@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Support — Big Brother</title>
+    <meta name="description" content="Get help with the Big Brother parental control app. FAQs, troubleshooting, and contact information.">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav">
+    <div class="nav-inner">
+        <a href="index.html" class="nav-brand">
+            <span class="nav-icon">BB</span>
+            Big Brother
+        </a>
+        <div class="nav-links">
+            <a href="index.html">Home</a>
+            <a href="support.html" class="active">Support</a>
+            <a href="privacy.html">Privacy</a>
+            <a href="terms.html">Terms</a>
+        </div>
+    </div>
+</nav>
+
+<main>
+    <section class="page-header">
+        <div class="container">
+            <h1>Support</h1>
+            <p>Frequently asked questions and how to get help</p>
+        </div>
+    </section>
+
+    <section class="page-content">
+        <div class="container">
+
+            <h2>Frequently Asked Questions</h2>
+
+            <div class="faq-item">
+                <div class="faq-q">How do I enroll a child's device?</div>
+                <div class="faq-a">
+                    From the parent's device, open Big Brother and navigate to the family
+                    management screen. Generate an invite code for the child. On the child's
+                    device, install Big Brother, select "Join as Child," and enter the invite
+                    code. The device will be enrolled in your family and ready to receive
+                    commands.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-q">What are the different lock modes?</div>
+                <div class="faq-a">
+                    Big Brother has four modes:<br><br>
+                    <strong>Unlocked</strong> &mdash; No restrictions. The device operates normally.<br>
+                    <strong>Locked</strong> &mdash; Only the apps you've marked as "daily allowed" are accessible. Everything else is blocked.<br>
+                    <strong>Essential Only</strong> &mdash; Only critical system apps (Phone, Messages, etc.) remain available.<br>
+                    <strong>Disabled</strong> &mdash; All non-essential functionality is blocked. The device can still receive calls and emergency services.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-q">How does Temporary Unlock work?</div>
+                <div class="faq-a">
+                    Parents can grant a time-limited unlock from their device. You set the
+                    duration (e.g., 30 minutes for homework), and the child's device
+                    automatically returns to its previous lock mode when the timer expires.
+                    No action needed from the parent to re-lock.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-q">What happens if FamilyControls permission is revoked?</div>
+                <div class="faq-a">
+                    If a child revokes the FamilyControls permission in Settings, the App
+                    detects this through its authorization health monitoring system. The parent
+                    will be notified that the device's protection status has changed. The child
+                    will need to re-grant permission, or the parent can re-enroll the device.
+                    Note: on supervised devices, this permission cannot be revoked by the child.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-q">Does the App require Apple Family Sharing?</div>
+                <div class="faq-a">
+                    No. Big Brother uses its own enrollment system with invite codes. It works
+                    regardless of whether devices share an Apple ID, are in a Family Sharing
+                    group, or are completely independent accounts. This makes it ideal for
+                    larger families or non-traditional setups where Apple's built-in limits
+                    are too restrictive.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-q">Where is my data stored?</div>
+                <div class="faq-a">
+                    All family data is stored in Apple CloudKit within your own iCloud account.
+                    No data is sent to third-party servers. PINs are hashed and stored locally
+                    in the device Keychain. See our
+                    <a href="privacy.html">Privacy Policy</a> for full details.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-q">What if a device goes offline?</div>
+                <div class="faq-a">
+                    The heartbeat system will detect that the device has stopped checking in.
+                    The parent dashboard shows the last known status and when the device was
+                    last seen. Any commands sent while the device is offline will be delivered
+                    as soon as it reconnects, thanks to the polling fallback system.
+                    Existing restrictions remain enforced even while offline.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-q">Can multiple parents manage the same family?</div>
+                <div class="faq-a">
+                    Yes. Both parents can enroll as parent-role users in the same family.
+                    Each parent has full control over all enrolled child devices and can
+                    send commands independently.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-q">How quickly do commands take effect?</div>
+                <div class="faq-a">
+                    Commands are delivered via push notifications and typically take effect
+                    within seconds. If push delivery fails, the device's polling system will
+                    pick up the command within a short interval as a fallback.
+                </div>
+            </div>
+
+            <div class="contact-card">
+                <h3>Still need help?</h3>
+                <p>
+                    Email us at <a href="mailto:erichter@gmail.com">erichter@gmail.com</a>
+                    and we'll get back to you as soon as possible.
+                </p>
+                <p>
+                    You can also file a bug report or feature request on
+                    <a href="https://github.com/erichter2018/big.brother/issues" target="_blank" rel="noopener">GitHub Issues</a>.
+                </p>
+            </div>
+
+        </div>
+    </section>
+</main>
+
+<footer class="footer">
+    <div class="container footer-inner">
+        <div class="footer-links">
+            <a href="privacy.html">Privacy Policy</a>
+            <a href="terms.html">Terms of Service</a>
+            <a href="support.html">Support</a>
+            <a href="https://github.com/erichter2018/big.brother" target="_blank" rel="noopener">GitHub</a>
+        </div>
+        <p class="footer-copy">&copy; 2026 Big Brother App. All rights reserved.</p>
+    </div>
+</footer>
+
+</body>
+</html>

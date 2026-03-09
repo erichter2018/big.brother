@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy — Big Brother</title>
+    <meta name="description" content="Privacy Policy for the Big Brother parental control app.">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav">
+    <div class="nav-inner">
+        <a href="index.html" class="nav-brand">
+            <span class="nav-icon">BB</span>
+            Big Brother
+        </a>
+        <div class="nav-links">
+            <a href="index.html">Home</a>
+            <a href="support.html">Support</a>
+            <a href="privacy.html" class="active">Privacy</a>
+            <a href="terms.html">Terms</a>
+        </div>
+    </div>
+</nav>
+
+<main>
+    <section class="page-header">
+        <div class="container">
+            <h1>Privacy Policy</h1>
+            <p>Last updated: March 9, 2026</p>
+        </div>
+    </section>
+
+    <section class="page-content">
+        <div class="container">
+
+            <h2>Overview</h2>
+            <p>
+                Big Brother ("the App") is a parental control application for iOS and iPadOS.
+                We are committed to protecting the privacy of every family member who uses the
+                App. This policy explains what data we collect, how it is stored, and how it is used.
+            </p>
+
+            <h2>Data Storage</h2>
+            <p>
+                All data is stored in <strong>Apple CloudKit</strong>, Apple's first-party cloud
+                infrastructure. Data resides within your family's own iCloud account and is subject
+                to Apple's privacy and security standards. We do not operate any third-party
+                servers, and no family data ever passes through infrastructure outside of Apple's
+                ecosystem.
+            </p>
+
+            <h2>Data We Collect</h2>
+            <p>The App collects and stores the following data within your family's CloudKit container:</p>
+            <ul>
+                <li><strong>Device identifiers</strong> &mdash; a unique identifier for each enrolled device, used to route commands and track status.</li>
+                <li><strong>Lock mode status</strong> &mdash; the current enforcement mode for each device (e.g., Unlocked, Locked, Essential Only, Disabled).</li>
+                <li><strong>Heartbeat timestamps</strong> &mdash; periodic check-in times that indicate a device is online and its configuration is active.</li>
+                <li><strong>Family enrollment data</strong> &mdash; family identifiers, child profiles, and device-to-child assignments.</li>
+                <li><strong>Parent PIN hash</strong> &mdash; a PBKDF2-HMAC-SHA256 hash stored in the device Keychain. The PIN is never stored in plaintext, and the hash never leaves the device.</li>
+            </ul>
+
+            <h2>Data We Do Not Collect</h2>
+            <ul>
+                <li>We do not collect browsing history, messages, photos, or any app content.</li>
+                <li>We do not collect location data.</li>
+                <li>We do not collect contacts, calendars, or personal files.</li>
+                <li>We do not record screen activity or keystrokes.</li>
+            </ul>
+
+            <h2>Third-Party Sharing</h2>
+            <p>
+                We do not sell, share, rent, or trade your personal data with any third parties.
+                Period. Your data stays within your family's iCloud account and is only accessible
+                to enrolled family members.
+            </p>
+
+            <h2>Analytics and Tracking</h2>
+            <p>
+                The App contains <strong>no analytics SDKs</strong>, no advertising frameworks,
+                and no third-party tracking code. We do not use cookies, fingerprinting, or any
+                other tracking mechanism.
+            </p>
+
+            <h2>Security</h2>
+            <ul>
+                <li>Parent PINs are hashed using PBKDF2-HMAC-SHA256 with 100,000 iterations before storage.</li>
+                <li>PIN hashes are stored exclusively in the iOS Keychain and never transmitted.</li>
+                <li>All CloudKit communication uses Apple's built-in encryption in transit.</li>
+                <li>Policy files stored on-device use atomic writes to prevent corruption.</li>
+            </ul>
+
+            <h2>Children's Privacy</h2>
+            <p>
+                The App is designed to be installed on children's devices by their parents or
+                guardians. The App does not independently collect data from children beyond the
+                device and enrollment information described above. All data collection is initiated
+                and controlled by the parent.
+            </p>
+
+            <h2>Data Retention and Deletion</h2>
+            <p>
+                Family data persists in CloudKit as long as the family account is active. Parents
+                can unenroll devices and delete family data at any time through the App. When a
+                device is unenrolled, its local policy files and Keychain entries are removed.
+            </p>
+
+            <h2>Changes to This Policy</h2>
+            <p>
+                We may update this Privacy Policy from time to time. Changes will be posted on
+                this page with an updated revision date. Continued use of the App after changes
+                constitutes acceptance of the revised policy.
+            </p>
+
+            <h2>Contact</h2>
+            <p>
+                If you have questions about this Privacy Policy or your data, please contact us at
+                <a href="mailto:erichter@gmail.com">erichter@gmail.com</a>.
+            </p>
+
+        </div>
+    </section>
+</main>
+
+<footer class="footer">
+    <div class="container footer-inner">
+        <div class="footer-links">
+            <a href="privacy.html">Privacy Policy</a>
+            <a href="terms.html">Terms of Service</a>
+            <a href="support.html">Support</a>
+            <a href="https://github.com/erichter2018/big.brother" target="_blank" rel="noopener">GitHub</a>
+        </div>
+        <p class="footer-copy">&copy; 2026 Big Brother App. All rights reserved.</p>
+    </div>
+</footer>
+
+</body>
+</html>
