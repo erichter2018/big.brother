@@ -75,18 +75,32 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     /// When a FamilyActivitySelection exists, uses `shield.applications` so
     /// ShieldAction receives the ApplicationToken directly (per-app unlock).
     /// Falls back to `.all(except:)` category blocking when no selection exists.
+    /// Global limit on shield.applications tokens (undocumented Apple constraint).
+    /// Exceeding this silently fails — no apps are shielded and reads back nil.
+    private static let maxShieldApplications = 50
+
     private func applyShield() {
         let allowedTokens = collectAllowedTokens()
         let pickerTokens = loadPickerTokens()
 
         if !pickerTokens.isEmpty {
-            // Per-app blocking: ShieldAction gets ApplicationToken directly.
+            // Per-app blocking for up to 50 apps (ShieldAction gets ApplicationToken).
+            // Apps beyond 50 are caught by the category policy instead.
             let tokensToBlock = pickerTokens.subtracting(allowedTokens)
-            baseStore.shield.applications = tokensToBlock
-            // Category catch-all for apps NOT in the picker selection.
-            baseStore.shield.applicationCategories = .all(except: pickerTokens.union(allowedTokens))
+            let perAppTokens: Set<ApplicationToken>
+            if tokensToBlock.count <= Self.maxShieldApplications {
+                perAppTokens = tokensToBlock
+            } else {
+                perAppTokens = Set(tokensToBlock.prefix(Self.maxShieldApplications))
+            }
+            baseStore.shield.applications = perAppTokens
+            // Category catch-all blocks everything except picker + allowed apps.
+            // Apps in perAppTokens are blocked by BOTH shield.applications and the
+            // category policy, but ShieldAction prefers the application handler.
+            baseStore.shield.applicationCategories = .all(except: allowedTokens)
             #if DEBUG
-            print("[BigBrother] Shield applied — \(tokensToBlock.count) apps via shield.applications, category catch-all active")
+            let overflow = tokensToBlock.count - perAppTokens.count
+            print("[BigBrother] Shield applied — \(perAppTokens.count) apps via shield.applications\(overflow > 0 ? " (\(overflow) overflow to category)" : ""), category catch-all active")
             #endif
         } else {
             // No picker selection — block everything via categories.
