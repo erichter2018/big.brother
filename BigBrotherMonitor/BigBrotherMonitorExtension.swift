@@ -1,6 +1,7 @@
 import Foundation
 import DeviceActivity
 import ManagedSettings
+import UserNotifications
 import BigBrotherCore
 
 /// DeviceActivityMonitor extension.
@@ -24,6 +25,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private let storage = AppGroupStorage()
     private let store = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
 
+    /// Prefix used by ScheduleRegistrar for free-window activities.
+    private let scheduleProfilePrefix = "bigbrother.scheduleprofile."
+
     override func intervalDidStart(for activity: DeviceActivityName) {
         // Reconciliation schedule — verify enforcement matches snapshot.
         if activity.rawValue == "bigbrother.reconciliation" {
@@ -31,7 +35,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Read the lightweight shared state first; fall back to full snapshot.
+        // Schedule profile free window — unlock if today matches.
+        if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
+            handleFreeWindowStart(activity)
+            return
+        }
+
+        // Legacy / other schedule activity — apply current policy mode.
         let mode: LockMode
         let policy: EffectivePolicy?
         if let extState = storage.readExtensionSharedState() {
@@ -51,11 +61,59 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     override func intervalDidEnd(for activity: DeviceActivityName) {
         if activity.rawValue == "bigbrother.reconciliation" { return }
 
-        // Clear the schedule store. The "base" store (set by the main app)
-        // will still enforce the base policy.
-        store.clearAllSettings()
+        // Schedule profile free window ended — re-lock.
+        if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
+            handleFreeWindowEnd(activity)
+            return
+        }
 
+        // Legacy / other schedule — clear schedule store.
+        store.clearAllSettings()
         logEvent(.scheduleEnded, details: "Schedule ended: \(activity.rawValue)")
+    }
+
+    // MARK: - Schedule Profile Handling
+
+    /// Free window started: check if today is a valid day, then unlock.
+    private func handleFreeWindowStart(_ activity: DeviceActivityName) {
+        guard let profile = storage.readActiveScheduleProfile() else { return }
+
+        let windowID = String(activity.rawValue.dropFirst(scheduleProfilePrefix.count))
+        guard let window = profile.freeWindows.first(where: { $0.id.uuidString == windowID }) else {
+            return
+        }
+
+        // Check if today matches one of this window's active days.
+        let today = Calendar.current.component(.weekday, from: Date())
+        guard let day = DayOfWeek(rawValue: today), window.daysOfWeek.contains(day) else {
+            // Not a matching day — keep locked.
+            return
+        }
+
+        // Unlock: clear the schedule store restrictions.
+        store.clearAllSettings()
+        logEvent(.scheduleTriggered, details: "Free window started: \(activity.rawValue)")
+        sendModeNotification(title: "Free Time Started", body: "All apps are now accessible.")
+    }
+
+    /// Free window ended: re-apply the profile's locked mode.
+    private func handleFreeWindowEnd(_ activity: DeviceActivityName) {
+        guard let profile = storage.readActiveScheduleProfile() else { return }
+
+        // Check if we're currently inside another free window.
+        // If so, don't lock — the device should stay free.
+        if profile.isInFreeWindow(at: Date()) {
+            return
+        }
+
+        // Re-lock using the profile's locked mode.
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShielding(mode: profile.lockedMode, policy: policy)
+        logEvent(.scheduleEnded, details: "Free window ended, locked to \(profile.lockedMode.rawValue)")
+        sendModeNotification(
+            title: "Free Time Ended",
+            body: "Device locked — \(profile.lockedMode.displayName) mode active."
+        )
     }
 
     // MARK: - Reconciliation
@@ -88,21 +146,56 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         case .unlocked:
             store.clearAllSettings()
 
-        case .fullLockdown:
-            store.shield.applicationCategories = .all()
-            store.shield.webDomainCategories = .all()
-
         case .dailyMode, .essentialOnly:
-            // If allowed app token data is available, decode and exempt those apps.
-            // Otherwise, shield all (safe default).
-            if let tokenData = policy?.allowedAppTokensData,
-               let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: tokenData) {
-                store.shield.applicationCategories = .all(except: tokens)
-            } else {
+            // Read allowed tokens from App Group (same source as main app).
+            let allowedTokens = collectAllowedTokens()
+            if allowedTokens.isEmpty {
                 store.shield.applicationCategories = .all()
+            } else {
+                store.shield.applicationCategories = .all(except: allowedTokens)
             }
             store.shield.webDomainCategories = .all()
         }
+    }
+
+    /// Collect parent-approved tokens from App Group storage.
+    /// Mirrors EnforcementServiceImpl.collectAllowedTokens().
+    private func collectAllowedTokens() -> Set<ApplicationToken> {
+        let decoder = JSONDecoder()
+        var tokens = Set<ApplicationToken>()
+
+        // Permanently allowed apps.
+        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
+            tokens.formUnion(allowed)
+        }
+
+        // Temporarily allowed apps (non-expired only).
+        let tempEntries = storage.readTemporaryAllowedApps()
+        for entry in tempEntries where entry.isValid {
+            if let token = try? decoder.decode(ApplicationToken.self, from: entry.tokenData) {
+                tokens.insert(token)
+            }
+        }
+
+        return tokens
+    }
+
+    // MARK: - Notifications
+
+    private func sendModeNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = "SCHEDULE_CHANGE"
+
+        let request = UNNotificationRequest(
+            identifier: "schedule-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     private func logEvent(_ type: EventType, details: String?) {

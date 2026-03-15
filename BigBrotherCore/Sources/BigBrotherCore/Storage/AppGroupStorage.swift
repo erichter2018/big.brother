@@ -27,6 +27,13 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         static let extensionSharedState = "extension_shared_state.json"
         static let diagnosticsLog = "diagnostics_log.json"
         static let snapshotHistory = "snapshot_history.json"
+        static let appBlockingConfig = "app_blocking_config.json"
+        static let activeScheduleProfile = "active_schedule_profile.json"
+        static let pendingUnlockRequests = "pending_unlock_requests.json"
+        static let shieldedAppNameCache = "shielded_app_name_cache.json"
+        static let temporaryAllowedApps = "temporary_allowed_apps.json"
+        static let lastShieldedApp = "last_shielded_app.json"
+        static let unlockPickerPending = "unlock_picker_pending.json"
     }
 
     public init(appGroupIdentifier: String = AppConstants.appGroupIdentifier) {
@@ -112,6 +119,193 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
             entries[i].uploadState = state
         }
         try writeAtomically(entries, to: FileName.eventLogQueue)
+    }
+
+    // MARK: - Pending Unlock Requests
+    //
+    // Single JSON array file, pre-created by the main app.
+    // Extensions can MODIFY existing App Group files but cannot CREATE new ones
+    // (silent failure on real devices). The main app must call ensureSharedFilesExist()
+    // at startup so extensions only ever append to an existing file.
+
+    public func appendPendingUnlockRequest(_ request: PendingUnlockRequest) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var entries: [PendingUnlockRequest] = read(FileName.pendingUnlockRequests) ?? []
+        entries.append(request)
+        if entries.count > 50 {
+            entries = Array(entries.suffix(50))
+        }
+        try writeAtomically(entries, to: FileName.pendingUnlockRequests)
+    }
+
+    public func readPendingUnlockRequests() -> [PendingUnlockRequest] {
+        let result: [PendingUnlockRequest] = read(FileName.pendingUnlockRequests) ?? []
+        #if DEBUG
+        print("[BigBrother] Read \(result.count) pending requests")
+        #endif
+        return result
+    }
+
+    public func removePendingUnlockRequest(id: UUID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var entries: [PendingUnlockRequest] = read(FileName.pendingUnlockRequests) ?? []
+        entries.removeAll { $0.id == id }
+        try writeAtomically(entries, to: FileName.pendingUnlockRequests)
+    }
+
+    // MARK: - Shielded App Name Cache
+    //
+    // Single JSON dictionary file, pre-created by the main app.
+
+    public func cacheAppName(_ name: String, forTokenKey key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var cache: [String: String] = read(FileName.shieldedAppNameCache) ?? [:]
+        cache[key] = name
+        if cache.count > 200 {
+            cache = Dictionary(uniqueKeysWithValues: Array(cache.suffix(200)))
+        }
+        try? writeAtomically(cache, to: FileName.shieldedAppNameCache)
+    }
+
+    public func cachedAppName(forTokenKey key: String) -> String? {
+        let cache: [String: String]? = read(FileName.shieldedAppNameCache)
+        return cache?[key]
+    }
+
+    public func readAllCachedAppNames() -> [String: String] {
+        (read(FileName.shieldedAppNameCache) as [String: String]?) ?? [:]
+    }
+
+    public func writeCachedAppNames(_ cache: [String: String]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try writeAtomically(cache, to: FileName.shieldedAppNameCache)
+    }
+
+    // MARK: - Last Shielded App
+    //
+    // Written by ShieldConfiguration, read by ShieldAction's category handler.
+    // Single JSON file, pre-created by the main app.
+
+    public func readLastShieldedApp() -> LastShieldedApp? {
+        read(FileName.lastShieldedApp)
+    }
+
+    public func writeLastShieldedApp(_ entry: LastShieldedApp) throws {
+        try writeAtomically(entry, to: FileName.lastShieldedApp)
+    }
+
+    // MARK: - Unlock Picker Pending Flag
+
+    public func readUnlockPickerPendingDate() -> Date? {
+        let url = fileURL(for: FileName.unlockPickerPending)
+        guard let data = try? Data(contentsOf: url),
+              let wrapper = try? decoder.decode(UnlockPickerPending.self, from: data) else {
+            return nil
+        }
+        return wrapper.requestedAt
+    }
+
+    public func writeUnlockPickerPending() throws {
+        let wrapper = UnlockPickerPending(requestedAt: Date())
+        try writeAtomically(wrapper, to: FileName.unlockPickerPending)
+    }
+
+    public func clearUnlockPickerPending() throws {
+        let url = fileURL(for: FileName.unlockPickerPending)
+        try "{}".data(using: .utf8)?.write(to: url, options: [.atomic, .noFileProtection])
+    }
+
+    // MARK: - Temporary Allowed Apps
+    //
+    // Single JSON array file, pre-created by the main app.
+
+    public func readTemporaryAllowedApps() -> [TemporaryAllowedAppEntry] {
+        (read(FileName.temporaryAllowedApps) as [TemporaryAllowedAppEntry]?) ?? []
+    }
+
+    public func writeTemporaryAllowedApps(_ entries: [TemporaryAllowedAppEntry]) throws {
+        try writeAtomically(entries, to: FileName.temporaryAllowedApps)
+    }
+
+    // MARK: - Pre-create Shared Files
+    //
+    // Extensions cannot create new files in the App Group container (silent failure).
+    // The main app MUST call this at startup to ensure all files that extensions
+    // need to modify already exist.
+
+    public func ensureSharedFilesExist() {
+        // Set .none protection on the container directory itself so extensions
+        // can always access files even in background/locked contexts.
+        try? fileManager.setAttributes(
+            [.protectionKey: FileProtectionType.none],
+            ofItemAtPath: containerURL.path
+        )
+
+        // All files that extensions need to read or write.
+        // Pre-create if missing, and fix protection class on ALL existing files.
+        let allExtensionFiles: [(name: String, emptyContent: String)] = [
+            (FileName.pendingUnlockRequests, "[]"),
+            (FileName.temporaryAllowedApps, "[]"),
+            (FileName.shieldedAppNameCache, "{}"),
+            // Pre-create with valid LastShieldedApp JSON so ShieldConfiguration can
+            // overwrite it. Extensions cannot CREATE new files in App Group (silent
+            // failure), they can only MODIFY existing ones.
+            (FileName.lastShieldedApp, "{\"appName\":\"\",\"tokenBase64\":\"none\",\"cachedAt\":0}"),
+            (FileName.unlockPickerPending, "{}"),
+            (FileName.eventLogQueue, "[]"),
+            (FileName.diagnosticsLog, "[]"),
+            (FileName.extensionSharedState, "{}"),
+            (FileName.shieldConfig, "{}"),
+            (FileName.policySnapshot, "{}"),
+        ]
+
+        for (name, emptyContent) in allExtensionFiles {
+            let url = fileURL(for: name)
+            if fileManager.fileExists(atPath: url.path) {
+                // Fix protection class on existing files — extensions can't read
+                // files with the default completeFileProtection.
+                try? fileManager.setAttributes(
+                    [.protectionKey: FileProtectionType.none],
+                    ofItemAtPath: url.path
+                )
+            } else if !emptyContent.isEmpty {
+                // Pre-create with no protection.
+                try? emptyContent.data(using: .utf8)?.write(to: url, options: [.atomic, .noFileProtection])
+                #if DEBUG
+                print("[BigBrother] Pre-created \(name)")
+                #endif
+            }
+        }
+
+        // Also fix protection on raw data files that extensions read.
+        let rawFiles = ["cachedEnrollmentIDs", "allowedAppTokens", "temporaryAllowedApps"]
+        for key in rawFiles {
+            let url = fileURL(for: "raw_\(key).bin")
+            if fileManager.fileExists(atPath: url.path) {
+                try? fileManager.setAttributes(
+                    [.protectionKey: FileProtectionType.none],
+                    ofItemAtPath: url.path
+                )
+            }
+        }
+
+        #if DEBUG
+        // Verify protection classes.
+        if let files = try? fileManager.contentsOfDirectory(at: containerURL, includingPropertiesForKeys: nil) {
+            for file in files where file.pathExtension == "json" || file.pathExtension == "bin" {
+                let attrs = try? fileManager.attributesOfItem(atPath: file.path)
+                let protection = attrs?[.protectionKey] as? FileProtectionType
+                print("[BigBrother] \(file.lastPathComponent): protection=\(protection?.rawValue ?? "nil")")
+            }
+        }
+        #endif
     }
 
     // MARK: - Processed Commands
@@ -235,6 +429,52 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         try writeAtomically(history, to: FileName.snapshotHistory)
     }
 
+    // MARK: - App Blocking
+
+    public func readAppBlockingConfig() -> AppBlockingConfig? {
+        read(FileName.appBlockingConfig)
+    }
+
+    public func writeAppBlockingConfig(_ config: AppBlockingConfig) throws {
+        try writeAtomically(config, to: FileName.appBlockingConfig)
+    }
+
+    // MARK: - Active Schedule Profile
+
+    public func readActiveScheduleProfile() -> ScheduleProfile? {
+        read(FileName.activeScheduleProfile)
+    }
+
+    public func writeActiveScheduleProfile(_ profile: ScheduleProfile?) throws {
+        if let profile {
+            try writeAtomically(profile, to: FileName.activeScheduleProfile)
+        } else {
+            try deleteFile(FileName.activeScheduleProfile)
+        }
+    }
+
+    // MARK: - Raw Data
+
+    public func writeRawData(_ data: Data?, forKey key: String) throws {
+        let fileName = "raw_\(key).bin"
+        if let data {
+            let targetURL = fileURL(for: fileName)
+            do {
+                try data.write(to: targetURL, options: [.atomic, .noFileProtection])
+            } catch {
+                throw StorageError.writeFailed(fileName: fileName)
+            }
+        } else {
+            try deleteFile(fileName)
+        }
+    }
+
+    public func readRawData(forKey key: String) -> Data? {
+        let fileName = "raw_\(key).bin"
+        let url = fileURL(for: fileName)
+        return try? Data(contentsOf: url)
+    }
+
     // MARK: - Private Helpers
 
     private func fileURL(for name: String) -> URL {
@@ -267,9 +507,9 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         }
     }
 
-    /// Write data atomically using Foundation's built-in atomic write.
-    /// This writes to a temporary file in the same directory and renames
-    /// over the target, ensuring readers never see a partial file.
+    /// Write data atomically with no file protection.
+    /// Uses .noFileProtection so extensions can write even when the device is locked
+    /// (the default completeFileProtection can block extension writes).
     private func writeAtomically<T: Encodable>(_ value: T, to fileName: String) throws {
         let data: Data
         do {
@@ -279,7 +519,7 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         }
         let targetURL = fileURL(for: fileName)
         do {
-            try data.write(to: targetURL, options: [.atomic])
+            try data.write(to: targetURL, options: [.atomic, .noFileProtection])
         } catch {
             throw StorageError.writeFailed(fileName: fileName)
         }
@@ -292,4 +532,16 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
             try fileManager.removeItem(at: url)
         }
     }
+
+    /// Pre-create a file so the extension can open it via FileHandle.
+    /// Call from the main app on launch.
+    public func ensureFileExists(_ fileName: String) {
+        let url = fileURL(for: fileName)
+        if !fileManager.fileExists(atPath: url.path) {
+            fileManager.createFile(atPath: url.path, contents: Data("{}".utf8))
+        }
+    }
+
+    /// File name constant exposed for extension use.
+    public static let shieldedAppNameCacheFileName = FileName.shieldedAppNameCache
 }
