@@ -29,6 +29,20 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "205008D2826FE5FB4D7AD957"
+               BuildableName = "BigBrotherActivityReport.appex"
+               BlueprintName = "BigBrotherActivityReport"
+               ReferencedContainer = "container:BigBrother.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "6F3F6815D1946D5D294161EC"
                BuildableName = "BigBrotherMonitor.appex"
                BlueprintName = "BigBrotherMonitor"

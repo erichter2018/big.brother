@@ -57,25 +57,39 @@ enum BackgroundRefreshHandler {
         #endif
 
         // CloudKit fires the push immediately on record creation, but the query
-        // index may not reflect the new record yet. Wait briefly so the fetch
-        // actually returns the new command.
+        // index may not reflect the new record yet. Wait briefly so follow-up
+        // fetches actually return the new record.
         try? await Task.sleep(for: .seconds(1.5))
 
-        // Perform a quick sync: commands + heartbeat.
-        do {
-            try await appState.syncCoordinator?.performQuickSync()
-            await MainActor.run { appState.refreshLocalState() }
-            // Ensure heartbeat reflects new mode immediately.
-            try? await appState.heartbeatService?.sendNow(force: true)
-            #if DEBUG
-            print("[BigBrother] Quick sync complete after push")
-            #endif
-            return .newData
-        } catch {
-            #if DEBUG
-            print("[BigBrother] Quick sync failed: \(error.localizedDescription)")
-            #endif
-            return .failed
+        if appState.parentState != nil {
+            do {
+                try await appState.refreshDashboard()
+                #if DEBUG
+                print("[BigBrother] Parent dashboard refreshed after push")
+                #endif
+                return .newData
+            } catch {
+                #if DEBUG
+                print("[BigBrother] Parent push refresh failed: \(error.localizedDescription)")
+                #endif
+                return .failed
+            }
+        } else {
+            do {
+                try await appState.syncCoordinator?.performQuickSync()
+                await MainActor.run { appState.refreshLocalState() }
+                // Ensure heartbeat reflects new mode immediately.
+                try? await appState.heartbeatService?.sendNow(force: true)
+                #if DEBUG
+                print("[BigBrother] Quick sync complete after push")
+                #endif
+                return .newData
+            } catch {
+                #if DEBUG
+                print("[BigBrother] Quick sync failed: \(error.localizedDescription)")
+                #endif
+                return .failed
+            }
         }
     }
 

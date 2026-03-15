@@ -106,6 +106,7 @@
 		DC626FA24A6F297C93D92035 /* ScheduleProfileListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8B389D96F841429A18C0C09 /* ScheduleProfileListView.swift */; };
 		DD6B2303988124953A6E3C13 /* ScheduleEditorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 792778475B47D7B9A5347B7E /* ScheduleEditorViewModel.swift */; };
 		DD9D47719395C40D9435126B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 430C6D0168B773C0C8A82CEE /* AppDelegate.swift */; };
+		DDC64E2A886E861A761A24AC /* AlwaysAllowedSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDBCF4A69298132F5217DDB /* AlwaysAllowedSetupView.swift */; };
 		DEA8F8FE8A9782500BF5CEB2 /* EventLoggerImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9418F1852E0F2CD23971CF3F /* EventLoggerImpl.swift */; };
 		E1B11BA9E4C3F1556F2814A2 /* AppBlockingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9365151926785393DA7C07D6 /* AppBlockingStore.swift */; };
 		E757F4FD5DAFA47B4F899DB8 /* AppNamingPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F3975C33F9CD2FF966FC1D /* AppNamingPromptView.swift */; };
@@ -194,6 +195,7 @@
 		25278626B1E7D32CA00C882C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		29D040A84EC024E85953B1DE /* AddChildView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddChildView.swift; sourceTree = "<group>"; };
 		2A6038FA70DCFA9E944B73C2 /* ModeChangeNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModeChangeNotifier.swift; sourceTree = "<group>"; };
+		2CDBCF4A69298132F5217DDB /* AlwaysAllowedSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlwaysAllowedSetupView.swift; sourceTree = "<group>"; };
 		2F1995DC304FA128CA2C780C /* AlwaysAllowedSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlwaysAllowedSelectionView.swift; sourceTree = "<group>"; };
 		2F2C1FAF31FCCB98CFE58693 /* ManagedSettings.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ManagedSettings.framework; path = System/Library/Frameworks/ManagedSettings.framework; sourceTree = SDKROOT; };
 		32E0AEC9003140FEC925C6B0 /* ScheduleListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleListView.swift; sourceTree = "<group>"; };
@@ -510,6 +512,7 @@
 		89C185BD51239FA304FFEB54 /* Child */ = {
 			isa = PBXGroup;
 			children = (
+				2CDBCF4A69298132F5217DDB /* AlwaysAllowedSetupView.swift */,
 				9A53748BB4CB2D47E27569BE /* AppBlockingSetupView.swift */,
 				13F3975C33F9CD2FF966FC1D /* AppNamingPromptView.swift */,
 				ECC8AE34732E820D470DACBD /* ChildHomeView.swift */,
@@ -982,6 +985,7 @@
 			files = (
 				90FFAAE761F58EC28A2072FF /* AddChildView.swift in Sources */,
 				CD80BF2C155A9A0AE6689FBF /* AlwaysAllowedSelectionView.swift in Sources */,
+				DDC64E2A886E861A761A24AC /* AlwaysAllowedSetupView.swift in Sources */,
 				54647100AF3EC99E715A1CAC /* AppBlockingSetupView.swift in Sources */,
 				E1B11BA9E4C3F1556F2814A2 /* AppBlockingStore.swift in Sources */,
 				DD9D47719395C40D9435126B /* AppDelegate.swift in Sources */,

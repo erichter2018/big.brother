@@ -1,0 +1,165 @@
+import SwiftUI
+import BigBrotherCore
+
+struct ScheduleProfileEditorView: View {
+    let viewModel: ScheduleProfileListViewModel
+    @State private var profile: ScheduleProfile
+    @Environment(\.dismiss) private var dismiss
+    @State private var isSaving = false
+
+    private let isNew: Bool
+
+    init(viewModel: ScheduleProfileListViewModel, profile: ScheduleProfile) {
+        self.viewModel = viewModel
+        self._profile = State(initialValue: profile)
+        self.isNew = profile.name.isEmpty
+    }
+
+    var body: some View {
+        Form {
+            Section("Profile Name") {
+                TextField("e.g. School Day", text: $profile.name)
+            }
+
+            Section("Locked Mode") {
+                Picker("Mode outside free windows", selection: $profile.lockedMode) {
+                    Text("Daily Mode").tag(LockMode.dailyMode)
+                    Text("Essential Only").tag(LockMode.essentialOnly)
+                }
+                .pickerStyle(.segmented)
+
+                Text("Applied when the device is NOT in a free window.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Section {
+                Toggle("Default Profile", isOn: $profile.isDefault)
+
+                Text("Applied to devices without an assigned schedule profile.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Section("Free Windows") {
+                Text("During these windows, the device is unlocked. Outside them, the locked mode above is applied automatically.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                ForEach($profile.freeWindows) { $window in
+                    windowEditor(window: $window)
+                }
+                .onDelete { indexSet in
+                    profile.freeWindows.remove(atOffsets: indexSet)
+                }
+
+                Button {
+                    profile.freeWindows.append(
+                        ActiveWindow(
+                            daysOfWeek: DayOfWeek.weekdays,
+                            startTime: DayTime(hour: 15, minute: 0),
+                            endTime: DayTime(hour: 20, minute: 0)
+                        )
+                    )
+                } label: {
+                    Label("Add Window", systemImage: "plus.circle")
+                }
+            }
+        }
+        .navigationTitle(isNew ? "New Schedule" : "Edit Schedule")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if isNew {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    Task { await save() }
+                }
+                .disabled(profile.name.trimmingCharacters(in: .whitespaces).isEmpty || isSaving)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func windowEditor(window: Binding<ActiveWindow>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Day selector circles
+            HStack(spacing: 4) {
+                ForEach(DayOfWeek.allCases, id: \.self) { day in
+                    let selected = window.wrappedValue.daysOfWeek.contains(day)
+                    Button {
+                        if selected {
+                            window.wrappedValue.daysOfWeek.remove(day)
+                        } else {
+                            window.wrappedValue.daysOfWeek.insert(day)
+                        }
+                    } label: {
+                        Text(day.initial)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .frame(width: 32, height: 32)
+                            .background(selected ? Color.accentColor : Color.secondary.opacity(0.15))
+                            .foregroundStyle(selected ? .white : .primary)
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button("Weekdays") { window.wrappedValue.daysOfWeek = DayOfWeek.weekdays }
+                    .font(.caption2).buttonStyle(.bordered)
+                Button("Weekend") { window.wrappedValue.daysOfWeek = DayOfWeek.weekend }
+                    .font(.caption2).buttonStyle(.bordered)
+                Button("All") { window.wrappedValue.daysOfWeek = Set(DayOfWeek.allCases) }
+                    .font(.caption2).buttonStyle(.bordered)
+            }
+
+            // Time pickers
+            DatePicker("Unlock at", selection: startTimeBinding(for: window), displayedComponents: .hourAndMinute)
+                .font(.caption)
+            DatePicker("Lock at", selection: endTimeBinding(for: window), displayedComponents: .hourAndMinute)
+                .font(.caption)
+        }
+        .padding(.vertical, 4)
+    }
+
+    // MARK: - Date <-> DayTime Bridge
+
+    private func startTimeBinding(for window: Binding<ActiveWindow>) -> Binding<Date> {
+        Binding<Date>(
+            get: { dayTimeToDate(window.wrappedValue.startTime) },
+            set: { window.wrappedValue.startTime = dateToDayTime($0) }
+        )
+    }
+
+    private func endTimeBinding(for window: Binding<ActiveWindow>) -> Binding<Date> {
+        Binding<Date>(
+            get: { dayTimeToDate(window.wrappedValue.endTime) },
+            set: { window.wrappedValue.endTime = dateToDayTime($0) }
+        )
+    }
+
+    private func dayTimeToDate(_ dt: DayTime) -> Date {
+        Calendar.current.date(from: DateComponents(hour: dt.hour, minute: dt.minute)) ?? Date()
+    }
+
+    private func dateToDayTime(_ date: Date) -> DayTime {
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return DayTime(hour: comps.hour ?? 0, minute: comps.minute ?? 0)
+    }
+
+    // MARK: - Save
+
+    private func save() async {
+        isSaving = true
+        defer { isSaving = false }
+
+        profile.updatedAt = Date()
+        await viewModel.save(profile)
+        dismiss()
+    }
+}

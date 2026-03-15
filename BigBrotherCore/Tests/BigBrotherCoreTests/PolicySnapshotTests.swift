@@ -44,7 +44,7 @@ struct PolicySnapshotTests {
         let storage = AppGroupStorage(containerURL: tempDir)
 
         let effective = EffectivePolicy(
-            resolvedMode: .fullLockdown,
+            resolvedMode: .essentialOnly,
             warnings: [.familyControlsNotAuthorized],
             policyVersion: 3
         )
@@ -54,7 +54,7 @@ struct PolicySnapshotTests {
         let read = storage.readPolicySnapshot()
 
         #expect(read != nil)
-        #expect(read?.effectivePolicy.resolvedMode == .fullLockdown)
+        #expect(read?.effectivePolicy.resolvedMode == .essentialOnly)
         #expect(read?.effectivePolicy.policyVersion == 3)
     }
 
@@ -82,14 +82,14 @@ struct PolicySnapshotTests {
             effectivePolicy: EffectivePolicy(resolvedMode: .unlocked, policyVersion: 1)
         )
         let snap2 = PolicySnapshot(
-            effectivePolicy: EffectivePolicy(resolvedMode: .fullLockdown, policyVersion: 2)
+            effectivePolicy: EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 2)
         )
 
         try storage.writePolicySnapshot(snap1)
         try storage.writePolicySnapshot(snap2)
 
         let read = storage.readPolicySnapshot()
-        #expect(read?.effectivePolicy.resolvedMode == .fullLockdown)
+        #expect(read?.effectivePolicy.resolvedMode == .essentialOnly)
         #expect(read?.effectivePolicy.policyVersion == 2)
     }
 }

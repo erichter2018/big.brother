@@ -5,18 +5,17 @@ import BigBrotherCore
 
 /// Concrete wrapper around FamilyControls.AuthorizationCenter.
 ///
-/// Provides a clean interface that doesn't leak framework types.
-/// Monitors authorization status changes, persists AuthorizationHealth
-/// transitions, and reports them via callback.
-///
-/// Note: AuthorizationCenter conforms to ObservableObject and publishes
-/// status changes via Combine's @Published. This is the only supported
-/// observation mechanism — there is no NotificationCenter notification.
+/// Tries `.child` authorization first (requires Family Sharing child account).
+/// Falls back to `.individual` if `.child` fails. Persists which type was
+/// granted so the app knows whether system restrictions are enforceable.
 final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked Sendable {
 
     private var changeHandler: (@Sendable (FCAuthorizationStatus) -> Void)?
     private let storage: (any SharedStorageProtocol)?
     private var cancellable: AnyCancellable?
+
+    /// Persisted in UserDefaults so it survives app restarts.
+    private static let authTypeKey = "fr.bigbrother.authorizationType"
 
     init(storage: (any SharedStorageProtocol)? = nil) {
         self.storage = storage
@@ -35,25 +34,43 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
         }
     }
 
+    var isChildAuthorization: Bool {
+        UserDefaults.standard.string(forKey: Self.authTypeKey) == "child"
+    }
+
     func requestAuthorization() async throws {
+        // Try .child first (stronger — parent must authenticate, child can't revoke).
+        do {
+            try await AuthorizationCenter.shared.requestAuthorization(for: .child)
+            UserDefaults.standard.set("child", forKey: Self.authTypeKey)
+            #if DEBUG
+            print("[BigBrother] FamilyControls authorized as .child")
+            #endif
+            return
+        } catch {
+            #if DEBUG
+            print("[BigBrother] .child auth failed (\(error.localizedDescription)), falling back to .individual")
+            #endif
+        }
+
+        // Fall back to .individual (self-regulation — user can revoke).
         try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
+        UserDefaults.standard.set("individual", forKey: Self.authTypeKey)
+        #if DEBUG
+        print("[BigBrother] FamilyControls authorized as .individual")
+        #endif
     }
 
     func observeAuthorizationChanges(handler: @escaping @Sendable (FCAuthorizationStatus) -> Void) {
         self.changeHandler = handler
 
-        // AuthorizationCenter is an ObservableObject with @Published authorizationStatus.
-        // Combine is the only supported observation mechanism for this API.
         cancellable = AuthorizationCenter.shared.$authorizationStatus
-            .dropFirst() // Skip the initial value (we only want changes)
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
                 let newStatus = self.status
-
-                // Persist authorization health transition.
                 self.updateAuthorizationHealth(newStatus: newStatus)
-
                 self.changeHandler?(newStatus)
             }
     }
@@ -74,7 +91,6 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
         let updatedHealth = currentHealth.withTransition(to: authState)
         try? storage.writeAuthorizationHealth(updatedHealth)
 
-        // Log diagnostic on transitions.
         if updatedHealth.currentState != currentHealth.currentState {
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .auth,

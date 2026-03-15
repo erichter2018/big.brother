@@ -70,12 +70,6 @@ public struct PolicyResolver {
             shieldedCategoriesData = nil
             allowedAppTokensData = nil
 
-        case .fullLockdown:
-            // Shield everything. Empty Data signals "all categories".
-            shieldedCategoriesData = Data()
-            allowedAppTokensData = nil
-            warnings.append(.someSystemAppsCannotBeBlocked)
-
         case .dailyMode:
             // Shield all categories; allowed apps are the exceptions.
             shieldedCategoriesData = Data()

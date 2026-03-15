@@ -9,10 +9,6 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable {
     /// The allowed list is defined per-child and per-device.
     case dailyMode
 
-    /// Block everything possible. Only system-unblockable apps
-    /// (Phone, Settings) remain usable.
-    case fullLockdown
-
     /// Allow only a narrow essential set: Messages, Maps, Phone,
     /// FaceTime, Find My, Camera, Clock, Contacts.
     /// Best-effort — some system apps cannot be blocked regardless.
@@ -22,7 +18,6 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable {
         switch self {
         case .unlocked: "Unlocked"
         case .dailyMode: "Locked"
-        case .fullLockdown: "Disabled"
         case .essentialOnly: "Essential Only"
         }
     }

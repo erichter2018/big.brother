@@ -439,7 +439,6 @@ struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
 enum LockMode: String, Codable, Sendable, CaseIterable {
     case unlocked
     case dailyMode       // block all except allowed list
-    case fullLockdown    // block everything possible
     case essentialOnly   // narrow essential set only
 }
 ```
@@ -472,7 +471,7 @@ struct EffectivePolicy: Codable, Sendable, Equatable {
 
     /// Serialized tokens for apps that should be shielded.
     /// nil means "no shielding" (unlocked mode).
-    /// empty Data means "shield everything" (full lockdown).
+    /// empty Data means "shield everything" (essential only / daily mode).
     let shieldedCategoriesData: Data?
     let allowedAppTokensData: Data?
 
@@ -1287,7 +1286,6 @@ Within any resolved mode, `alwaysAllowedApps` from the child profile are merged 
 |-----------------|-------------------------------------------------------------|
 | `unlocked`      | Clear all shield settings. No restrictions.                 |
 | `dailyMode`     | `store.shield.applicationCategories = .all(except: allowed)`. Allowed = always-allowed + daily-allowed list. |
-| `fullLockdown`  | `store.shield.applicationCategories = .all()`. Only system-unblockable apps (Phone, Settings) remain usable. |
 | `essentialOnly`  | `store.shield.applicationCategories = .all(except: essentialCategories)`. Essential = a curated category/app set. |
 
 ### 11.3 Named ManagedSettings Stores
@@ -1802,7 +1800,7 @@ Implement the enforcement layer:
 - `EnforcementService.swift`
 - Request `.individual` authorization during enrollment.
 - Apply mode changes via `ManagedSettingsStore`.
-- Test: set mode to fullLockdown, verify apps are shielded.
+- Test: set mode to essentialOnly, verify apps are shielded.
 
 ### Step 7: Command System
 Implement remote commands:

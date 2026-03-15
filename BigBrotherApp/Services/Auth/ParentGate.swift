@@ -19,9 +19,16 @@ struct ParentGate<Content: View>: View {
 
     @Environment(\.scenePhase) private var scenePhase
 
+    private var authEnabled: Bool {
+        // Default to true if key has never been set (backward compatible).
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        if defaults.object(forKey: StorageKeys.parentAuthEnabled) == nil { return true }
+        return defaults.bool(forKey: StorageKeys.parentAuthEnabled)
+    }
+
     var body: some View {
-        if !isPINConfigured {
-            // No PIN set — skip authentication (user can use iOS app lock instead).
+        if !isPINConfigured || !authEnabled {
+            // No PIN set or auth disabled — skip authentication.
             content()
         } else if isAuthenticated && !isTimedOut {
             content()

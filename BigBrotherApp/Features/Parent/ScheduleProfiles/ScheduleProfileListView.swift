@@ -1,0 +1,114 @@
+import SwiftUI
+import BigBrotherCore
+
+struct ScheduleProfileListView: View {
+    @Bindable var viewModel: ScheduleProfileListViewModel
+    @State private var editingProfile: ScheduleProfile?
+
+    var body: some View {
+        List {
+            if viewModel.profiles.isEmpty && !viewModel.isLoading {
+                ContentUnavailableView(
+                    "No Schedule Profiles",
+                    systemImage: "calendar.badge.clock",
+                    description: Text("Add a profile to automatically unlock devices on a schedule.")
+                )
+            }
+
+            ForEach(viewModel.profiles) { profile in
+                NavigationLink {
+                    ScheduleProfileEditorView(
+                        viewModel: viewModel,
+                        profile: profile
+                    )
+                } label: {
+                    profileRow(profile)
+                }
+            }
+            .onDelete { indexSet in
+                let toDelete = indexSet.compactMap { viewModel.profiles[safe: $0] }
+                for profile in toDelete {
+                    Task { await viewModel.delete(profile) }
+                }
+            }
+
+            if let error = viewModel.errorMessage {
+                Section {
+                    Text(error).foregroundStyle(.red).font(.caption)
+                }
+            }
+        }
+        .navigationTitle("Schedule Profiles")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("New Custom Profile") {
+                        editingProfile = ScheduleProfile(
+                            familyID: viewModel.appState.parentState?.familyID ?? FamilyID(rawValue: ""),
+                            name: "",
+                            freeWindows: []
+                        )
+                    }
+
+                    if let familyID = viewModel.appState.parentState?.familyID {
+                        Divider()
+                        ForEach(ScheduleProfile.presets(familyID: familyID)) { preset in
+                            Button(preset.name) {
+                                Task { await viewModel.addPreset(preset) }
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                }
+            }
+        }
+        .refreshable {
+            await viewModel.refresh()
+        }
+        .sheet(item: $editingProfile) { profile in
+            NavigationStack {
+                ScheduleProfileEditorView(
+                    viewModel: viewModel,
+                    profile: profile
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func profileRow(_ profile: ScheduleProfile) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(profile.name)
+                    .fontWeight(.medium)
+                if profile.isDefault {
+                    Text("DEFAULT")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.blue.opacity(0.15))
+                        .foregroundStyle(.blue)
+                        .clipShape(Capsule())
+                }
+            }
+
+            HStack(spacing: 12) {
+                Label("\(profile.freeWindows.count) window\(profile.freeWindows.count == 1 ? "" : "s")",
+                      systemImage: "clock")
+                Label("Locked: \(profile.lockedMode.displayName)", systemImage: "lock")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// Safe subscript for arrays.
+private extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}

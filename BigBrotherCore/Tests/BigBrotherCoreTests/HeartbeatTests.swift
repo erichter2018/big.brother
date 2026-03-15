@@ -13,7 +13,7 @@ struct HeartbeatTests {
         let hb = DeviceHeartbeat(
             deviceID: deviceID,
             familyID: familyID,
-            currentMode: .fullLockdown,
+            currentMode: .essentialOnly,
             policyVersion: 42,
             familyControlsAuthorized: true,
             batteryLevel: 0.75,
@@ -27,7 +27,7 @@ struct HeartbeatTests {
 
         #expect(decoded.deviceID == deviceID)
         #expect(decoded.familyID == familyID)
-        #expect(decoded.currentMode == .fullLockdown)
+        #expect(decoded.currentMode == .essentialOnly)
         #expect(decoded.policyVersion == 42)
         #expect(decoded.familyControlsAuthorized == true)
         #expect(decoded.batteryLevel == 0.75)

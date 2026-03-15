@@ -23,7 +23,7 @@ struct EventQueueTests {
             deviceID: deviceID,
             familyID: familyID,
             eventType: .modeChanged,
-            details: "Changed to fullLockdown"
+            details: "Changed to essentialOnly"
         )
         let entry2 = EventLogEntry(
             deviceID: deviceID,
@@ -71,14 +71,14 @@ struct EventQueueTests {
         let storage = try makeStorage()
 
         let config = ShieldConfig(
-            title: "Full Lockdown",
+            title: "Essential Only",
             message: "Everything is restricted.",
             showRequestButton: true
         )
         try storage.writeShieldConfiguration(config)
 
         let read = storage.readShieldConfiguration()
-        #expect(read?.title == "Full Lockdown")
+        #expect(read?.title == "Essential Only")
         #expect(read?.message == "Everything is restricted.")
         #expect(read?.showRequestButton == true)
     }

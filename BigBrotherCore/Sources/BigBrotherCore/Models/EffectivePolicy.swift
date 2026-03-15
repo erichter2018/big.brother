@@ -17,7 +17,7 @@ public struct EffectivePolicy: Codable, Sendable, Equatable {
     public let temporaryUnlockExpiresAt: Date?
 
     /// Serialized category tokens to shield. Framework-specific encoding.
-    /// nil = no shielding (unlocked). Empty = shield all (full lockdown).
+    /// nil = no shielding (unlocked). Empty = shield all (essential only / daily mode).
     public let shieldedCategoriesData: Data?
 
     /// Serialized app tokens that are explicitly allowed (exceptions to shielding).

@@ -9,6 +9,7 @@ struct ChildHomeView: View {
     @State private var showUnlockRequestPicker = false
     @State private var showNameMyApps = false
     @State private var showShieldAppTest = false
+    @State private var showAlwaysAllowedSetup = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -127,6 +128,15 @@ struct ChildHomeView: View {
                     showAppBlockingSetup = true
                     viewModel.appState.showAppConfigurationRequest = false
                 }
+            }
+            .onChange(of: viewModel.appState.showAlwaysAllowedSetup) { _, newValue in
+                if newValue {
+                    showAlwaysAllowedSetup = true
+                    viewModel.appState.showAlwaysAllowedSetup = false
+                }
+            }
+            .sheet(isPresented: $showAlwaysAllowedSetup) {
+                AlwaysAllowedSetupView(appState: viewModel.appState)
             }
             #endif
             .onAppear {

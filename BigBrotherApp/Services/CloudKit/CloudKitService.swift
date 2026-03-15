@@ -32,6 +32,7 @@ protocol CloudKitServiceProtocol: Sendable {
     func updateCommandStatus(_ commandID: UUID, status: CommandStatus) async throws
     func saveReceipt(_ receipt: CommandReceipt) async throws
     func fetchReceipts(familyID: FamilyID, since: Date) async throws -> [CommandReceipt]
+    func fetchRecentCommands(familyID: FamilyID, since: Date) async throws -> [RemoteCommand]
 
     // MARK: - Enrollment
 
@@ -48,6 +49,7 @@ protocol CloudKitServiceProtocol: Sendable {
 
     func syncEventLogs(_ entries: [EventLogEntry]) async throws
     func fetchEventLogs(familyID: FamilyID, since: Date) async throws -> [EventLogEntry]
+    func deleteEventLog(_ id: UUID) async throws
 
     // MARK: - Policy
 
@@ -60,6 +62,23 @@ protocol CloudKitServiceProtocol: Sendable {
     func fetchSchedules(familyID: FamilyID) async throws -> [Schedule]
     func saveSchedule(_ schedule: Schedule) async throws
     func deleteSchedule(_ id: UUID, familyID: FamilyID) async throws
+
+    // MARK: - Heartbeat Profiles
+
+    func fetchHeartbeatProfiles(familyID: FamilyID) async throws -> [HeartbeatProfile]
+    func saveHeartbeatProfile(_ profile: HeartbeatProfile) async throws
+    func deleteHeartbeatProfile(_ id: UUID) async throws
+
+    // MARK: - Schedule Profiles
+
+    func fetchScheduleProfiles(familyID: FamilyID) async throws -> [ScheduleProfile]
+    func saveScheduleProfile(_ profile: ScheduleProfile) async throws
+    func deleteScheduleProfile(_ id: UUID) async throws
+
+    // MARK: - Cleanup
+
+    /// Delete old records of the given type matching a predicate.
+    func deleteRecords(type: String, predicate: NSPredicate) async throws -> Int
 
     // MARK: - Subscriptions
 

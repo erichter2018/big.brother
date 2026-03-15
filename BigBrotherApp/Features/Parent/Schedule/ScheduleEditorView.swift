@@ -14,7 +14,6 @@ struct ScheduleEditorView: View {
             Section("Mode During Schedule") {
                 Picker("Mode", selection: $viewModel.mode) {
                     Text("Daily Mode").tag(LockMode.dailyMode)
-                    Text("Full Lockdown").tag(LockMode.fullLockdown)
                     Text("Essential Only").tag(LockMode.essentialOnly)
                     Text("Unlocked").tag(LockMode.unlocked)
                 }

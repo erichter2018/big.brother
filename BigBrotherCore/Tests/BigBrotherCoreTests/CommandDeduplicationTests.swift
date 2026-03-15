@@ -10,7 +10,7 @@ struct CommandDeduplicationTests {
     let childID = ChildProfileID.generate()
 
     private func makeCommand(
-        action: CommandAction = .setMode(.fullLockdown),
+        action: CommandAction = .setMode(.essentialOnly),
         target: CommandTarget? = nil,
         expiresAt: Date? = nil
     ) -> RemoteCommand {
@@ -54,7 +54,7 @@ struct CommandDeduplicationTests {
         let new = RemoteCommand(
             familyID: familyID,
             target: .device(deviceID),
-            action: .setMode(.fullLockdown),
+            action: .setMode(.essentialOnly),
             issuedBy: "Parent",
             issuedAt: Date()
         )
@@ -123,13 +123,19 @@ struct CommandDeduplicationTests {
     @Test("Action types encode/decode correctly")
     func actionCodable() throws {
         let actions: [CommandAction] = [
-            .setMode(.fullLockdown),
+            .setMode(.essentialOnly),
             .setMode(.unlocked),
             .setMode(.dailyMode),
             .setMode(.essentialOnly),
             .temporaryUnlock(durationSeconds: 1800),
             .requestHeartbeat,
+            .requestAppConfiguration,
             .unenroll,
+            .allowApp(requestID: UUID()),
+            .allowManagedApp(appName: "Safari"),
+            .revokeApp(requestID: UUID()),
+            .blockManagedApp(appName: "Safari"),
+            .temporaryUnlockApp(requestID: UUID(), durationSeconds: 900),
         ]
 
         let encoder = JSONEncoder()

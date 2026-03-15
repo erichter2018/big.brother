@@ -10,8 +10,8 @@ public enum AppConstants {
     public static let cloudKitContainerIdentifier = "iCloud.fr.bigbrother.app"
 
     /// Keychain access group for shared secrets between app and extensions.
-    /// The Team ID prefix is prepended automatically by the system.
-    public static let keychainAccessGroup = "fr.bigbrother.shared"
+    /// Must include the Team ID prefix for cross-process access (app + extensions).
+    public static let keychainAccessGroup = "Y2G5FUN342.fr.bigbrother.shared"
 
     /// Main app bundle identifier.
     public static let appBundleID = "fr.bigbrother.app"
@@ -97,6 +97,11 @@ public enum AppConstants {
 
     /// How long to keep processed command IDs (48 hours).
     public static let processedCommandRetentionSeconds: TimeInterval = 172800
+
+    // MARK: - Background Tasks
+
+    /// BGTaskScheduler identifier for periodic heartbeat + command sync.
+    public static let bgTaskHeartbeat = "fr.bigbrother.app.heartbeat-refresh"
 
     // MARK: - Snapshot History
 

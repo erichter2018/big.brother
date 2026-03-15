@@ -2,6 +2,33 @@ import SwiftUI
 import CloudKit
 import BigBrotherCore
 
+// MARK: - Launch Diagnostics (inline to avoid cross-file resolution issues)
+
+/// Writes breadcrumb messages to Documents/launch_log.txt.
+/// Used to diagnose launch crashes that only occur without the debugger attached.
+private enum _LaunchLog {
+    static let url: URL? = FileManager.default
+        .urls(for: .documentDirectory, in: .userDomainMask).first?
+        .appendingPathComponent("launch_log.txt")
+
+    static func start() {
+        guard let url else { return }
+        try? "=== Launch \(Date()) ===\n".write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    static func log(_ msg: String) {
+        guard let url else { return }
+        let line = "[\(Date())] \(msg)\n"
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile()
+            h.write(Data(line.utf8))
+            h.closeFile()
+        }
+    }
+}
+
+// MARK: - App Entry Point
+
 /// Main app entry point.
 ///
 /// On launch:
@@ -16,7 +43,14 @@ import BigBrotherCore
 @main
 struct BigBrotherApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var appState = AppState()
+    @State private var appState: AppState
+
+    init() {
+        _LaunchLog.start()
+        _LaunchLog.log("App struct init")
+        self._appState = State(initialValue: AppState())
+        _LaunchLog.log("AppState created, role=\(self._appState.wrappedValue.deviceRole)")
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -28,29 +62,70 @@ struct BigBrotherApp: App {
     }
 
     private func setupOnLaunch() async {
+        _LaunchLog.log("setupOnLaunch started")
+
         // Wire AppState into the AppDelegate for push notification handling.
         appDelegate.appState = appState
 
         // Skip heavy setup for unconfigured devices — services aren't needed during onboarding.
-        guard appState.deviceRole != .unconfigured else { return }
+        guard appState.deviceRole != .unconfigured else {
+            _LaunchLog.log("Unconfigured device — skipping setup")
+            return
+        }
 
         // Configure all services (creates ManagedSettingsStore, CloudKit, etc.).
+        _LaunchLog.log("Calling configureServices (role=\(appState.deviceRole))")
         appState.configureServices()
+        _LaunchLog.log("configureServices complete")
 
         // Restore enforcement state (child devices). This is synchronous and fast.
+        _LaunchLog.log("performRestoration starting")
         appState.performRestoration()
+        _LaunchLog.log("performRestoration complete")
 
-        // Run CloudKit and sync work in the background so it doesn't block UI.
+        // --- UI-presenting requests (MUST run on MainActor, NOT in Task.detached) ---
+        if appState.deviceRole == .child {
+            // Request notification permission. This presents a system dialog.
+            _LaunchLog.log("Child: requesting notification permission (MainActor)")
+            ModeChangeNotifier.requestPermission()
+
+            // Request FamilyControls authorization if needed. This presents
+            // the system "Allow Parental Controls" dialog.
+            if appState.familyControlsAvailable {
+                let authStatus = appState.enforcement?.authorizationStatus
+                if authStatus != .authorized {
+                    _LaunchLog.log("Child: requesting FamilyControls authorization (MainActor)")
+                    do {
+                        try await appState.enforcement?.requestAuthorization()
+                        _LaunchLog.log("Child: FamilyControls authorized")
+                    } catch {
+                        _LaunchLog.log("Child: FamilyControls auth failed: \(error) — user can retry via UI")
+                    }
+                } else {
+                    _LaunchLog.log("Child: FamilyControls already authorized")
+                }
+            } else {
+                _LaunchLog.log("Child: FamilyControls not available (missing entitlement or parent device)")
+            }
+        }
+
+        // --- Background work (CloudKit, sync) — no UI presentation ---
         Task.detached {
+            _LaunchLog.log("Task.detached started")
+
             // Bootstrap CloudKit schema (creates record types in Development environment).
             let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
+            _LaunchLog.log("CloudKit schema bootstrap starting")
             await CloudKitSchemaBootstrap.bootstrapIfNeeded(database: db)
+            _LaunchLog.log("CloudKit schema bootstrap done")
 
             // Give CloudKit a moment to propagate newly created record types.
             try? await Task.sleep(for: .seconds(2))
 
             // Validate CloudKit environment.
+            _LaunchLog.log("Checking CloudKit account status")
             let cloudKitStatus = await CloudKitEnvironment.checkAccountStatus()
+            _LaunchLog.log("CloudKit status: \(cloudKitStatus)")
             if cloudKitStatus != .available {
                 await MainActor.run {
                     appState.cloudKitStatusMessage = CloudKitEnvironment.statusDescription(cloudKitStatus)
@@ -59,6 +134,7 @@ struct BigBrotherApp: App {
 
             // Set up CloudKit subscriptions and sync.
             let role = await MainActor.run { appState.deviceRole }
+            _LaunchLog.log("Setting up for role: \(role)")
             switch role {
             case .child:
                 let enrollment = await MainActor.run { appState.enrollmentState }
@@ -71,19 +147,47 @@ struct BigBrotherApp: App {
                 await MainActor.run { appState.startChildSync() }
                 try? await appState.syncCoordinator?.performFullSync()
 
+                // Schedule BGTask for periodic heartbeat when app is suspended.
+                await MainActor.run { appDelegate.scheduleHeartbeatRefresh() }
+
             case .parent:
+                _LaunchLog.log("Parent: setting up subscriptions")
                 let familyID = await MainActor.run { appState.parentState?.familyID }
                 if let familyID {
+                    _LaunchLog.log("Parent: familyID=\(familyID)")
                     try? await appState.cloudKit?.setupSubscriptions(
                         familyID: familyID,
                         deviceID: nil
                     )
+                    _LaunchLog.log("Parent: subscriptions done")
                 }
+                _LaunchLog.log("Parent: refreshing dashboard")
                 try? await appState.refreshDashboard()
+                _LaunchLog.log("Parent: dashboard refreshed")
+
+                // Start monitoring child device heartbeats for offline alerts.
+                await MainActor.run {
+                    let monitor = DeviceMonitor(appState: appState)
+                    appState.deviceMonitor = monitor
+                    monitor.startMonitoring()
+                    appState.startUnlockRequestPolling()
+                    _LaunchLog.log("Parent: DeviceMonitor + unlock request polling started")
+                }
+
+                // Run CloudKit cleanup to prune old records.
+                let ck = await MainActor.run { appState.cloudKit }
+                if let familyID, let ck {
+                    await CloudKitCleanupService.performCleanup(
+                        cloudKit: ck,
+                        familyID: familyID
+                    )
+                    _LaunchLog.log("Parent: CloudKit cleanup done")
+                }
 
             case .unconfigured:
                 break
             }
+            _LaunchLog.log("Background setup complete")
         }
     }
 }

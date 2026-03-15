@@ -15,6 +15,7 @@ schemes:
         BigBrotherMonitor: all
         BigBrotherShield: all
         BigBrotherShieldAction: all
+        BigBrotherActivityReport: all
     run:
       config: Debug
       executable: BigBrother
@@ -48,9 +49,13 @@ targets:
       - target: BigBrotherMonitor
       - target: BigBrotherShield
       - target: BigBrotherShieldAction
+      - target: BigBrotherActivityReport
       - sdk: FamilyControls.framework
+        weak: true
       - sdk: ManagedSettings.framework
+        weak: true
       - sdk: DeviceActivity.framework
+        weak: true
       - sdk: CloudKit.framework
       - sdk: LocalAuthentication.framework
       - sdk: Combine.framework
@@ -66,8 +71,15 @@ targets:
       properties:
         CFBundleDisplayName: BigBrother
         NSFaceIDUsageDescription: "Big Brother uses Face ID to protect parent settings."
+        BGTaskSchedulerPermittedIdentifiers:
+          - fr.bigbrother.app.heartbeat-refresh
         UIBackgroundModes:
+          - fetch
           - remote-notification
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - bigbrother
+            CFBundleURLName: fr.bigbrother.app
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -124,12 +136,14 @@ targets:
         PRODUCT_NAME: BigBrotherMonitor
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        ENABLE_DEBUG_DYLIB: NO
+        MERGED_BINARY_TYPE: none
     info:
       path: BigBrotherMonitor/Info.plist
       properties:
         CFBundleDisplayName: BigBrotherMonitor
         NSExtension:
-          NSExtensionPointIdentifier: com.apple.deviceactivitymonitor
+          NSExtensionPointIdentifier: com.apple.deviceactivity.monitor-extension
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).BigBrotherMonitorExtension"
     entitlements:
       path: BigBrotherMonitor/BigBrotherMonitor.entitlements
@@ -169,15 +183,63 @@ targets:
         PRODUCT_NAME: BigBrotherShield
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        ENABLE_DEBUG_DYLIB: NO
+        MERGED_BINARY_TYPE: none
     info:
       path: BigBrotherShield/Info.plist
       properties:
         CFBundleDisplayName: BigBrotherShield
         NSExtension:
-          NSExtensionPointIdentifier: com.apple.ManagedSettings.ShieldConfigurationExtension
+          NSExtensionPointIdentifier: com.apple.ManagedSettingsUI.shield-configuration-service
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).BigBrotherShieldExtension"
     entitlements:
       path: BigBrotherShield/BigBrotherShield.entitlements
+      properties:
+        com.apple.developer.family-controls: true
+        com.apple.security.application-groups:
+          - "group.fr.bigbrother.shared"
+        keychain-access-groups:
+          - "$(AppIdentifierPrefix)fr.bigbrother.shared"
+    attributes:
+      SystemCapabilities:
+        com.apple.ApplicationGroups.iOS:
+          enabled: 1
+        com.apple.Keychain:
+          enabled: 1
+        com.apple.FamilyControls:
+          enabled: 1
+
+  # ============================================================
+  # DeviceActivityReport Extension (token → name resolution)
+  # ============================================================
+  BigBrotherActivityReport:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: BigBrotherActivityReport
+        excludes:
+          - "**/*.entitlements"
+    dependencies:
+      - package: BigBrotherCore
+      - sdk: DeviceActivity.framework
+      - sdk: ManagedSettings.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fr.bigbrother.app.activity-report
+        CODE_SIGN_ENTITLEMENTS: BigBrotherActivityReport/BigBrotherActivityReport.entitlements
+        PRODUCT_NAME: BigBrotherActivityReport
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_DEBUG_DYLIB: NO
+        MERGED_BINARY_TYPE: none
+    info:
+      path: BigBrotherActivityReport/Info.plist
+      properties:
+        CFBundleDisplayName: BigBrotherActivityReport
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.deviceactivityui.report-extension
+    entitlements:
+      path: BigBrotherActivityReport/BigBrotherActivityReport.entitlements
       properties:
         com.apple.developer.family-controls: true
         com.apple.security.application-groups:
@@ -213,12 +275,14 @@ targets:
         PRODUCT_NAME: BigBrotherShieldAction
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        ENABLE_DEBUG_DYLIB: NO
+        MERGED_BINARY_TYPE: none
     info:
       path: BigBrotherShieldAction/Info.plist
       properties:
         CFBundleDisplayName: BigBrotherShieldAction
         NSExtension:
-          NSExtensionPointIdentifier: com.apple.ManagedSettings.ShieldActionExtension
+          NSExtensionPointIdentifier: com.apple.ManagedSettings.shield-action-service
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).BigBrotherShieldActionExtension"
     entitlements:
       path: BigBrotherShieldAction/BigBrotherShieldAction.entitlements

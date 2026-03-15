@@ -115,6 +115,16 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await save(record)
     }
 
+    func fetchRecentCommands(familyID: FamilyID, since: Date) async throws -> [RemoteCommand] {
+        let predicate = NSPredicate(
+            format: "%K == %@ AND %K >= %@",
+            CKFieldName.familyID, familyID.rawValue,
+            CKFieldName.issuedAt, since as NSDate
+        )
+        return try await query(CKRecordType.remoteCommand, predicate: predicate)
+            .compactMap(CKRecordConversion.remoteCommand)
+    }
+
     func fetchReceipts(familyID: FamilyID, since: Date) async throws -> [CommandReceipt] {
         let predicate = NSPredicate(
             format: "%K == %@ AND %K >= %@",
@@ -168,6 +178,11 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await saveMultiple(records)
     }
 
+    func deleteEventLog(_ id: UUID) async throws {
+        let recordID = CKRecordConversion.recordID(id.uuidString, type: CKRecordType.eventLog)
+        try await delete(recordID)
+    }
+
     func fetchEventLogs(familyID: FamilyID, since: Date) async throws -> [EventLogEntry] {
         let predicate = NSPredicate(
             format: "%K == %@ AND %K >= %@",
@@ -217,54 +232,110 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await delete(recordID)
     }
 
+    // MARK: - Heartbeat Profiles
+
+    func fetchHeartbeatProfiles(familyID: FamilyID) async throws -> [HeartbeatProfile] {
+        let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
+        return try await query(CKRecordType.heartbeatProfile, predicate: predicate)
+            .compactMap(CKRecordConversion.heartbeatProfile)
+    }
+
+    func saveHeartbeatProfile(_ profile: HeartbeatProfile) async throws {
+        let record = CKRecordConversion.toCKRecord(profile)
+        try await save(record)
+    }
+
+    func deleteHeartbeatProfile(_ id: UUID) async throws {
+        let recordID = CKRecordConversion.recordID(id.uuidString, type: CKRecordType.heartbeatProfile)
+        try await delete(recordID)
+    }
+
+    // MARK: - Schedule Profiles
+
+    func fetchScheduleProfiles(familyID: FamilyID) async throws -> [ScheduleProfile] {
+        let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
+        return try await query(CKRecordType.scheduleProfile, predicate: predicate)
+            .compactMap(CKRecordConversion.scheduleProfile)
+    }
+
+    func saveScheduleProfile(_ profile: ScheduleProfile) async throws {
+        let record = CKRecordConversion.toCKRecord(profile)
+        try await save(record)
+    }
+
+    func deleteScheduleProfile(_ id: UUID) async throws {
+        let recordID = CKRecordConversion.recordID(id.uuidString, type: CKRecordType.scheduleProfile)
+        try await delete(recordID)
+    }
+
     // MARK: - Subscriptions
 
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws {
-        // Subscribe to new pending commands for this family.
-        let commandPredicate: NSPredicate
+        var subscriptionsToSave: [CKSubscription] = []
+
         if deviceID != nil {
-            // Child device: subscribe to commands targeting this device, its profile, or all.
-            // We use a broad filter on familyID + pending status; the CommandProcessor
-            // handles fine-grained targeting.
-            commandPredicate = NSPredicate(
+            // Child device: subscribe to pending commands.
+            let commandPredicate = NSPredicate(
                 format: "%K == %@ AND %K == %@",
                 CKFieldName.familyID, familyID.rawValue,
                 CKFieldName.status, CommandStatus.pending.rawValue
             )
-        } else {
-            // Parent device: subscribe to receipts and heartbeats.
-            commandPredicate = NSPredicate(
-                format: "%K == %@",
-                CKFieldName.familyID, familyID.rawValue
+            let commandSub = CKQuerySubscription(
+                recordType: CKRecordType.remoteCommand,
+                predicate: commandPredicate,
+                subscriptionID: "commands-\(familyID.rawValue)",
+                options: [.firesOnRecordCreation]
             )
+            let commandNotifInfo = CKSubscription.NotificationInfo()
+            commandNotifInfo.shouldSendContentAvailable = true
+            commandSub.notificationInfo = commandNotifInfo
+            subscriptionsToSave.append(commandSub)
+
+            #if DEBUG
+            print("[BigBrother] 🔔 Setting up CloudKit subscription: commands-\(familyID.rawValue) (deviceID: \(deviceID?.rawValue ?? "nil"))")
+            #endif
+        } else {
+            // Parent device: subscribe to unlock request event logs.
+            let unlockPredicate = NSPredicate(
+                format: "%K == %@ AND %K == %@",
+                CKFieldName.familyID, familyID.rawValue,
+                CKFieldName.eventType, EventType.unlockRequested.rawValue
+            )
+            let unlockSub = CKQuerySubscription(
+                recordType: CKRecordType.eventLog,
+                predicate: unlockPredicate,
+                subscriptionID: "unlock-requests-v3-\(familyID.rawValue)",
+                options: [.firesOnRecordCreation]
+            )
+            let unlockNotifInfo = CKSubscription.NotificationInfo()
+            unlockNotifInfo.shouldSendContentAvailable = true // wake app for processing
+            // No alertBody/soundName/shouldBadge — this is a SILENT push that wakes
+            // the app. The app then posts a LOCAL notification via
+            // UnlockRequestNotificationService with the child's name, app name,
+            // and actionable buttons (15min/1hr/2hr/today/always).
+            // Having BOTH a CloudKit alert AND a local notification caused duplicates.
+            unlockSub.notificationInfo = unlockNotifInfo
+            subscriptionsToSave.append(unlockSub)
+
+            #if DEBUG
+            print("[BigBrother] 🔔 Setting up CloudKit subscription: unlock-requests-\(familyID.rawValue)")
+            #endif
         }
 
-        let commandSub = CKQuerySubscription(
-            recordType: CKRecordType.remoteCommand,
-            predicate: commandPredicate,
-            subscriptionID: "commands-\(familyID.rawValue)",
-            options: [.firesOnRecordCreation]
-        )
-        let notifInfo = CKSubscription.NotificationInfo()
-        notifInfo.shouldSendContentAvailable = true // silent push
-        commandSub.notificationInfo = notifInfo
-
         let op = CKModifySubscriptionsOperation(
-            subscriptionsToSave: [commandSub],
+            subscriptionsToSave: subscriptionsToSave,
             subscriptionIDsToDelete: nil
         )
         op.qualityOfService = .utility
-
-        #if DEBUG
-        print("[BigBrother] 🔔 Setting up CloudKit subscription: commands-\(familyID.rawValue) (deviceID: \(deviceID?.rawValue ?? "nil"))")
-        #endif
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             op.modifySubscriptionsResultBlock = { result in
                 switch result {
                 case .success:
                     #if DEBUG
-                    print("[BigBrother] ✅ CloudKit subscription active: commands-\(familyID.rawValue)")
+                    for subscription in subscriptionsToSave {
+                        print("[BigBrother] ✅ CloudKit subscription active: \(subscription.subscriptionID)")
+                    }
                     #endif
                     continuation.resume()
                 case .failure(let error):
@@ -276,6 +347,37 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             }
             database.add(op)
         }
+    }
+
+    // MARK: - Cleanup
+
+    func deleteRecords(type: String, predicate: NSPredicate) async throws -> Int {
+        let records = try await query(type, predicate: predicate)
+        guard !records.isEmpty else { return 0 }
+
+        // Delete in batches of 400 (CloudKit limit is 400 per operation).
+        var deleted = 0
+        for batchStart in stride(from: 0, to: records.count, by: 400) {
+            let batchEnd = min(batchStart + 400, records.count)
+            let ids = records[batchStart..<batchEnd].map(\.recordID)
+
+            let op = CKModifyRecordsOperation(recordIDsToDelete: Array(ids))
+            op.qualityOfService = .utility
+
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                op.modifyRecordsResultBlock = { result in
+                    switch result {
+                    case .success:
+                        continuation.resume()
+                    case .failure(let error):
+                        continuation.resume(throwing: CloudKitError.serverError(error))
+                    }
+                }
+                database.add(op)
+            }
+            deleted += ids.count
+        }
+        return deleted
     }
 
     // MARK: - Private CloudKit Helpers
@@ -304,10 +406,27 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         let op = CKModifyRecordsOperation(recordsToSave: records)
         op.savePolicy = .changedKeys
         op.isAtomic = false // allow partial success
-        op.qualityOfService = .utility
+        op.qualityOfService = .userInitiated
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            var resumed = false
+
+            op.perRecordSaveBlock = { recordID, result in
+                switch result {
+                case .success:
+                    #if DEBUG
+                    print("[BigBrother] CloudKit saved record: \(recordID.recordName)")
+                    #endif
+                case .failure(let error):
+                    #if DEBUG
+                    print("[BigBrother] CloudKit per-record FAILED: \(recordID.recordName) — \(error.localizedDescription)")
+                    #endif
+                }
+            }
+
             op.modifyRecordsResultBlock = { result in
+                guard !resumed else { return }
+                resumed = true
                 switch result {
                 case .success:
                     continuation.resume()

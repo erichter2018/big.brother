@@ -43,6 +43,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     // MARK: - EnforcementServiceProtocol
 
     func apply(_ policy: EffectivePolicy) throws {
+        // Device restrictions apply ALWAYS, regardless of lock/unlock state.
+        applyRestrictions()
+
         // Handle temporary unlock: clear all stores so device is unlocked.
         if policy.isTemporaryUnlock {
             clearAllShieldStores()
@@ -57,8 +60,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         case .unlocked:
             clearAllShieldStores()
 
-        case .dailyMode, .essentialOnly:
-            applyShield()
+        case .dailyMode:
+            applyShield(allowExemptions: true)
+
+        case .essentialOnly:
+            applyShield(allowExemptions: false)
         }
 
         // Update shield config for the shield extension UI.
@@ -79,13 +85,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     /// Exceeding this silently fails — no apps are shielded and reads back nil.
     private static let maxShieldApplications = 50
 
-    private func applyShield() {
-        let allowedTokens = collectAllowedTokens()
+    /// - Parameter allowExemptions: When false (essentialOnly), blocks ALL apps with no exemptions.
+    private func applyShield(allowExemptions: Bool) {
+        let allowedTokens = allowExemptions ? collectAllowedTokens() : []
         let pickerTokens = loadPickerTokens()
 
-        if !pickerTokens.isEmpty {
+        if !pickerTokens.isEmpty && allowExemptions {
             // Per-app blocking for up to 50 apps (ShieldAction gets ApplicationToken).
-            // Apps beyond 50 are caught by the category policy instead.
             let tokensToBlock = pickerTokens.subtracting(allowedTokens)
             let perAppTokens: Set<ApplicationToken>
             if tokensToBlock.count <= Self.maxShieldApplications {
@@ -94,24 +100,21 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 perAppTokens = Set(tokensToBlock.prefix(Self.maxShieldApplications))
             }
             baseStore.shield.applications = perAppTokens
-            // Category catch-all blocks everything except picker + allowed apps.
-            // Apps in perAppTokens are blocked by BOTH shield.applications and the
-            // category policy, but ShieldAction prefers the application handler.
             baseStore.shield.applicationCategories = .all(except: allowedTokens)
             #if DEBUG
             let overflow = tokensToBlock.count - perAppTokens.count
             print("[BigBrother] Shield applied — \(perAppTokens.count) apps via shield.applications\(overflow > 0 ? " (\(overflow) overflow to category)" : ""), category catch-all active")
             #endif
         } else {
-            // No picker selection — block everything via categories.
-            baseStore.shield.applications = nil
+            // No picker selection or essentialOnly — block everything.
+            baseStore.shield.applications = allowExemptions ? nil : pickerTokens.isEmpty ? nil : pickerTokens
             if allowedTokens.isEmpty {
                 baseStore.shield.applicationCategories = .all()
             } else {
                 baseStore.shield.applicationCategories = .all(except: allowedTokens)
             }
             #if DEBUG
-            print("[BigBrother] Shield applied — category-only block with \(allowedTokens.count) exemptions (no picker selection)")
+            print("[BigBrother] Shield applied — \(allowExemptions ? "category-only" : "essential") block with \(allowedTokens.count) exemptions")
             #endif
         }
         baseStore.shield.webDomainCategories = .all()
@@ -140,9 +143,21 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         let decoder = JSONDecoder()
 
         // Permanently allowed apps.
-        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
-           let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
-            tokens.formUnion(allowed)
+        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens) {
+            if let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
+                tokens.formUnion(allowed)
+                #if DEBUG
+                print("[BigBrother] Allowed tokens loaded: \(allowed.count) permanent")
+                #endif
+            } else {
+                #if DEBUG
+                print("[BigBrother] Allowed tokens: decode FAILED (\(data.count) bytes)")
+                #endif
+            }
+        } else {
+            #if DEBUG
+            print("[BigBrother] Allowed tokens: no data stored")
+            #endif
         }
 
         // Temporarily allowed apps (non-expired only).
@@ -153,6 +168,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             }
         }
 
+        #if DEBUG
+        print("[BigBrother] Total allowed tokens: \(tokens.count) (permanent + \(tempEntries.filter(\.isValid).count) temp)")
+        #endif
         return tokens
     }
 
@@ -179,6 +197,25 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     }
 
     // MARK: - Private
+
+    /// Apply device-level restrictions from parent settings.
+    /// Uses the default (unnamed) ManagedSettingsStore — named stores may not
+    /// enforce system-level restrictions like denyAppRemoval.
+    private func applyRestrictions() {
+        let r = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+        let store = ManagedSettingsStore()
+        store.application.denyAppRemoval = r.denyAppRemoval ? true : nil
+        store.media.denyExplicitContent = r.denyExplicitContent ? true : nil
+        store.account.lockAccounts = r.lockAccounts ? true : nil
+        store.dateAndTime.requireAutomaticDateAndTime = r.requireAutomaticDateAndTime ? true : nil
+
+        // Read back to verify
+        let readBack = store.application.denyAppRemoval
+        #if DEBUG
+        print("[BigBrother] Restrictions applied: removal=\(r.denyAppRemoval) explicit=\(r.denyExplicitContent) accounts=\(r.lockAccounts) dateTime=\(r.requireAutomaticDateAndTime)")
+        print("[BigBrother] Restrictions readback: denyAppRemoval=\(String(describing: readBack))")
+        #endif
+    }
 
     private func shieldMessage(for policy: EffectivePolicy) -> String {
         switch policy.resolvedMode {

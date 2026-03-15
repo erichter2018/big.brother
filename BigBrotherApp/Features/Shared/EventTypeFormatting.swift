@@ -22,6 +22,7 @@ extension EventType {
         case .authorizationRestored: "Authorization Restored"
         case .temporaryUnlockStarted: "Temp Unlock Started"
         case .enforcementDegraded: "Enforcement Degraded"
+        case .unlockRequested: "Unlock Requested"
         }
     }
 }

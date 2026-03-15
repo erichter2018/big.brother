@@ -93,4 +93,5 @@ public enum EventType: String, Codable, Sendable, Equatable {
     case authorizationRestored
     case temporaryUnlockStarted
     case enforcementDegraded
+    case unlockRequested
 }

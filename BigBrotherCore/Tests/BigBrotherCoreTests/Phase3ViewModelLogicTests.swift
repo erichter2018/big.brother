@@ -47,7 +47,7 @@ struct Phase3ViewModelLogicTests {
             childProfileID: childProfileID,
             familyID: familyID,
             name: "Bedtime",
-            mode: .fullLockdown,
+            mode: .essentialOnly,
             daysOfWeek: DayOfWeek.weekdays,
             startTime: DayTime(hour: 20, minute: 30),
             endTime: DayTime(hour: 23, minute: 0)
@@ -57,7 +57,7 @@ struct Phase3ViewModelLogicTests {
         let decoded = try JSONDecoder().decode(Schedule.self, from: data)
 
         #expect(decoded.name == "Bedtime")
-        #expect(decoded.mode == .fullLockdown)
+        #expect(decoded.mode == .essentialOnly)
         #expect(decoded.daysOfWeek == DayOfWeek.weekdays)
         #expect(decoded.startTime.hour == 20)
         #expect(decoded.startTime.minute == 30)
@@ -71,7 +71,7 @@ struct Phase3ViewModelLogicTests {
     func tempUnlockState() {
         let active = TemporaryUnlockState(
             origin: .localPINUnlock,
-            previousMode: .fullLockdown,
+            previousMode: .essentialOnly,
             expiresAt: Date().addingTimeInterval(1800)
         )
         #expect(active.isActive)
@@ -172,7 +172,7 @@ struct Phase3ViewModelLogicTests {
 
     @Test("ExtensionSharedState degraded when auth unavailable")
     func extensionSharedStateDegraded() {
-        let policy = EffectivePolicy(resolvedMode: .fullLockdown, policyVersion: 1)
+        let policy = EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 1)
         let snapshot = PolicySnapshot(
             deviceID: deviceID,
             effectivePolicy: policy,
@@ -196,7 +196,7 @@ struct Phase3ViewModelLogicTests {
     func lockModeDisplayName() {
         #expect(LockMode.unlocked.displayName == "Unlocked")
         #expect(LockMode.dailyMode.displayName == "Locked")
-        #expect(LockMode.fullLockdown.displayName == "Disabled")
+        #expect(LockMode.essentialOnly.displayName == "Essential Only")
         #expect(LockMode.essentialOnly.displayName == "Essential Only")
     }
 
@@ -207,13 +207,13 @@ struct Phase3ViewModelLogicTests {
         let entry = DiagnosticEntry(
             category: .enforcement,
             message: "Applied policy",
-            details: "Mode: fullLockdown"
+            details: "Mode: essentialOnly"
         )
         let data = try JSONEncoder().encode(entry)
         let decoded = try JSONDecoder().decode(DiagnosticEntry.self, from: data)
         #expect(decoded.category == .enforcement)
         #expect(decoded.message == "Applied policy")
-        #expect(decoded.details == "Mode: fullLockdown")
+        #expect(decoded.details == "Mode: essentialOnly")
     }
 
     // MARK: - Snapshot Transition Computation
@@ -222,7 +222,7 @@ struct Phase3ViewModelLogicTests {
     func snapshotTransitionModeChange() {
         let prev = PolicySnapshot(
             generation: 1,
-            effectivePolicy: EffectivePolicy(resolvedMode: .fullLockdown, policyVersion: 1)
+            effectivePolicy: EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 1)
         )
         let curr = PolicySnapshot(
             generation: 2,
@@ -231,7 +231,7 @@ struct Phase3ViewModelLogicTests {
         )
 
         let transition = SnapshotTransition.between(from: prev, to: curr)
-        #expect(transition.fromMode == .fullLockdown)
+        #expect(transition.fromMode == .essentialOnly)
         #expect(transition.toMode == .unlocked)
         #expect(transition.changes.contains { $0.contains("Mode:") })
     }
@@ -281,7 +281,7 @@ struct Phase3ViewModelLogicTests {
         let snapshotStore = PolicySnapshotStore(storage: storage)
 
         // Set up initial snapshot.
-        let initialPolicy = EffectivePolicy(resolvedMode: .fullLockdown, policyVersion: 1)
+        let initialPolicy = EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 1)
         let initialSnapshot = PolicySnapshot(
             generation: 1,
             deviceID: deviceID,
@@ -294,13 +294,13 @@ struct Phase3ViewModelLogicTests {
         let expiresAt = Date().addingTimeInterval(1800)
         let unlockState = TemporaryUnlockState(
             origin: .localPINUnlock,
-            previousMode: .fullLockdown,
+            previousMode: .essentialOnly,
             expiresAt: expiresAt
         )
 
         let policy = Policy(
             targetDeviceID: deviceID,
-            mode: .fullLockdown,
+            mode: .essentialOnly,
             temporaryUnlockUntil: expiresAt,
             version: 2
         )

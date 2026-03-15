@@ -2,6 +2,46 @@ import Foundation
 import Observation
 import BigBrotherCore
 
+/// A unified timeline entry combining child-reported events and parent-sent commands.
+struct TimelineEntry: Identifiable {
+    let id: UUID
+    let label: String
+    let timestamp: Date
+    let isCommand: Bool
+
+    /// Status indicator for commands (pending, applied, failed).
+    let status: CommandStatus?
+
+    /// Whether this entry is an actionable unlock request from the child.
+    let isUnlockRequest: Bool
+
+    /// The device ID that originated this event (for targeted approval).
+    let deviceID: DeviceID?
+
+    /// The app name extracted from unlock request details.
+    let appName: String?
+
+    init(
+        id: UUID,
+        label: String,
+        timestamp: Date,
+        isCommand: Bool,
+        status: CommandStatus? = nil,
+        isUnlockRequest: Bool = false,
+        deviceID: DeviceID? = nil,
+        appName: String? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.timestamp = timestamp
+        self.isCommand = isCommand
+        self.status = status
+        self.isUnlockRequest = isUnlockRequest
+        self.deviceID = deviceID
+        self.appName = appName
+    }
+}
+
 @Observable
 final class ChildDetailViewModel: CommandSendable {
     let appState: AppState
@@ -10,19 +50,122 @@ final class ChildDetailViewModel: CommandSendable {
     var isSendingCommand = false
     var commandFeedback: String?
     var isCommandError = false
-    var recentEvents: [EventLogEntry] = []
+    var timeline: [TimelineEntry] = []
+    private var refreshTimer: Timer?
+
+    /// Parent-side restriction state for this child (persisted in UserDefaults).
+    var restrictions: DeviceRestrictions {
+        get { Self.loadRestrictions(for: child.id) }
+        set { Self.saveRestrictions(newValue, for: child.id) }
+    }
+
+    /// Whether any of this child's devices use .child FamilyControls authorization.
+    /// Auto-detected from heartbeats. When true, system restrictions are enforceable.
+    var hasChildAuthorization: Bool {
+        let deviceIDs = Set(devices.map(\.id))
+        return appState.latestHeartbeats
+            .filter { deviceIDs.contains($0.deviceID) }
+            .contains { $0.isChildAuthorization == true }
+    }
 
     init(appState: AppState, child: ChildProfile) {
         self.appState = appState
         self.child = child
     }
 
+    /// Toggle a single restriction and send to all child devices.
+    func toggleRestriction(_ keyPath: WritableKeyPath<DeviceRestrictions, Bool>) {
+        var r = restrictions
+        r[keyPath: keyPath].toggle()
+        restrictions = r
+        Task { await sendRestrictions(r) }
+    }
+
+    private func sendRestrictions(_ r: DeviceRestrictions) async {
+        await performCommand(.setRestrictions(r), target: .child(child.id))
+    }
+
+    // MARK: - Restriction Persistence (parent-side, per child)
+
+    private static func restrictionsKey(for childID: ChildProfileID) -> String {
+        "restrictions.\(childID.rawValue)"
+    }
+
+    private static func loadRestrictions(for childID: ChildProfileID) -> DeviceRestrictions {
+        guard let data = UserDefaults.standard.data(forKey: restrictionsKey(for: childID)),
+              let r = try? JSONDecoder().decode(DeviceRestrictions.self, from: data) else {
+            return DeviceRestrictions()
+        }
+        return r
+    }
+
+    private static func saveRestrictions(_ r: DeviceRestrictions, for childID: ChildProfileID) {
+        if let data = try? JSONEncoder().encode(r) {
+            UserDefaults.standard.set(data, forKey: restrictionsKey(for: childID))
+        }
+    }
+
+    /// Poll CloudKit for updated heartbeats every 10s so device status stays current.
+    func startAutoRefresh() {
+        guard refreshTimer == nil else { return }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            Task { [weak self] in
+                try? await self?.appState.refreshDashboard()
+            }
+        }
+    }
+
+    func stopAutoRefresh() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
+
     var devices: [ChildDevice] {
         appState.childDevices.filter { $0.childProfileID == child.id }
     }
 
+    /// Approved apps across all of this child's devices.
+    var approvedAppsForChild: [ApprovedApp] {
+        let deviceIDs = Set(devices.map(\.id))
+        return appState.approvedApps.filter { deviceIDs.contains($0.deviceID) }
+    }
+
     func heartbeat(for device: ChildDevice) -> DeviceHeartbeat? {
         appState.latestHeartbeats.first { $0.deviceID == device.id }
+    }
+
+    /// Temporarily unlocked app names from heartbeats for this child's devices.
+    var temporaryAllowedAppsForChild: [String] {
+        let deviceIDs = Set(devices.map(\.id))
+        return appState.latestHeartbeats
+            .filter { deviceIDs.contains($0.deviceID) }
+            .flatMap { $0.temporaryAllowedAppNames ?? [] }
+    }
+
+    /// Allowed app names from heartbeat that the parent hasn't tracked yet.
+    /// These represent apps allowed on the device but not in the parent's ApprovedApp list.
+    var heartbeatAllowedAppsForChild: [String] {
+        let deviceIDs = Set(devices.map(\.id))
+        let trackedNames = Set(approvedAppsForChild.map { $0.appName.lowercased() })
+        return appState.latestHeartbeats
+            .filter { deviceIDs.contains($0.deviceID) }
+            .flatMap { $0.allowedAppNames ?? [] }
+            .filter { !trackedNames.contains($0.lowercased()) }
+    }
+
+    /// Remaining seconds on a temporary unlock across this child's devices.
+    var remainingUnlockSeconds: Int? {
+        let devs = devices
+        let expiry = devs.compactMap { dev -> Date? in
+            guard let hb = appState.latestHeartbeats.first(where: { $0.deviceID == dev.id }),
+                  hb.currentMode == .unlocked,
+                  let exp = hb.temporaryUnlockExpiresAt,
+                  exp > Date() else { return nil }
+            return exp
+        }.max()
+        guard let expiry else { return nil }
+        let secs = Int(expiry.timeIntervalSince(Date()))
+        return secs > 0 ? secs : nil
     }
 
     // MARK: - Actions (target all devices for this child)
@@ -31,8 +174,132 @@ final class ChildDetailViewModel: CommandSendable {
         await performCommand(.setMode(mode), target: .child(child.id))
     }
 
-    func temporaryUnlock(seconds: Int = 900) async {
+    func temporaryUnlock(seconds: Int = 24 * 3600) async {
         await performCommand(.temporaryUnlock(durationSeconds: seconds), target: .child(child.id))
+    }
+
+    /// Revoke all allowed apps on all of this child's devices.
+    func revokeAllApps() async {
+        await performCommand(.revokeAllApps, target: .child(child.id))
+        // Clear parent-side tracking too.
+        let deviceIDs = Set(devices.map(\.id))
+        let remaining = appState.approvedApps.filter { !deviceIDs.contains($0.deviceID) }
+        appState.approvedApps = remaining
+    }
+
+    /// Revoke all allowed apps on a specific device.
+    func revokeAllApps(for device: ChildDevice) async {
+        await performCommand(.revokeAllApps, target: .device(device.id))
+        appState.approvedApps.removeAll { $0.deviceID == device.id }
+    }
+
+    /// Send requestAppConfiguration command to a specific device.
+    func requestAppConfiguration(for device: ChildDevice) async {
+        await performCommand(.requestAppConfiguration, target: .device(device.id))
+    }
+
+    /// Open the always-allowed apps picker on a specific child device.
+    func requestAlwaysAllowedSetup(for device: ChildDevice) async {
+        await performCommand(.requestAlwaysAllowedSetup, target: .device(device.id))
+    }
+
+    /// Approve an unlock request — sends a per-app temporary unlock to the requesting device.
+    func approveUnlock(requestID: UUID, deviceID: DeviceID?, seconds: Int, appName: String?) async {
+        if let deviceID {
+            await performCommand(.temporaryUnlockApp(requestID: requestID, durationSeconds: seconds), target: .device(deviceID))
+        } else {
+            await performCommand(.temporaryUnlockApp(requestID: requestID, durationSeconds: seconds), target: .child(child.id))
+        }
+        // Remove from UI and CloudKit — request has been handled.
+        await removeUnlockRequest(id: requestID)
+    }
+
+    /// Permanently allow an app — only possible when we have the app token.
+    func allowAppPermanently(requestID: UUID, appName: String, deviceID: DeviceID?) async {
+        let targetDeviceID = deviceID ?? devices.first?.id
+        if let deviceID {
+            await performCommand(.allowApp(requestID: requestID), target: .device(deviceID))
+        } else {
+            await performCommand(.allowApp(requestID: requestID), target: .child(child.id))
+        }
+        // Track the approval on the parent side for display and revocation.
+        if let targetDeviceID {
+            appState.addApprovedApp(ApprovedApp(
+                id: requestID,
+                appName: appName,
+                deviceID: targetDeviceID
+            ))
+        }
+        // Remove from UI and CloudKit — request has been handled.
+        await removeUnlockRequest(id: requestID)
+    }
+
+    /// Revoke a previously approved app.
+    func revokeApp(_ app: ApprovedApp) async {
+        await performCommand(.blockManagedApp(appName: app.appName), target: .device(app.deviceID))
+        guard !isCommandError else { return }
+        appState.removeApprovedApp(appName: app.appName, deviceID: app.deviceID)
+    }
+
+    /// Send an app name to the child device so ShieldAction uses it in future requests.
+    func sendAppNameToChild(name: String, rawAppName: String, deviceID: DeviceID?) async {
+        guard let fingerprint = ParentAppNameMapping.extractFingerprint(from: rawAppName) else { return }
+        if let deviceID {
+            await performCommand(.nameApp(fingerprint: fingerprint, name: name), target: .device(deviceID))
+        } else {
+            await performCommand(.nameApp(fingerprint: fingerprint, name: name), target: .child(child.id))
+        }
+    }
+
+    /// Deny an unlock request — removes from timeline and deletes from CloudKit.
+    func denyUnlockRequest(id: UUID) async {
+        await removeUnlockRequest(id: id)
+    }
+
+    /// Remove an unlock request from UI and CloudKit.
+    private func removeUnlockRequest(id: UUID) async {
+        timeline.removeAll { $0.id == id }
+        guard let cloudKit = appState.cloudKit else { return }
+        try? await cloudKit.deleteEventLog(id)
+    }
+
+    // MARK: - Timeline
+
+    /// Event types that are internal housekeeping and clutter the timeline.
+    private static let filteredEventTypes: Set<EventType> = [
+        .heartbeatSent, .policyReconciled
+    ]
+
+    /// Parse event details for display, stripping TOKEN payloads and truncating.
+    /// Returns (displayDetails, appName).
+    private static func parseEventDetails(_ event: EventLogEntry) -> (String?, String?) {
+        guard let details = event.details else {
+            return (nil, nil)
+        }
+
+        // Strip TOKEN payload if present (any event type).
+        var cleanDetails: String
+        if let tokenRange = details.range(of: "\nTOKEN:") {
+            cleanDetails = String(details[..<tokenRange.lowerBound])
+        } else {
+            cleanDetails = details
+        }
+
+        // Truncate overly long details for display.
+        if cleanDetails.count > 120 {
+            cleanDetails = String(cleanDetails.prefix(120)) + "…"
+        }
+
+        // Extract app name from unlock requests.
+        let appName: String?
+        if event.eventType == .unlockRequested,
+           cleanDetails.hasPrefix("Requesting access to ") {
+            appName = String(cleanDetails.dropFirst("Requesting access to ".count))
+        } else {
+            appName = nil
+        }
+
+        return (cleanDetails, appName)
     }
 
     func loadEvents() async {
@@ -40,8 +307,85 @@ final class ChildDetailViewModel: CommandSendable {
               let familyID = appState.parentState?.familyID else { return }
 
         let since = Date().addingTimeInterval(-86400) // last 24h
-        recentEvents = (try? await cloudKit.fetchEventLogs(familyID: familyID, since: since))
-            ?? []
+        let childDeviceIDs = Set(devices.map(\.id))
+
+        // Fetch child-reported events and parent-sent commands in parallel.
+        async let eventsTask = cloudKit.fetchEventLogs(familyID: familyID, since: since)
+        async let commandsTask = cloudKit.fetchRecentCommands(familyID: familyID, since: since)
+
+        let allEvents = (try? await eventsTask) ?? []
+        let allCommands = (try? await commandsTask) ?? []
+
+        // Build timeline from child-reported events (filtered to this child's devices).
+        var entries: [TimelineEntry] = allEvents
+            .filter { event in
+                childDeviceIDs.contains(event.deviceID) &&
+                !Self.filteredEventTypes.contains(event.eventType)
+            }
+            .map { event in
+                // Extract app name from "Requesting access to AppName\nTOKEN:..." details.
+                // Strip the TOKEN payload for display.
+                let (displayDetails, extractedAppName) = Self.parseEventDetails(event)
+
+                return TimelineEntry(
+                    id: event.id,
+                    label: displayDetails ?? event.eventType.displayName,
+                    timestamp: event.timestamp,
+                    isCommand: false,
+                    isUnlockRequest: event.eventType == .unlockRequested,
+                    deviceID: event.deviceID,
+                    appName: extractedAppName
+                )
+            }
+
+        // Add parent-sent commands that target this child or their devices.
+        // Deduplicate: skip commands whose action is already reflected by a
+        // child-reported event within 30 seconds (the child logged it).
+        let eventTimestamps = Set(entries.map { Int($0.timestamp.timeIntervalSince1970) })
+
+        for cmd in allCommands {
+            guard commandTargetsChild(cmd, childDeviceIDs: childDeviceIDs) else { continue }
+
+            // Skip if a child event already covers this command (within 30s window).
+            let cmdEpoch = Int(cmd.issuedAt.timeIntervalSince1970)
+            let hasCoveringEvent = (-30...30).contains(where: { offset in
+                eventTimestamps.contains(cmdEpoch + offset)
+            })
+
+            if !hasCoveringEvent || cmd.status == .pending {
+                let statusLabel: String
+                switch cmd.status {
+                case .applied: statusLabel = ""
+                case .pending: statusLabel = " (pending)"
+                case .delivered: statusLabel = " (delivered)"
+                case .failed: statusLabel = " (failed)"
+                case .expired: statusLabel = " (expired)"
+                }
+
+                entries.append(TimelineEntry(
+                    id: cmd.id,
+                    label: "Sent: \(cmd.action.displayDescription)\(statusLabel)",
+                    timestamp: cmd.issuedAt,
+                    isCommand: true,
+                    status: cmd.status
+                ))
+            }
+        }
+
+        // Sort newest first.
+        timeline = entries.sorted { $0.timestamp > $1.timestamp }
+    }
+
+    /// Check if a command targets this child's devices.
+    private func commandTargetsChild(_ cmd: RemoteCommand, childDeviceIDs: Set<DeviceID>) -> Bool {
+        switch cmd.target {
+        case .device(let deviceID):
+            return childDeviceIDs.contains(deviceID)
+        case .child(let profileID):
+            return profileID == child.id
+        case .allDevices:
+            return true
+        }
     }
 
     func refresh() async {

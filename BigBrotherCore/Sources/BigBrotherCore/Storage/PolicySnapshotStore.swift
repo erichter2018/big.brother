@@ -155,15 +155,13 @@ public final class PolicySnapshotStore: @unchecked Sendable {
             message = "This app should be accessible."
         case .dailyMode:
             message = "This app is not in your allowed list. Ask a parent to unlock it."
-        case .fullLockdown:
-            message = "All apps are restricted right now."
         case .essentialOnly:
             message = "Only essential apps are available right now."
         }
         return ShieldConfig(
             title: mode.displayName,
             message: message,
-            showRequestButton: false
+            showRequestButton: mode != .unlocked
         )
     }
 }

@@ -17,6 +17,8 @@ enum CKRecordType {
     static let eventLog = "BBEventLog"
     static let enrollmentInvite = "BBEnrollmentInvite"
     static let schedule = "BBSchedule"
+    static let heartbeatProfile = "BBHeartbeatProfile"
+    static let scheduleProfile = "BBScheduleProfile"
 }
 
 /// Field names used in CloudKit records.
@@ -69,6 +71,18 @@ enum CKFieldName {
     static let fcAuthorized = "fcAuthorized"
     static let batteryLevel = "batteryLevel"
     static let isCharging = "isCharging"
+    static let appBlockingConfigured = "appBlockingConfigured"
+    static let blockedCategoryCount = "blockedCategoryCount"
+    static let blockedAppCount = "blockedAppCount"
+    static let blockedAppNames = "blockedAppNames"
+    static let blockedCategoryNames = "blockedCategoryNames"
+    static let installID = "installID"
+    static let heartbeatSeq = "heartbeatSeq"
+    static let cloudKitStatus = "cloudKitStatus"
+    static let allowedAppNames = "allowedAppNames"
+    static let temporaryAllowedAppNames = "temporaryAllowedAppNames"
+    static let temporaryUnlockExpiresAt = "tempUnlockExpiresAt"
+    static let isChildAuthorization = "isChildAuth"
 
     // BBEventLog
     static let eventID = "eventID"
@@ -88,4 +102,17 @@ enum CKFieldName {
     static let endHour = "endHour"
     static let endMinute = "endMinute"
     static let isActive = "isActive"
+
+    // BBHeartbeatProfile
+    static let activeWindowsJSON = "activeWindowsJSON"
+    static let maxHeartbeatGap = "maxHeartbeatGap"
+    static let isDefault = "isDefault"
+
+    // BBScheduleProfile
+    static let freeWindowsJSON = "freeWindowsJSON"
+    static let lockedMode = "lockedMode"
+
+    // BBChildDevice (profile links)
+    static let heartbeatProfileID = "heartbeatProfileID"
+    static let scheduleProfileID = "scheduleProfileID"
 }

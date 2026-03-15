@@ -32,6 +32,8 @@ struct RootRouter: View {
 struct ParentTabView: View {
     let appState: AppState
     @State private var dashboardViewModel: ParentDashboardViewModel
+    @State private var navigationPath = NavigationPath()
+    @Environment(\.scenePhase) private var scenePhase
 
     init(appState: AppState) {
         self.appState = appState
@@ -40,15 +42,33 @@ struct ParentTabView: View {
 
     var body: some View {
         TabView {
-            NavigationStack {
+            NavigationStack(path: $navigationPath) {
                 ParentDashboardView(viewModel: dashboardViewModel)
+                    .navigationDestination(for: ChildProfileID.self) { childID in
+                        if let child = appState.childProfiles.first(where: { $0.id == childID }) {
+                            ChildDetailView(
+                                viewModel: ChildDetailViewModel(
+                                    appState: appState,
+                                    child: child
+                                )
+                            )
+                        }
+                    }
+            }
+            .onChange(of: appState.pendingChildNavigation) { _, childID in
+                if let childID {
+                    navigationPath.append(childID)
+                    appState.pendingChildNavigation = nil
+                }
             }
             .tabItem {
                 Label("Dashboard", systemImage: "house")
             }
 
             NavigationStack {
-                ScheduleListView(appState: appState)
+                ScheduleProfileListView(
+                    viewModel: ScheduleProfileListViewModel(appState: appState)
+                )
             }
             .tabItem {
                 Label("Schedules", systemImage: "calendar.badge.clock")
@@ -59,6 +79,11 @@ struct ParentTabView: View {
             }
             .tabItem {
                 Label("Settings", systemImage: "gear")
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                appState.checkForUnlockRequestsNow()
             }
         }
     }

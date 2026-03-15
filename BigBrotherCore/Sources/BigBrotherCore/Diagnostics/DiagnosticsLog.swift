@@ -11,6 +11,10 @@ public enum DiagnosticCategory: String, Codable, Sendable, CaseIterable {
     case temporaryUnlock
     case eventUpload
     case storage
+    case shieldAction
+    case shieldConfig
+    case activityReport
+    case tokenNameResearch
 }
 
 /// A single structured diagnostic log entry.

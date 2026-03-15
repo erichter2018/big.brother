@@ -453,6 +453,16 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         }
     }
 
+    // MARK: - Device Restrictions
+
+    public func readDeviceRestrictions() -> DeviceRestrictions? {
+        read("device_restrictions.json")
+    }
+
+    public func writeDeviceRestrictions(_ restrictions: DeviceRestrictions) throws {
+        try writeAtomically(restrictions, to: "device_restrictions.json")
+    }
+
     // MARK: - Raw Data
 
     public func writeRawData(_ data: Data?, forKey key: String) throws {

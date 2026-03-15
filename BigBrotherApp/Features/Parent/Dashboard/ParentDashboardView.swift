@@ -1,13 +1,13 @@
 import SwiftUI
 import BigBrotherCore
 
-/// Parent dashboard — overview of all children and their devices.
+/// Parent dashboard — overview of all children with inline controls.
 struct ParentDashboardView: View {
     @Bindable var viewModel: ParentDashboardViewModel
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 10) {
                 GlobalActionsBar(viewModel: viewModel)
 
                 if let feedback = viewModel.commandFeedback {
@@ -23,31 +23,8 @@ struct ParentDashboardView: View {
                         .padding(.top, 40)
 
                 case .loaded:
-                    LazyVStack(spacing: 12) {
-                        ForEach(viewModel.childProfiles) { child in
-                            NavigationLink {
-                                ChildDetailView(
-                                    viewModel: ChildDetailViewModel(
-                                        appState: viewModel.appState,
-                                        child: child
-                                    )
-                                )
-                            } label: {
-                                ChildSummaryCard(
-                                    child: child,
-                                    devices: viewModel.devices(for: child),
-                                    heartbeats: viewModel.latestHeartbeats
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    Task { await viewModel.deleteChild(child) }
-                                } label: {
-                                    Label("Delete Child", systemImage: "trash")
-                                }
-                            }
-                        }
+                    ForEach(viewModel.childProfiles) { child in
+                        childCard(child)
                     }
 
                 case .empty(let msg):
@@ -72,7 +49,8 @@ struct ParentDashboardView: View {
                     }
                 }
             }
-            .padding()
+            .padding(.horizontal)
+            .padding(.top, 8)
         }
         .navigationTitle("Dashboard")
         .toolbar {
@@ -96,6 +74,46 @@ struct ParentDashboardView: View {
         }
         .task {
             await viewModel.loadDashboard()
+            viewModel.startCountdownTimer()
+        }
+        .onDisappear {
+            viewModel.stopCountdownTimer()
+        }
+    }
+
+    @ViewBuilder
+    private func childCard(_ child: ChildProfile) -> some View {
+        let devs = viewModel.devices(for: child)
+        let dominant = viewModel.dominantMode(for: child)
+
+        NavigationLink {
+            ChildDetailView(
+                viewModel: ChildDetailViewModel(
+                    appState: viewModel.appState,
+                    child: child
+                )
+            )
+        } label: {
+            ChildSummaryCard(
+                child: child,
+                devices: devs,
+                heartbeats: viewModel.latestHeartbeats,
+                dominantMode: dominant.mode,
+                isSending: viewModel.isSendingCommand,
+                countdown: viewModel.countdownString(for: child),
+                remainingSeconds: viewModel.remainingSeconds(for: child),
+                onLock: { Task { await viewModel.lockChild(child) } },
+                onUnlock: { seconds in Task { await viewModel.unlockChild(child, seconds: seconds) } },
+                onEssential: { Task { await viewModel.essentialChild(child) } }
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) {
+                Task { await viewModel.deleteChild(child) }
+            } label: {
+                Label("Delete Child", systemImage: "trash")
+            }
         }
     }
 }

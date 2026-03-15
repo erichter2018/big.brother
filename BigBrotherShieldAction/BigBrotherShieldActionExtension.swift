@@ -25,7 +25,12 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         // 1. Direct token from application handler (only fires for shield.applications, not categories).
         if let directToken, let data = try? JSONEncoder().encode(directToken) {
             let base64 = data.base64EncodedString()
-            return (name: "App", tokenBase64: base64, bundleID: nil, source: "directToken")
+            // Try to resolve the app name from the token — works in some extension contexts.
+            let app = Application(token: directToken)
+            let resolvedName = app.localizedDisplayName ?? app.bundleIdentifier ?? "App"
+            let resolvedBundle = app.bundleIdentifier
+            diag(storage, "directToken resolve: name=\(app.localizedDisplayName ?? "nil") bundle=\(app.bundleIdentifier ?? "nil")")
+            return (name: resolvedName, tokenBase64: base64, bundleID: resolvedBundle, source: "directToken")
         }
 
         // 2. Keychain bridge — written by ShieldConfiguration (securityd, not file sandbox).

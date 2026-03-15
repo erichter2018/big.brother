@@ -48,9 +48,9 @@ struct PolicyResolverTests {
         #expect(result.shieldedCategoriesData == nil)
     }
 
-    @Test("Full lockdown shields all categories")
-    func fullLockdown() {
-        let policy = makePolicy(mode: .fullLockdown)
+    @Test("Essential only shields all categories")
+    func essentialOnlyShieldsAll() {
+        let policy = makePolicy(mode: .essentialOnly)
         let result = PolicyResolver.resolve(
             basePolicy: policy,
             schedule: nil,
@@ -58,7 +58,7 @@ struct PolicyResolverTests {
             alwaysAllowedCategories: [],
             capabilities: makeCapabilities()
         )
-        #expect(result.resolvedMode == .fullLockdown)
+        #expect(result.resolvedMode == .essentialOnly)
         #expect(result.shieldedCategoriesData == Data())
     }
 
@@ -67,7 +67,7 @@ struct PolicyResolverTests {
     @Test("Temporary unlock overrides base mode")
     func temporaryUnlockOverrides() {
         let future = Date().addingTimeInterval(1800)
-        let policy = makePolicy(mode: .fullLockdown, temporaryUnlockUntil: future)
+        let policy = makePolicy(mode: .essentialOnly, temporaryUnlockUntil: future)
         let result = PolicyResolver.resolve(
             basePolicy: policy,
             schedule: nil,
@@ -83,7 +83,7 @@ struct PolicyResolverTests {
     @Test("Expired temporary unlock falls through to base mode")
     func expiredTemporaryUnlock() {
         let past = Date().addingTimeInterval(-60)
-        let policy = makePolicy(mode: .fullLockdown, temporaryUnlockUntil: past)
+        let policy = makePolicy(mode: .essentialOnly, temporaryUnlockUntil: past)
         let result = PolicyResolver.resolve(
             basePolicy: policy,
             schedule: nil,
@@ -91,7 +91,7 @@ struct PolicyResolverTests {
             alwaysAllowedCategories: [],
             capabilities: makeCapabilities()
         )
-        #expect(result.resolvedMode == .fullLockdown)
+        #expect(result.resolvedMode == .essentialOnly)
         #expect(result.isTemporaryUnlock == false)
     }
 
@@ -138,7 +138,7 @@ struct PolicyResolverTests {
             childProfileID: childProfileID,
             familyID: familyID,
             name: "Test Schedule",
-            mode: .fullLockdown,
+            mode: .essentialOnly,
             daysOfWeek: Set(DayOfWeek.allCases),
             startTime: DayTime(hour: max(0, hour - 1), minute: 0),
             endTime: DayTime(hour: min(23, hour + 1), minute: 59)
@@ -152,6 +152,6 @@ struct PolicyResolverTests {
             alwaysAllowedCategories: [],
             capabilities: makeCapabilities()
         )
-        #expect(result.resolvedMode == .fullLockdown)
+        #expect(result.resolvedMode == .essentialOnly)
     }
 }

@@ -40,7 +40,6 @@ public enum Defaults {
     public static let lockModeDescriptions: [LockMode: String] = [
         .unlocked: "Unlocked — all apps accessible",
         .dailyMode: "Daily Mode — only allowed apps accessible",
-        .fullLockdown: "Full Lockdown — all apps restricted",
         .essentialOnly: "Essential Only — limited to essential apps",
     ]
 }

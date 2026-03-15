@@ -22,6 +22,12 @@ public enum StorageKeys {
     /// The familyID, also stored in Keychain for tamper resistance.
     public static let familyID = "fr.bigbrother.keychain.familyID"
 
+    /// Last-shielded app info (JSON: appName + tokenBase64 + timestamp).
+    /// Written by ShieldConfiguration, read by ShieldAction.
+    /// Uses Keychain (securityd) because UserDefaults (cfprefsd) and file writes
+    /// fail from extension processes.
+    public static let lastShieldedAppKeychain = "fr.bigbrother.keychain.lastShieldedApp"
+
     // MARK: - UserDefaults Keys (App Group)
 
     /// Whether onboarding has been completed.
@@ -41,4 +47,37 @@ public enum StorageKeys {
 
     /// Whether a fail-safe mode was applied during the last recovery.
     public static let failSafeApplied = "fr.bigbrother.failSafeApplied"
+
+    /// Whether parent app requires PIN/biometric authentication.
+    /// When false, ParentGate is bypassed even if a PIN is configured.
+    public static let parentAuthEnabled = "fr.bigbrother.parentAuthEnabled"
+
+    // MARK: - App Blocking
+
+    /// App blocking configuration summary (pure-Swift model).
+    public static let appBlockingConfig = "appBlockingConfig"
+
+    /// Raw Data storage for FamilyActivitySelection (device-local opaque tokens).
+    public static let familyActivitySelection = "familyActivitySelection"
+
+    // MARK: - Per-App Allow List
+
+    /// Serialized Set<ApplicationToken> of permanently allowed apps (device-local).
+    public static let allowedAppTokens = "allowedAppTokens"
+
+    /// Pending unlock requests with cached app tokens (device-local).
+    /// Array of PendingUnlockRequest — written by ShieldAction, read by CommandProcessor.
+    public static let pendingUnlockRequests = "pendingUnlockRequests"
+
+    /// Cached app name → token mapping from ShieldConfiguration extension.
+    /// Written when shields are displayed, read by ShieldAction for request details.
+    public static let shieldedAppCache = "shieldedAppCache"
+
+    /// Temporarily allowed apps with expiry times (device-local).
+    /// Array of TemporaryAllowedAppEntry — written by CommandProcessor, read by Shield extensions.
+    public static let temporaryAllowedApps = "temporaryAllowedApps"
+
+    /// Enrollment IDs cached in App Group so extensions can create events
+    /// without needing Keychain access (which can fail in extension context).
+    public static let cachedEnrollmentIDs = "cachedEnrollmentIDs"
 }

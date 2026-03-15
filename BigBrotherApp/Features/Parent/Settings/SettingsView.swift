@@ -38,6 +38,16 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Monitoring") {
+                NavigationLink {
+                    HeartbeatProfileListView(
+                        viewModel: HeartbeatProfileListViewModel(appState: appState)
+                    )
+                } label: {
+                    Label("Monitoring Profiles", systemImage: "heart.text.clipboard")
+                }
+            }
+
             Section("System") {
                 NavigationLink {
                     DiagnosticsView(viewModel: DiagnosticsViewModel(appState: appState))

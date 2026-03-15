@@ -16,7 +16,7 @@ struct SnapshotStoreTests {
 
     private func makeSnapshot(
         generation: Int64 = 1,
-        mode: LockMode = .fullLockdown,
+        mode: LockMode = .essentialOnly,
         version: Int64 = 1,
         source: SnapshotSource = .commandApplied,
         authHealth: AuthorizationHealth? = nil
@@ -43,7 +43,7 @@ struct SnapshotStoreTests {
         let storage = try makeStorage()
         let store = PolicySnapshotStore(storage: storage)
 
-        let s1 = makeSnapshot(generation: 2, mode: .fullLockdown)
+        let s1 = makeSnapshot(generation: 2, mode: .essentialOnly)
         let result1 = try store.commit(s1)
         #expect(result1 == .committed(s1))
 
@@ -55,7 +55,7 @@ struct SnapshotStoreTests {
         // Verify original is still persisted
         let loaded = store.loadCurrentSnapshot()
         #expect(loaded?.generation == 2)
-        #expect(loaded?.effectivePolicy.resolvedMode == .fullLockdown)
+        #expect(loaded?.effectivePolicy.resolvedMode == .essentialOnly)
     }
 
     @Test("Same generation commit rejected")
@@ -80,11 +80,11 @@ struct SnapshotStoreTests {
         let storage = try makeStorage()
         let store = PolicySnapshotStore(storage: storage)
 
-        let s1 = makeSnapshot(generation: 1, mode: .fullLockdown)
+        let s1 = makeSnapshot(generation: 1, mode: .essentialOnly)
         _ = try store.commit(s1)
 
         // Same mode/version, different generation, routine source
-        let s2 = makeSnapshot(generation: 2, mode: .fullLockdown, source: .syncUpdate)
+        let s2 = makeSnapshot(generation: 2, mode: .essentialOnly, source: .syncUpdate)
         let result = try store.commit(s2)
         #expect(result == .unchanged)
     }
@@ -94,11 +94,11 @@ struct SnapshotStoreTests {
         let storage = try makeStorage()
         let store = PolicySnapshotStore(storage: storage)
 
-        let s1 = makeSnapshot(generation: 1, mode: .fullLockdown)
+        let s1 = makeSnapshot(generation: 1, mode: .essentialOnly)
         _ = try store.commit(s1)
 
         // Same fingerprint but restoration source → always commit
-        let s2 = makeSnapshot(generation: 2, mode: .fullLockdown, source: .restoration)
+        let s2 = makeSnapshot(generation: 2, mode: .essentialOnly, source: .restoration)
         let result = try store.commit(s2)
         if case .committed = result {
             // expected
@@ -178,7 +178,7 @@ struct SnapshotStoreTests {
         let legacyJSON = """
         {
             "effectivePolicy": {
-                "resolvedMode": "fullLockdown",
+                "resolvedMode": "essentialOnly",
                 "isTemporaryUnlock": false,
                 "warnings": [],
                 "policyVersion": 1,
@@ -192,11 +192,11 @@ struct SnapshotStoreTests {
         let decoder = JSONDecoder()
         let snapshot = try decoder.decode(PolicySnapshot.self, from: legacyJSON)
 
-        #expect(snapshot.effectivePolicy.resolvedMode == .fullLockdown)
+        #expect(snapshot.effectivePolicy.resolvedMode == .essentialOnly)
         #expect(snapshot.generation == 1)
         #expect(snapshot.source == .initial)
         #expect(snapshot.writerVersion == 1)
-        #expect(snapshot.policyFingerprint.contains("fullLockdown"))
+        #expect(snapshot.policyFingerprint.contains("essentialOnly"))
     }
 
     // ==========================================================
@@ -211,7 +211,7 @@ struct SnapshotStoreTests {
         let s1 = makeSnapshot(generation: 1, mode: .unlocked, source: .initial)
         _ = try store.commit(s1)
 
-        let s2 = makeSnapshot(generation: 2, mode: .fullLockdown, source: .commandApplied)
+        let s2 = makeSnapshot(generation: 2, mode: .essentialOnly, source: .commandApplied)
         _ = try store.commit(s2)
 
         let s3 = makeSnapshot(generation: 3, mode: .dailyMode, version: 2, source: .syncUpdate)
@@ -221,10 +221,10 @@ struct SnapshotStoreTests {
         #expect(history.count == 2)  // Two transitions (s1→s2, s2→s3)
 
         #expect(history[0].fromMode == .unlocked)
-        #expect(history[0].toMode == .fullLockdown)
+        #expect(history[0].toMode == .essentialOnly)
         #expect(history[0].source == .commandApplied)
 
-        #expect(history[1].fromMode == .fullLockdown)
+        #expect(history[1].fromMode == .essentialOnly)
         #expect(history[1].toMode == .dailyMode)
         #expect(history[1].source == .syncUpdate)
     }
@@ -236,7 +236,7 @@ struct SnapshotStoreTests {
 
         // Create more transitions than max
         for i in 1...Int64(AppConstants.snapshotHistoryMaxEntries + 10) {
-            let mode: LockMode = i % 2 == 0 ? .fullLockdown : .unlocked
+            let mode: LockMode = i % 2 == 0 ? .essentialOnly : .unlocked
             let s = makeSnapshot(generation: i, mode: mode, version: i, source: .commandApplied)
             _ = try store.commit(s)
         }
@@ -255,13 +255,13 @@ struct SnapshotStoreTests {
         let store = PolicySnapshotStore(storage: storage)
 
         // 1. Create initial locked snapshot
-        let s1 = makeSnapshot(generation: 1, mode: .fullLockdown, source: .initial)
+        let s1 = makeSnapshot(generation: 1, mode: .essentialOnly, source: .initial)
         _ = try store.commit(s1)
 
         // 2. Create temp unlock snapshot
         let unlockState = TemporaryUnlockState(
             origin: .remoteCommand,
-            previousMode: .fullLockdown,
+            previousMode: .essentialOnly,
             startedAt: Date().addingTimeInterval(-600),
             expiresAt: Date().addingTimeInterval(-60) // already expired
         )
@@ -283,7 +283,7 @@ struct SnapshotStoreTests {
         let restorationInputs = PolicyPipelineCoordinator.Inputs(
             basePolicy: Policy(
                 targetDeviceID: deviceID,
-                mode: unlockState.previousMode,  // fullLockdown
+                mode: unlockState.previousMode,  // essentialOnly
                 version: 1
             ),
             capabilities: DeviceCapabilities(familyControlsAuthorized: true),
@@ -298,7 +298,7 @@ struct SnapshotStoreTests {
 
         let result = try store.commit(output.snapshot)
         if case .committed(let committed) = result {
-            #expect(committed.effectivePolicy.resolvedMode == .fullLockdown)
+            #expect(committed.effectivePolicy.resolvedMode == .essentialOnly)
             #expect(committed.source == .temporaryUnlockExpired)
             #expect(committed.generation == 3)
         } else {
@@ -337,7 +337,7 @@ struct SnapshotStoreTests {
             generation: 1,
             source: .commandApplied,
             effectivePolicy: EffectivePolicy(
-                resolvedMode: .fullLockdown,
+                resolvedMode: .essentialOnly,
                 policyVersion: 5
             ),
             authorizationHealth: authHealth
@@ -347,7 +347,7 @@ struct SnapshotStoreTests {
 
         let extState = storage.readExtensionSharedState()
         #expect(extState != nil)
-        #expect(extState?.currentMode == .fullLockdown)
+        #expect(extState?.currentMode == .essentialOnly)
         #expect(extState?.policyVersion == 5)
         #expect(extState?.authorizationAvailable == true)
         #expect(extState?.enforcementDegraded == false)
@@ -362,7 +362,7 @@ struct SnapshotStoreTests {
         let snapshot = PolicySnapshot(
             generation: 1,
             source: .authorizationChange,
-            effectivePolicy: EffectivePolicy(resolvedMode: .fullLockdown, policyVersion: 1),
+            effectivePolicy: EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 1),
             authorizationHealth: degradedAuth
         )
 
@@ -382,7 +382,7 @@ struct SnapshotStoreTests {
         let storage = try makeStorage()
         let store = PolicySnapshotStore(storage: storage)
 
-        let snapshot = makeSnapshot(generation: 1, mode: .fullLockdown)
+        let snapshot = makeSnapshot(generation: 1, mode: .essentialOnly)
         _ = try store.commit(snapshot)
 
         // Reconciler should detect mismatch
@@ -435,11 +435,11 @@ struct SnapshotStoreTests {
         let storage = try makeStorage()
         let store = PolicySnapshotStore(storage: storage)
 
-        let s1 = makeSnapshot(generation: 1, mode: .fullLockdown, source: .commandApplied)
+        let s1 = makeSnapshot(generation: 1, mode: .essentialOnly, source: .commandApplied)
         _ = try store.commit(s1)
 
         // Same command result (same mode) — commit detects unchanged
-        let s2 = makeSnapshot(generation: 2, mode: .fullLockdown, source: .commandApplied)
+        let s2 = makeSnapshot(generation: 2, mode: .essentialOnly, source: .commandApplied)
         let result = try store.commit(s2)
         #expect(result == .unchanged)
 
@@ -488,25 +488,25 @@ struct SnapshotStoreTests {
     @Test("SnapshotTransition.between captures mode change")
     func transitionCapturesModeChange() {
         let s1 = makeSnapshot(generation: 1, mode: .unlocked)
-        let s2 = makeSnapshot(generation: 2, mode: .fullLockdown, source: .commandApplied)
+        let s2 = makeSnapshot(generation: 2, mode: .essentialOnly, source: .commandApplied)
 
         let transition = SnapshotTransition.between(from: s1, to: s2)
 
         #expect(transition.fromMode == .unlocked)
-        #expect(transition.toMode == .fullLockdown)
+        #expect(transition.toMode == .essentialOnly)
         #expect(transition.source == .commandApplied)
-        #expect(transition.changes.contains(where: { $0.contains("unlocked") && $0.contains("fullLockdown") }))
+        #expect(transition.changes.contains(where: { $0.contains("unlocked") && $0.contains("essentialOnly") }))
     }
 
     @Test("SnapshotTransition.between notes no change")
     func transitionNotesNoChange() {
-        let s1 = makeSnapshot(generation: 1, mode: .fullLockdown, version: 1)
-        let s2 = makeSnapshot(generation: 2, mode: .fullLockdown, version: 1, source: .restoration)
+        let s1 = makeSnapshot(generation: 1, mode: .essentialOnly, version: 1)
+        let s2 = makeSnapshot(generation: 2, mode: .essentialOnly, version: 1, source: .restoration)
 
         let transition = SnapshotTransition.between(from: s1, to: s2)
 
-        #expect(transition.fromMode == .fullLockdown)
-        #expect(transition.toMode == .fullLockdown)
+        #expect(transition.fromMode == .essentialOnly)
+        #expect(transition.toMode == .essentialOnly)
         #expect(transition.changes.contains(where: { $0.contains("no policy change") }))
     }
 }

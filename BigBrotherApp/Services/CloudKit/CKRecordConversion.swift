@@ -75,6 +75,8 @@ enum CKRecordConversion {
         record[CKFieldName.osVersion] = device.osVersion
         record[CKFieldName.enrolledAt] = device.enrolledAt as NSDate
         record[CKFieldName.familyControlsOK] = (device.familyControlsAuthorized ? 1 : 0) as NSNumber
+        record[CKFieldName.heartbeatProfileID] = device.heartbeatProfileID?.uuidString
+        record[CKFieldName.scheduleProfileID] = device.scheduleProfileID?.uuidString
         return record
     }
 
@@ -91,6 +93,16 @@ enum CKRecordConversion {
 
         let fcOK = (record[CKFieldName.familyControlsOK] as? Int64 ?? 0) != 0
 
+        var hbProfileID: UUID?
+        if let str = record[CKFieldName.heartbeatProfileID] as? String {
+            hbProfileID = UUID(uuidString: str)
+        }
+
+        var schProfileID: UUID?
+        if let str = record[CKFieldName.scheduleProfileID] as? String {
+            schProfileID = UUID(uuidString: str)
+        }
+
         return ChildDevice(
             id: DeviceID(rawValue: deviceID),
             childProfileID: ChildProfileID(rawValue: profileID),
@@ -99,7 +111,9 @@ enum CKRecordConversion {
             modelIdentifier: modelID,
             osVersion: osVer,
             enrolledAt: enrolledAt,
-            familyControlsAuthorized: fcOK
+            familyControlsAuthorized: fcOK,
+            heartbeatProfileID: hbProfileID,
+            scheduleProfileID: schProfileID
         )
     }
 
@@ -264,6 +278,18 @@ enum CKRecordConversion {
         record[CKFieldName.fcAuthorized] = (hb.familyControlsAuthorized ? 1 : 0) as NSNumber
         if let bl = hb.batteryLevel { record[CKFieldName.batteryLevel] = bl as NSNumber }
         if let ic = hb.isCharging { record[CKFieldName.isCharging] = (ic ? 1 : 0) as NSNumber }
+        if let abc = hb.appBlockingConfigured { record[CKFieldName.appBlockingConfigured] = (abc ? 1 : 0) as NSNumber }
+        if let bcc = hb.blockedCategoryCount { record[CKFieldName.blockedCategoryCount] = bcc as NSNumber }
+        if let bac = hb.blockedAppCount { record[CKFieldName.blockedAppCount] = bac as NSNumber }
+        if let names = hb.blockedAppNames, !names.isEmpty { record[CKFieldName.blockedAppNames] = names as NSArray }
+        if let names = hb.blockedCategoryNames, !names.isEmpty { record[CKFieldName.blockedCategoryNames] = names as NSArray }
+        if let iid = hb.installID { record[CKFieldName.installID] = iid.uuidString }
+        if let seq = hb.heartbeatSeq { record[CKFieldName.heartbeatSeq] = seq as NSNumber }
+        if let cks = hb.cloudKitStatus { record[CKFieldName.cloudKitStatus] = cks }
+        if let names = hb.allowedAppNames, !names.isEmpty { record[CKFieldName.allowedAppNames] = names as NSArray }
+        if let names = hb.temporaryAllowedAppNames, !names.isEmpty { record[CKFieldName.temporaryAllowedAppNames] = names as NSArray }
+        if let expiry = hb.temporaryUnlockExpiresAt { record[CKFieldName.temporaryUnlockExpiresAt] = expiry as NSDate }
+        if let isChild = hb.isChildAuthorization { record[CKFieldName.isChildAuthorization] = (isChild ? 1 : 0) as NSNumber }
         return record
     }
 
@@ -278,6 +304,11 @@ enum CKRecordConversion {
               let fc = record[CKFieldName.fcAuthorized] as? Int64
         else { return nil }
 
+        var installID: UUID?
+        if let str = record[CKFieldName.installID] as? String {
+            installID = UUID(uuidString: str)
+        }
+
         return DeviceHeartbeat(
             deviceID: DeviceID(rawValue: deviceID),
             familyID: FamilyID(rawValue: familyID),
@@ -286,7 +317,19 @@ enum CKRecordConversion {
             policyVersion: pv,
             familyControlsAuthorized: fc != 0,
             batteryLevel: record[CKFieldName.batteryLevel] as? Double,
-            isCharging: (record[CKFieldName.isCharging] as? Int64).map { $0 != 0 }
+            isCharging: (record[CKFieldName.isCharging] as? Int64).map { $0 != 0 },
+            appBlockingConfigured: (record[CKFieldName.appBlockingConfigured] as? Int64).map { $0 != 0 },
+            blockedCategoryCount: (record[CKFieldName.blockedCategoryCount] as? Int64).map { Int($0) },
+            blockedAppCount: (record[CKFieldName.blockedAppCount] as? Int64).map { Int($0) },
+            blockedAppNames: record[CKFieldName.blockedAppNames] as? [String],
+            blockedCategoryNames: record[CKFieldName.blockedCategoryNames] as? [String],
+            installID: installID,
+            heartbeatSeq: record[CKFieldName.heartbeatSeq] as? Int64,
+            cloudKitStatus: record[CKFieldName.cloudKitStatus] as? String,
+            allowedAppNames: record[CKFieldName.allowedAppNames] as? [String],
+            temporaryAllowedAppNames: record[CKFieldName.temporaryAllowedAppNames] as? [String],
+            temporaryUnlockExpiresAt: record[CKFieldName.temporaryUnlockExpiresAt] as? Date,
+            isChildAuthorization: (record[CKFieldName.isChildAuthorization] as? Int64).map { $0 != 0 }
         )
     }
 
@@ -428,6 +471,108 @@ enum CKRecordConversion {
             startTime: DayTime(hour: Int(startH), minute: Int(startM)),
             endTime: DayTime(hour: Int(endH), minute: Int(endM)),
             isActive: activeInt != 0,
+            updatedAt: updatedAt
+        )
+    }
+
+    // MARK: - HeartbeatProfile
+
+    static func toCKRecord(_ profile: HeartbeatProfile) -> CKRecord {
+        let id = recordID(profile.id.uuidString, type: CKRecordType.heartbeatProfile)
+        let record = CKRecord(recordType: CKRecordType.heartbeatProfile, recordID: id)
+        record[CKFieldName.familyID] = profile.familyID.rawValue
+        record[CKFieldName.name] = profile.name
+        record[CKFieldName.maxHeartbeatGap] = profile.maxHeartbeatGap as NSNumber
+        record[CKFieldName.isDefault] = (profile.isDefault ? 1 : 0) as NSNumber
+        record[CKFieldName.updatedAt] = profile.updatedAt as NSDate
+
+        if let windowsData = try? JSONEncoder().encode(profile.activeWindows),
+           let windowsStr = String(data: windowsData, encoding: .utf8) {
+            record[CKFieldName.activeWindowsJSON] = windowsStr
+        }
+
+        return record
+    }
+
+    static func heartbeatProfile(from record: CKRecord) -> HeartbeatProfile? {
+        guard record.recordType == CKRecordType.heartbeatProfile,
+              let familyID = record[CKFieldName.familyID] as? String,
+              let name = record[CKFieldName.name] as? String,
+              let maxGap = record[CKFieldName.maxHeartbeatGap] as? Double,
+              let isDefaultInt = record[CKFieldName.isDefault] as? Int64,
+              let updatedAt = record[CKFieldName.updatedAt] as? Date
+        else { return nil }
+
+        // Extract UUID from record name (format: "BBHeartbeatProfile_<uuid>")
+        let recordName = record.recordID.recordName
+        let uuidStr = recordName.replacingOccurrences(of: "\(CKRecordType.heartbeatProfile)_", with: "")
+        guard let profileID = UUID(uuidString: uuidStr) else { return nil }
+
+        var windows: [ActiveWindow] = []
+        if let json = record[CKFieldName.activeWindowsJSON] as? String,
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([ActiveWindow].self, from: data) {
+            windows = decoded
+        }
+
+        return HeartbeatProfile(
+            id: profileID,
+            familyID: FamilyID(rawValue: familyID),
+            name: name,
+            activeWindows: windows,
+            maxHeartbeatGap: maxGap,
+            isDefault: isDefaultInt != 0,
+            updatedAt: updatedAt
+        )
+    }
+
+    // MARK: - ScheduleProfile
+
+    static func toCKRecord(_ profile: ScheduleProfile) -> CKRecord {
+        let id = recordID(profile.id.uuidString, type: CKRecordType.scheduleProfile)
+        let record = CKRecord(recordType: CKRecordType.scheduleProfile, recordID: id)
+        record[CKFieldName.familyID] = profile.familyID.rawValue
+        record[CKFieldName.name] = profile.name
+        record[CKFieldName.lockedMode] = profile.lockedMode.rawValue
+        record[CKFieldName.isDefault] = (profile.isDefault ? 1 : 0) as NSNumber
+        record[CKFieldName.updatedAt] = profile.updatedAt as NSDate
+
+        if let windowsData = try? JSONEncoder().encode(profile.freeWindows),
+           let windowsStr = String(data: windowsData, encoding: .utf8) {
+            record[CKFieldName.freeWindowsJSON] = windowsStr
+        }
+
+        return record
+    }
+
+    static func scheduleProfile(from record: CKRecord) -> ScheduleProfile? {
+        guard record.recordType == CKRecordType.scheduleProfile,
+              let familyID = record[CKFieldName.familyID] as? String,
+              let name = record[CKFieldName.name] as? String,
+              let lockedModeRaw = record[CKFieldName.lockedMode] as? String,
+              let lockedMode = LockMode(rawValue: lockedModeRaw),
+              let isDefaultInt = record[CKFieldName.isDefault] as? Int64,
+              let updatedAt = record[CKFieldName.updatedAt] as? Date
+        else { return nil }
+
+        let recordName = record.recordID.recordName
+        let uuidStr = recordName.replacingOccurrences(of: "\(CKRecordType.scheduleProfile)_", with: "")
+        guard let profileID = UUID(uuidString: uuidStr) else { return nil }
+
+        var windows: [ActiveWindow] = []
+        if let json = record[CKFieldName.freeWindowsJSON] as? String,
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([ActiveWindow].self, from: data) {
+            windows = decoded
+        }
+
+        return ScheduleProfile(
+            id: profileID,
+            familyID: FamilyID(rawValue: familyID),
+            name: name,
+            freeWindows: windows,
+            lockedMode: lockedMode,
+            isDefault: isDefaultInt != 0,
             updatedAt: updatedAt
         )
     }

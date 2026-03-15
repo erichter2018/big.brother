@@ -11,12 +11,11 @@ public final class KeychainManager: KeychainProtocol, @unchecked Sendable {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    /// Initialize with an explicit access group for cross-target sharing.
-    /// Pass `nil` to use the app's default keychain group (works without entitlement provisioning).
+    /// Initialize with the shared keychain access group by default.
     ///
-    /// On device with Keychain Sharing entitlement, the system resolves the full access group
-    /// (TeamID prefix + group name) from the entitlements file automatically.
-    /// Passing the raw group name without TeamID prefix will fail with errSecMissingEntitlement.
+    /// By passing `nil` as the default, iOS automatically uses the first keychain access
+    /// group defined in the target's .entitlements file (which resolves the Team ID dynamically).
+    /// This prevents errSecMissingEntitlement (-34018) across different developer accounts.
     public init(accessGroup: String? = nil) {
         self.accessGroup = accessGroup
     }

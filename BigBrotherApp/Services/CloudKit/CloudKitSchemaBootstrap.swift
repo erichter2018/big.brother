@@ -68,6 +68,8 @@ enum CloudKitSchemaBootstrap {
             buildEventLog(),
             buildEnrollmentInvite(),
             buildSchedule(),
+            buildHeartbeatProfile(),
+            buildScheduleProfile(),
         ]
     }
 
@@ -148,6 +150,9 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.fcAuthorized] = 0 as NSNumber
         r[CKFieldName.batteryLevel] = 0.0 as NSNumber
         r[CKFieldName.isCharging] = 0 as NSNumber
+        r[CKFieldName.installID] = UUID().uuidString
+        r[CKFieldName.heartbeatSeq] = 0 as NSNumber
+        r[CKFieldName.cloudKitStatus] = "available"
         return r
     }
 
@@ -185,6 +190,28 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.endHour] = 0 as NSNumber
         r[CKFieldName.endMinute] = 0 as NSNumber
         r[CKFieldName.isActive] = 0 as NSNumber
+        return r
+    }
+
+    private static func buildHeartbeatProfile() -> CKRecord {
+        let r = seed(CKRecordType.heartbeatProfile)
+        r[CKFieldName.familyID] = seedFamilyID
+        r[CKFieldName.name] = "_seed_"
+        r[CKFieldName.activeWindowsJSON] = "[]"
+        r[CKFieldName.maxHeartbeatGap] = 7200.0 as NSNumber
+        r[CKFieldName.isDefault] = 0 as NSNumber
+        r[CKFieldName.updatedAt] = Date() as NSDate
+        return r
+    }
+
+    private static func buildScheduleProfile() -> CKRecord {
+        let r = seed(CKRecordType.scheduleProfile)
+        r[CKFieldName.familyID] = seedFamilyID
+        r[CKFieldName.name] = "_seed_"
+        r[CKFieldName.freeWindowsJSON] = "[]"
+        r[CKFieldName.lockedMode] = "dailyMode"
+        r[CKFieldName.isDefault] = 0 as NSNumber
+        r[CKFieldName.updatedAt] = Date() as NSDate
         return r
     }
 }

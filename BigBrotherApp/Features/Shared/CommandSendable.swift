@@ -20,7 +20,7 @@ extension CommandSendable {
 
         do {
             try await appState.sendCommand(target: target, action: action)
-            commandFeedback = "Command sent."
+            commandFeedback = "\(action.displayDescription) sent."
         } catch {
             commandFeedback = "Failed: \(error.localizedDescription)"
             isCommandError = true

@@ -20,6 +20,11 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol {
     private let enforcement: (any EnforcementServiceProtocol)?
     private let snapshotStore: PolicySnapshotStore
 
+    /// Called when the device record is no longer found in CloudKit,
+    /// indicating the parent has deleted this device. The app should
+    /// clear enrollment and reset to unconfigured.
+    var onUnenroll: (() -> Void)?
+
     init(
         cloudKit: any CloudKitServiceProtocol,
         commandProcessor: any CommandProcessorProtocol,
@@ -64,17 +69,52 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol {
             // Event sync failure is non-fatal.
         }
 
-        // 4. Fetch latest policy from CloudKit (for child devices).
+        // 4. Check if this device still exists in CloudKit.
+        //    If the parent deleted the device record, self-unenroll.
+        await checkDeviceExistence()
+
+        // 5. Fetch latest policy from CloudKit (for child devices).
         await syncPolicyFromCloud()
     }
 
     func performQuickSync() async throws {
-        // Lightweight: just commands and heartbeat.
+        // Lightweight: commands, heartbeat, and event sync.
         try? await commandProcessor.processIncomingCommands()
         try? await heartbeat.sendNow(force: false)
+        // Sync pending events so unlock requests reach CloudKit promptly.
+        try? await eventLogger.syncPendingEvents()
     }
 
     // MARK: - Private
+
+    /// Verify this device's record still exists in CloudKit.
+    /// If the parent deleted the device, clear local enrollment and restrictions.
+    private func checkDeviceExistence() async {
+        guard let enrollment = try? keychain.get(
+            ChildEnrollmentState.self,
+            forKey: StorageKeys.enrollmentState
+        ) else { return }
+
+        do {
+            let devices = try await cloudKit.fetchDevices(familyID: enrollment.familyID)
+            let stillExists = devices.contains { $0.id == enrollment.deviceID }
+            if !stillExists {
+                #if DEBUG
+                print("[BigBrother] Device record not found in CloudKit — self-unenrolling")
+                #endif
+                eventLogger.log(.enrollmentRevoked, details: "Device record deleted by parent — auto-unenrolling")
+                try? enforcement?.clearAllRestrictions()
+                DispatchQueue.main.async { [weak self] in
+                    self?.onUnenroll?()
+                }
+            }
+        } catch {
+            // Network error — don't unenroll on transient failures.
+            #if DEBUG
+            print("[BigBrother] Device existence check failed (non-fatal): \(error.localizedDescription)")
+            #endif
+        }
+    }
 
     private func syncPolicyFromCloud() async {
         guard let enrollment = try? keychain.get(

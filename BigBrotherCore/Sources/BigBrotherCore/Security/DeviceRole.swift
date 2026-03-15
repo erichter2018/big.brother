@@ -24,16 +24,37 @@ public struct ChildEnrollmentState: Codable, Sendable, Equatable {
     public let familyID: FamilyID
     public let enrolledAt: Date
 
+    /// Unique identifier for this specific app installation.
+    /// Survives app launches but NOT reinstalls.
+    /// Used to distinguish "same instance resumed" from "reinstalled."
+    public let installID: UUID
+
     public init(
         deviceID: DeviceID,
         childProfileID: ChildProfileID,
         familyID: FamilyID,
-        enrolledAt: Date = Date()
+        enrolledAt: Date = Date(),
+        installID: UUID = UUID()
     ) {
         self.deviceID = deviceID
         self.childProfileID = childProfileID
         self.familyID = familyID
         self.enrolledAt = enrolledAt
+        self.installID = installID
+    }
+
+    // Backward-compatible decoding: generate installID if missing.
+    private enum CodingKeys: String, CodingKey {
+        case deviceID, childProfileID, familyID, enrolledAt, installID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        deviceID = try container.decode(DeviceID.self, forKey: .deviceID)
+        childProfileID = try container.decode(ChildProfileID.self, forKey: .childProfileID)
+        familyID = try container.decode(FamilyID.self, forKey: .familyID)
+        enrolledAt = try container.decode(Date.self, forKey: .enrolledAt)
+        installID = try container.decodeIfPresent(UUID.self, forKey: .installID) ?? UUID()
     }
 }
 

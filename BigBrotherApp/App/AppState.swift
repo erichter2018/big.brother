@@ -1,4 +1,5 @@
 import Foundation
+import CloudKit
 import Observation
 import BigBrotherCore
 
@@ -35,6 +36,17 @@ final class AppState {
     /// Latest heartbeats for all devices (parent mode).
     var latestHeartbeats: [DeviceHeartbeat] = []
 
+    /// Heartbeat monitoring profiles (parent mode).
+    var heartbeatProfiles: [HeartbeatProfile] = []
+
+    /// Schedule profiles (parent mode).
+    var scheduleProfiles: [ScheduleProfile] = []
+
+    /// Apps permanently approved by parent, per device (parent mode).
+    var approvedApps: [ApprovedApp] = [] {
+        didSet { persistApprovedApps() }
+    }
+
     /// Current effective policy (child mode — from local snapshot).
     var currentEffectivePolicy: EffectivePolicy?
 
@@ -47,6 +59,17 @@ final class AppState {
     /// CloudKit account status message (nil when available).
     var cloudKitStatusMessage: String?
 
+    /// Set to true when a requestAppConfiguration command is received,
+    /// triggering the FamilyActivityPicker sheet on the child device.
+    var showAppConfigurationRequest: Bool = false
+
+    /// Set to true when a requestAlwaysAllowedSetup command is received,
+    /// triggering the always-allowed apps picker on the child device.
+    var showAlwaysAllowedSetup: Bool = false
+
+    /// Set by notification tap to deep-link into a specific child's detail view.
+    var pendingChildNavigation: ChildProfileID?
+
     // MARK: - Services
 
     private(set) var cloudKit: (any CloudKitServiceProtocol)?
@@ -57,6 +80,15 @@ final class AppState {
     private(set) var heartbeatService: (any HeartbeatServiceProtocol)?
     private(set) var eventLogger: (any EventLoggerProtocol)?
     private(set) var syncCoordinator: (any SyncCoordinatorProtocol)?
+
+    /// Monitors child device heartbeats and sends local notifications (parent mode only).
+    internal var deviceMonitor: DeviceMonitor?
+
+    /// Periodic timer that checks for new unlock requests (parent mode only).
+    private var unlockRequestPollTimer: Timer?
+
+    /// Last extension diagnostic timestamp printed to the debug console.
+    private var lastPrintedExtensionDiagnosticAt: Date?
 
     /// The authoritative store for policy snapshots.
     private(set) var snapshotStore: PolicySnapshotStore?
@@ -74,28 +106,140 @@ final class AppState {
     ) {
         self.keychain = keychain
         self.storage = storage
+        storage.ensureSharedFilesExist()
         loadRole()
+        loadApprovedApps()
     }
 
     /// Read role and enrollment state from Keychain.
+    ///
+    /// If the role is `.child` but enrollment state is missing (e.g. after
+    /// app reinstall where Keychain migrated or access group changed),
+    /// reset to `.unconfigured` so the user sees the onboarding flow.
     private func loadRole() {
-        deviceRole = (try? keychain.get(DeviceRole.self, forKey: StorageKeys.deviceRole))
+        let storedRole = (try? keychain.get(DeviceRole.self, forKey: StorageKeys.deviceRole))
             ?? .unconfigured
 
-        switch deviceRole {
+        switch storedRole {
         case .child:
-            enrollmentState = try? keychain.get(
+            let enrollment = try? keychain.get(
                 ChildEnrollmentState.self,
                 forKey: StorageKeys.enrollmentState
             )
+            if let enrollment {
+                deviceRole = .child
+                enrollmentState = enrollment
+                // Ensure enrollment IDs are cached in App Group for extensions.
+                let cached = CachedEnrollmentIDs(deviceID: enrollment.deviceID, familyID: enrollment.familyID)
+                if let data = try? JSONEncoder().encode(cached) {
+                    try? storage.writeRawData(data, forKey: StorageKeys.cachedEnrollmentIDs)
+                }
+            } else {
+                // Stale role without enrollment — reset to onboarding.
+                #if DEBUG
+                print("[BigBrother] Child role found but no enrollment state — resetting to unconfigured")
+                #endif
+                try? keychain.delete(forKey: StorageKeys.deviceRole)
+                deviceRole = .unconfigured
+            }
         case .parent:
-            parentState = try? keychain.get(
+            let parent = try? keychain.get(
                 ParentState.self,
                 forKey: StorageKeys.parentState
             )
+            if let parent {
+                deviceRole = .parent
+                parentState = parent
+            } else {
+                #if DEBUG
+                print("[BigBrother] Parent role found but no parent state — resetting to unconfigured")
+                #endif
+                try? keychain.delete(forKey: StorageKeys.deviceRole)
+                deviceRole = .unconfigured
+            }
         case .unconfigured:
-            break
+            deviceRole = .unconfigured
         }
+    }
+
+    // MARK: - Approved Apps Persistence
+
+    private static let approvedAppsKey = "fr.bigbrother.approvedApps"
+
+    private func loadApprovedApps() {
+        guard let data = UserDefaults.standard.data(forKey: Self.approvedAppsKey) else { return }
+        approvedApps = (try? JSONDecoder().decode([ApprovedApp].self, from: data)) ?? []
+    }
+
+    private func persistApprovedApps() {
+        guard let data = try? JSONEncoder().encode(approvedApps) else { return }
+        UserDefaults.standard.set(data, forKey: Self.approvedAppsKey)
+    }
+
+    func addApprovedApp(_ app: ApprovedApp) {
+        guard !approvedApps.contains(where: {
+            $0.deviceID == app.deviceID &&
+            Self.normalizeAppName($0.appName) == Self.normalizeAppName(app.appName)
+        }) else { return }
+        approvedApps.append(app)
+    }
+
+    func removeApprovedApp(requestID: UUID) {
+        approvedApps.removeAll { $0.id == requestID }
+    }
+
+    func removeApprovedApp(appName: String, deviceID: DeviceID) {
+        let normalizedName = Self.normalizeAppName(appName)
+        approvedApps.removeAll {
+            $0.deviceID == deviceID &&
+            Self.normalizeAppName($0.appName) == normalizedName
+        }
+    }
+
+    func approvedApps(for deviceID: DeviceID) -> [ApprovedApp] {
+        approvedApps.filter { $0.deviceID == deviceID }
+    }
+
+    private static func normalizeAppName(_ appName: String) -> String {
+        appName
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Update approved app names when heartbeat provides better resolved names.
+    /// Called during dashboard refresh after heartbeats are fetched.
+    func enrichApprovedAppNames(from heartbeats: [DeviceHeartbeat]) {
+        var changed = false
+        for heartbeat in heartbeats {
+            guard let allowedNames = heartbeat.allowedAppNames, !allowedNames.isEmpty else { continue }
+            for i in approvedApps.indices where approvedApps[i].deviceID == heartbeat.deviceID {
+                let currentName = approvedApps[i].appName
+                // Skip if already has a good name.
+                if Self.isPlaceholderAppName(currentName) {
+                    // Try to find a matching name from the heartbeat's allowed list.
+                    // The heartbeat resolves names via DeviceActivityReport — use the first unmatched name
+                    // or any name that's better than the placeholder.
+                    if let betterName = allowedNames.first(where: { !Self.isPlaceholderAppName($0) }) {
+                        approvedApps[i] = ApprovedApp(
+                            id: approvedApps[i].id,
+                            appName: betterName,
+                            deviceID: approvedApps[i].deviceID,
+                            approvedAt: approvedApps[i].approvedAt
+                        )
+                        changed = true
+                    }
+                }
+            }
+        }
+        if changed {
+            persistApprovedApps()
+        }
+    }
+
+    private static func isPlaceholderAppName(_ name: String) -> Bool {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return n.isEmpty || n == "unknown" || n == "an app" || n == "app"
+            || n.hasPrefix("blocked app ") || n.contains("token(")
     }
 
     /// Whether FamilyControls/ManagedSettings are available.
@@ -121,10 +265,12 @@ final class AppState {
         let loggerImpl = EventLoggerImpl(cloudKit: ck, storage: storage, keychain: keychain)
         self.eventLogger = loggerImpl
 
-        // FamilyControls/ManagedSettings crash without Apple-approved entitlement.
-        // Guard their creation so the app remains usable for UI testing and parent setup.
+        // FamilyControls/ManagedSettings are only needed on child devices.
+        // Creating ManagedSettingsStore or accessing AuthorizationCenter on a parent
+        // device (where authorization was never requested) can trigger EXC_BREAKPOINT.
+        // The debugger catches this silently, but standalone launches crash immediately.
         let enforcementImpl: EnforcementServiceImpl?
-        if Self.isFamilyControlsSafe() {
+        if deviceRole == .child && Self.isFamilyControlsSafe() {
             let fcManager = FamilyControlsManagerImpl(storage: storage)
             let impl = EnforcementServiceImpl(storage: storage, fcManager: fcManager)
             self.enforcement = impl
@@ -138,7 +284,11 @@ final class AppState {
         } else {
             enforcementImpl = nil
             #if DEBUG
-            print("[BigBrother] ⚠️ FamilyControls unavailable — enforcement disabled")
+            if deviceRole == .parent {
+                print("[BigBrother] Parent device — FamilyControls enforcement skipped")
+            } else {
+                print("[BigBrother] ⚠️ FamilyControls unavailable — enforcement disabled")
+            }
             #endif
         }
 
@@ -152,6 +302,12 @@ final class AppState {
             eventLogger: loggerImpl,
             snapshotStore: snapStore
         )
+        cmdProcessor.onRequestAppConfiguration = { [weak self] in
+            self?.showAppConfigurationRequest = true
+        }
+        cmdProcessor.onRequestAlwaysAllowedSetup = { [weak self] in
+            self?.showAlwaysAllowedSetup = true
+        }
         self.commandProcessor = cmdProcessor
 
         let hbService = HeartbeatServiceImpl(
@@ -161,6 +317,26 @@ final class AppState {
             enforcement: enforcementImpl
         )
         self.heartbeatService = hbService
+
+        // Wire up heartbeat request: when the parent pings, send a heartbeat immediately.
+        cmdProcessor.onRequestHeartbeat = { [weak hbService] in
+            Task { try? await hbService?.sendNow(force: true) }
+        }
+
+        // Listen for iCloud account changes on child devices.
+        if deviceRole == .child {
+            NotificationCenter.default.addObserver(
+                forName: Notification.Name.CKAccountChanged,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.eventLogger?.log(.familyControlsAuthChanged, details: "iCloud account changed (CKAccountChanged)")
+                #if DEBUG
+                print("[BigBrother] CKAccountChanged notification received")
+                #endif
+            }
+        }
 
         let syncImpl = SyncCoordinatorImpl(
             cloudKit: ck,
@@ -172,7 +348,30 @@ final class AppState {
             enforcement: enforcementImpl,
             snapshotStore: snapStore
         )
+        // Wire unenroll callbacks (command processor + sync coordinator).
+        let unenrollHandler: () -> Void = { [weak self] in
+            self?.performLocalUnenroll()
+        }
+        cmdProcessor.onUnenroll = unenrollHandler
+        syncImpl.onUnenroll = unenrollHandler
+
         self.syncCoordinator = syncImpl
+    }
+
+    /// Clear local enrollment state and reset to unconfigured.
+    /// Called when the parent deletes this device or sends an unenroll command.
+    func performLocalUnenroll() {
+        #if DEBUG
+        print("[BigBrother] Performing local unenroll — clearing enrollment and resetting role")
+        #endif
+        try? keychain.delete(forKey: StorageKeys.enrollmentState)
+        try? keychain.delete(forKey: StorageKeys.deviceRole)
+        try? keychain.delete(forKey: StorageKeys.familyID)
+        // Clear cached enrollment IDs from App Group.
+        try? storage.writeRawData(nil, forKey: StorageKeys.cachedEnrollmentIDs)
+        heartbeatService?.stopHeartbeat()
+        deviceRole = .unconfigured
+        enrollmentState = nil
     }
 
     /// Check if FamilyControls APIs can be used without crashing.
@@ -194,22 +393,68 @@ final class AppState {
     private static func _checkFamilyControlsAccess() -> Bool {
         // If FamilyControls entitlement is missing, accessing AuthorizationCenter.shared
         // triggers EXC_BREAKPOINT. There's no safe way to catch that. Instead, check
-        // the provisioning profile for the entitlement string.
-        guard let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-              let profileData = try? Data(contentsOf: profileURL),
-              let profileString = String(data: profileData, encoding: .ascii) else {
-            // No provisioning profile — likely dev-signed without profile.
-            // Optimistically try if running on device with automatic signing.
+        // multiple sources for the entitlement.
+
+        let entitlementKey = "com.apple.developer.family-controls"
+
+        // Method 1: Check embedded provisioning profile.
+        // The file is binary CMS/PKCS7 data wrapping a plist — String(data:encoding:.ascii)
+        // can return nil if any byte > 127. Search the raw bytes instead.
+        let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
+            ?? URL(fileURLWithPath: Bundle.main.bundlePath + "/embedded.mobileprovision")
+
+        if let profileData = try? Data(contentsOf: profileURL) {
+            let needle = Data(entitlementKey.utf8)
+            let found = profileData.range(of: needle) != nil
             #if DEBUG
-            print("[BigBrother] No embedded.mobileprovision found — trying FamilyControls optimistically")
+            print("[BigBrother] embedded.mobileprovision found (\(profileData.count) bytes), FamilyControls entitlement: \(found)")
+            #endif
+            if found { return true }
+        } else {
+            #if DEBUG
+            print("[BigBrother] embedded.mobileprovision not found in bundle")
+            #endif
+        }
+
+        // Method 2: Check the app's code signing entitlements file.
+        // If the entitlements file declares FamilyControls, the provisioning profile
+        // should include it — the profile check above may have failed due to file format issues.
+        if let entURL = Bundle.main.url(forResource: "BigBrother", withExtension: "entitlements"),
+           let entData = try? Data(contentsOf: entURL),
+           let entString = String(data: entData, encoding: .utf8),
+           entString.contains(entitlementKey) {
+            #if DEBUG
+            print("[BigBrother] FamilyControls entitlement found in bundled .entitlements file")
             #endif
             return true
         }
-        let hasFamilyControls = profileString.contains("com.apple.developer.family-controls")
+
+        // Method 3: Check the built-in entitlements from the code signature.
+        // On iOS, the codesign entitlements are embedded in the binary itself.
+        // Look for the entitlement key in our own Mach-O binary.
+        if let executableURL = Bundle.main.executableURL,
+           let execData = try? Data(contentsOf: executableURL) {
+            let needle = Data(entitlementKey.utf8)
+            let found = execData.range(of: needle) != nil
+            #if DEBUG
+            print("[BigBrother] Executable binary FamilyControls entitlement: \(found)")
+            #endif
+            if found { return true }
+        }
+
+        // Method 4: Environment variable override.
+        if ProcessInfo.processInfo.environment["BIGBROTHER_FORCE_FC"] == "1" {
+            #if DEBUG
+            print("[BigBrother] FamilyControls force-enabled via BIGBROTHER_FORCE_FC")
+            #endif
+            return true
+        }
+
         #if DEBUG
-        print("[BigBrother] FamilyControls entitlement in profile: \(hasFamilyControls)")
+        print("[BigBrother] FamilyControls entitlement not found — enforcement disabled")
+        print("[BigBrother] Try: Delete app → Clean Build Folder (Cmd+Shift+K) → Rebuild")
         #endif
-        return hasFamilyControls
+        return false
     }
 
     /// Perform app launch restoration (child devices only).
@@ -362,11 +607,17 @@ final class AppState {
               let cloudKit else { return }
 
         // Profiles are the critical query — let this one throw.
-        childProfiles = try await cloudKit.fetchChildProfiles(familyID: familyID)
+        let fetchedProfiles = try await cloudKit.fetchChildProfiles(familyID: familyID)
 
-        // Devices and heartbeats are secondary — don't let them block the dashboard.
+        // Fetch all secondary data into locals first to avoid flashing
+        // stale defaults while awaiting subsequent queries.
+        var fetchedDevices: [ChildDevice]?
+        var fetchedHeartbeats: [DeviceHeartbeat]?
+        var fetchedHBProfiles: [HeartbeatProfile]?
+        var fetchedScheduleProfiles: [ScheduleProfile]?
+
         do {
-            childDevices = try await cloudKit.fetchDevices(familyID: familyID)
+            fetchedDevices = try await cloudKit.fetchDevices(familyID: familyID)
         } catch {
             #if DEBUG
             print("[BigBrother] Failed to fetch devices: \(error.localizedDescription)")
@@ -374,20 +625,111 @@ final class AppState {
         }
 
         do {
-            latestHeartbeats = try await cloudKit.fetchLatestHeartbeats(familyID: familyID)
+            fetchedHeartbeats = try await cloudKit.fetchLatestHeartbeats(familyID: familyID)
         } catch {
             #if DEBUG
             print("[BigBrother] Failed to fetch heartbeats: \(error.localizedDescription)")
             #endif
         }
 
-        // Merge heartbeat data into device records.
-        for heartbeat in latestHeartbeats {
-            if let idx = childDevices.firstIndex(where: { $0.id == heartbeat.deviceID }) {
-                childDevices[idx].lastHeartbeat = heartbeat.timestamp
-                childDevices[idx].confirmedMode = heartbeat.currentMode
-                childDevices[idx].confirmedPolicyVersion = heartbeat.policyVersion
-                childDevices[idx].familyControlsAuthorized = heartbeat.familyControlsAuthorized
+        do {
+            fetchedHBProfiles = try await cloudKit.fetchHeartbeatProfiles(familyID: familyID)
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Failed to fetch heartbeat profiles: \(error.localizedDescription)")
+            #endif
+        }
+
+        do {
+            fetchedScheduleProfiles = try await cloudKit.fetchScheduleProfiles(familyID: familyID)
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Failed to fetch schedule profiles: \(error.localizedDescription)")
+            #endif
+        }
+
+        // Merge heartbeat data into device records BEFORE publishing to UI.
+        if var devices = fetchedDevices, let heartbeats = fetchedHeartbeats {
+            for heartbeat in heartbeats {
+                if let idx = devices.firstIndex(where: { $0.id == heartbeat.deviceID }) {
+                    devices[idx].lastHeartbeat = heartbeat.timestamp
+                    devices[idx].confirmedMode = heartbeat.currentMode
+                    devices[idx].confirmedPolicyVersion = heartbeat.policyVersion
+                    devices[idx].familyControlsAuthorized = heartbeat.familyControlsAuthorized
+                }
+            }
+            // Publish merged data in one shot — no intermediate empty state.
+            childDevices = devices
+            latestHeartbeats = heartbeats
+        } else if let devices = fetchedDevices {
+            childDevices = devices
+        } else if let heartbeats = fetchedHeartbeats {
+            latestHeartbeats = heartbeats
+            // Re-merge into existing devices.
+            for heartbeat in heartbeats {
+                if let idx = childDevices.firstIndex(where: { $0.id == heartbeat.deviceID }) {
+                    childDevices[idx].lastHeartbeat = heartbeat.timestamp
+                    childDevices[idx].confirmedMode = heartbeat.currentMode
+                    childDevices[idx].confirmedPolicyVersion = heartbeat.policyVersion
+                    childDevices[idx].familyControlsAuthorized = heartbeat.familyControlsAuthorized
+                }
+            }
+        }
+
+        // Publish remaining data.
+        childProfiles = fetchedProfiles
+        if let hbp = fetchedHBProfiles { heartbeatProfiles = hbp }
+        if let sp = fetchedScheduleProfiles { scheduleProfiles = sp }
+
+        // Enrich approved app names from heartbeat data.
+        enrichApprovedAppNames(from: latestHeartbeats)
+
+        // Check for new unlock requests and post notifications.
+        checkForUnlockRequestNotifications(familyID: familyID)
+    }
+
+    /// Start polling for unlock requests every 10 seconds (parent mode).
+    func startUnlockRequestPolling() {
+        unlockRequestPollTimer?.invalidate()
+        guard let familyID = parentState?.familyID else { return }
+        unlockRequestPollTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            self?.checkForUnlockRequestNotifications(familyID: familyID)
+        }
+        // Also check immediately on start.
+        checkForUnlockRequestNotifications(familyID: familyID)
+        #if DEBUG
+        print("[BigBrother] Unlock request polling started (every 10s)")
+        #endif
+    }
+
+    /// Immediately check for unlock requests (call when app becomes active).
+    func checkForUnlockRequestsNow() {
+        guard let familyID = parentState?.familyID else { return }
+        checkForUnlockRequestNotifications(familyID: familyID)
+    }
+
+    /// Stop polling for unlock requests.
+    func stopUnlockRequestPolling() {
+        unlockRequestPollTimer?.invalidate()
+        unlockRequestPollTimer = nil
+    }
+
+    /// Fetch recent events and post local notifications for new unlock requests.
+    private func checkForUnlockRequestNotifications(familyID: FamilyID) {
+        guard let cloudKit else { return }
+
+        Task {
+            let since = Date().addingTimeInterval(-1800) // last 30 minutes
+            let events = (try? await cloudKit.fetchEventLogs(familyID: familyID, since: since)) ?? []
+
+            for profile in childProfiles {
+                let deviceIDs = Set(childDevices.filter { $0.childProfileID == profile.id }.map(\.id))
+                UnlockRequestNotificationService.checkAndNotify(
+                    events: events,
+                    childDeviceIDs: deviceIDs,
+                    childName: profile.name,
+                    childProfileID: profile.id
+                )
             }
         }
     }
@@ -409,11 +751,15 @@ final class AppState {
     // MARK: - Child Actions
 
     private var commandPollTimer: Timer?
+    private var scheduleSyncTimer: Timer?
+    private var eventSyncTimer: Timer?
 
     /// Start periodic sync for child devices.
     func startChildSync() {
         heartbeatService?.startHeartbeat()
         startCommandPolling()
+        startScheduleSync()
+        startEventSync()
     }
 
     /// Stop periodic sync.
@@ -421,6 +767,10 @@ final class AppState {
         heartbeatService?.stopHeartbeat()
         commandPollTimer?.invalidate()
         commandPollTimer = nil
+        scheduleSyncTimer?.invalidate()
+        scheduleSyncTimer = nil
+        eventSyncTimer?.invalidate()
+        eventSyncTimer = nil
     }
 
     /// Poll for commands every 5 seconds for fast response to parent actions.
@@ -443,6 +793,98 @@ final class AppState {
             try? await commandProcessor?.processIncomingCommands()
             refreshLocalState()
         }
+    }
+
+    /// Sync pending events (e.g. unlock requests from extensions) every 5 seconds.
+    /// Short interval ensures unlock requests reach CloudKit quickly so parents
+    /// get notified promptly.
+    private func startEventSync() {
+        eventSyncTimer?.invalidate()
+        eventSyncTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task {
+                try? await self.eventLogger?.syncPendingEvents()
+                #if DEBUG
+                // Dump only newly appended extension diagnostics so stale entries
+                // do not keep replaying every cycle.
+                let diags = self.storage.readDiagnosticEntries(category: nil)
+                    .filter { $0.category == .shieldAction || $0.category == .shieldConfig || $0.category == .activityReport || $0.category == .eventUpload }
+                    .filter { diag in
+                        guard let lastPrintedAt = self.lastPrintedExtensionDiagnosticAt else {
+                            return true
+                        }
+                        return diag.timestamp > lastPrintedAt
+                    }
+                    .sorted { $0.timestamp < $1.timestamp }
+                for d in diags {
+                    print("[BigBrother] ExtDiag[\(d.category.rawValue)] \(d.message)")
+                    self.lastPrintedExtensionDiagnosticAt = d.timestamp
+                }
+                #endif
+            }
+        }
+        #if DEBUG
+        print("[BigBrother] Event sync started (every 5s)")
+        #endif
+    }
+
+    /// Fetch and register the schedule profile assigned to this child device.
+    /// Called during child sync to keep DeviceActivity schedules current.
+    func syncScheduleProfile() async {
+        guard deviceRole == .child,
+              let enrollment = enrollmentState,
+              let cloudKit else { return }
+
+        do {
+            // Fetch this device's record to get the assigned schedule profile ID.
+            let devices = try await cloudKit.fetchDevices(familyID: enrollment.familyID)
+            guard let myDevice = devices.first(where: { $0.id == enrollment.deviceID }),
+                  let profileID = myDevice.scheduleProfileID else {
+                // No schedule profile assigned — clear any existing registration.
+                if familyControlsAvailable {
+                    ScheduleRegistrar.clearAll(storage: storage)
+                }
+                return
+            }
+
+            // Check if the profile has changed since last registration.
+            let currentProfile = storage.readActiveScheduleProfile()
+            if currentProfile?.id == profileID, currentProfile?.updatedAt == currentProfile?.updatedAt {
+                // Already registered — skip unless profile was updated.
+                // We'll re-register on the off chance the profile was edited.
+            }
+
+            // Fetch the full schedule profile.
+            let profiles = try await cloudKit.fetchScheduleProfiles(familyID: enrollment.familyID)
+            guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
+
+            // Check if we need to re-register (profile changed).
+            if let current = currentProfile, current == profile {
+                return // Already up to date.
+            }
+
+            if familyControlsAvailable {
+                ScheduleRegistrar.register(profile, storage: storage)
+                #if DEBUG
+                print("[BigBrother] Schedule profile registered: \(profile.name) (\(profile.freeWindows.count) windows)")
+                #endif
+            }
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Schedule profile sync failed: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
+    /// Check for schedule profile changes every 60 seconds.
+    private func startScheduleSync() {
+        scheduleSyncTimer?.invalidate()
+        scheduleSyncTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.syncScheduleProfile() }
+        }
+        // Fire immediately on startup.
+        Task { await syncScheduleProfile() }
     }
 
     /// Re-read the current snapshot and update observable state so the UI refreshes.

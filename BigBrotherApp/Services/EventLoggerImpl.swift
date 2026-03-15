@@ -45,8 +45,15 @@ final class EventLoggerImpl: EventLoggerProtocol {
     }
 
     func syncPendingEvents() async throws {
-        let pending = storage.readPendingEventLogs()
-            .filter { $0.uploadState == .pending }
+        let allEvents = storage.readPendingEventLogs()
+        let pending = allEvents.filter { $0.uploadState == .pending }
+
+        #if DEBUG
+        if !allEvents.isEmpty || !pending.isEmpty {
+            let unlockCount = pending.filter { $0.eventType == .unlockRequested }.count
+            print("[BigBrother] Event sync: \(allEvents.count) total, \(pending.count) pending (\(unlockCount) unlock requests)")
+        }
+        #endif
 
         guard !pending.isEmpty else { return }
 
@@ -60,13 +67,41 @@ final class EventLoggerImpl: EventLoggerProtocol {
             // Mark as uploading.
             try? storage.updateEventUploadState(ids: batchIDs, state: .uploading)
 
+            #if DEBUG
+            for event in batch {
+                print("[BigBrother] Event sync: uploading \(event.id) type=\(event.eventType.rawValue) details=\(event.details?.prefix(60) ?? "nil")")
+            }
+            #endif
+
             do {
-                try await cloudKit.syncEventLogs(batch)
-                // Remove uploaded events from the queue.
-                try storage.clearSyncedEventLogs(ids: batchIDs)
+                // Strip TOKEN payloads before uploading — token data is only
+                // needed locally (in PendingUnlockRequest). No need to bloat CloudKit.
+                let sanitizedBatch = batch.map(Self.stripTokenPayload)
+                try await cloudKit.syncEventLogs(sanitizedBatch)
+                #if DEBUG
+                print("[BigBrother] Event sync: SUCCESS — uploaded \(sanitizedBatch.count) events")
+                #endif
+                // Remove uploaded events from the queue — but keep unlockRequested
+                // events because their token data is needed when the parent approves.
+                // They'll be pruned by the cleanup service after 7 days.
+                let clearableIDs = batchIDs.filter { id in
+                    !batch.contains { $0.id == id && $0.eventType == .unlockRequested }
+                }
+                if !clearableIDs.isEmpty {
+                    try storage.clearSyncedEventLogs(ids: Set(clearableIDs))
+                }
+                // Mark unlock requests as uploaded but don't remove them.
+                let unlockIDs = batchIDs.subtracting(clearableIDs)
+                if !unlockIDs.isEmpty {
+                    try? storage.updateEventUploadState(ids: unlockIDs, state: .uploaded)
+                }
             } catch {
-                // Mark as failed so they can be retried later.
-                try? storage.updateEventUploadState(ids: batchIDs, state: .failed)
+                // Mark back as pending so they will be retried on the next sync.
+                try? storage.updateEventUploadState(ids: batchIDs, state: .pending)
+
+                #if DEBUG
+                print("[BigBrother] Event sync FAILED: \(error.localizedDescription)")
+                #endif
 
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .eventUpload,
@@ -82,6 +117,24 @@ final class EventLoggerImpl: EventLoggerProtocol {
     }
 
     // MARK: - Private
+
+    /// Strip TOKEN:base64 payload from event details before CloudKit upload.
+    private static func stripTokenPayload(_ entry: EventLogEntry) -> EventLogEntry {
+        guard let details = entry.details,
+              let tokenRange = details.range(of: "\nTOKEN:") else {
+            return entry
+        }
+        let cleanDetails = String(details[..<tokenRange.lowerBound])
+        return EventLogEntry(
+            id: entry.id,
+            deviceID: entry.deviceID,
+            familyID: entry.familyID,
+            eventType: entry.eventType,
+            details: cleanDetails,
+            timestamp: entry.timestamp,
+            uploadState: entry.uploadState
+        )
+    }
 
     /// Fallback for logging when device is in parent mode or not yet enrolled.
     private func logWithFallbackIDs(eventType: EventType, details: String?) {

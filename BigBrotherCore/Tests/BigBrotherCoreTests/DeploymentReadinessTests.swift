@@ -103,7 +103,7 @@ struct DeploymentReadinessTests {
 
         // Extension shared state
         let extState = ExtensionSharedState(
-            currentMode: .fullLockdown,
+            currentMode: .essentialOnly,
             isTemporaryUnlock: false,
             authorizationAvailable: true,
             enforcementDegraded: false,
@@ -111,7 +111,7 @@ struct DeploymentReadinessTests {
             policyVersion: 1
         )
         try storage.writeExtensionSharedState(extState)
-        #expect(storage.readExtensionSharedState()?.currentMode == .fullLockdown)
+        #expect(storage.readExtensionSharedState()?.currentMode == .essentialOnly)
 
         // Authorization health
         let auth = AuthorizationHealth.unknown.withTransition(to: .authorized)

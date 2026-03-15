@@ -102,14 +102,14 @@
 ## C. Core Flows
 
 ### C1. Send Command: Set Mode
-- [ ] Parent: ChildDetailView → tap "Lockdown" button
+- [ ] Parent: ChildDetailView → tap "Essential" button
 - [ ] "Command sent" feedback appears
 - [ ] BBRemoteCommand record created in CloudKit
 - [ ] Child device receives silent push (may take 5-30 seconds)
 - [ ] Child device processes command
-- [ ] ManagedSettingsStore applies full lockdown
+- [ ] ManagedSettingsStore applies essential only restrictions
 - [ ] BBCommandReceipt created in CloudKit
-- [ ] Child ChildHomeView shows "Full Lockdown" mode
+- [ ] Child ChildHomeView shows "Essential Only" mode
 - [ ] Attempting to open a non-essential app shows shield screen
 
 ### C2. Send Command: Unlock
@@ -162,15 +162,15 @@
 - [ ] Base policy enforcement remains active
 
 ### C9. App Relaunch Restore
-- [ ] Child device: set mode to "Full Lockdown"
+- [ ] Child device: set mode to "Essential Only"
 - [ ] Force-quit the BigBrother app
 - [ ] Relaunch the app
 - [ ] AppLaunchRestorer runs
-- [ ] Enforcement state matches pre-quit mode (Full Lockdown still active)
+- [ ] Enforcement state matches pre-quit mode (Essential Only still active)
 - [ ] Diagnostics: "Launch reconciliation" entry appears
 
 ### C10. Device Reboot Restore
-- [ ] Child device: set mode to "Full Lockdown"
+- [ ] Child device: set mode to "Essential Only"
 - [ ] Reboot the device
 - [ ] ManagedSettingsStore persists across reboot (no app launch needed)
 - [ ] Shielded apps still show shield screen before app launches
@@ -285,7 +285,7 @@
 ### F2. Global Actions
 - [ ] Parent dashboard: tap "Lock All"
 - [ ] All child devices receive command
-- [ ] All devices enter Full Lockdown
+- [ ] All devices enter Locked mode
 - [ ] Parent dashboard: tap "Unlock All"
 - [ ] All devices unlock
 
