@@ -10,13 +10,6 @@ struct ParentDashboardView: View {
             VStack(spacing: 10) {
                 GlobalActionsBar(viewModel: viewModel)
 
-                if let feedback = viewModel.commandFeedback {
-                    CommandFeedbackBanner(
-                        message: feedback,
-                        isError: viewModel.isCommandError
-                    )
-                }
-
                 switch viewModel.loadingState {
                 case .idle, .loading:
                     ProgressView("Loading dashboard...")
@@ -47,6 +40,15 @@ struct ParentDashboardView: View {
                             Task { await viewModel.loadDashboard() }
                         }
                     }
+                }
+
+                if let feedback = viewModel.commandFeedback {
+                    CommandFeedbackBanner(
+                        message: feedback,
+                        isError: viewModel.isCommandError
+                    )
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.5), value: viewModel.commandFeedback)
                 }
             }
             .padding(.horizontal)
@@ -102,9 +104,20 @@ struct ParentDashboardView: View {
                 isSending: viewModel.isSendingCommand,
                 countdown: viewModel.countdownString(for: child),
                 remainingSeconds: viewModel.remainingSeconds(for: child),
-                onLock: { Task { await viewModel.lockChild(child) } },
+                penaltyTimer: viewModel.penaltyTimerString(for: child),
+                isPenaltyRunning: viewModel.penaltyTimer(for: child)?.isActivelyRunning ?? false,
+                selfUnlocksUsed: viewModel.selfUnlocksUsedToday(for: child),
+                selfUnlockBudget: viewModel.selfUnlockBudget(for: child),
+                avatarHexColor: viewModel.penaltyTimer(for: child)?.avatarColor,
+                avatarImageUrl: viewModel.penaltyTimer(for: child)?.avatarUrl,
+                isScheduleActive: viewModel.isScheduleActive(for: child),
+                scheduleLabel: viewModel.scheduleLabel(for: child),
+                onLock: { duration in Task { await viewModel.lockChild(child, duration: duration) } },
                 onUnlock: { seconds in Task { await viewModel.unlockChild(child, seconds: seconds) } },
-                onEssential: { Task { await viewModel.essentialChild(child) } }
+                onUnlockWithTimer: viewModel.appState.timerService != nil
+                    ? { seconds in Task { await viewModel.unlockChildWithTimer(child, seconds: seconds) } }
+                    : nil,
+                onSchedule: { Task { await viewModel.scheduleChild(child) } }
             )
         }
         .buttonStyle(.plain)

@@ -36,6 +36,20 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
     /// The schedule profile assigned to this device, if any.
     public var scheduleProfileID: UUID?
 
+    /// Penalty timer seconds (from AllowanceTracker, relayed by parent).
+    public var penaltySeconds: Int?
+
+    /// When the penalty timer expires (nil = not running).
+    public var penaltyTimerEndTime: Date?
+
+    /// Daily self-unlock budget (nil or 0 = disabled).
+    public var selfUnlocksPerDay: Int?
+
+    /// The version (updatedAt) of the schedule profile that was explicitly assigned.
+    /// Child only re-registers if this matches the fetched profile's updatedAt,
+    /// preventing auto-update when a parent edits a template without re-assigning.
+    public var scheduleProfileVersion: Date?
+
     /// Heuristic: device is considered online if heartbeat is within 10 minutes.
     public var isOnline: Bool {
         guard let hb = lastHeartbeat else { return false }
@@ -55,7 +69,11 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         confirmedPolicyVersion: Int64? = nil,
         familyControlsAuthorized: Bool = false,
         heartbeatProfileID: UUID? = nil,
-        scheduleProfileID: UUID? = nil
+        scheduleProfileID: UUID? = nil,
+        penaltySeconds: Int? = nil,
+        penaltyTimerEndTime: Date? = nil,
+        selfUnlocksPerDay: Int? = nil,
+        scheduleProfileVersion: Date? = nil
     ) {
         self.id = id
         self.childProfileID = childProfileID
@@ -70,6 +88,10 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         self.familyControlsAuthorized = familyControlsAuthorized
         self.heartbeatProfileID = heartbeatProfileID
         self.scheduleProfileID = scheduleProfileID
+        self.penaltySeconds = penaltySeconds
+        self.penaltyTimerEndTime = penaltyTimerEndTime
+        self.selfUnlocksPerDay = selfUnlocksPerDay
+        self.scheduleProfileVersion = scheduleProfileVersion
     }
 
     // MARK: - Backward-compatible Codable
@@ -79,6 +101,8 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         case osVersion, enrolledAt, lastHeartbeat, confirmedMode
         case confirmedPolicyVersion, familyControlsAuthorized
         case heartbeatProfileID, scheduleProfileID
+        case penaltySeconds, penaltyTimerEndTime
+        case selfUnlocksPerDay, scheduleProfileVersion
     }
 
     public init(from decoder: Decoder) throws {
@@ -96,5 +120,9 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         familyControlsAuthorized = try container.decode(Bool.self, forKey: .familyControlsAuthorized)
         heartbeatProfileID = try container.decodeIfPresent(UUID.self, forKey: .heartbeatProfileID)
         scheduleProfileID = try container.decodeIfPresent(UUID.self, forKey: .scheduleProfileID)
+        penaltySeconds = try container.decodeIfPresent(Int.self, forKey: .penaltySeconds)
+        penaltyTimerEndTime = try container.decodeIfPresent(Date.self, forKey: .penaltyTimerEndTime)
+        selfUnlocksPerDay = try container.decodeIfPresent(Int.self, forKey: .selfUnlocksPerDay)
+        scheduleProfileVersion = try container.decodeIfPresent(Date.self, forKey: .scheduleProfileVersion)
     }
 }

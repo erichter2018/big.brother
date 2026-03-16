@@ -14,6 +14,7 @@ struct ChildDetailView: View {
                 ModeActionButtons(
                     onSetMode: { mode in Task { await viewModel.setMode(mode) } },
                     onTemporaryUnlock: { seconds in Task { await viewModel.temporaryUnlock(seconds: seconds) } },
+                    onLockWithDuration: { duration in Task { await viewModel.lockWithDuration(duration) } },
                     disabled: viewModel.isSendingCommand,
                     remainingSeconds: viewModel.remainingUnlockSeconds
                 )
@@ -31,10 +32,11 @@ struct ChildDetailView: View {
                     approvedAppsSection
                 }
 
-                // Device Restrictions (only enforceable with .child auth)
-                if viewModel.hasChildAuthorization {
-                    restrictionsSection
-                }
+                // Self-Unlock Budget
+                selfUnlockBudgetSection
+
+                // Device Restrictions (works with both .individual and .child auth — confirmed on device)
+                restrictionsSection
 
                 // Feedback
                 if let feedback = viewModel.commandFeedback {
@@ -42,11 +44,25 @@ struct ChildDetailView: View {
                         message: feedback,
                         isError: viewModel.isCommandError
                     )
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.5), value: viewModel.commandFeedback)
                 }
             }
             .padding()
         }
         .navigationTitle(viewModel.child.name)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                NavigationLink {
+                    EnrollmentCodeView(
+                        appState: viewModel.appState,
+                        childProfile: viewModel.child
+                    )
+                } label: {
+                    Image(systemName: "plus.circle")
+                }
+            }
+        }
         .alert("Revoke All Allowed Apps", isPresented: $showRevokeAllConfirmation) {
             Button("Revoke All", role: .destructive) {
                 Task { await viewModel.revokeAllApps() }
@@ -121,6 +137,15 @@ struct ChildDetailView: View {
                                         }
                                         .foregroundStyle(battery < 0.2 ? .red : .secondary)
                                     }
+                                    if let disk = hb?.availableDiskSpace {
+                                        HStack(spacing: 2) {
+                                            Image(systemName: "internaldrive")
+                                                .font(.caption2)
+                                            Text(Self.formatDisk(available: disk, total: hb?.totalDiskSpace))
+                                                .font(.caption2)
+                                        }
+                                        .foregroundStyle(disk < 1_000_000_000 ? .red : .secondary)
+                                    }
                                 }
                             }
                             Spacer()
@@ -191,6 +216,45 @@ struct ChildDetailView: View {
                 .background(Color.orange.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
+        }
+    }
+
+    @ViewBuilder
+    private var selfUnlockBudgetSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Self Unlocks", systemImage: "lock.open.rotation")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+
+            HStack {
+                Text("Daily budget")
+                    .font(.caption)
+                Spacer()
+                Stepper(
+                    "\(viewModel.selfUnlockBudget)",
+                    value: Binding(
+                        get: { viewModel.selfUnlockBudget },
+                        set: { viewModel.selfUnlockBudget = $0 }
+                    ),
+                    in: 0...10,
+                    step: 1
+                )
+                .font(.caption)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            if let used = viewModel.selfUnlocksUsedToday, viewModel.selfUnlockBudget > 0 {
+                Text("Used today: \(used) of \(viewModel.selfUnlockBudget)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Each self-unlock gives 15 minutes. Resets at midnight.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -295,5 +359,17 @@ struct ChildDetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
+    }
+
+    // MARK: - Helpers
+
+    private static func formatDisk(available: Int64, total: Int64?) -> String {
+        let gb = Double(available) / 1_000_000_000
+        let sizeStr = gb >= 10 ? String(format: "%.0f GB", gb) : String(format: "%.1f GB", gb)
+        if let total, total > 0 {
+            let pct = Int(Double(available) / Double(total) * 100)
+            return "\(sizeStr) (\(pct)%)"
+        }
+        return sizeStr
     }
 }

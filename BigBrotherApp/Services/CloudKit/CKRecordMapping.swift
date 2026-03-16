@@ -83,6 +83,8 @@ enum CKFieldName {
     static let temporaryAllowedAppNames = "temporaryAllowedAppNames"
     static let temporaryUnlockExpiresAt = "tempUnlockExpiresAt"
     static let isChildAuthorization = "isChildAuth"
+    static let availableDiskSpace = "availableDiskSpace"
+    static let totalDiskSpace = "totalDiskSpace"
 
     // BBEventLog
     static let eventID = "eventID"
@@ -115,4 +117,11 @@ enum CKFieldName {
     // BBChildDevice (profile links)
     static let heartbeatProfileID = "heartbeatProfileID"
     static let scheduleProfileID = "scheduleProfileID"
+    static let penaltySeconds = "penaltySeconds"
+    static let penaltyTimerEndTime = "penaltyTimerEndTime"
+    static let selfUnlocksPerDay = "selfUnlocksPerDay"
+    static let scheduleProfileVersion = "scheduleProfileVersion"
+
+    // BBHeartbeat (self-unlock reporting)
+    static let selfUnlocksUsedToday = "selfUnlocksUsedToday"
 }

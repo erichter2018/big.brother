@@ -4,9 +4,11 @@ import BigBrotherCore
 /// Reusable row of mode-change buttons used in child detail and device detail.
 ///
 /// Unlock is a Menu: tap = 24h, long-press shows 1h / 1.5h / 2h / 24h / delayed.
+/// Lock is a Menu: tap = until midnight, long-press shows duration options.
 struct ModeActionButtons: View {
     let onSetMode: (LockMode) -> Void
     let onTemporaryUnlock: (Int) -> Void  // duration in seconds
+    var onLockWithDuration: ((LockDuration) -> Void)? = nil
     var disabled: Bool = false
     var remainingSeconds: Int? = nil
 
@@ -50,7 +52,45 @@ struct ModeActionButtons: View {
                 onTemporaryUnlock(15 * 60)
             }
 
-            modeButton("Lock", icon: "lock.fill", color: .blue, mode: .dailyMode)
+            // Lock: tap = until midnight, long-press = duration menu
+            if let onLockWithDuration {
+                Menu {
+                    Button { onLockWithDuration(.returnToSchedule) } label: {
+                        Label("Return to Schedule", systemImage: "calendar.badge.clock")
+                    }
+                    Divider()
+                    Button { onLockWithDuration(.untilMidnight) } label: {
+                        Label("Until Midnight", systemImage: "moon.fill")
+                    }
+                    Button { onLockWithDuration(.indefinite) } label: {
+                        Label("Indefinite", systemImage: "lock.fill")
+                    }
+                    Divider()
+                    Button { onLockWithDuration(.hours(1)) } label: {
+                        Label("1 hour", systemImage: "clock")
+                    }
+                    Button { onLockWithDuration(.hours(2)) } label: {
+                        Label("2 hours", systemImage: "clock")
+                    }
+                    Button { onLockWithDuration(.hours(4)) } label: {
+                        Label("4 hours", systemImage: "clock")
+                    }
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: "lock.fill").font(.subheadline)
+                        Text("Lock").font(.caption2).fontWeight(.medium)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.blue.opacity(0.12))
+                    .foregroundStyle(.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                } primaryAction: {
+                    onLockWithDuration(.untilMidnight)
+                }
+            } else {
+                modeButton("Lock", icon: "lock.fill", color: .blue, mode: .dailyMode)
+            }
             modeButton("Essential", icon: "shield", color: .purple, mode: .essentialOnly)
         }
         .disabled(disabled)

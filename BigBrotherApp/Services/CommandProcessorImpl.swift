@@ -1,5 +1,6 @@
 import Foundation
 import ManagedSettings
+import DeviceActivity
 import BigBrotherCore
 
 /// Serializes access to a boolean flag for async contexts.
@@ -284,6 +285,29 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                 }
                 eventLogger.log(.commandApplied, details: "Always-allowed setup requested by parent")
                 return .applied
+
+            case .timedUnlock(let totalSeconds, let penaltySeconds):
+                try applyTimedUnlock(
+                    totalSeconds: totalSeconds,
+                    penaltySeconds: penaltySeconds,
+                    issuedAt: command.issuedAt,
+                    enrollment: enrollment,
+                    commandID: command.id
+                )
+                return .applied
+
+            case .returnToSchedule:
+                try applyReturnToSchedule(enrollment: enrollment, commandID: command.id)
+                eventLogger.log(.commandApplied, details: "Returned to schedule-driven mode")
+                return .applied
+
+            case .lockUntil(let date):
+                try applyLockUntil(date: date, enrollment: enrollment, commandID: command.id)
+                let formatter = DateFormatter()
+                formatter.dateFormat = "h:mm a"
+                eventLogger.log(.commandApplied, details: "Locked until \(formatter.string(from: date))")
+                ModeChangeNotifier.notify(newMode: .dailyMode)
+                return .applied
             }
 
         } catch {
@@ -308,8 +332,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             isOnline: true
         )
 
-        // Clear any active temporary unlock on explicit mode change.
+        // Clear any active temporary/timed unlock on explicit mode change.
         try? storage.clearTemporaryUnlockState()
+        try? storage.clearTimedUnlockInfo()
+        cancelNonScheduleActivities()
 
         let inputs = PolicyPipelineCoordinator.Inputs(
             basePolicy: policy,
@@ -338,6 +364,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
     }
 
     /// Apply a temporary unlock through the canonical snapshot pipeline.
+    ///
+    /// Also registers a DeviceActivitySchedule that fires at `expiresAt` so the
+    /// monitor extension re-locks the device even if the main app is terminated.
     private func applyTemporaryUnlock(
         durationSeconds: Int,
         enrollment: ChildEnrollmentState,
@@ -347,7 +376,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
         let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .essentialOnly
 
-        let expiresAt = Date().addingTimeInterval(Double(durationSeconds))
+        let now = Date()
+        let expiresAt = now.addingTimeInterval(Double(durationSeconds))
 
         // Create durable temp unlock state.
         let unlockState = TemporaryUnlockState(
@@ -389,11 +419,244 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         if case .committed(let snapshot) = result {
             try enforcement?.apply(snapshot.effectivePolicy)
             try snapshotStore.markApplied()
+
+            // Register a DeviceActivitySchedule so the monitor extension re-locks
+            // when the unlock expires — works even if the main app is terminated.
+            registerTempUnlockExpirySchedule(commandID: commandID, start: now, end: expiresAt)
+
             let hours = durationSeconds / 3600
             let mins = (durationSeconds % 3600) / 60
             let durationStr = hours > 0 ? (mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h") : "\(mins)m"
             eventLogger.log(.temporaryUnlockStarted, details: "Unlocked for \(durationStr)")
         }
+    }
+
+    /// Register a one-shot DeviceActivitySchedule that fires `intervalDidEnd`
+    /// at the temporary unlock expiry time. The monitor extension handles re-lock.
+    private func registerTempUnlockExpirySchedule(commandID: UUID, start: Date, end: Date) {
+        let cal = Calendar.current
+        let startComps = cal.dateComponents([.hour, .minute, .second], from: start)
+        let endComps = cal.dateComponents([.hour, .minute, .second], from: end)
+
+        let activityName = DeviceActivityName(rawValue: "bigbrother.tempunlock.\(commandID.uuidString)")
+        let schedule = DeviceActivitySchedule(
+            intervalStart: startComps,
+            intervalEnd: endComps,
+            repeats: false
+        )
+
+        let center = DeviceActivityCenter()
+        try? center.startMonitoring(activityName, during: schedule)
+
+        #if DEBUG
+        print("[BigBrother] Registered temp unlock expiry schedule: \(activityName.rawValue), ends at \(end)")
+        #endif
+    }
+
+    // MARK: - Self Unlock (child-initiated)
+
+    /// Apply a self-unlock (child-initiated, 15 minutes).
+    /// Uses the same temporary unlock infrastructure as remote commands.
+    func applySelfUnlock(durationSeconds: Int) throws {
+        guard let enrollment = try? keychain.get(
+            ChildEnrollmentState.self,
+            forKey: StorageKeys.enrollmentState
+        ) else { return }
+
+        let currentSnapshot = snapshotStore.loadCurrentSnapshot()
+        let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
+        let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .dailyMode
+
+        // Don't self-unlock if already unlocked.
+        guard currentMode != .unlocked else { return }
+
+        let now = Date()
+        let expiresAt = now.addingTimeInterval(Double(durationSeconds))
+        let unlockID = UUID()
+
+        let unlockState = TemporaryUnlockState(
+            unlockID: unlockID,
+            origin: .selfUnlock,
+            previousMode: currentMode,
+            startedAt: now,
+            expiresAt: expiresAt,
+            commandID: nil
+        )
+        try storage.writeTemporaryUnlockState(unlockState)
+
+        let policy = Policy(
+            targetDeviceID: enrollment.deviceID,
+            mode: currentMode,
+            temporaryUnlockUntil: expiresAt,
+            version: currentVersion + 1
+        )
+
+        let capabilities = DeviceCapabilities(
+            familyControlsAuthorized: enforcement?.authorizationStatus == .authorized,
+            isOnline: true
+        )
+
+        let inputs = PolicyPipelineCoordinator.Inputs(
+            basePolicy: policy,
+            capabilities: capabilities,
+            temporaryUnlockState: unlockState,
+            authorizationHealth: storage.readAuthorizationHealth(),
+            deviceID: enrollment.deviceID,
+            source: .temporaryUnlockStarted,
+            trigger: "selfUnlock(\(durationSeconds)s)"
+        )
+
+        let output = PolicyPipelineCoordinator.generateSnapshot(
+            from: inputs,
+            previousSnapshot: currentSnapshot
+        )
+
+        let result = try snapshotStore.commit(output.snapshot)
+        if case .committed(let snapshot) = result {
+            try enforcement?.apply(snapshot.effectivePolicy)
+            try snapshotStore.markApplied()
+            registerTempUnlockExpirySchedule(commandID: unlockID, start: now, end: expiresAt)
+            eventLogger.log(.temporaryUnlockStarted, details: "Self-unlock for \(durationSeconds / 60)m")
+        }
+    }
+
+    // MARK: - Timed Unlock (Penalty Offset)
+
+    private func applyTimedUnlock(
+        totalSeconds: Int,
+        penaltySeconds: Int,
+        issuedAt: Date,
+        enrollment: ChildEnrollmentState,
+        commandID: UUID
+    ) throws {
+        // Account for delivery delay.
+        let elapsed = Int(Date().timeIntervalSince(issuedAt))
+        let adjustedPenalty = max(0, penaltySeconds - elapsed)
+        let adjustedTotal = max(0, totalSeconds - elapsed)
+
+        guard adjustedTotal > 0 else {
+            eventLogger.log(.commandApplied, details: "Timed unlock expired before delivery (elapsed \(elapsed)s)")
+            return
+        }
+
+        if adjustedPenalty <= 0 {
+            // Penalty already served — immediate unlock for remaining time.
+            let unlockDuration = adjustedTotal
+            try applyTemporaryUnlock(
+                durationSeconds: unlockDuration,
+                enrollment: enrollment,
+                commandID: commandID
+            )
+            eventLogger.log(.commandApplied, details: "Timed unlock: no penalty remaining, unlocked for \(unlockDuration / 60)m")
+            ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: unlockDuration)
+        } else {
+            // Register a DeviceActivitySchedule: locked now, unlock after penalty, lock after total.
+            let now = Date()
+            let unlockAt = now.addingTimeInterval(Double(adjustedPenalty))
+            let lockAt = now.addingTimeInterval(Double(adjustedTotal))
+            let cal = Calendar.current
+
+            let startComps = cal.dateComponents([.hour, .minute, .second], from: unlockAt)
+            let endComps = cal.dateComponents([.hour, .minute, .second], from: lockAt)
+
+            let activityName = DeviceActivityName(rawValue: "bigbrother.timedunlock.\(commandID.uuidString)")
+            let schedule = DeviceActivitySchedule(
+                intervalStart: startComps,
+                intervalEnd: endComps,
+                repeats: false
+            )
+
+            let center = DeviceActivityCenter()
+            try center.startMonitoring(activityName, during: schedule)
+
+            // Store timed unlock info so the monitor extension knows to unlock/lock.
+            let info = TimedUnlockInfo(
+                commandID: commandID,
+                activityName: activityName.rawValue,
+                unlockAt: unlockAt,
+                lockAt: lockAt
+            )
+            try storage.writeTimedUnlockInfo(info)
+
+            // Explicitly enforce locked mode during penalty phase.
+            // The device may have been in an ambiguous state; ensure shields are active.
+            let currentMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .dailyMode
+            let lockedMode = currentMode == .unlocked ? .dailyMode : currentMode
+            try applyMode(lockedMode, enrollment: enrollment, commandID: commandID)
+
+            let penaltyMin = adjustedPenalty / 60
+            let unlockMin = (adjustedTotal - adjustedPenalty) / 60
+            eventLogger.log(.commandApplied, details: "Timed unlock: \(penaltyMin)m penalty then \(unlockMin)m free")
+            ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedPenalty, unlockSeconds: adjustedTotal - adjustedPenalty)
+        }
+    }
+
+    // MARK: - Return to Schedule
+
+    /// Clear overrides and apply the mode dictated by the child's schedule profile.
+    /// Falls back to dailyMode if no profile is assigned.
+    private func applyReturnToSchedule(enrollment: ChildEnrollmentState, commandID: UUID) throws {
+        // Clear any temporary unlock / timed unlock state.
+        try? storage.clearTemporaryUnlockState()
+        try? storage.clearTimedUnlockInfo()
+
+        // Cancel any active temp/timed/lockuntil DeviceActivity schedules
+        // so they don't interfere with the schedule-driven mode.
+        cancelNonScheduleActivities()
+
+        // Read the active schedule profile from App Group storage.
+        let mode: LockMode
+        if let profile = storage.readActiveScheduleProfile() {
+            mode = profile.resolvedMode(at: Date())
+        } else {
+            mode = .dailyMode
+        }
+
+        try applyMode(mode, enrollment: enrollment, commandID: commandID)
+        ModeChangeNotifier.notify(newMode: mode)
+    }
+
+    /// Cancel all non-schedule DeviceActivity monitors (temp unlock, timed unlock, lock-until).
+    private func cancelNonScheduleActivities() {
+        let center = DeviceActivityCenter()
+        let prefixes = ["bigbrother.tempunlock.", "bigbrother.timedunlock.", "bigbrother.lockuntil."]
+        for activity in center.activities {
+            if prefixes.contains(where: { activity.rawValue.hasPrefix($0) }) {
+                center.stopMonitoring([activity])
+            }
+        }
+    }
+
+    // MARK: - Lock Until
+
+    /// Lock the device immediately and register a DeviceActivitySchedule to
+    /// return to schedule at the target date.
+    private func applyLockUntil(date: Date, enrollment: ChildEnrollmentState, commandID: UUID) throws {
+        // Apply dailyMode lock immediately.
+        try applyMode(.dailyMode, enrollment: enrollment, commandID: commandID)
+
+        // Register a one-shot DeviceActivitySchedule that fires at the target date.
+        // When it fires, the monitor extension will call returnToSchedule.
+        let now = Date()
+        guard date > now else { return }
+
+        let cal = Calendar.current
+        let startComps = cal.dateComponents([.hour, .minute, .second], from: now)
+        let endComps = cal.dateComponents([.hour, .minute, .second], from: date)
+
+        let activityName = DeviceActivityName(rawValue: "bigbrother.lockuntil.\(commandID.uuidString)")
+        let schedule = DeviceActivitySchedule(
+            intervalStart: startComps,
+            intervalEnd: endComps,
+            repeats: false
+        )
+
+        let center = DeviceActivityCenter()
+        try? center.startMonitoring(activityName, during: schedule)
+
+        #if DEBUG
+        print("[BigBrother] Registered lockUntil schedule: \(activityName.rawValue), ends at \(date)")
+        #endif
     }
 
     // MARK: - Token Lookup

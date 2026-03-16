@@ -29,8 +29,149 @@ final class ChildHomeViewModel {
         appState.storage.readTemporaryUnlockState()
     }
 
+    // MARK: - Timed Unlock (Penalty Offset)
+
+    var timedUnlockInfo: TimedUnlockInfo? {
+        appState.storage.readTimedUnlockInfo()
+    }
+
+    /// Whether the device is in the penalty phase of a timed unlock.
+    var isInPenaltyPhase: Bool {
+        guard let info = timedUnlockInfo else { return false }
+        return now < info.unlockAt
+    }
+
+    /// Whether the device is in the unlock phase of a timed unlock.
+    var isInTimedUnlockPhase: Bool {
+        guard let info = timedUnlockInfo else { return false }
+        return now >= info.unlockAt && now < info.lockAt
+    }
+
+    /// Countdown string for the current timed unlock phase.
+    var timedUnlockCountdown: String? {
+        guard let info = timedUnlockInfo else { return nil }
+        let target: Date
+        if now < info.unlockAt {
+            target = info.unlockAt  // Counting down penalty
+        } else if now < info.lockAt {
+            target = info.lockAt   // Counting down free time
+        } else {
+            return nil  // Expired
+        }
+        let remaining = Int(target.timeIntervalSince(now))
+        guard remaining > 0 else { return nil }
+        let h = remaining / 3600
+        let m = (remaining % 3600) / 60
+        let s = remaining % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+
+    // MARK: - Schedule
+
+    /// Active schedule profile from App Group storage.
+    var activeScheduleProfile: ScheduleProfile? {
+        appState.storage.readActiveScheduleProfile()
+    }
+
+    /// Human-readable schedule status, e.g. "Free until 8:00 PM" or "Locked until 3:00 PM".
+    var scheduleStatusText: String? {
+        guard let profile = activeScheduleProfile else { return nil }
+        let inFree = profile.isInFreeWindow(at: now)
+        let label = inFree ? "Free" : "Locked"
+        if let transition = profile.nextTransitionTime(from: now) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "h:mm a"
+            return "\(label) until \(formatter.string(from: transition))"
+        }
+        return label
+    }
+
+    /// Today's free windows formatted as start–end pairs.
+    var todaysFreeWindows: [(start: String, end: String)] {
+        guard let profile = activeScheduleProfile else { return [] }
+        let weekday = Calendar.current.component(.weekday, from: now)
+        guard let today = DayOfWeek(rawValue: weekday) else { return [] }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h:mm a"
+        return profile.freeWindows
+            .filter { $0.daysOfWeek.contains(today) }
+            .sorted { $0.startTime < $1.startTime }
+            .map { window in
+                var startComps = Calendar.current.dateComponents([.year, .month, .day], from: now)
+                startComps.hour = window.startTime.hour
+                startComps.minute = window.startTime.minute
+                var endComps = startComps
+                endComps.hour = window.endTime.hour
+                endComps.minute = window.endTime.minute
+                let startStr = Calendar.current.date(from: startComps).map { formatter.string(from: $0) } ?? ""
+                let endStr = Calendar.current.date(from: endComps).map { formatter.string(from: $0) } ?? ""
+                return (start: startStr, end: endStr)
+            }
+    }
+
     var needsReauthorization: Bool {
         appState.familyControlsAvailable && appState.enforcement?.authorizationStatus != .authorized
+    }
+
+    // MARK: - Self Unlock
+
+    /// Self-unlock state from App Group storage, with automatic midnight reset.
+    var selfUnlockState: SelfUnlockState? {
+        guard let state = appState.storage.readSelfUnlockState() else { return nil }
+        return state.resettingIfNeeded(currentDate: SelfUnlockState.todayDateString())
+    }
+
+    /// Whether the self-unlock card should be visible.
+    var canShowSelfUnlock: Bool {
+        guard let state = selfUnlockState, state.budget > 0 else { return false }
+        return currentMode == .dailyMode && !isTemporaryUnlock && timedUnlockInfo == nil
+    }
+
+    /// Whether the button should be tappable (has remaining budget).
+    var canUseSelfUnlock: Bool {
+        canShowSelfUnlock && (selfUnlockState?.isAvailable ?? false)
+    }
+
+    /// Consume one self-unlock and trigger a 15-minute temporary unlock.
+    func useSelfUnlock() {
+        guard canUseSelfUnlock, let state = selfUnlockState else { return }
+        let today = SelfUnlockState.todayDateString()
+        let updated = state.consuming(one: today)
+        try? appState.storage.writeSelfUnlockState(updated)
+        appState.applySelfUnlock()
+    }
+
+    // MARK: - Penalty Timer (relayed from parent via CloudKit)
+
+    /// Penalty seconds from the device's CloudKit record.
+    var penaltySeconds: Int? { appState.childPenaltySeconds }
+
+    /// Penalty timer end time from the device's CloudKit record.
+    var penaltyTimerEndTime: Date? { appState.childPenaltyTimerEndTime }
+
+    /// Whether a penalty timer is actively counting down.
+    var isPenaltyRunning: Bool {
+        guard let end = penaltyTimerEndTime else { return false }
+        return end.timeIntervalSinceNow > 0
+    }
+
+    /// Remaining penalty seconds (running countdown or banked).
+    var penaltyRemaining: Int? {
+        if let end = penaltyTimerEndTime, end.timeIntervalSinceNow > 0 {
+            return Int(end.timeIntervalSinceNow)
+        }
+        guard let secs = penaltySeconds, secs > 0 else { return nil }
+        return secs
+    }
+
+    /// Formatted penalty timer string.
+    var penaltyDisplayString: String? {
+        guard let secs = penaltyRemaining, secs > 0 else { return nil }
+        let h = secs / 3600
+        let m = (secs % 3600) / 60
+        let s = secs % 60
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+        return String(format: "%d:%02d", m, s)
     }
 
     var authStatusDescription: String {

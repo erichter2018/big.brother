@@ -71,6 +71,45 @@ final class ChildDetailViewModel: CommandSendable {
     init(appState: AppState, child: ChildProfile) {
         self.appState = appState
         self.child = child
+        self.selfUnlockBudget = Self.loadSelfUnlockBudget(for: child.id)
+    }
+
+    // MARK: - Self Unlock Budget
+
+    /// Self-unlock budget for this child (persisted in UserDefaults, synced to CloudKit).
+    /// Stored property so @Observable can track mutations for Stepper binding.
+    var selfUnlockBudget: Int = 0 {
+        didSet {
+            guard selfUnlockBudget != oldValue else { return }
+            Self.saveSelfUnlockBudget(selfUnlockBudget, for: child.id)
+            Task { await saveSelfUnlockBudgetToCloudKit(selfUnlockBudget) }
+        }
+    }
+
+    /// Self-unlocks used today, read from the latest heartbeat across all devices.
+    var selfUnlocksUsedToday: Int? {
+        let deviceIDs = Set(devices.map(\.id))
+        let values = appState.latestHeartbeats
+            .filter { deviceIDs.contains($0.deviceID) }
+            .compactMap(\.selfUnlocksUsedToday)
+        guard !values.isEmpty else { return nil }
+        return values.max()
+    }
+
+    private func saveSelfUnlockBudgetToCloudKit(_ budget: Int) async {
+        for device in devices {
+            var updated = device
+            updated.selfUnlocksPerDay = budget > 0 ? budget : nil
+            try? await appState.cloudKit?.saveDevice(updated)
+        }
+    }
+
+    private static func loadSelfUnlockBudget(for childID: ChildProfileID) -> Int {
+        UserDefaults.standard.integer(forKey: "selfUnlockBudget.\(childID.rawValue)")
+    }
+
+    private static func saveSelfUnlockBudget(_ budget: Int, for childID: ChildProfileID) {
+        UserDefaults.standard.set(budget, forKey: "selfUnlockBudget.\(childID.rawValue)")
     }
 
     /// Toggle a single restriction and send to all child devices.
@@ -171,10 +210,34 @@ final class ChildDetailViewModel: CommandSendable {
     // MARK: - Actions (target all devices for this child)
 
     func setMode(_ mode: LockMode) async {
+        appState.expectedModes[child.id] = (mode, Date())
         await performCommand(.setMode(mode), target: .child(child.id))
     }
 
+    func lockWithDuration(_ duration: LockDuration) async {
+        switch duration {
+        case .returnToSchedule:
+            appState.expectedModes.removeValue(forKey: child.id)
+            await performCommand(.returnToSchedule, target: .child(child.id))
+
+        case .indefinite:
+            appState.expectedModes[child.id] = (.dailyMode, Date())
+            await performCommand(.setMode(.dailyMode), target: .child(child.id))
+
+        case .untilMidnight:
+            let midnight = Calendar.current.startOfDay(for: Date()).addingTimeInterval(86400)
+            appState.expectedModes[child.id] = (.dailyMode, Date())
+            await performCommand(.lockUntil(date: midnight), target: .child(child.id))
+
+        case .hours(let h):
+            let target = Date().addingTimeInterval(Double(h) * 3600)
+            appState.expectedModes[child.id] = (.dailyMode, Date())
+            await performCommand(.lockUntil(date: target), target: .child(child.id))
+        }
+    }
+
     func temporaryUnlock(seconds: Int = 24 * 3600) async {
+        appState.expectedModes[child.id] = (.unlocked, Date())
         await performCommand(.temporaryUnlock(durationSeconds: seconds), target: .child(child.id))
     }
 

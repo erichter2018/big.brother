@@ -77,6 +77,18 @@ enum CKRecordConversion {
         record[CKFieldName.familyControlsOK] = (device.familyControlsAuthorized ? 1 : 0) as NSNumber
         record[CKFieldName.heartbeatProfileID] = device.heartbeatProfileID?.uuidString
         record[CKFieldName.scheduleProfileID] = device.scheduleProfileID?.uuidString
+        if let ps = device.penaltySeconds {
+            record[CKFieldName.penaltySeconds] = ps as NSNumber
+        }
+        if let endTime = device.penaltyTimerEndTime {
+            record[CKFieldName.penaltyTimerEndTime] = endTime as NSDate
+        }
+        if let s = device.selfUnlocksPerDay {
+            record[CKFieldName.selfUnlocksPerDay] = s as NSNumber
+        }
+        if let v = device.scheduleProfileVersion {
+            record[CKFieldName.scheduleProfileVersion] = v as NSDate
+        }
         return record
     }
 
@@ -103,6 +115,11 @@ enum CKRecordConversion {
             schProfileID = UUID(uuidString: str)
         }
 
+        let penaltySecs = record[CKFieldName.penaltySeconds] as? Int
+        let penaltyEnd = record[CKFieldName.penaltyTimerEndTime] as? Date
+        let selfUnlocksPerDay = record[CKFieldName.selfUnlocksPerDay] as? Int
+        let schProfileVersion = record[CKFieldName.scheduleProfileVersion] as? Date
+
         return ChildDevice(
             id: DeviceID(rawValue: deviceID),
             childProfileID: ChildProfileID(rawValue: profileID),
@@ -113,7 +130,11 @@ enum CKRecordConversion {
             enrolledAt: enrolledAt,
             familyControlsAuthorized: fcOK,
             heartbeatProfileID: hbProfileID,
-            scheduleProfileID: schProfileID
+            scheduleProfileID: schProfileID,
+            penaltySeconds: penaltySecs,
+            penaltyTimerEndTime: penaltyEnd,
+            selfUnlocksPerDay: selfUnlocksPerDay,
+            scheduleProfileVersion: schProfileVersion
         )
     }
 
@@ -290,6 +311,9 @@ enum CKRecordConversion {
         if let names = hb.temporaryAllowedAppNames, !names.isEmpty { record[CKFieldName.temporaryAllowedAppNames] = names as NSArray }
         if let expiry = hb.temporaryUnlockExpiresAt { record[CKFieldName.temporaryUnlockExpiresAt] = expiry as NSDate }
         if let isChild = hb.isChildAuthorization { record[CKFieldName.isChildAuthorization] = (isChild ? 1 : 0) as NSNumber }
+        if let disk = hb.availableDiskSpace { record[CKFieldName.availableDiskSpace] = disk as NSNumber }
+        if let total = hb.totalDiskSpace { record[CKFieldName.totalDiskSpace] = total as NSNumber }
+        if let s = hb.selfUnlocksUsedToday { record[CKFieldName.selfUnlocksUsedToday] = s as NSNumber }
         return record
     }
 
@@ -329,7 +353,10 @@ enum CKRecordConversion {
             allowedAppNames: record[CKFieldName.allowedAppNames] as? [String],
             temporaryAllowedAppNames: record[CKFieldName.temporaryAllowedAppNames] as? [String],
             temporaryUnlockExpiresAt: record[CKFieldName.temporaryUnlockExpiresAt] as? Date,
-            isChildAuthorization: (record[CKFieldName.isChildAuthorization] as? Int64).map { $0 != 0 }
+            isChildAuthorization: (record[CKFieldName.isChildAuthorization] as? Int64).map { $0 != 0 },
+            availableDiskSpace: record[CKFieldName.availableDiskSpace] as? Int64,
+            totalDiskSpace: record[CKFieldName.totalDiskSpace] as? Int64,
+            selfUnlocksUsedToday: (record[CKFieldName.selfUnlocksUsedToday] as? Int64).map { Int($0) }
         )
     }
 

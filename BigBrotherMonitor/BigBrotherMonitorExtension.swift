@@ -1,5 +1,6 @@
 import Foundation
 import DeviceActivity
+import FamilyControls
 import ManagedSettings
 import UserNotifications
 import BigBrotherCore
@@ -24,9 +25,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     private let storage = AppGroupStorage()
     private let store = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
+    private let baseStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
 
     /// Prefix used by ScheduleRegistrar for free-window activities.
     private let scheduleProfilePrefix = "bigbrother.scheduleprofile."
+    /// Prefix used for penalty-offset timed unlocks.
+    private let timedUnlockPrefix = "bigbrother.timedunlock."
+    /// Prefix used for temporary unlock expiry (auto-relock).
+    private let tempUnlockPrefix = "bigbrother.tempunlock."
+    /// Prefix used for timed lock (lockUntil) — auto-return to schedule.
+    private let lockUntilPrefix = "bigbrother.lockuntil."
 
     override func intervalDidStart(for activity: DeviceActivityName) {
         // Reconciliation schedule — verify enforcement matches snapshot.
@@ -38,6 +46,22 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Schedule profile free window — unlock if today matches.
         if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
             handleFreeWindowStart(activity)
+            return
+        }
+
+        // Timed unlock (penalty offset) — penalty served, now unlock.
+        if activity.rawValue.hasPrefix(timedUnlockPrefix) {
+            handleTimedUnlockStart(activity)
+            return
+        }
+
+        // Temporary unlock expiry schedule — no action needed on start (device is already unlocked).
+        if activity.rawValue.hasPrefix(tempUnlockPrefix) {
+            return
+        }
+
+        // Lock-until schedule — no action needed on start (device is already locked).
+        if activity.rawValue.hasPrefix(lockUntilPrefix) {
             return
         }
 
@@ -67,6 +91,24 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
+        // Timed unlock ended — re-lock.
+        if activity.rawValue.hasPrefix(timedUnlockPrefix) {
+            handleTimedUnlockEnd(activity)
+            return
+        }
+
+        // Temporary unlock expired — re-lock the device.
+        if activity.rawValue.hasPrefix(tempUnlockPrefix) {
+            handleTempUnlockExpired(activity)
+            return
+        }
+
+        // Lock-until expired — return to schedule mode.
+        if activity.rawValue.hasPrefix(lockUntilPrefix) {
+            handleLockUntilExpired(activity)
+            return
+        }
+
         // Legacy / other schedule — clear schedule store.
         store.clearAllSettings()
         logEvent(.scheduleEnded, details: "Schedule ended: \(activity.rawValue)")
@@ -90,8 +132,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Unlock: clear the schedule store restrictions.
-        store.clearAllSettings()
+        // Unlock: clear ALL shield stores (base + schedule + default).
+        // ManagedSettings merges across stores with OR logic — clearing only
+        // the schedule store leaves the base store shields active.
+        clearAllShieldStores()
         logEvent(.scheduleTriggered, details: "Free window started: \(activity.rawValue)")
         sendModeNotification(title: "Free Time Started", body: "All apps are now accessible.")
     }
@@ -106,9 +150,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Re-lock using the profile's locked mode.
+        // Re-lock using the profile's locked mode on ALL stores.
         let policy = storage.readPolicySnapshot()?.effectivePolicy
-        applyShielding(mode: profile.lockedMode, policy: policy)
+        applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
         logEvent(.scheduleEnded, details: "Free window ended, locked to \(profile.lockedMode.rawValue)")
         sendModeNotification(
             title: "Free Time Ended",
@@ -116,30 +160,262 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         )
     }
 
+    // MARK: - Timed Unlock (Penalty Offset)
+
+    /// Penalty served — unlock the device.
+    private func handleTimedUnlockStart(_ activity: DeviceActivityName) {
+        clearAllShieldStores()
+        logEvent(.scheduleTriggered, details: "Timed unlock: penalty served, device unlocked")
+        sendModeNotification(title: "Penalty Complete", body: "All apps are now accessible.")
+    }
+
+    /// Timed unlock window ended — re-lock the device.
+    private func handleTimedUnlockEnd(_ activity: DeviceActivityName) {
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        let mode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .dailyMode
+        applyShieldingToAllStores(mode: mode, policy: policy)
+        try? storage.clearTimedUnlockInfo()
+        logEvent(.scheduleEnded, details: "Timed unlock ended, locked to \(mode.rawValue)")
+        sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
+    }
+
+    // MARK: - Temporary Unlock Expiry
+
+    /// Temporary unlock timer expired — re-lock the device using the previous mode.
+    private func handleTempUnlockExpired(_ activity: DeviceActivityName) {
+        let unlockState = storage.readTemporaryUnlockState()
+        let previousMode = unlockState?.previousMode ?? .dailyMode
+
+        // Check schedule profile — if one is assigned, use its resolved mode instead.
+        let mode: LockMode
+        if let profile = storage.readActiveScheduleProfile() {
+            mode = profile.resolvedMode(at: Date())
+        } else {
+            mode = previousMode
+        }
+
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShieldingToAllStores(mode: mode, policy: policy)
+        try? storage.clearTemporaryUnlockState()
+        logEvent(.temporaryUnlockExpired, details: "Temp unlock expired, locked to \(mode.rawValue)")
+        sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
+    }
+
+    // MARK: - Lock Until Expiry
+
+    /// Lock-until timer expired — return to schedule-driven mode.
+    private func handleLockUntilExpired(_ activity: DeviceActivityName) {
+        let mode: LockMode
+        if let profile = storage.readActiveScheduleProfile() {
+            mode = profile.resolvedMode(at: Date())
+        } else {
+            // No schedule — stay locked.
+            mode = .dailyMode
+        }
+
+        if mode == .unlocked {
+            clearAllShieldStores()
+        } else {
+            let policy = storage.readPolicySnapshot()?.effectivePolicy
+            applyShieldingToAllStores(mode: mode, policy: policy)
+        }
+        logEvent(.scheduleEnded, details: "Lock-until expired, mode: \(mode.rawValue)")
+        sendModeNotification(
+            title: mode == .unlocked ? "Free Time Started" : "Lock Period Ended",
+            body: mode == .unlocked ? "All apps are now accessible." : "\(mode.displayName) mode active."
+        )
+    }
+
     // MARK: - Reconciliation
 
     /// Verify enforcement matches the current policy snapshot.
-    /// If the extension shared state indicates a mode that requires shielding,
-    /// reapply it in case the schedule store was cleared unexpectedly.
+    /// Must work even if the main app was force-killed before writing ExtensionSharedState.
+    /// Falls back to PolicySnapshot + ScheduleProfile when ExtensionSharedState is nil.
     private func reconcile() {
-        guard let extState = storage.readExtensionSharedState() else { return }
+        let extState = storage.readExtensionSharedState()
 
-        // If temporary unlock is active and not expired, ensure store is clear.
-        if extState.isTemporaryUnlock,
-           let expires = extState.temporaryUnlockExpiresAt, expires > Date() {
-            store.clearAllSettings()
+        // --- Temporary unlock checks (only if ExtensionSharedState exists) ---
+
+        if let extState {
+            // If temporary unlock is active and not expired, ensure all stores are clear.
+            if extState.isTemporaryUnlock,
+               let expires = extState.temporaryUnlockExpiresAt, expires > Date() {
+                clearAllShieldStores()
+                return
+            }
+
+            // If temporary unlock has expired, re-lock using the previous mode.
+            if extState.isTemporaryUnlock,
+               let expires = extState.temporaryUnlockExpiresAt, expires <= Date() {
+                let unlockState = storage.readTemporaryUnlockState()
+                let previousMode = unlockState?.previousMode ?? .dailyMode
+                let mode: LockMode
+                if let profile = storage.readActiveScheduleProfile() {
+                    mode = profile.resolvedMode(at: Date())
+                } else {
+                    mode = previousMode
+                }
+                let policy = storage.readPolicySnapshot()?.effectivePolicy
+                applyShieldingToAllStores(mode: mode, policy: policy)
+                try? storage.clearTemporaryUnlockState()
+                logEvent(.temporaryUnlockExpired, details: "Reconciliation: temp unlock expired, locked to \(mode.rawValue)")
+                sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
+                return
+            }
+
+            // If enforcement is degraded, nothing we can do from the extension.
+            if extState.enforcementDegraded { return }
+        }
+
+        // --- Check TemporaryUnlockState directly (survives force-close) ---
+
+        if let unlockState = storage.readTemporaryUnlockState() {
+            if unlockState.expiresAt > Date() {
+                // Active temp unlock — keep stores clear.
+                clearAllShieldStores()
+                return
+            } else {
+                // Expired temp unlock the monitor never caught — re-lock now.
+                let mode: LockMode
+                if let profile = storage.readActiveScheduleProfile() {
+                    mode = profile.resolvedMode(at: Date())
+                } else {
+                    mode = unlockState.previousMode
+                }
+                let policy = storage.readPolicySnapshot()?.effectivePolicy
+                applyShieldingToAllStores(mode: mode, policy: policy)
+                try? storage.clearTemporaryUnlockState()
+                logEvent(.temporaryUnlockExpired, details: "Reconciliation: stale temp unlock cleaned up, locked to \(mode.rawValue)")
+                sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
+                return
+            }
+        }
+
+        // --- Timed unlock check (penalty-offset unlocks survive force-close) ---
+
+        if let timedInfo = storage.readTimedUnlockInfo() {
+            let now = Date()
+            if now < timedInfo.unlockAt {
+                // Still in penalty phase — device should be locked.
+                // The schedule will unlock when penalty expires. Nothing to do.
+            } else if now >= timedInfo.unlockAt && now < timedInfo.lockAt {
+                // In the free phase — device should be unlocked.
+                clearAllShieldStores()
+                return
+            } else {
+                // Past lockAt — the schedule should have re-locked, but clean up in case it didn't.
+                let mode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .dailyMode
+                let policy = storage.readPolicySnapshot()?.effectivePolicy
+                applyShieldingToAllStores(mode: mode, policy: policy)
+                try? storage.clearTimedUnlockInfo()
+                logEvent(.policyReconciled, details: "Reconciliation: stale timed unlock cleaned up, locked to \(mode.rawValue)")
+                return
+            }
+        }
+
+        // --- Schedule profile free window check ---
+
+        if let profile = storage.readActiveScheduleProfile(),
+           profile.isInFreeWindow(at: Date()) {
+            clearAllShieldStores()
+            logEvent(.policyReconciled, details: "Reconciliation: in free window, stores cleared")
             return
         }
 
-        // If enforcement is degraded, nothing we can do from the extension.
-        if extState.enforcementDegraded { return }
+        // --- Default: apply the current mode from ExtensionSharedState or PolicySnapshot ---
+
+        let resolvedMode: LockMode
+        if let extState {
+            resolvedMode = extState.currentMode
+        } else if let snapshot = storage.readPolicySnapshot() {
+            resolvedMode = snapshot.effectivePolicy.resolvedMode
+        } else {
+            // No state at all — nothing to enforce.
+            return
+        }
 
         let policy = storage.readPolicySnapshot()?.effectivePolicy
-        applyShielding(mode: extState.currentMode, policy: policy)
+        applyShieldingToAllStores(mode: resolvedMode, policy: policy)
         logEvent(.policyReconciled, details: "Reconciliation check from extension")
     }
 
-    // MARK: - Shielding
+    // MARK: - All-Store Shield Management
+
+    /// Clear shield properties on ALL named stores + default store.
+    /// ManagedSettings merges across stores with OR logic — if any store blocks, it's blocked.
+    private func clearAllShieldStores() {
+        let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
+        for s in [baseStore, store, tempUnlockStore] {
+            s.shield.applications = nil
+            s.shield.applicationCategories = nil
+            s.shield.webDomainCategories = nil
+            s.shield.webDomains = nil
+        }
+        let defaultStore = ManagedSettingsStore()
+        defaultStore.shield.applications = nil
+        defaultStore.shield.applicationCategories = nil
+        defaultStore.shield.webDomainCategories = nil
+        defaultStore.shield.webDomains = nil
+    }
+
+    /// Apply shields to BOTH base and schedule stores using the hybrid per-app + category strategy.
+    /// Mirrors EnforcementServiceImpl.applyShield() logic.
+    private static let maxShieldApplications = 50
+
+    private func applyShieldingToAllStores(mode: LockMode, policy: EffectivePolicy?) {
+        switch mode {
+        case .unlocked:
+            clearAllShieldStores()
+
+        case .dailyMode, .essentialOnly:
+            let allowExemptions = mode == .dailyMode
+            let allowedTokens = allowExemptions ? collectAllowedTokens() : []
+            let pickerTokens = loadPickerTokens()
+
+            if !pickerTokens.isEmpty && allowExemptions {
+                let tokensToBlock = pickerTokens.subtracting(allowedTokens)
+                let perAppTokens: Set<ApplicationToken>
+                if tokensToBlock.count <= Self.maxShieldApplications {
+                    perAppTokens = tokensToBlock
+                } else {
+                    perAppTokens = Set(tokensToBlock.prefix(Self.maxShieldApplications))
+                }
+                // Apply to both base and schedule stores for full coverage.
+                for s in [baseStore, store] {
+                    s.shield.applications = perAppTokens
+                    s.shield.applicationCategories = .all(except: allowedTokens)
+                    s.shield.webDomainCategories = .all()
+                }
+            } else {
+                let apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
+                for s in [baseStore, store] {
+                    s.shield.applications = apps
+                    if allowedTokens.isEmpty {
+                        s.shield.applicationCategories = .all()
+                    } else {
+                        s.shield.applicationCategories = .all(except: allowedTokens)
+                    }
+                    s.shield.webDomainCategories = .all()
+                }
+            }
+        }
+    }
+
+    /// Load app tokens from the saved FamilyActivitySelection.
+    /// Mirrors EnforcementServiceImpl.loadPickerTokens().
+    private func loadPickerTokens() -> Set<ApplicationToken> {
+        guard let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection) else {
+            return []
+        }
+        // FamilyActivitySelection is Codable — decode to get applicationTokens.
+        // We decode a lightweight wrapper since we only need the tokens.
+        guard let selection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: data) else {
+            return []
+        }
+        return selection.applicationTokens
+    }
+
+    // MARK: - Single-Store Shielding (legacy fallback)
 
     private func applyShielding(mode: LockMode, policy: EffectivePolicy?) {
         switch mode {

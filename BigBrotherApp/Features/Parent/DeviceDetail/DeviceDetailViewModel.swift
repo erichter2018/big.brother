@@ -121,14 +121,23 @@ final class DeviceDetailViewModel: CommandSendable {
     }
 
     /// Assign (or clear) a schedule profile for this device.
+    /// Stamps the profile version so the child only applies this specific version.
     func assignScheduleProfile(_ profileID: UUID?) async {
         device.scheduleProfileID = profileID
+        // Stamp the version so the child applies exactly this version of the profile.
+        if let profileID,
+           let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) {
+            device.scheduleProfileVersion = profile.updatedAt
+        } else {
+            device.scheduleProfileVersion = nil
+        }
         guard let cloudKit = appState.cloudKit else { return }
 
         do {
             try await cloudKit.saveDevice(device)
             if let idx = appState.childDevices.firstIndex(where: { $0.id == device.id }) {
                 appState.childDevices[idx].scheduleProfileID = profileID
+                appState.childDevices[idx].scheduleProfileVersion = device.scheduleProfileVersion
             }
         } catch {
             commandFeedback = "Failed to save schedule profile: \(error.localizedDescription)"

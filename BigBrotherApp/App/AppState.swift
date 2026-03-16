@@ -30,6 +30,11 @@ final class AppState {
     /// Child profiles (parent mode — fetched from CloudKit).
     var childProfiles: [ChildProfile] = []
 
+    /// User-defined display order for children. IDs not in this list appear at the end.
+    var childOrder: [ChildProfileID] = [] {
+        didSet { persistChildOrder() }
+    }
+
     /// All enrolled devices (parent mode — fetched from CloudKit).
     var childDevices: [ChildDevice] = []
 
@@ -50,6 +55,10 @@ final class AppState {
     /// Current effective policy (child mode — from local snapshot).
     var currentEffectivePolicy: EffectivePolicy?
 
+    /// Penalty timer data relayed from parent via CloudKit (child mode).
+    var childPenaltySeconds: Int?
+    var childPenaltyTimerEndTime: Date?
+
     /// Active capability warnings.
     var activeWarnings: [CapabilityWarning] = []
 
@@ -67,6 +76,11 @@ final class AppState {
     /// triggering the always-allowed apps picker on the child device.
     var showAlwaysAllowedSetup: Bool = false
 
+    /// Expected mode per child, set when any view model sends a mode command.
+    /// Used by the dashboard to show the correct mode before heartbeat confirms.
+    /// Cleared when a heartbeat confirms the mode.
+    var expectedModes: [ChildProfileID: (mode: LockMode, sentAt: Date)] = [:]
+
     /// Set by notification tap to deep-link into a specific child's detail view.
     var pendingChildNavigation: ChildProfileID?
 
@@ -80,6 +94,9 @@ final class AppState {
     private(set) var heartbeatService: (any HeartbeatServiceProtocol)?
     private(set) var eventLogger: (any EventLoggerProtocol)?
     private(set) var syncCoordinator: (any SyncCoordinatorProtocol)?
+
+    /// AllowanceTracker timer integration (parent mode only).
+    private(set) var timerService: TimerIntegrationService?
 
     /// Monitors child device heartbeats and sends local notifications (parent mode only).
     internal var deviceMonitor: DeviceMonitor?
@@ -109,6 +126,7 @@ final class AppState {
         storage.ensureSharedFilesExist()
         loadRole()
         loadApprovedApps()
+        loadChildOrder()
     }
 
     /// Read role and enrollment state from Keychain.
@@ -174,6 +192,31 @@ final class AppState {
     private func persistApprovedApps() {
         guard let data = try? JSONEncoder().encode(approvedApps) else { return }
         UserDefaults.standard.set(data, forKey: Self.approvedAppsKey)
+    }
+
+    // MARK: - Child Order
+
+    private static let childOrderKey = "fr.bigbrother.childOrder"
+
+    func loadChildOrder() {
+        guard let data = UserDefaults.standard.data(forKey: Self.childOrderKey) else { return }
+        childOrder = (try? JSONDecoder().decode([ChildProfileID].self, from: data)) ?? []
+    }
+
+    private func persistChildOrder() {
+        guard let data = try? JSONEncoder().encode(childOrder) else { return }
+        UserDefaults.standard.set(data, forKey: Self.childOrderKey)
+    }
+
+    /// Returns child profiles sorted by user-defined order.
+    /// Children not in the order list appear at the end.
+    var orderedChildProfiles: [ChildProfile] {
+        let orderMap = Dictionary(uniqueKeysWithValues: childOrder.enumerated().map { ($1, $0) })
+        return childProfiles.sorted { a, b in
+            let ia = orderMap[a.id] ?? Int.max
+            let ib = orderMap[b.id] ?? Int.max
+            return ia < ib
+        }
     }
 
     func addApprovedApp(_ app: ApprovedApp) {
@@ -478,6 +521,13 @@ final class AppState {
         )
         restorer.restore()
 
+        // Register the hourly reconciliation schedule so the monitor extension
+        // periodically verifies enforcement state, even if the app isn't running.
+        if familyControlsAvailable {
+            let scheduleManager = ScheduleManagerImpl()
+            try? scheduleManager.registerReconciliationSchedule()
+        }
+
         // Update runtime state from restored snapshot.
         if let snapshot = snapshotStore.loadCurrentSnapshot() {
             currentEffectivePolicy = snapshot.effectivePolicy
@@ -714,6 +764,52 @@ final class AppState {
         unlockRequestPollTimer = nil
     }
 
+    // MARK: - Timer Integration
+
+    /// Creates the timer service if the integration is enabled in settings.
+    func initializeTimerServiceIfNeeded() {
+        let config = TimerIntegrationConfig.load()
+        guard config.isEnabled else { return }
+        let service = TimerIntegrationService()
+        service.onTimerDataChanged = { [weak self] timers in
+            self?.relayTimerDataToCloudKit(timers)
+        }
+        timerService = service
+        #if DEBUG
+        print("[BigBrother] Timer integration service initialized")
+        #endif
+    }
+
+    /// Pushes timer data from Firestore to child device records in CloudKit.
+    private func relayTimerDataToCloudKit(_ timers: [String: TimerIntegrationService.KidTimerState]) {
+        guard let cloudKit else { return }
+        let config = TimerIntegrationConfig.load()
+
+        for mapping in config.kidMappings {
+            guard let childID = mapping.childProfileID else { continue }
+            let timer = timers[mapping.firestoreKidID]
+            let seconds = timer?.penaltySeconds
+            let endTime = timer?.timerEndTime
+
+            // Update all devices for this child.
+            let devices = childDevices.filter { $0.childProfileID == childID }
+            for var device in devices {
+                // Skip if unchanged.
+                if device.penaltySeconds == seconds && device.penaltyTimerEndTime == endTime { continue }
+
+                device.penaltySeconds = seconds
+                device.penaltyTimerEndTime = endTime
+                if let idx = childDevices.firstIndex(where: { $0.id == device.id }) {
+                    childDevices[idx].penaltySeconds = seconds
+                    childDevices[idx].penaltyTimerEndTime = endTime
+                }
+                Task {
+                    try? await cloudKit.saveDevice(device)
+                }
+            }
+        }
+    }
+
     /// Fetch recent events and post local notifications for new unlock requests.
     private func checkForUnlockRequestNotifications(familyID: FamilyID) {
         guard let cloudKit else { return }
@@ -838,8 +934,16 @@ final class AppState {
         do {
             // Fetch this device's record to get the assigned schedule profile ID.
             let devices = try await cloudKit.fetchDevices(familyID: enrollment.familyID)
-            guard let myDevice = devices.first(where: { $0.id == enrollment.deviceID }),
-                  let profileID = myDevice.scheduleProfileID else {
+            guard let myDevice = devices.first(where: { $0.id == enrollment.deviceID }) else { return }
+
+            // Update penalty timer data from parent.
+            childPenaltySeconds = myDevice.penaltySeconds
+            childPenaltyTimerEndTime = myDevice.penaltyTimerEndTime
+
+            // Cache self-unlock budget from CloudKit device record.
+            cacheSelfUnlockBudget(from: myDevice)
+
+            guard let profileID = myDevice.scheduleProfileID else {
                 // No schedule profile assigned — clear any existing registration.
                 if familyControlsAvailable {
                     ScheduleRegistrar.clearAll(storage: storage)
@@ -847,20 +951,31 @@ final class AppState {
                 return
             }
 
-            // Check if the profile has changed since last registration.
+            // Check if we already have this exact assigned version registered.
             let currentProfile = storage.readActiveScheduleProfile()
-            if currentProfile?.id == profileID, currentProfile?.updatedAt == currentProfile?.updatedAt {
-                // Already registered — skip unless profile was updated.
-                // We'll re-register on the off chance the profile was edited.
+            let assignedVersion = myDevice.scheduleProfileVersion
+
+            if let current = currentProfile,
+               current.id == profileID,
+               let assignedVersion,
+               current.updatedAt == assignedVersion {
+                // Already registered with the explicitly assigned version.
+                return
             }
 
             // Fetch the full schedule profile.
             let profiles = try await cloudKit.fetchScheduleProfiles(familyID: enrollment.familyID)
             guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
 
-            // Check if we need to re-register (profile changed).
-            if let current = currentProfile, current == profile {
-                return // Already up to date.
+            // Only apply the version that was explicitly assigned by the parent.
+            // If the profile was edited (updatedAt changed) but not re-assigned
+            // (scheduleProfileVersion still points to old version), skip.
+            if let assignedVersion, profile.updatedAt != assignedVersion {
+                // Profile was edited but not re-assigned to this device.
+                // Use the stored profile if we have one, otherwise register anyway (first assignment).
+                if currentProfile?.id == profileID {
+                    return
+                }
             }
 
             if familyControlsAvailable {
@@ -895,6 +1010,49 @@ final class AppState {
             #if DEBUG
             print("[BigBrother] UI state refreshed: mode=\(snapshot.effectivePolicy.resolvedMode.displayName)")
             #endif
+        }
+    }
+
+    // MARK: - Self Unlock
+
+    /// Trigger a child-initiated self-unlock (15 minutes).
+    func applySelfUnlock() {
+        guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
+        do {
+            try cmdProcessor.applySelfUnlock(durationSeconds: 900)
+            refreshLocalState()
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Self-unlock failed: \(error)")
+            #endif
+        }
+    }
+
+    /// Cache the self-unlock budget from the CloudKit device record into App Group storage.
+    private func cacheSelfUnlockBudget(from device: ChildDevice) {
+        let budget = device.selfUnlocksPerDay ?? 0
+        let today = SelfUnlockState.todayDateString()
+        let current = storage.readSelfUnlockState()
+
+        if budget > 0 {
+            if let current, current.date == today {
+                // Same day — update budget if parent changed it, keep usedCount.
+                if current.budget != budget {
+                    try? storage.writeSelfUnlockState(SelfUnlockState(
+                        date: today, usedCount: current.usedCount, budget: budget
+                    ))
+                }
+            } else {
+                // New day or no state — reset counter with new budget.
+                try? storage.writeSelfUnlockState(SelfUnlockState(
+                    date: today, usedCount: 0, budget: budget
+                ))
+            }
+        } else if current != nil {
+            // Budget removed — write state with budget 0 so UI hides the card.
+            try? storage.writeSelfUnlockState(SelfUnlockState(
+                date: today, usedCount: 0, budget: 0
+            ))
         }
     }
 }

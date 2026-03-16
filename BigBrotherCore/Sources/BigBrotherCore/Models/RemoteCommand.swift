@@ -72,6 +72,15 @@ public enum CommandAction: Codable, Sendable, Equatable {
     case revokeAllApps
     /// Open the always-allowed apps picker on the child device.
     case requestAlwaysAllowedSetup
+    /// Unlock with penalty offset. Device stays locked for penaltySeconds first,
+    /// then unlocks for (totalSeconds - penaltySeconds). If penalty is 0, unlocks immediately.
+    case timedUnlock(totalSeconds: Int, penaltySeconds: Int)
+    /// Clear any manual override and return to schedule-driven enforcement.
+    /// If no schedule is assigned, defaults to dailyMode lock.
+    case returnToSchedule
+    /// Lock the device immediately and automatically return to schedule at the given date.
+    /// The child registers a DeviceActivitySchedule to fire returnToSchedule at that time.
+    case lockUntil(date: Date)
 
     /// Human-readable description for UI feedback.
     public var displayDescription: String {
@@ -124,8 +133,26 @@ public enum CommandAction: Codable, Sendable, Equatable {
             return "Revoke all allowed apps"
         case .requestAlwaysAllowedSetup:
             return "Configure always-allowed apps"
+        case .timedUnlock(let total, let penalty):
+            let totalMin = total / 60
+            let penaltyMin = penalty / 60
+            return "Timed unlock (\(totalMin)m total, \(penaltyMin)m penalty)"
+        case .returnToSchedule:
+            return "Return to schedule"
+        case .lockUntil(let date):
+            let formatter = DateFormatter()
+            formatter.dateFormat = "h:mm a"
+            return "Lock until \(formatter.string(from: date))"
         }
     }
+}
+
+/// Duration options for the lock action menu.
+public enum LockDuration: Sendable, Equatable {
+    case untilMidnight
+    case indefinite
+    case hours(Int)
+    case returnToSchedule
 }
 
 /// Monotonic status transitions: pending → delivered → applied | failed | expired.
