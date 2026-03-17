@@ -82,7 +82,20 @@ final class ChildDetailViewModel: CommandSendable {
         didSet {
             guard selfUnlockBudget != oldValue else { return }
             Self.saveSelfUnlockBudget(selfUnlockBudget, for: child.id)
-            Task { await saveSelfUnlockBudgetToCloudKit(selfUnlockBudget) }
+            debounceSelfUnlockBudget()
+        }
+    }
+
+    /// Debounce task for self-unlock budget saves — waits 1s after last change.
+    private var budgetDebounceTask: Task<Void, Never>?
+
+    private func debounceSelfUnlockBudget() {
+        budgetDebounceTask?.cancel()
+        let budget = selfUnlockBudget
+        budgetDebounceTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            await saveSelfUnlockBudgetToCloudKit(budget)
         }
     }
 
@@ -96,12 +109,12 @@ final class ChildDetailViewModel: CommandSendable {
         return values.max()
     }
 
+    /// Send self-unlock budget via command queue (debounced by caller).
     private func saveSelfUnlockBudgetToCloudKit(_ budget: Int) async {
-        for device in devices {
-            var updated = device
-            updated.selfUnlocksPerDay = budget > 0 ? budget : nil
-            try? await appState.cloudKit?.saveDevice(updated)
-        }
+        try? await appState.sendCommand(
+            target: .child(child.id),
+            action: .setSelfUnlockBudget(count: budget)
+        )
     }
 
     private static func loadSelfUnlockBudget(for childID: ChildProfileID) -> Int {
@@ -193,17 +206,30 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     /// Remaining seconds on a temporary unlock across this child's devices.
+    /// Falls back to parent-side unlock tracking when heartbeat hasn't confirmed yet.
     var remainingUnlockSeconds: Int? {
+        let now = Date()
         let devs = devices
-        let expiry = devs.compactMap { dev -> Date? in
+        let heartbeatExpiry = devs.compactMap { dev -> Date? in
             guard let hb = appState.latestHeartbeats.first(where: { $0.deviceID == dev.id }),
                   hb.currentMode == .unlocked,
                   let exp = hb.temporaryUnlockExpiresAt,
-                  exp > Date() else { return nil }
+                  exp > now else { return nil }
             return exp
         }.max()
-        guard let expiry else { return nil }
-        let secs = Int(expiry.timeIntervalSince(Date()))
+
+        // Fall back to parent-side tracking (set immediately when unlock is sent).
+        let key = "unlockExpiries"
+        let parentExpiry: Date? = {
+            guard let data = UserDefaults.standard.data(forKey: key),
+                  let decoded = try? JSONDecoder().decode([String: Date].self, from: data),
+                  let exp = decoded[child.id.rawValue],
+                  exp > now else { return nil }
+            return exp
+        }()
+
+        guard let expiry = heartbeatExpiry ?? parentExpiry else { return nil }
+        let secs = Int(expiry.timeIntervalSince(now))
         return secs > 0 ? secs : nil
     }
 
@@ -254,6 +280,19 @@ final class ChildDetailViewModel: CommandSendable {
     func revokeAllApps(for device: ChildDevice) async {
         await performCommand(.revokeAllApps, target: .device(device.id))
         appState.approvedApps.removeAll { $0.deviceID == device.id }
+    }
+
+    /// Unenroll a device: send unenroll command and delete the device record.
+    func unenrollDevice(_ device: ChildDevice) async {
+        await performCommand(.unenroll, target: .device(device.id))
+        guard let cloudKit = appState.cloudKit else { return }
+        do {
+            try await cloudKit.deleteDevice(device.id)
+            appState.childDevices.removeAll { $0.id == device.id }
+            appState.latestHeartbeats.removeAll { $0.deviceID == device.id }
+        } catch {
+            commandFeedback = "Failed to delete device: \(error.localizedDescription)"
+        }
     }
 
     /// Send requestAppConfiguration command to a specific device.

@@ -39,6 +39,9 @@ public enum StorageKeys {
     /// Timestamp of the last PIN lockout.
     public static let pinLockoutUntil = "fr.bigbrother.pinLockoutUntil"
 
+    /// Number of consecutive lockouts (escalating: 5m → 15m → 1h → 4h).
+    public static let pinLockoutStreak = "fr.bigbrother.pinLockoutStreak"
+
     /// The lock mode that was last confirmed applied to ManagedSettingsStore.
     public static let lastAppliedMode = "fr.bigbrother.lastAppliedMode"
 
@@ -80,4 +83,10 @@ public enum StorageKeys {
     /// Enrollment IDs cached in App Group so extensions can create events
     /// without needing Keychain access (which can fail in extension context).
     public static let cachedEnrollmentIDs = "cachedEnrollmentIDs"
+
+    // MARK: - Web Domain Allowlist
+
+    /// JSON-encoded [String] of allowed web domains (e.g. ["google.com", "khan.org"]).
+    /// Empty or missing = block all web. Used by enforcement to build shield.webDomains.
+    public static let allowedWebDomains = "allowedWebDomains"
 }

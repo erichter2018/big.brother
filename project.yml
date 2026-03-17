@@ -23,6 +23,9 @@ schemes:
 packages:
   BigBrotherCore:
     path: BigBrotherCore
+  firebase-ios-sdk:
+    url: https://github.com/firebase/firebase-ios-sdk
+    majorVersion: "11.0"
 
 settings:
   base:
@@ -44,12 +47,19 @@ targets:
         excludes:
           - "**/*.entitlements"
           - "**/*.plist"
+      - path: BigBrotherApp/GoogleService-Info.plist
+        type: file
+        buildPhase: resources
     dependencies:
       - package: BigBrotherCore
       - target: BigBrotherMonitor
       - target: BigBrotherShield
       - target: BigBrotherShieldAction
       - target: BigBrotherActivityReport
+      - package: firebase-ios-sdk
+        product: FirebaseAuth
+      - package: firebase-ios-sdk
+        product: FirebaseFirestore
       - sdk: FamilyControls.framework
         weak: true
       - sdk: ManagedSettings.framework
@@ -73,9 +83,11 @@ targets:
         NSFaceIDUsageDescription: "Big Brother uses Face ID to protect parent settings."
         BGTaskSchedulerPermittedIdentifiers:
           - fr.bigbrother.app.heartbeat-refresh
+          - fr.bigbrother.app.relock
         UIBackgroundModes:
           - fetch
           - remote-notification
+          - processing
         CFBundleURLTypes:
           - CFBundleURLSchemes:
               - bigbrother

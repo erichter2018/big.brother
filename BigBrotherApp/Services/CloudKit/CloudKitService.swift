@@ -19,6 +19,7 @@ protocol CloudKitServiceProtocol: Sendable {
     func fetchDevices(familyID: FamilyID) async throws -> [ChildDevice]
     func fetchDevices(childProfileID: ChildProfileID) async throws -> [ChildDevice]
     func saveDevice(_ device: ChildDevice) async throws
+    func updateDeviceFields(deviceID: DeviceID, fields: [String: CKRecordValue?]) async throws
     func deleteDevice(_ id: DeviceID) async throws
 
     // MARK: - Commands
@@ -30,6 +31,7 @@ protocol CloudKitServiceProtocol: Sendable {
         familyID: FamilyID
     ) async throws -> [RemoteCommand]
     func updateCommandStatus(_ commandID: UUID, status: CommandStatus) async throws
+    func deleteCommand(_ commandID: UUID) async throws
     func saveReceipt(_ receipt: CommandReceipt) async throws
     func fetchReceipts(familyID: FamilyID, since: Date) async throws -> [CommandReceipt]
     func fetchRecentCommands(familyID: FamilyID, since: Date) async throws -> [RemoteCommand]

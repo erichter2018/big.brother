@@ -1,7 +1,7 @@
 import Foundation
 
 /// How heartbeat monitoring is checked for an active window.
-public enum HeartbeatCheckMode: Codable, Sendable, Equatable {
+public enum HeartbeatCheckMode: Codable, Sendable, Equatable, Hashable {
     /// Alert if no heartbeat within the specified gap (rolling).
     case gap(TimeInterval)
     /// Alert only if zero heartbeats arrived during today's window.
@@ -11,7 +11,7 @@ public enum HeartbeatCheckMode: Codable, Sendable, Equatable {
 /// A time window on specific days of the week during which heartbeat
 /// monitoring is expected. Used by `HeartbeatProfile` to define when
 /// a device should be active and reporting.
-public struct ActiveWindow: Codable, Sendable, Equatable, Identifiable {
+public struct ActiveWindow: Codable, Sendable, Equatable, Hashable, Identifiable {
     public let id: UUID
     public var daysOfWeek: Set<DayOfWeek>
     public var startTime: DayTime

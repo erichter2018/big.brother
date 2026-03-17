@@ -34,6 +34,8 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         static let temporaryAllowedApps = "temporary_allowed_apps.json"
         static let lastShieldedApp = "last_shielded_app.json"
         static let unlockPickerPending = "unlock_picker_pending.json"
+        static let timedUnlockInfo = "timed_unlock_info.json"
+        static let selfUnlockState = "self_unlock_state.json"
     }
 
     public init(appGroupIdentifier: String = AppConstants.appGroupIdentifier) {
@@ -354,6 +356,20 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         try deleteFile(FileName.temporaryUnlockState)
     }
 
+    // MARK: - Timed Unlock Info
+
+    public func readTimedUnlockInfo() -> TimedUnlockInfo? {
+        read(FileName.timedUnlockInfo)
+    }
+
+    public func writeTimedUnlockInfo(_ info: TimedUnlockInfo) throws {
+        try writeAtomically(info, to: FileName.timedUnlockInfo)
+    }
+
+    public func clearTimedUnlockInfo() throws {
+        try deleteFile(FileName.timedUnlockInfo)
+    }
+
     // MARK: - Authorization Health
 
     public func readAuthorizationHealth() -> AuthorizationHealth? {
@@ -451,6 +467,16 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         } else {
             try deleteFile(FileName.activeScheduleProfile)
         }
+    }
+
+    // MARK: - Self Unlock State
+
+    public func readSelfUnlockState() -> SelfUnlockState? {
+        read(FileName.selfUnlockState)
+    }
+
+    public func writeSelfUnlockState(_ state: SelfUnlockState) throws {
+        try writeAtomically(state, to: FileName.selfUnlockState)
     }
 
     // MARK: - Device Restrictions

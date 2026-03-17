@@ -8,7 +8,7 @@ import Foundation
 ///
 /// The DeviceActivityMonitor extension uses this to automatically
 /// unlock/lock devices on schedule without network access.
-public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable {
+public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hashable {
     public let id: UUID
     public let familyID: FamilyID
     public var name: String
@@ -49,6 +49,64 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable {
     /// Returns the mode that should be active at the given date.
     public func resolvedMode(at date: Date, calendar: Calendar = .current) -> LockMode {
         isInFreeWindow(at: date, calendar: calendar) ? .unlocked : lockedMode
+    }
+
+    /// Returns the next time the mode will change (end of current free window,
+    /// or start of the next free window). Used for schedule labels like
+    /// "Free until 8 PM" / "Locked until 3 PM".
+    public func nextTransitionTime(from date: Date, calendar: Calendar = .current) -> Date? {
+        let weekday = calendar.component(.weekday, from: date)
+        guard let today = DayOfWeek(rawValue: weekday) else { return nil }
+        let hour = calendar.component(.hour, from: date)
+        let minute = calendar.component(.minute, from: date)
+        let now = DayTime(hour: hour, minute: minute)
+
+        let inFree = isInFreeWindow(at: date, calendar: calendar)
+
+        if inFree {
+            // Find the end of the current free window.
+            for window in freeWindows where window.daysOfWeek.contains(today) {
+                if now >= window.startTime && now < window.endTime {
+                    var comps = calendar.dateComponents([.year, .month, .day], from: date)
+                    comps.hour = window.endTime.hour
+                    comps.minute = window.endTime.minute
+                    comps.second = 0
+                    return calendar.date(from: comps)
+                }
+            }
+        } else {
+            // Find the start of the next free window (today or upcoming days).
+            // Check remaining windows today first.
+            let todayStarts = freeWindows
+                .filter { $0.daysOfWeek.contains(today) && $0.startTime > now }
+                .sorted { $0.startTime < $1.startTime }
+            if let next = todayStarts.first {
+                var comps = calendar.dateComponents([.year, .month, .day], from: date)
+                comps.hour = next.startTime.hour
+                comps.minute = next.startTime.minute
+                comps.second = 0
+                return calendar.date(from: comps)
+            }
+
+            // Check future days (up to 7 days ahead).
+            for dayOffset in 1...7 {
+                guard let futureDate = calendar.date(byAdding: .day, value: dayOffset, to: date) else { continue }
+                let futureWeekday = calendar.component(.weekday, from: futureDate)
+                guard let futureDay = DayOfWeek(rawValue: futureWeekday) else { continue }
+                let dayStarts = freeWindows
+                    .filter { $0.daysOfWeek.contains(futureDay) }
+                    .sorted { $0.startTime < $1.startTime }
+                if let next = dayStarts.first {
+                    var comps = calendar.dateComponents([.year, .month, .day], from: futureDate)
+                    comps.hour = next.startTime.hour
+                    comps.minute = next.startTime.minute
+                    comps.second = 0
+                    return calendar.date(from: comps)
+                }
+            }
+        }
+
+        return nil
     }
 
     /// Built-in preset profiles for common device usage patterns.

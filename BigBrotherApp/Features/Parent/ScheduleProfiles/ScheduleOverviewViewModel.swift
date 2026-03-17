@@ -22,7 +22,7 @@ final class ScheduleOverviewViewModel {
     }
 
     var childrenWithSchedule: [ChildScheduleInfo] {
-        appState.childProfiles.compactMap { child in
+        appState.orderedChildProfiles.compactMap { child in
             let profileID = scheduleProfileID(for: child)
             guard let profileID,
                   let profile = appState.scheduleProfiles.first(where: { $0.id == profileID })
@@ -32,7 +32,7 @@ final class ScheduleOverviewViewModel {
     }
 
     var childrenWithoutSchedule: [ChildProfile] {
-        appState.childProfiles.filter { child in
+        appState.orderedChildProfiles.filter { child in
             scheduleProfileID(for: child) == nil
         }
     }
@@ -59,41 +59,54 @@ final class ScheduleOverviewViewModel {
         }
     }
 
+    var successMessage: String?
+
     func assignSchedule(_ profile: ScheduleProfile, to child: ChildProfile) async {
-        guard let cloudKit = appState.cloudKit else { return }
+        errorMessage = nil
+        successMessage = nil
 
         let devices = appState.childDevices.filter { $0.childProfileID == child.id }
+        if devices.isEmpty {
+            errorMessage = "\(child.name) has no enrolled devices. Enroll a device first."
+            return
+        }
         do {
-            for var device in devices {
-                device.scheduleProfileID = profile.id
-                device.scheduleProfileVersion = profile.updatedAt
-                try await cloudKit.saveDevice(device)
+            let versionDate = profile.updatedAt ?? Date()
+            try await appState.sendCommand(
+                target: .child(child.id),
+                action: .setScheduleProfile(profileID: profile.id, versionDate: versionDate)
+            )
+            // Update in-memory immediately for responsive UI.
+            for device in devices {
                 if let idx = appState.childDevices.firstIndex(where: { $0.id == device.id }) {
                     appState.childDevices[idx].scheduleProfileID = profile.id
                     appState.childDevices[idx].scheduleProfileVersion = profile.updatedAt
                 }
             }
+            successMessage = "Assigned \(profile.name) to \(child.name)"
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = "Failed to assign schedule: \(error.localizedDescription)"
         }
     }
 
     func removeSchedule(from child: ChildProfile) async {
-        guard let cloudKit = appState.cloudKit else { return }
+        errorMessage = nil
+        successMessage = nil
 
-        let devices = appState.childDevices.filter { $0.childProfileID == child.id }
         do {
-            for var device in devices {
-                device.scheduleProfileID = nil
-                device.scheduleProfileVersion = nil
-                try await cloudKit.saveDevice(device)
+            try await appState.sendCommand(
+                target: .child(child.id),
+                action: .clearScheduleProfile
+            )
+            let devices = appState.childDevices.filter { $0.childProfileID == child.id }
+            for device in devices {
                 if let idx = appState.childDevices.firstIndex(where: { $0.id == device.id }) {
                     appState.childDevices[idx].scheduleProfileID = nil
                     appState.childDevices[idx].scheduleProfileVersion = nil
                 }
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = "Failed to remove schedule: \(error.localizedDescription)"
         }
     }
 

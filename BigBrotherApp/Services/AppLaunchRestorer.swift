@@ -126,12 +126,56 @@ struct AppLaunchRestorer {
             eventLogger.log(.policyReconciled, details: "Launch reconciliation: no change needed")
         }
 
+        // Schedule-aware reconciliation: if a schedule profile is active,
+        // verify enforcement matches the current window state. The Monitor
+        // extension handles transitions, but if it crashed mid-transition
+        // enforcement could be wrong.
+        reconcileScheduleState()
+
         // Log diagnostic.
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .restoration,
             message: "App launch restoration completed",
             details: "Action: \(action)"
         ))
+    }
+
+    /// Verify enforcement matches the current schedule window state.
+    /// Catches cases where the Monitor extension crashed during a transition.
+    private func reconcileScheduleState() {
+        guard let profile = storage.readActiveScheduleProfile() else { return }
+        let now = Date()
+        let inFreeWindow = profile.isInFreeWindow(at: now)
+        let currentSnapshot = snapshotStore.loadCurrentSnapshot()
+        let currentMode = currentSnapshot?.effectivePolicy.resolvedMode
+
+        // If we're in a free window but enforcement shows locked (or vice versa),
+        // re-apply the correct state.
+        if inFreeWindow && currentMode != .unlocked {
+            // Should be unlocked but isn't — extension missed the start.
+            #if DEBUG
+            print("[BigBrother] Schedule reconciliation: in free window but mode=\(currentMode?.rawValue ?? "nil"), clearing shields")
+            #endif
+            try? enforcement.clearAllRestrictions()
+            // Re-apply restrictions (they should always be on).
+            if let snapshot = currentSnapshot {
+                try? enforcement.apply(snapshot.effectivePolicy)
+            }
+            eventLogger.log(.policyReconciled, details: "Schedule reconciliation: cleared shields for active free window")
+        } else if !inFreeWindow && currentMode == .unlocked {
+            // Check if there's a temporary unlock active — don't override that.
+            if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > now {
+                return // Active temp unlock, don't re-lock.
+            }
+            // Should be locked but isn't — extension missed the end.
+            #if DEBUG
+            print("[BigBrother] Schedule reconciliation: outside free window but unlocked, re-locking")
+            #endif
+            if let snapshot = currentSnapshot {
+                try? enforcement.reconcile(with: snapshot)
+            }
+            eventLogger.log(.policyReconciled, details: "Schedule reconciliation: re-locked after missed free window end")
+        }
     }
 
     // MARK: - Private

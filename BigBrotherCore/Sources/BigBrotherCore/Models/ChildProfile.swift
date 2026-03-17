@@ -2,7 +2,7 @@ import Foundation
 
 /// A child profile represents one child in the family.
 /// A child may have multiple enrolled devices.
-public struct ChildProfile: Codable, Sendable, Identifiable, Equatable {
+public struct ChildProfile: Codable, Sendable, Identifiable, Equatable, Hashable {
     public let id: ChildProfileID
     public let familyID: FamilyID
     public var name: String

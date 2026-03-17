@@ -45,6 +45,36 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// nil = not yet reported (old build). false = .individual.
     public let isChildAuthorization: Bool?
 
+    /// Available disk space in bytes on the child device.
+    public let availableDiskSpace: Int64?
+
+    /// Total disk capacity in bytes on the child device.
+    public let totalDiskSpace: Int64?
+
+    /// Number of self-unlocks used today (nil = feature not configured).
+    public let selfUnlocksUsedToday: Int?
+
+    /// Origin of the current temporary unlock (nil if not in temp unlock).
+    public let temporaryUnlockOrigin: TemporaryUnlockOrigin?
+
+    /// Current iOS version string (e.g. "17.4.1").
+    public let osVersion: String?
+
+    /// Device model identifier (e.g. "iPad13,4").
+    public let modelIdentifier: String?
+
+    /// Manual build number from AppConstants, carried via heartbeat so parent can compare.
+    public let appBuildNumber: Int?
+
+    /// Last enforcement error message (nil = no recent errors).
+    public let enforcementError: String?
+
+    /// Name of the currently active schedule free window (nil = not in a free window).
+    public let activeScheduleWindowName: String?
+
+    /// When the last command was successfully processed (nil = never).
+    public let lastCommandProcessedAt: Date?
+
     public init(
         deviceID: DeviceID,
         familyID: FamilyID,
@@ -65,7 +95,17 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         allowedAppNames: [String]? = nil,
         temporaryAllowedAppNames: [String]? = nil,
         temporaryUnlockExpiresAt: Date? = nil,
-        isChildAuthorization: Bool? = nil
+        isChildAuthorization: Bool? = nil,
+        availableDiskSpace: Int64? = nil,
+        totalDiskSpace: Int64? = nil,
+        selfUnlocksUsedToday: Int? = nil,
+        temporaryUnlockOrigin: TemporaryUnlockOrigin? = nil,
+        osVersion: String? = nil,
+        modelIdentifier: String? = nil,
+        appBuildNumber: Int? = nil,
+        enforcementError: String? = nil,
+        activeScheduleWindowName: String? = nil,
+        lastCommandProcessedAt: Date? = nil
     ) {
         self.deviceID = deviceID
         self.familyID = familyID
@@ -87,6 +127,16 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.temporaryAllowedAppNames = temporaryAllowedAppNames
         self.temporaryUnlockExpiresAt = temporaryUnlockExpiresAt
         self.isChildAuthorization = isChildAuthorization
+        self.availableDiskSpace = availableDiskSpace
+        self.totalDiskSpace = totalDiskSpace
+        self.selfUnlocksUsedToday = selfUnlocksUsedToday
+        self.temporaryUnlockOrigin = temporaryUnlockOrigin
+        self.osVersion = osVersion
+        self.modelIdentifier = modelIdentifier
+        self.appBuildNumber = appBuildNumber
+        self.enforcementError = enforcementError
+        self.activeScheduleWindowName = activeScheduleWindowName
+        self.lastCommandProcessedAt = lastCommandProcessedAt
     }
 
     // MARK: - Backward-compatible Codable
@@ -100,6 +150,16 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case allowedAppNames, temporaryAllowedAppNames
         case temporaryUnlockExpiresAt
         case isChildAuthorization
+        case availableDiskSpace
+        case totalDiskSpace
+        case selfUnlocksUsedToday
+        case temporaryUnlockOrigin
+        case osVersion
+        case modelIdentifier
+        case appBuildNumber
+        case enforcementError
+        case activeScheduleWindowName
+        case lastCommandProcessedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -124,5 +184,15 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         temporaryAllowedAppNames = try container.decodeIfPresent([String].self, forKey: .temporaryAllowedAppNames)
         temporaryUnlockExpiresAt = try container.decodeIfPresent(Date.self, forKey: .temporaryUnlockExpiresAt)
         isChildAuthorization = try container.decodeIfPresent(Bool.self, forKey: .isChildAuthorization)
+        availableDiskSpace = try container.decodeIfPresent(Int64.self, forKey: .availableDiskSpace)
+        totalDiskSpace = try container.decodeIfPresent(Int64.self, forKey: .totalDiskSpace)
+        selfUnlocksUsedToday = try container.decodeIfPresent(Int.self, forKey: .selfUnlocksUsedToday)
+        temporaryUnlockOrigin = try container.decodeIfPresent(TemporaryUnlockOrigin.self, forKey: .temporaryUnlockOrigin)
+        osVersion = try container.decodeIfPresent(String.self, forKey: .osVersion)
+        modelIdentifier = try container.decodeIfPresent(String.self, forKey: .modelIdentifier)
+        appBuildNumber = try container.decodeIfPresent(Int.self, forKey: .appBuildNumber)
+        enforcementError = try container.decodeIfPresent(String.self, forKey: .enforcementError)
+        activeScheduleWindowName = try container.decodeIfPresent(String.self, forKey: .activeScheduleWindowName)
+        lastCommandProcessedAt = try container.decodeIfPresent(Date.self, forKey: .lastCommandProcessedAt)
     }
 }

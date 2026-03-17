@@ -94,6 +94,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             guard let bgTask = task as? BGAppRefreshTask else { return }
             self?.handleHeartbeatRefresh(bgTask)
         }
+
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: AppConstants.bgTaskRelock,
+            using: nil
+        ) { [weak self] task in
+            guard let bgTask = task as? BGProcessingTask else { return }
+            self?.handleRelockTask(bgTask)
+        }
     }
 
     /// Schedule the next background heartbeat refresh.
@@ -131,6 +139,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         let workTask = Task {
             do {
+                // Check for expired unlocks and re-lock if needed (safety net).
+                await MainActor.run {
+                    self.checkAndRelockExpiredUnlocks(appState: appState)
+                }
+
                 // Process any pending commands first.
                 try? await appState.commandProcessor?.processIncomingCommands()
 
@@ -158,6 +171,91 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             #if DEBUG
             print("[BGTask] Heartbeat refresh expired by system")
             #endif
+        }
+    }
+
+    // MARK: - Enforcement Safety Net
+
+    /// Check for expired temporary/timed unlocks and re-lock.
+    /// Called from both the heartbeat BGTask and the re-lock BGProcessingTask.
+    @MainActor
+    private func checkAndRelockExpiredUnlocks(appState: AppState) {
+        let now = Date()
+
+        // Check expired temporary unlock.
+        if let unlockState = appState.storage.readTemporaryUnlockState(),
+           unlockState.expiresAt <= now {
+            appState.applyTimedUnlockEnd()
+            #if DEBUG
+            print("[BGTask] Safety net: cleared expired temporary unlock")
+            #endif
+        }
+
+        // Re-read timed info (applyTimedUnlockEnd may have cleared it above).
+        if let timedInfo = appState.storage.readTimedUnlockInfo() {
+            if now < timedInfo.unlockAt {
+                // Still in penalty phase — ensure device is locked.
+                appState.enforcePenaltyPhaseLock()
+            } else if now >= timedInfo.unlockAt && now < timedInfo.lockAt {
+                // Should be in free phase — ensure device is unlocked.
+                appState.applyTimedUnlockStart()
+            } else if now >= timedInfo.lockAt {
+                // Past lock time — re-lock.
+                appState.applyTimedUnlockEnd()
+            }
+        }
+    }
+
+    // MARK: - Re-lock BGProcessingTask
+
+    /// Schedule a BGProcessingTask to fire at the given date.
+    /// Called when a temporary or timed unlock is created.
+    /// Static so it can be called from CommandProcessor/AppState without a reference to AppDelegate.
+    static func scheduleRelockTask(at date: Date) {
+        let request = BGProcessingTaskRequest(identifier: AppConstants.bgTaskRelock)
+        request.earliestBeginDate = date
+        request.requiresNetworkConnectivity = false
+        request.requiresExternalPower = false
+
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            #if DEBUG
+            print("[BGTask] Scheduled re-lock task at \(date)")
+            #endif
+        } catch {
+            #if DEBUG
+            print("[BGTask] Failed to schedule re-lock task: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
+    private func handleRelockTask(_ task: BGProcessingTask) {
+        #if DEBUG
+        print("[BGTask] Re-lock task started")
+        #endif
+
+        guard let appState else {
+            task.setTaskCompleted(success: false)
+            return
+        }
+
+        let workTask = Task { @MainActor in
+            self.checkAndRelockExpiredUnlocks(appState: appState)
+
+            // Also process commands, send heartbeat, and sync events
+            // since we're awake anyway.
+            try? await appState.commandProcessor?.processIncomingCommands()
+            try? await appState.heartbeatService?.sendNow(force: true)
+            try? await appState.eventLogger?.syncPendingEvents()
+
+            #if DEBUG
+            print("[BGTask] Re-lock task complete")
+            #endif
+            task.setTaskCompleted(success: true)
+        }
+
+        task.expirationHandler = {
+            workTask.cancel()
         }
     }
 

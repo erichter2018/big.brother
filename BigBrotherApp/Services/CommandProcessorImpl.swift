@@ -1,4 +1,5 @@
 import Foundation
+import CloudKit
 import ManagedSettings
 import DeviceActivity
 import BigBrotherCore
@@ -103,14 +104,41 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         print("[BigBrother] Found \(commands.count) pending commands, \(processedIDs.count) already processed")
         #endif
 
-        // Sort by issuedAt (oldest first) for correct ordering.
-        let sorted = commands
-            .filter { !processedIDs.contains($0.id) }
-            .sorted { $0.issuedAt < $1.issuedAt }
+        // Filter out already-processed commands.
+        let unprocessed = commands.filter { !processedIDs.contains($0.id) }
 
+        // Separate enforcement commands (lock/unlock) from config commands (budget, etc.).
+        let enforcementCommands = unprocessed.filter { Self.isEnforcementCommand($0.action) }
+        let configCommands = unprocessed.filter { !Self.isEnforcementCommand($0.action) }
+
+        // For config commands, only process the LATEST of each type — older duplicates
+        // are stale and just waste time. Group by action description as a key.
+        var latestConfig: [String: RemoteCommand] = [:]
+        for cmd in configCommands {
+            let key = cmd.action.displayDescription
+            if let existing = latestConfig[key] {
+                // Keep the newer one, mark the older as processed to skip next time.
+                if cmd.issuedAt > existing.issuedAt {
+                    try? storage.markCommandProcessed(existing.id)
+                    latestConfig[key] = cmd
+                } else {
+                    try? storage.markCommandProcessed(cmd.id)
+                }
+            } else {
+                latestConfig[key] = cmd
+            }
+        }
+
+        // Process enforcement first, then only the latest config commands.
+        let sorted = enforcementCommands.sorted { $0.issuedAt < $1.issuedAt }
+            + latestConfig.values.sorted { $0.issuedAt < $1.issuedAt }
+
+        let skippedConfig = configCommands.count - latestConfig.count
         #if DEBUG
         if sorted.isEmpty && !commands.isEmpty {
             print("[BigBrother] All commands already processed (deduped)")
+        } else {
+            print("[BigBrother] \(enforcementCommands.count) enforcement + \(latestConfig.count) config to process (\(skippedConfig) stale config skipped)")
         }
         #endif
 
@@ -118,7 +146,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             #if DEBUG
             print("[BigBrother] Processing command: \(command.action), id=\(command.id)")
             #endif
-            let result = processCommand(command, enrollment: enrollment)
+            let result = await processCommand(command, enrollment: enrollment)
             #if DEBUG
             print("[BigBrother] Command result: \(result.logReason)")
             #endif
@@ -137,10 +165,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
 
             try? storage.markCommandProcessed(command.id)
 
-            // Mark the command as applied/failed in CloudKit so it's not returned by
-            // future fetchPendingCommands queries. This is the server-side dedup.
-            let serverStatus: CommandStatus = (result == .applied) ? .applied : .failed
-            try? await cloudKit.updateCommandStatus(command.id, status: serverStatus)
+            // NOTE: We don't update command status on the server here because
+            // CloudKit public database only allows the record creator (parent) to
+            // modify records. The child can't write to parent-created commands.
+            // The parent-side cleanup in AppState.cleanupStaleCommands handles this.
 
             // Log diagnostic.
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -153,6 +181,15 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         // Prune processed IDs older than retention window.
         let cutoff = Date().addingTimeInterval(-AppConstants.processedCommandRetentionSeconds)
         try? storage.pruneProcessedCommands(olderThan: cutoff)
+
+        // Record last command processing time for heartbeat reporting.
+        if !sorted.isEmpty {
+            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+            defaults.set(Date().timeIntervalSince1970, forKey: "fr.bigbrother.lastCommandProcessedAt")
+
+            // Send heartbeat immediately so parent sees the confirmed mode change.
+            onRequestHeartbeat?()
+        }
     }
 
     func process(_ command: RemoteCommand) async throws -> CommandReceipt {
@@ -169,7 +206,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             )
         }
 
-        let result = processCommand(command, enrollment: enrollment)
+        let result = await processCommand(command, enrollment: enrollment)
 
         return makeReceipt(
             commandID: command.id,
@@ -185,7 +222,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
     private func processCommand(
         _ command: RemoteCommand,
         enrollment: ChildEnrollmentState
-    ) -> CommandProcessingResult {
+    ) async -> CommandProcessingResult {
         // Check expiration.
         if let expiresAt = command.expiresAt, expiresAt < Date() {
             eventLogger.log(.commandFailed, details: "Command \(command.id) expired")
@@ -308,6 +345,72 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                 eventLogger.log(.commandApplied, details: "Locked until \(formatter.string(from: date))")
                 ModeChangeNotifier.notify(newMode: .dailyMode)
                 return .applied
+
+            case .syncPINHash(let base64):
+                guard let data = Data(base64Encoded: base64) else {
+                    return .failedExecution(reason: "Invalid PIN hash base64")
+                }
+                try keychain.setData(data, forKey: StorageKeys.parentPINHash)
+                eventLogger.log(.commandApplied, details: "Parent PIN synced to device")
+                return .applied
+
+            case .setScheduleProfile(let profileID, let versionDate):
+                try await cloudKit.updateDeviceFields(
+                    deviceID: enrollment.deviceID,
+                    fields: [
+                        CKFieldName.scheduleProfileID: profileID.uuidString as CKRecordValue,
+                        CKFieldName.scheduleProfileVersion: versionDate as CKRecordValue
+                    ]
+                )
+                eventLogger.log(.commandApplied, details: "Schedule profile set: \(profileID.uuidString.prefix(8))")
+                return .applied
+
+            case .clearScheduleProfile:
+                try await cloudKit.updateDeviceFields(
+                    deviceID: enrollment.deviceID,
+                    fields: [
+                        CKFieldName.scheduleProfileID: nil,
+                        CKFieldName.scheduleProfileVersion: nil
+                    ]
+                )
+                eventLogger.log(.commandApplied, details: "Schedule profile cleared")
+                return .applied
+
+            case .setSelfUnlockBudget(let count):
+                let value: CKRecordValue? = count > 0 ? count as NSNumber : nil
+                try await cloudKit.updateDeviceFields(
+                    deviceID: enrollment.deviceID,
+                    fields: [CKFieldName.selfUnlocksPerDay: value]
+                )
+                eventLogger.log(.commandApplied, details: "Self-unlock budget set to \(count)")
+                return .applied
+
+            case .setPenaltyTimer(let seconds, let endTime):
+                try await cloudKit.updateDeviceFields(
+                    deviceID: enrollment.deviceID,
+                    fields: [
+                        CKFieldName.penaltySeconds: seconds.map { $0 as NSNumber } as CKRecordValue?,
+                        CKFieldName.penaltyTimerEndTime: endTime.map { $0 as NSDate } as CKRecordValue?
+                    ]
+                )
+                eventLogger.log(.commandApplied, details: "Penalty timer updated")
+                return .applied
+
+            case .setHeartbeatProfile(let profileID):
+                let value: CKRecordValue? = profileID?.uuidString as CKRecordValue?
+                try await cloudKit.updateDeviceFields(
+                    deviceID: enrollment.deviceID,
+                    fields: [CKFieldName.heartbeatProfileID: value]
+                )
+                eventLogger.log(.commandApplied, details: "Heartbeat profile set: \(profileID?.uuidString.prefix(8) ?? "cleared")")
+                return .applied
+
+            case .setAllowedWebDomains(let domains):
+                let data = try JSONEncoder().encode(domains)
+                try storage.writeRawData(data, forKey: StorageKeys.allowedWebDomains)
+                reapplyCurrentEnforcement()
+                eventLogger.log(.commandApplied, details: "Web domains: \(domains.isEmpty ? "all blocked" : domains.joined(separator: ", "))")
+                return .applied
             }
 
         } catch {
@@ -424,9 +527,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             // when the unlock expires — works even if the main app is terminated.
             registerTempUnlockExpirySchedule(commandID: commandID, start: now, end: expiresAt)
 
-            let hours = durationSeconds / 3600
-            let mins = (durationSeconds % 3600) / 60
-            let durationStr = hours > 0 ? (mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h") : "\(mins)m"
+            // Also schedule a BGProcessingTask as a second safety net.
+            AppDelegate.scheduleRelockTask(at: expiresAt)
+
+            let durationStr = ModeChangeNotifier.formatDuration(durationSeconds)
             eventLogger.log(.temporaryUnlockStarted, details: "Unlocked for \(durationStr)")
         }
     }
@@ -435,8 +539,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
     /// at the temporary unlock expiry time. The monitor extension handles re-lock.
     private func registerTempUnlockExpirySchedule(commandID: UUID, start: Date, end: Date) {
         let cal = Calendar.current
-        let startComps = cal.dateComponents([.hour, .minute, .second], from: start)
-        let endComps = cal.dateComponents([.hour, .minute, .second], from: end)
+        let startComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: start)
+        let endComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: end)
 
         let activityName = DeviceActivityName(rawValue: "bigbrother.tempunlock.\(commandID.uuidString)")
         let schedule = DeviceActivitySchedule(
@@ -451,6 +555,22 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         #if DEBUG
         print("[BigBrother] Registered temp unlock expiry schedule: \(activityName.rawValue), ends at \(end)")
         #endif
+    }
+
+    // MARK: - Direct Enforcement (called from main app for timed unlock transitions)
+
+    /// Apply a temporary unlock directly (no command needed).
+    func applyTemporaryUnlockDirect(durationSeconds: Int, enrollment: ChildEnrollmentState) throws {
+        try applyTemporaryUnlock(
+            durationSeconds: durationSeconds,
+            enrollment: enrollment,
+            commandID: UUID()
+        )
+    }
+
+    /// Apply a mode change directly (no command needed).
+    func applyModeDirect(_ mode: LockMode, enrollment: ChildEnrollmentState) throws {
+        try applyMode(mode, enrollment: enrollment, commandID: UUID())
     }
 
     // MARK: - Self Unlock (child-initiated)
@@ -516,7 +636,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             try enforcement?.apply(snapshot.effectivePolicy)
             try snapshotStore.markApplied()
             registerTempUnlockExpirySchedule(commandID: unlockID, start: now, end: expiresAt)
-            eventLogger.log(.temporaryUnlockStarted, details: "Self-unlock for \(durationSeconds / 60)m")
+            eventLogger.log(.temporaryUnlockStarted, details: "Self-unlock for \(ModeChangeNotifier.formatDuration(durationSeconds))")
         }
     }
 
@@ -547,7 +667,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                 enrollment: enrollment,
                 commandID: commandID
             )
-            eventLogger.log(.commandApplied, details: "Timed unlock: no penalty remaining, unlocked for \(unlockDuration / 60)m")
+            eventLogger.log(.commandApplied, details: "Timed unlock: no penalty remaining, unlocked for \(ModeChangeNotifier.formatDuration(unlockDuration))")
             ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: unlockDuration)
         } else {
             // Register a DeviceActivitySchedule: locked now, unlock after penalty, lock after total.
@@ -556,8 +676,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             let lockAt = now.addingTimeInterval(Double(adjustedTotal))
             let cal = Calendar.current
 
-            let startComps = cal.dateComponents([.hour, .minute, .second], from: unlockAt)
-            let endComps = cal.dateComponents([.hour, .minute, .second], from: lockAt)
+            let startComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: unlockAt)
+            let endComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: lockAt)
 
             let activityName = DeviceActivityName(rawValue: "bigbrother.timedunlock.\(commandID.uuidString)")
             let schedule = DeviceActivitySchedule(
@@ -578,15 +698,22 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             )
             try storage.writeTimedUnlockInfo(info)
 
+            // Schedule BGProcessingTasks as safety nets for both phase transitions.
+            AppDelegate.scheduleRelockTask(at: unlockAt)  // penalty → unlock
+            AppDelegate.scheduleRelockTask(at: lockAt)    // unlock → re-lock
+
             // Explicitly enforce locked mode during penalty phase.
             // The device may have been in an ambiguous state; ensure shields are active.
+            // NOTE: applyMode() clears timedUnlockInfo, so we must re-write it after.
             let currentMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .dailyMode
             let lockedMode = currentMode == .unlocked ? .dailyMode : currentMode
             try applyMode(lockedMode, enrollment: enrollment, commandID: commandID)
+            // Re-write timed unlock info because applyMode() clears it.
+            try storage.writeTimedUnlockInfo(info)
 
-            let penaltyMin = adjustedPenalty / 60
-            let unlockMin = (adjustedTotal - adjustedPenalty) / 60
-            eventLogger.log(.commandApplied, details: "Timed unlock: \(penaltyMin)m penalty then \(unlockMin)m free")
+            let penaltyStr = ModeChangeNotifier.formatDuration(adjustedPenalty)
+            let unlockStr = ModeChangeNotifier.formatDuration(adjustedTotal - adjustedPenalty)
+            eventLogger.log(.commandApplied, details: "Timed unlock: \(penaltyStr) penalty then \(unlockStr) free")
             ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedPenalty, unlockSeconds: adjustedTotal - adjustedPenalty)
         }
     }
@@ -641,8 +768,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         guard date > now else { return }
 
         let cal = Calendar.current
-        let startComps = cal.dateComponents([.hour, .minute, .second], from: now)
-        let endComps = cal.dateComponents([.hour, .minute, .second], from: date)
+        let startComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
+        let endComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
 
         let activityName = DeviceActivityName(rawValue: "bigbrother.lockuntil.\(commandID.uuidString)")
         let schedule = DeviceActivitySchedule(
@@ -1077,6 +1204,21 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             return []
         }
         return (try? JSONDecoder().decode(Set<String>.self, from: data)) ?? []
+    }
+
+    /// Returns true for commands that affect device lock state and should be processed first.
+    private static func isEnforcementCommand(_ action: CommandAction) -> Bool {
+        switch action {
+        case .setMode, .temporaryUnlock, .timedUnlock, .lockUntil, .returnToSchedule,
+             .allowApp, .revokeApp, .allowManagedApp, .blockManagedApp,
+             .temporaryUnlockApp, .revokeAllApps, .requestAlwaysAllowedSetup, .unenroll:
+            return true
+        case .setSelfUnlockBudget, .setRestrictions, .nameApp, .syncPINHash,
+             .setScheduleProfile, .clearScheduleProfile, .setHeartbeatProfile,
+             .setPenaltyTimer, .requestHeartbeat, .requestAppConfiguration,
+             .setAllowedWebDomains:
+            return false
+        }
     }
 
     private func makeReceipt(

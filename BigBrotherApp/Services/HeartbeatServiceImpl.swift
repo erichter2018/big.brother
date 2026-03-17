@@ -23,6 +23,10 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     private var timer: Timer?
     private let interval: TimeInterval
 
+    /// Called after a successful heartbeat send — piggyback command processing
+    /// since the device is clearly online.
+    var onHeartbeatSent: (() -> Void)?
+
     /// Monotonically increasing sequence number for this app launch.
     /// Persisted across heartbeats within a session; resets on app relaunch.
     private var seqCounter: Int64 = 0
@@ -86,19 +90,32 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let snapshot = storage.readPolicySnapshot()
         let currentMode = snapshot?.effectivePolicy.resolvedMode ?? .unlocked
         let policyVersion = snapshot?.effectivePolicy.policyVersion ?? 0
-        let tempUnlockExpiry: Date? = {
-            // Only report expiry if the device is actually unlocked.
+        let tempUnlockState: TemporaryUnlockState? = {
+            // Only report if the device is actually unlocked.
             // The TemporaryUnlockState file may linger after a lock command.
             guard currentMode == .unlocked,
                   let state = storage.readTemporaryUnlockState(),
                   state.expiresAt > Date() else { return nil }
-            return state.expiresAt
+            return state
         }()
+        let tempUnlockExpiry = tempUnlockState?.expiresAt
 
         let blockingConfig = storage.readAppBlockingConfig()
         let cachedAppNames = Self.discoveredAppNames(from: storage)
         let allowedNames = Self.resolvedAllowedAppNames(from: storage)
         let tempAllowedNames = Self.resolvedTemporaryAllowedAppNames(from: storage)
+
+        let selfUnlocksUsed: Int? = {
+            guard let state = storage.readSelfUnlockState() else { return nil }
+            let today = SelfUnlockState.todayDateString()
+            if state.date != today {
+                // Persist the reset so other readers see the updated state.
+                let reset = state.resettingIfNeeded(currentDate: today)
+                try? storage.writeSelfUnlockState(reset)
+                return 0
+            }
+            return state.usedCount
+        }()
 
         seqCounter += 1
         let ckStatus = await Self.cloudKitAccountStatus()
@@ -124,7 +141,17 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             allowedAppNames: allowedNames.isEmpty ? nil : allowedNames,
             temporaryAllowedAppNames: tempAllowedNames.isEmpty ? nil : tempAllowedNames,
             temporaryUnlockExpiresAt: tempUnlockExpiry,
-            isChildAuthorization: UserDefaults.standard.string(forKey: "fr.bigbrother.authorizationType") == "child"
+            isChildAuthorization: UserDefaults.standard.string(forKey: "fr.bigbrother.authorizationType") == "child",
+            availableDiskSpace: Self.availableDiskSpace,
+            totalDiskSpace: Self.totalDiskSpace,
+            selfUnlocksUsedToday: selfUnlocksUsed,
+            temporaryUnlockOrigin: tempUnlockState?.origin,
+            osVersion: Self.currentOSVersion,
+            modelIdentifier: Self.currentModelIdentifier,
+            appBuildNumber: AppConstants.appBuildNumber,
+            enforcementError: Self.lastEnforcementError(from: storage),
+            activeScheduleWindowName: Self.activeScheduleWindowName(from: storage),
+            lastCommandProcessedAt: Self.lastCommandProcessedAt(from: storage)
         )
 
         do {
@@ -132,6 +159,15 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
             let successStatus = attemptStatus.recordingSuccess()
             try? storage.writeHeartbeatStatus(successStatus)
+
+            // Update device record with current OS version + model if changed.
+            await updateDeviceRecordIfNeeded(enrollment: enrollment)
+
+            // Safety net: reconcile enforcement on every successful heartbeat.
+            reconcileEnforcement()
+
+            // Process commands — device is online if heartbeat succeeded.
+            onHeartbeatSent?()
         } catch {
             let failureStatus = attemptStatus.recordingFailure(reason: error.localizedDescription)
             try? storage.writeHeartbeatStatus(failureStatus)
@@ -143,6 +179,21 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             ))
             throw error
         }
+    }
+
+    // MARK: - Enforcement Reconciliation
+
+    /// Re-apply enforcement as a safety net after each heartbeat.
+    /// Skips during free windows to avoid fighting the monitor extension.
+    private func reconcileEnforcement() {
+        guard let enforcement else { return }
+        // Don't re-enforce during free windows — monitor manages stores.
+        if let profile = storage.readActiveScheduleProfile(),
+           profile.isInFreeWindow(at: Date()) {
+            return
+        }
+        guard let snapshot = storage.readPolicySnapshot() else { return }
+        try? enforcement.apply(snapshot.effectivePolicy)
     }
 
     // MARK: - Device Info
@@ -168,6 +219,39 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         #else
         return nil
         #endif
+    }
+
+    private static var availableDiskSpace: Int64? {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        guard let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+              let bytes = values.volumeAvailableCapacityForImportantUsage else {
+            return nil
+        }
+        return bytes
+    }
+
+    private static var totalDiskSpace: Int64? {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        guard let values = try? home.resourceValues(forKeys: [.volumeTotalCapacityKey]),
+              let bytes = values.volumeTotalCapacity else {
+            return nil
+        }
+        return Int64(bytes)
+    }
+
+    private static var currentOSVersion: String {
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
+    }
+
+    private static var currentModelIdentifier: String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        return withUnsafePointer(to: &systemInfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+                String(validatingUTF8: $0) ?? "unknown"
+            }
+        }
     }
 
     private static func cloudKitAccountStatus() async -> String {
@@ -225,6 +309,72 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             .filter(isUsefulAppName(_:))
         let unique = Set(names)
         return unique.sorted()
+    }
+
+    /// Update the BBChildDevice record in CloudKit with current OS version and model
+    /// if they've changed since enrollment (or last update).
+    /// Only touches osVersion and modelIdentifier — does NOT use saveDevice() to avoid
+    /// overwriting parent-set fields (scheduleProfileID, penaltySeconds, etc.).
+    private func updateDeviceRecordIfNeeded(enrollment: ChildEnrollmentState) async {
+        let osVersion = Self.currentOSVersion
+        let model = Self.currentModelIdentifier
+        let key = "lastReportedDeviceInfo"
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let lastReported = defaults.string(forKey: key)
+        let current = "\(osVersion)|\(model)"
+        guard lastReported != current else { return }
+
+        do {
+            try await cloudKit.updateDeviceFields(
+                deviceID: enrollment.deviceID,
+                fields: [
+                    CKFieldName.osVersion: osVersion as CKRecordValue,
+                    CKFieldName.modelIdentifier: model as CKRecordValue
+                ]
+            )
+            defaults.set(current, forKey: key)
+            #if DEBUG
+            print("[BigBrother] Updated device record: iOS \(osVersion), model \(model)")
+            #endif
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Failed to update device record: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
+    private static func lastEnforcementError(from storage: any SharedStorageProtocol) -> String? {
+        let entries = storage.readDiagnosticEntries(category: .enforcement)
+        guard let last = entries.last else { return nil }
+        let isFailed = last.message.contains("failed") || last.message.contains("Failed")
+        return isFailed ? last.message : nil
+    }
+
+    private static func activeScheduleWindowName(from storage: any SharedStorageProtocol) -> String? {
+        guard let profile = storage.readActiveScheduleProfile() else { return nil }
+        let now = Date()
+        let cal = Calendar.current
+        if profile.isInFreeWindow(at: now, calendar: cal) {
+            // Find matching window and format its time range.
+            let weekday = cal.component(.weekday, from: now)
+            guard let today = DayOfWeek(rawValue: weekday) else { return "Free" }
+            let hour = cal.component(.hour, from: now)
+            let minute = cal.component(.minute, from: now)
+            let nowTime = DayTime(hour: hour, minute: minute)
+            for window in profile.freeWindows where window.daysOfWeek.contains(today) {
+                if nowTime >= window.startTime && nowTime < window.endTime {
+                    return "\(profile.name) free window"
+                }
+            }
+            return "Free"
+        }
+        return nil
+    }
+
+    private static func lastCommandProcessedAt(from storage: any SharedStorageProtocol) -> Date? {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
+        return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
     }
 
     private static func isUsefulAppName(_ name: String) -> Bool {

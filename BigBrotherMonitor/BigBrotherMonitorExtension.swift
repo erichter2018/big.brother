@@ -171,12 +171,21 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Timed unlock window ended — re-lock the device.
     private func handleTimedUnlockEnd(_ activity: DeviceActivityName) {
-        let policy = storage.readPolicySnapshot()?.effectivePolicy
-        let mode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .dailyMode
-        applyShieldingToAllStores(mode: mode, policy: policy)
+        let mode: LockMode
+        if let profile = storage.readActiveScheduleProfile() {
+            mode = profile.resolvedMode(at: Date())
+        } else {
+            mode = .dailyMode
+        }
+        if mode == .unlocked {
+            clearAllShieldStores()
+        } else {
+            let policy = storage.readPolicySnapshot()?.effectivePolicy
+            applyShieldingToAllStores(mode: mode, policy: policy)
+        }
         try? storage.clearTimedUnlockInfo()
-        logEvent(.scheduleEnded, details: "Timed unlock ended, locked to \(mode.rawValue)")
-        sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
+        logEvent(.scheduleEnded, details: "Timed unlock ended, mode \(mode.rawValue)")
+        sendModeNotification(title: "Free Time Ended", body: mode == .unlocked ? "Free window — all apps accessible." : "Device locked — \(mode.displayName) mode active.")
     }
 
     // MARK: - Temporary Unlock Expiry
@@ -296,19 +305,31 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if let timedInfo = storage.readTimedUnlockInfo() {
             let now = Date()
             if now < timedInfo.unlockAt {
-                // Still in penalty phase — device should be locked.
-                // The schedule will unlock when penalty expires. Nothing to do.
+                // Still in penalty phase — ensure device is locked.
+                let penaltyMode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .dailyMode
+                let policy = storage.readPolicySnapshot()?.effectivePolicy
+                applyShieldingToAllStores(mode: penaltyMode, policy: policy)
+                return
             } else if now >= timedInfo.unlockAt && now < timedInfo.lockAt {
                 // In the free phase — device should be unlocked.
                 clearAllShieldStores()
                 return
             } else {
                 // Past lockAt — the schedule should have re-locked, but clean up in case it didn't.
-                let mode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .dailyMode
-                let policy = storage.readPolicySnapshot()?.effectivePolicy
-                applyShieldingToAllStores(mode: mode, policy: policy)
+                let mode: LockMode
+                if let profile = storage.readActiveScheduleProfile() {
+                    mode = profile.resolvedMode(at: Date())
+                } else {
+                    mode = .dailyMode
+                }
+                if mode == .unlocked {
+                    clearAllShieldStores()
+                } else {
+                    let policy = storage.readPolicySnapshot()?.effectivePolicy
+                    applyShieldingToAllStores(mode: mode, policy: policy)
+                }
                 try? storage.clearTimedUnlockInfo()
-                logEvent(.policyReconciled, details: "Reconciliation: stale timed unlock cleaned up, locked to \(mode.rawValue)")
+                logEvent(.policyReconciled, details: "Reconciliation: stale timed unlock cleaned up, mode \(mode.rawValue)")
                 return
             }
         }

@@ -18,6 +18,13 @@ import BigBrotherCore
 /// 5. Completion handler is called with the appropriate result
 enum BackgroundRefreshHandler {
 
+    /// Minimum interval between push-triggered syncs (seconds).
+    /// Pushes arriving faster than this are coalesced.
+    private static let pushDebounceInterval: TimeInterval = 10
+
+    /// Timestamp of last push-triggered sync (child path only).
+    private nonisolated(unsafe) static var lastPushSync: Date = .distantPast
+
     /// Handle a CloudKit silent push notification.
     ///
     /// Called from `UIApplicationDelegate.application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`.
@@ -52,16 +59,12 @@ enum BackgroundRefreshHandler {
             return .noData
         }
 
-        #if DEBUG
-        print("[BigBrother] CloudKit push received — waiting for index consistency...")
-        #endif
-
-        // CloudKit fires the push immediately on record creation, but the query
-        // index may not reflect the new record yet. Wait briefly so follow-up
-        // fetches actually return the new record.
-        try? await Task.sleep(for: .seconds(1.5))
-
         if appState.parentState != nil {
+            #if DEBUG
+            print("[BigBrother] CloudKit push received (parent) — refreshing dashboard...")
+            #endif
+            // Short delay for index consistency.
+            try? await Task.sleep(for: .seconds(1.5))
             do {
                 try await appState.refreshDashboard()
                 #if DEBUG
@@ -75,11 +78,26 @@ enum BackgroundRefreshHandler {
                 return .failed
             }
         } else {
+            // Debounce rapid pushes — skip if we synced recently.
+            let elapsed = Date().timeIntervalSince(lastPushSync)
+            guard elapsed >= pushDebounceInterval else {
+                #if DEBUG
+                print("[BigBrother] Push debounced (\(Int(elapsed))s since last sync)")
+                #endif
+                return .noData
+            }
+            lastPushSync = Date()
+
+            #if DEBUG
+            print("[BigBrother] CloudKit push received (child) — waiting for index consistency...")
+            #endif
+            try? await Task.sleep(for: .seconds(1.5))
+
             do {
+                // performQuickSync already includes commands + heartbeat + events.
+                // No need for a separate forced heartbeat — it just doubles CloudKit writes.
                 try await appState.syncCoordinator?.performQuickSync()
                 await MainActor.run { appState.refreshLocalState() }
-                // Ensure heartbeat reflects new mode immediately.
-                try? await appState.heartbeatService?.sendNow(force: true)
                 #if DEBUG
                 print("[BigBrother] Quick sync complete after push")
                 #endif

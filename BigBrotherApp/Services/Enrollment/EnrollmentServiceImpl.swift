@@ -67,8 +67,9 @@ final class EnrollmentServiceImpl: EnrollmentServiceProtocol {
         )
         try await cloudKit.saveDevice(device)
 
-        // Mark the invite as used.
-        try await cloudKit.markInviteUsed(code: invite.code, deviceID: deviceID)
+        // Mark the invite as used (best-effort — child can't modify parent-created
+        // records in CloudKit public database due to ownership restrictions).
+        try? await cloudKit.markInviteUsed(code: invite.code, deviceID: deviceID)
 
         // Persist enrollment state to Keychain.
         let enrollment = ChildEnrollmentState(

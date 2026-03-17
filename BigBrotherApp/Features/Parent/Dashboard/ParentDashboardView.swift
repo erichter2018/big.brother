@@ -54,8 +54,18 @@ struct ParentDashboardView: View {
             .padding(.horizontal)
             .padding(.top, 8)
         }
-        .navigationTitle("Dashboard")
+        .navigationTitle("Big Brother Dashboard")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("Big Brother Dashboard")
+                        .font(.system(size: 24, weight: .semibold))
+                    Text("b\(AppConstants.appBuildNumber)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 NavigationLink {
                     AddChildView(appState: viewModel.appState)
@@ -78,9 +88,6 @@ struct ParentDashboardView: View {
             await viewModel.loadDashboard()
             viewModel.startCountdownTimer()
         }
-        .onDisappear {
-            viewModel.stopCountdownTimer()
-        }
     }
 
     @ViewBuilder
@@ -93,7 +100,8 @@ struct ParentDashboardView: View {
                 viewModel: ChildDetailViewModel(
                     appState: viewModel.appState,
                     child: child
-                )
+                ),
+                dominantMode: dominant.mode
             )
         } label: {
             ChildSummaryCard(
@@ -110,8 +118,13 @@ struct ParentDashboardView: View {
                 selfUnlockBudget: viewModel.selfUnlockBudget(for: child),
                 avatarHexColor: viewModel.penaltyTimer(for: child)?.avatarColor,
                 avatarImageUrl: viewModel.penaltyTimer(for: child)?.avatarUrl,
+                unlockOrigin: viewModel.unlockOrigin(for: child),
+                isHeartbeatConfirmed: dominant.confirmed,
+                isInPenaltyPhase: viewModel.isInPenaltyPhase(for: child),
                 isScheduleActive: viewModel.isScheduleActive(for: child),
                 scheduleLabel: viewModel.scheduleLabel(for: child),
+                scheduleStatus: viewModel.scheduleStatus(for: child)?.label,
+                scheduleStatusIsFree: viewModel.scheduleStatus(for: child)?.isFree ?? false,
                 onLock: { duration in Task { await viewModel.lockChild(child, duration: duration) } },
                 onUnlock: { seconds in Task { await viewModel.unlockChild(child, seconds: seconds) } },
                 onUnlockWithTimer: viewModel.appState.timerService != nil
@@ -121,12 +134,5 @@ struct ParentDashboardView: View {
             )
         }
         .buttonStyle(.plain)
-        .contextMenu {
-            Button(role: .destructive) {
-                Task { await viewModel.deleteChild(child) }
-            } label: {
-                Label("Delete Child", systemImage: "trash")
-            }
-        }
     }
 }

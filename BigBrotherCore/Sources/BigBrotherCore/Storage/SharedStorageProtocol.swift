@@ -106,6 +106,17 @@ public protocol SharedStorageProtocol: Sendable {
     /// Clear temporary unlock state (unlock expired or was cancelled).
     func clearTemporaryUnlockState() throws
 
+    // MARK: - Timed Unlock Info
+
+    /// Read the current timed unlock info (penalty-offset unlock).
+    func readTimedUnlockInfo() -> TimedUnlockInfo?
+
+    /// Write timed unlock info.
+    func writeTimedUnlockInfo(_ info: TimedUnlockInfo) throws
+
+    /// Clear timed unlock info.
+    func clearTimedUnlockInfo() throws
+
     // MARK: - Authorization Health
 
     /// Read the current authorization health.
@@ -164,6 +175,14 @@ public protocol SharedStorageProtocol: Sendable {
 
     /// Write the active schedule profile for extension consumption.
     func writeActiveScheduleProfile(_ profile: ScheduleProfile?) throws
+
+    // MARK: - Self Unlock State
+
+    /// Read the current self-unlock usage state (child device).
+    func readSelfUnlockState() -> SelfUnlockState?
+
+    /// Write the self-unlock usage state.
+    func writeSelfUnlockState(_ state: SelfUnlockState) throws
 
     // MARK: - Temporary Allowed Apps
 

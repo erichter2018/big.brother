@@ -8,6 +8,8 @@ struct ChildHomeView: View {
     @Bindable var viewModel: ChildHomeViewModel
     @State private var showAppBlockingSetup = false
     @State private var showAlwaysAllowedSetup = false
+    @State private var showPINUnlock = false
+    @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -23,7 +25,7 @@ struct ChildHomeView: View {
                     // Mode icon + status
                     modeHeader
 
-                    // Info cards — side by side on iPad, stacked on iPhone
+                    // Info cards
                     infoCards
 
                     // Authorization warning (only when needed)
@@ -33,12 +35,34 @@ struct ChildHomeView: View {
 
                     Spacer(minLength: 40)
 
+                    // PIN Unlock button
+                    if viewModel.isPINConfigured {
+                        HStack {
+                            Spacer()
+                            Button {
+                                pinUnlockViewModel = LocalParentUnlockViewModel(appState: viewModel.appState)
+                                showPINUnlock = true
+                            } label: {
+                                Label("PIN Unlock", systemImage: "lock.open")
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.4))
+                            }
+                        }
+                    }
+
                     // Subtle footer
                     Text("Managed by Big Brother")
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.3))
                 }
                 .padding()
+            }
+        }
+        .sheet(isPresented: $showPINUnlock, onDismiss: {
+            pinUnlockViewModel = nil
+        }) {
+            if let vm = pinUnlockViewModel {
+                LocalUnlockView(viewModel: vm)
             }
         }
         #if canImport(FamilyControls)
@@ -117,36 +141,11 @@ struct ChildHomeView: View {
                     .frame(maxWidth: .infinity)
             }
 
-            // Timed unlock with penalty offset
-            if let countdown = viewModel.timedUnlockCountdown {
-                if viewModel.isInPenaltyPhase {
-                    timedUnlockCard(
-                        title: "Penalty Time",
-                        countdown: countdown,
-                        subtitle: "Device unlocks when penalty ends",
-                        color: .red
-                    )
-                    .frame(maxWidth: .infinity)
-                } else if viewModel.isInTimedUnlockPhase {
-                    timedUnlockCard(
-                        title: "Free Time",
-                        countdown: countdown,
-                        subtitle: "remaining",
-                        color: .green
-                    )
-                    .frame(maxWidth: .infinity)
-                }
-            }
-            // Regular temporary unlock countdown
-            else if viewModel.isTemporaryUnlock, let state = viewModel.temporaryUnlockState {
-                unlockCountdownCard(state: state)
-                    .frame(maxWidth: .infinity)
-            }
-
-            // Penalty timer
-            if viewModel.timedUnlockInfo == nil, let penaltyDisplay = viewModel.penaltyDisplayString {
-                penaltyTimerCard(display: penaltyDisplay, isRunning: viewModel.isPenaltyRunning)
-                    .frame(maxWidth: .infinity)
+            // Countdown cards — wrapped in TimelineView so Date() is captured
+            // once per tick and Text(timerInterval:) rebuilds with a fresh start.
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let now = context.date
+                countdownCards(now: now)
             }
 
             // Self-unlock compact indicator (when full card is hidden)
@@ -168,46 +167,71 @@ struct ChildHomeView: View {
         }
     }
 
-    // MARK: - Unlock Countdown
-
+    /// All countdown-dependent cards. `now` comes from TimelineView so it's
+    /// consistent within a single render and refreshes every second.
     @ViewBuilder
-    private func unlockCountdownCard(state: TemporaryUnlockState) -> some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "clock")
-                    .foregroundStyle(.white.opacity(0.8))
-                Text("Temporary Unlock")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundStyle(.white.opacity(0.8))
-            }
-
-            if state.expiresAt > viewModel.now {
-                let remaining = Int(state.expiresAt.timeIntervalSince(viewModel.now))
-                let h = remaining / 3600
-                let m = (remaining % 3600) / 60
-                let s = remaining % 60
-
-                Text(h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s))
-                    .font(.system(size: 48, weight: .thin, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
-
-                Text("remaining")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.5))
+    private func countdownCards(now: Date) -> some View {
+        // Timed unlock with penalty offset
+        if let info = viewModel.timedUnlockInfo {
+            if now < info.unlockAt {
+                liveCountdownCard(
+                    title: "Penalty Time",
+                    end: info.unlockAt,
+                    now: now,
+                    subtitle: "Device unlocks when penalty ends",
+                    color: .red
+                )
+                .frame(maxWidth: .infinity)
+            } else if now < info.lockAt {
+                liveCountdownCard(
+                    title: "Free Time",
+                    end: info.lockAt,
+                    now: now,
+                    subtitle: "remaining",
+                    color: .green
+                )
+                .frame(maxWidth: .infinity)
             }
         }
-        .padding(.vertical, 20)
-        .padding(.horizontal, 30)
-        .background(.white.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 20))
+        // Regular temporary unlock countdown
+        else if viewModel.isTemporaryUnlock, let state = viewModel.temporaryUnlockState,
+                state.expiresAt > now {
+            liveCountdownCard(
+                title: "Temporary Unlock",
+                end: state.expiresAt,
+                now: now,
+                subtitle: "remaining",
+                color: .white
+            )
+            .frame(maxWidth: .infinity)
+        }
+
+        // Penalty timer — suppress when timed unlock is active (same penalty, already shown above).
+        if viewModel.timedUnlockInfo == nil {
+            if let end = viewModel.penaltyTimerEndTime, end > now {
+                // Running penalty countdown
+                liveCountdownCard(
+                    title: "Screen Time Penalty",
+                    end: end,
+                    now: now,
+                    subtitle: "counting down",
+                    color: .red
+                )
+                .frame(maxWidth: .infinity)
+            } else if let secs = viewModel.penaltySeconds, secs > 0 {
+                // Banked penalty (static)
+                bankedPenaltyCard(seconds: secs)
+                    .frame(maxWidth: .infinity)
+            }
+        }
     }
 
-    // MARK: - Timed Unlock Card
+    // MARK: - Live Countdown Card (uses Text(timerInterval:) — ticks automatically)
 
     @ViewBuilder
-    private func timedUnlockCard(title: String, countdown: String, subtitle: String, color: Color) -> some View {
+    private func liveCountdownCard(title: String, end: Date, now: Date, subtitle: String, color: Color) -> some View {
+        // Clamp end to at least now to prevent invalid ClosedRange crash.
+        let safeEnd = max(now, end)
         VStack(spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: color == .red ? "hourglass" : "clock")
@@ -218,10 +242,10 @@ struct ChildHomeView: View {
                     .foregroundStyle(.white.opacity(0.8))
             }
 
-            Text(countdown)
+            Text(timerInterval: now...safeEnd, countsDown: true)
                 .font(.system(size: 48, weight: .thin, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(color)
+                .foregroundStyle(color == .white ? .white : color)
 
             Text(subtitle)
                 .font(.caption)
@@ -229,17 +253,19 @@ struct ChildHomeView: View {
         }
         .padding(.vertical, 20)
         .padding(.horizontal, 30)
-        .background(color.opacity(0.12))
+        .background((color == .white ? Color.white : color).opacity(0.12))
         .clipShape(RoundedRectangle(cornerRadius: 20))
     }
 
-    // MARK: - Penalty Timer Card
+    // MARK: - Banked Penalty Card (static, not counting down)
 
     @ViewBuilder
-    private func penaltyTimerCard(display: String, isRunning: Bool) -> some View {
+    private func bankedPenaltyCard(seconds: Int) -> some View {
+        let h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60
+        let display = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
         VStack(spacing: 12) {
             HStack(spacing: 8) {
-                Image(systemName: isRunning ? "timer" : "hourglass")
+                Image(systemName: "hourglass")
                     .foregroundStyle(.white.opacity(0.8))
                 Text("Screen Time Penalty")
                     .font(.subheadline)
@@ -252,7 +278,7 @@ struct ChildHomeView: View {
                 .monospacedDigit()
                 .foregroundStyle(.red)
 
-            Text(isRunning ? "counting down" : "banked")
+            Text("banked")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.5))
         }

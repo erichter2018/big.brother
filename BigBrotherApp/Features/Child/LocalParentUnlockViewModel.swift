@@ -1,4 +1,6 @@
 import Foundation
+import UIKit
+import UserNotifications
 import Observation
 import BigBrotherCore
 
@@ -12,8 +14,31 @@ final class LocalParentUnlockViewModel {
     var lockoutDate: Date?
     var unlockSuccess = false
 
+    /// nil = show duration picker, set = show PIN entry
+    var selectedDuration: Int?
+
+    /// Available unlock durations for the duration picker.
+    static let durationOptions: [(label: String, icon: String, seconds: Int?)] = [
+        ("15 minutes", "clock", 15 * 60),
+        ("1 hour", "clock", 1 * 3600),
+        ("1.5 hours", "clock", 5400),
+        ("2 hours", "clock", 2 * 3600),
+        ("Until midnight", "moon.fill", nil), // computed at selection time
+        ("24 hours", "clock.badge.checkmark", 24 * 3600),
+    ]
+
+    static var secondsUntilMidnight: Int {
+        let now = Date()
+        let midnight = Calendar.current.startOfDay(for: now).addingTimeInterval(86400)
+        return max(60, Int(midnight.timeIntervalSince(now)))
+    }
+
     init(appState: AppState) {
         self.appState = appState
+    }
+
+    private var deviceName: String {
+        UIDevice.current.name
     }
 
     var isLockedOut: Bool {
@@ -37,11 +62,23 @@ final class LocalParentUnlockViewModel {
             pin = ""
             attemptsRemaining = remaining
             errorMessage = "Incorrect PIN"
+            appState.eventLogger?.log(.localPINUnlock,
+                details: "PIN unlock FAILED on \(deviceName) — \(remaining) attempts remaining")
+            postLocalNotification(
+                title: "PIN Unlock Failed",
+                body: "Incorrect PIN entered on \(deviceName). \(remaining) attempts remaining."
+            )
 
         case .lockedOut(let until):
             pin = ""
             lockoutDate = until
             errorMessage = nil
+            appState.eventLogger?.log(.localPINUnlock,
+                details: "PIN unlock LOCKED OUT on \(deviceName)")
+            postLocalNotification(
+                title: "PIN Unlock Locked Out",
+                body: "Too many failed attempts on \(deviceName). Try again later."
+            )
         }
     }
 
@@ -56,7 +93,7 @@ final class LocalParentUnlockViewModel {
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .essentialOnly
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
-        let duration = AppConstants.defaultTemporaryUnlockSeconds
+        let duration = selectedDuration.map(TimeInterval.init) ?? AppConstants.defaultTemporaryUnlockSeconds
         let expiresAt = Date().addingTimeInterval(duration)
 
         // Create durable temp unlock state.
@@ -107,8 +144,32 @@ final class LocalParentUnlockViewModel {
         }
 
         // Log the event.
-        appState.eventLogger?.log(.localPINUnlock, details: "Local PIN unlock for \(Int(duration))s")
+        let durationLabel = Self.durationOptions.first { $0.seconds == selectedDuration }?.label ?? "\(Int(duration))s"
+        appState.eventLogger?.log(.localPINUnlock,
+            details: "PIN unlock on \(deviceName) for \(durationLabel)")
+        postLocalNotification(
+            title: "Device Unlocked",
+            body: "\(deviceName) unlocked for \(durationLabel) via parent PIN."
+        )
 
         unlockSuccess = true
+    }
+
+    private func postLocalNotification(title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+        // Request permission if not yet granted (no-op if already decided).
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            let request = UNNotificationRequest(
+                identifier: "pin-unlock-\(UUID().uuidString)",
+                content: content,
+                trigger: nil // deliver immediately
+            )
+            center.add(request)
+        }
     }
 }

@@ -105,6 +105,7 @@ struct ParentPINSetupView: View {
 
         do {
             try appState.auth?.setPIN(pin)
+            Task { await appState.syncPINToChildDevices() }
             if let onComplete {
                 onComplete()
             } else {

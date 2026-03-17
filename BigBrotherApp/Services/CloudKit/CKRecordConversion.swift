@@ -67,6 +67,13 @@ enum CKRecordConversion {
     static func toCKRecord(_ device: ChildDevice) -> CKRecord {
         let id = recordID(device.id.rawValue, type: CKRecordType.childDevice)
         let record = CKRecord(recordType: CKRecordType.childDevice, recordID: id)
+        updateCKRecord(record, from: device)
+        return record
+    }
+
+    /// Update an existing CKRecord in-place from a ChildDevice.
+    /// Setting fields to nil clears them on the server when using .changedKeys save policy.
+    static func updateCKRecord(_ record: CKRecord, from device: ChildDevice) {
         record[CKFieldName.deviceID] = device.id.rawValue
         record[CKFieldName.profileID] = device.childProfileID.rawValue
         record[CKFieldName.familyID] = device.familyID.rawValue
@@ -77,19 +84,10 @@ enum CKRecordConversion {
         record[CKFieldName.familyControlsOK] = (device.familyControlsAuthorized ? 1 : 0) as NSNumber
         record[CKFieldName.heartbeatProfileID] = device.heartbeatProfileID?.uuidString
         record[CKFieldName.scheduleProfileID] = device.scheduleProfileID?.uuidString
-        if let ps = device.penaltySeconds {
-            record[CKFieldName.penaltySeconds] = ps as NSNumber
-        }
-        if let endTime = device.penaltyTimerEndTime {
-            record[CKFieldName.penaltyTimerEndTime] = endTime as NSDate
-        }
-        if let s = device.selfUnlocksPerDay {
-            record[CKFieldName.selfUnlocksPerDay] = s as NSNumber
-        }
-        if let v = device.scheduleProfileVersion {
-            record[CKFieldName.scheduleProfileVersion] = v as NSDate
-        }
-        return record
+        record[CKFieldName.penaltySeconds] = device.penaltySeconds.map { $0 as NSNumber }
+        record[CKFieldName.penaltyTimerEndTime] = device.penaltyTimerEndTime.map { $0 as NSDate }
+        record[CKFieldName.selfUnlocksPerDay] = device.selfUnlocksPerDay.map { $0 as NSNumber }
+        record[CKFieldName.scheduleProfileVersion] = device.scheduleProfileVersion.map { $0 as NSDate }
     }
 
     static func childDevice(from record: CKRecord) -> ChildDevice? {
@@ -314,6 +312,13 @@ enum CKRecordConversion {
         if let disk = hb.availableDiskSpace { record[CKFieldName.availableDiskSpace] = disk as NSNumber }
         if let total = hb.totalDiskSpace { record[CKFieldName.totalDiskSpace] = total as NSNumber }
         if let s = hb.selfUnlocksUsedToday { record[CKFieldName.selfUnlocksUsedToday] = s as NSNumber }
+        if let origin = hb.temporaryUnlockOrigin { record[CKFieldName.temporaryUnlockOrigin] = origin.rawValue }
+        if let os = hb.osVersion { record[CKFieldName.hbOSVersion] = os }
+        if let model = hb.modelIdentifier { record[CKFieldName.hbModelIdentifier] = model }
+        if let build = hb.appBuildNumber { record[CKFieldName.hbAppBuildNumber] = build as NSNumber }
+        if let err = hb.enforcementError { record[CKFieldName.hbEnforcementError] = err }
+        if let win = hb.activeScheduleWindowName { record[CKFieldName.hbActiveScheduleWindow] = win }
+        if let cmdAt = hb.lastCommandProcessedAt { record[CKFieldName.hbLastCommandProcessedAt] = cmdAt as NSDate }
         return record
     }
 
@@ -356,7 +361,14 @@ enum CKRecordConversion {
             isChildAuthorization: (record[CKFieldName.isChildAuthorization] as? Int64).map { $0 != 0 },
             availableDiskSpace: record[CKFieldName.availableDiskSpace] as? Int64,
             totalDiskSpace: record[CKFieldName.totalDiskSpace] as? Int64,
-            selfUnlocksUsedToday: (record[CKFieldName.selfUnlocksUsedToday] as? Int64).map { Int($0) }
+            selfUnlocksUsedToday: (record[CKFieldName.selfUnlocksUsedToday] as? Int64).map { Int($0) },
+            temporaryUnlockOrigin: (record[CKFieldName.temporaryUnlockOrigin] as? String).flatMap { TemporaryUnlockOrigin(rawValue: $0) },
+            osVersion: record[CKFieldName.hbOSVersion] as? String,
+            modelIdentifier: record[CKFieldName.hbModelIdentifier] as? String,
+            appBuildNumber: (record[CKFieldName.hbAppBuildNumber] as? Int64).map { Int($0) },
+            enforcementError: record[CKFieldName.hbEnforcementError] as? String,
+            activeScheduleWindowName: record[CKFieldName.hbActiveScheduleWindow] as? String,
+            lastCommandProcessedAt: record[CKFieldName.hbLastCommandProcessedAt] as? Date
         )
     }
 

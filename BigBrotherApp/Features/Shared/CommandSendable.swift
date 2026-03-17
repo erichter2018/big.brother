@@ -20,11 +20,39 @@ extension CommandSendable {
 
         do {
             try await appState.sendCommand(target: target, action: action)
-            commandFeedback = "\(action.displayDescription) sent."
+            let targetLabel = self.targetLabel(for: target)
+            commandFeedback = "\(action.displayDescription) sent\(targetLabel)."
         } catch {
             commandFeedback = "Failed: \(error.localizedDescription)"
             isCommandError = true
         }
         isSendingCommand = false
+
+        // Auto-dismiss after 10 seconds.
+        let feedback = commandFeedback
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            // Only clear if the feedback hasn't changed (another command might have fired).
+            if self?.commandFeedback == feedback {
+                self?.commandFeedback = nil
+            }
+        }
+    }
+
+    private func targetLabel(for target: CommandTarget) -> String {
+        switch target {
+        case .allDevices:
+            return " to all devices"
+        case .child(let childID):
+            if let name = appState.childProfiles.first(where: { $0.id == childID })?.name {
+                return " to \(name)"
+            }
+            return ""
+        case .device(let deviceID):
+            if let device = appState.childDevices.first(where: { $0.id == deviceID }) {
+                return " to \(device.displayName)"
+            }
+            return ""
+        }
     }
 }

@@ -81,6 +81,22 @@ public enum CommandAction: Codable, Sendable, Equatable {
     /// Lock the device immediately and automatically return to schedule at the given date.
     /// The child registers a DeviceActivitySchedule to fire returnToSchedule at that time.
     case lockUntil(date: Date)
+    /// Sync the parent PIN hash to child devices so local PIN unlock works.
+    /// The base64 string is the PBKDF2 hash (salt + derived key combined).
+    case syncPINHash(base64: String)
+    /// Assign a schedule profile to this device. The child updates its own CloudKit record.
+    case setScheduleProfile(profileID: UUID, versionDate: Date)
+    /// Remove the schedule profile from this device.
+    case clearScheduleProfile
+    /// Set the daily self-unlock budget on this device.
+    case setSelfUnlockBudget(count: Int)
+    /// Set penalty timer data on this device.
+    case setPenaltyTimer(seconds: Int?, endTime: Date?)
+    /// Set the heartbeat monitoring profile on this device.
+    case setHeartbeatProfile(profileID: UUID?)
+    /// Set the list of allowed web domains (child applies via shield.webDomains).
+    /// Empty array = block all web. nil domains in the array are ignored.
+    case setAllowedWebDomains(domains: [String])
 
     /// Human-readable description for UI feedback.
     public var displayDescription: String {
@@ -143,6 +159,20 @@ public enum CommandAction: Codable, Sendable, Equatable {
             let formatter = DateFormatter()
             formatter.dateFormat = "h:mm a"
             return "Lock until \(formatter.string(from: date))"
+        case .syncPINHash:
+            return "Sync parent PIN"
+        case .setScheduleProfile:
+            return "Set schedule profile"
+        case .clearScheduleProfile:
+            return "Clear schedule profile"
+        case .setSelfUnlockBudget(let count):
+            return "Set self-unlock budget to \(count)"
+        case .setPenaltyTimer:
+            return "Update penalty timer"
+        case .setHeartbeatProfile:
+            return "Set heartbeat profile"
+        case .setAllowedWebDomains(let domains):
+            return domains.isEmpty ? "Block all web" : "Allow \(domains.count) web domain(s)"
         }
     }
 }

@@ -44,19 +44,14 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
     }
 
     func registerReconciliationSchedule() throws {
-        // Register a schedule that fires every hour to reconcile enforcement state.
+        // Register a repeating schedule that fires every hour to reconcile enforcement state.
         // Uses a fixed activity name so it can be updated without duplication.
         let activityName = DeviceActivityName(rawValue: "bigbrother.reconciliation")
 
-        // Reconciliation schedule: fires at the start of every hour.
-        // The DeviceActivityMonitor extension will re-read the policy snapshot
-        // and verify enforcement state matches.
-        let now = Calendar.current.dateComponents([.hour, .minute], from: Date())
-        let startMinute = (now.minute ?? 0) + 1  // next minute
-        let endMinute = startMinute + 1
-
-        let start = DateComponents(hour: now.hour, minute: startMinute % 60)
-        let end = DateComponents(hour: now.hour, minute: endMinute % 60)
+        // Hourly repeating schedule: interval from minute 0 to minute 1 of each hour.
+        // DeviceActivityMonitor.intervalDidStart fires at the top of every hour.
+        let start = DateComponents(minute: 0)
+        let end = DateComponents(minute: 1)
 
         let schedule = DeviceActivitySchedule(
             intervalStart: start,

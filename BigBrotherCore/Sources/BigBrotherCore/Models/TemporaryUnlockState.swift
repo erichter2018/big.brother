@@ -7,6 +7,9 @@ public enum TemporaryUnlockOrigin: String, Codable, Sendable, Equatable {
 
     /// Unlock triggered by local PIN entry on the child device.
     case localPINUnlock
+
+    /// Unlock triggered by the child using a daily self-unlock budget.
+    case selfUnlock
 }
 
 /// Durable metadata about an active (or recently expired) temporary unlock.

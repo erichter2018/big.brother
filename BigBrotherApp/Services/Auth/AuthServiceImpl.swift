@@ -79,9 +79,11 @@ final class AuthServiceImpl: AuthServiceProtocol {
             let remaining = max(0, AppConstants.maxPINAttempts - attempts)
 
             if remaining == 0 {
-                let lockoutEnd = Date().addingTimeInterval(AppConstants.pinLockoutDurationSeconds)
+                let streak = incrementLockoutStreak()
+                let duration = lockoutDuration(forStreak: streak)
+                let lockoutEnd = Date().addingTimeInterval(duration)
                 defaults.set(lockoutEnd.timeIntervalSince1970, forKey: StorageKeys.pinLockoutUntil)
-                resetFailedAttempts()
+                defaults.set(0, forKey: StorageKeys.failedPINAttempts)
                 return .lockedOut(until: lockoutEnd)
             }
 
@@ -122,6 +124,23 @@ final class AuthServiceImpl: AuthServiceProtocol {
 
     private func resetFailedAttempts() {
         defaults.set(0, forKey: StorageKeys.failedPINAttempts)
+        defaults.set(0, forKey: StorageKeys.pinLockoutStreak)
         defaults.removeObject(forKey: StorageKeys.pinLockoutUntil)
+    }
+
+    private func incrementLockoutStreak() -> Int {
+        let current = defaults.integer(forKey: StorageKeys.pinLockoutStreak) + 1
+        defaults.set(current, forKey: StorageKeys.pinLockoutStreak)
+        return current
+    }
+
+    /// Escalating lockout: 5 min → 15 min → 1 hour → 4 hours (capped).
+    private func lockoutDuration(forStreak streak: Int) -> TimeInterval {
+        switch streak {
+        case 1:  return 5 * 60      // 5 minutes
+        case 2:  return 15 * 60     // 15 minutes
+        case 3:  return 60 * 60     // 1 hour
+        default: return 4 * 3600    // 4 hours
+        }
     }
 }

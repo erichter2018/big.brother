@@ -6,6 +6,7 @@ struct OnboardingView: View {
     let appState: AppState
 
     @State private var showParentSetup = false
+    @State private var showParentJoin = false
     @State private var showChildEnrollment = false
 
     var body: some View {
@@ -38,7 +39,7 @@ struct OnboardingView: View {
                                 .font(.title2)
                             Text("Set Up as Parent")
                                 .fontWeight(.semibold)
-                            Text("Manage children's devices")
+                            Text("Create a new family")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -46,6 +47,23 @@ struct OnboardingView: View {
                         .padding(.vertical, 12)
                     }
                     .buttonStyle(.borderedProminent)
+
+                    Button {
+                        showParentJoin = true
+                    } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: "person.2.badge.key")
+                                .font(.title2)
+                            Text("Join as Parent")
+                                .fontWeight(.semibold)
+                            Text("Enter code from existing parent")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.bordered)
 
                     Button {
                         showChildEnrollment = true
@@ -70,6 +88,9 @@ struct OnboardingView: View {
             }
             .navigationDestination(isPresented: $showParentSetup) {
                 ParentSetupView(appState: appState)
+            }
+            .navigationDestination(isPresented: $showParentJoin) {
+                ParentJoinView(appState: appState)
             }
             .navigationDestination(isPresented: $showChildEnrollment) {
                 EnrollmentCodeEntryView(appState: appState)

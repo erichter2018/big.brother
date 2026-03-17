@@ -9,16 +9,62 @@ struct GlobalActionsBar: View {
         return values.min()
     }
 
-    private var isIPad: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad
-    }
-
     var body: some View {
-        let layout = isIPad
-            ? AnyLayout(HStackLayout(spacing: 12))
-            : AnyLayout(VStackLayout(spacing: 8))
+        HStack(spacing: 8) {
+            // Unlock All (tap = 15m, menu = duration options + extend)
+            Menu {
+                if let remaining = minRemaining, remaining > 0 {
+                    Button {
+                        Task { await viewModel.unlockAll(seconds: remaining + 15 * 60) }
+                    } label: {
+                        Label("+15 minutes", systemImage: "plus.circle")
+                    }
+                    Divider()
+                }
+                Button { Task { await viewModel.unlockAll(seconds: 15 * 60) } } label: {
+                    Label("15 minutes", systemImage: "clock")
+                }
+                Button { Task { await viewModel.unlockAll(seconds: 1 * 3600) } } label: {
+                    Label("1 hour", systemImage: "clock")
+                }
+                Button { Task { await viewModel.unlockAll(seconds: 5400) } } label: {
+                    Label("1.5 hours", systemImage: "clock")
+                }
+                Button { Task { await viewModel.unlockAll(seconds: 2 * 3600) } } label: {
+                    Label("2 hours", systemImage: "clock")
+                }
+                Divider()
+                Button { Task { await viewModel.unlockAll(seconds: Self.secondsUntilMidnight) } } label: {
+                    Label("Until midnight", systemImage: "moon.fill")
+                }
+                Button { Task { await viewModel.unlockAll(seconds: 24 * 3600) } } label: {
+                    Label("24 hours", systemImage: "clock.badge.checkmark")
+                }
+                if viewModel.appState.timerService != nil {
+                    Divider()
+                    Button { Task { await viewModel.unlockAllWithTimer(seconds: 1 * 3600) } } label: {
+                        Label("1 hour + timer", systemImage: "timer")
+                    }
+                    Button { Task { await viewModel.unlockAllWithTimer(seconds: 2 * 3600) } } label: {
+                        Label("2 hours + timer", systemImage: "timer")
+                    }
+                }
+            } label: {
+                Label("Unlock All", systemImage: "lock.open")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(Color.green.opacity(0.12))
+                    .foregroundStyle(.green)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            } primaryAction: {
+                if let remaining = minRemaining, remaining > 0 {
+                    Task { await viewModel.unlockAll(seconds: remaining + 15 * 60) }
+                } else {
+                    Task { await viewModel.unlockAll(seconds: 15 * 60) }
+                }
+            }
 
-        layout {
             // Lock All (tap = until midnight, menu = duration options)
             Menu {
                 Button { Task { await viewModel.lockAll(duration: .returnToSchedule) } } label: {
@@ -53,53 +99,6 @@ struct GlobalActionsBar: View {
                 Task { await viewModel.lockAll(duration: .untilMidnight) }
             }
 
-            // Unlock All (tap = 15m, menu = duration options + extend)
-            Menu {
-                if let remaining = minRemaining, remaining > 0 {
-                    Button {
-                        Task { await viewModel.unlockAll(seconds: remaining + 15 * 60) }
-                    } label: {
-                        Label("+15 minutes", systemImage: "plus.circle")
-                    }
-                    Divider()
-                }
-                Button { Task { await viewModel.unlockAll(seconds: 15 * 60) } } label: {
-                    Label("15 minutes", systemImage: "clock")
-                }
-                Button { Task { await viewModel.unlockAll(seconds: 1 * 3600) } } label: {
-                    Label("1 hour", systemImage: "clock")
-                }
-                Button { Task { await viewModel.unlockAll(seconds: 5400) } } label: {
-                    Label("1.5 hours", systemImage: "clock")
-                }
-                Button { Task { await viewModel.unlockAll(seconds: 2 * 3600) } } label: {
-                    Label("2 hours", systemImage: "clock")
-                }
-                Divider()
-                Button { Task { await viewModel.unlockAll(seconds: 24 * 3600) } } label: {
-                    Label("24 hours", systemImage: "clock.badge.checkmark")
-                }
-                if viewModel.appState.timerService != nil {
-                    Divider()
-                    Button { Task { await viewModel.unlockAllWithTimer(seconds: 1 * 3600) } } label: {
-                        Label("1 hour + timer", systemImage: "timer")
-                    }
-                    Button { Task { await viewModel.unlockAllWithTimer(seconds: 2 * 3600) } } label: {
-                        Label("2 hours + timer", systemImage: "timer")
-                    }
-                }
-            } label: {
-                Label("Unlock All", systemImage: "lock.open")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(Color.green.opacity(0.12))
-                    .foregroundStyle(.green)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-            } primaryAction: {
-                Task { await viewModel.unlockAll(seconds: 15 * 60) }
-            }
-
             // Schedule All
             Button {
                 Task { await viewModel.scheduleAll() }
@@ -115,5 +114,11 @@ struct GlobalActionsBar: View {
         }
         .disabled(viewModel.isSendingCommand)
         .opacity(viewModel.isSendingCommand ? 0.6 : 1)
+    }
+
+    static var secondsUntilMidnight: Int {
+        let now = Date()
+        let midnight = Calendar.current.startOfDay(for: now).addingTimeInterval(86400)
+        return max(60, Int(midnight.timeIntervalSince(now)))
     }
 }

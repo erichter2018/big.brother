@@ -1,7 +1,7 @@
 import Foundation
 
 /// The restriction modes that can be applied to a child device.
-public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable {
+public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashable {
     /// No restrictions. All apps accessible.
     case unlocked
 

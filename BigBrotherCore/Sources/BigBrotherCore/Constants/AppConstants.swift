@@ -25,6 +25,12 @@ public enum AppConstants {
     /// ShieldAction extension bundle identifier.
     public static let shieldActionBundleID = "fr.bigbrother.app.shield-action"
 
+    // MARK: - Build Tracking
+
+    /// Manual build number — bump each time you deploy new code during development.
+    /// Both parent and child read this constant; matching numbers = same code.
+    public static let appBuildNumber = 76
+
     // MARK: - Enrollment
 
     /// How long an enrollment code remains valid (30 minutes).
@@ -102,6 +108,9 @@ public enum AppConstants {
 
     /// BGTaskScheduler identifier for periodic heartbeat + command sync.
     public static let bgTaskHeartbeat = "fr.bigbrother.app.heartbeat-refresh"
+
+    /// BGTaskScheduler identifier for enforcement re-lock at unlock expiry.
+    public static let bgTaskRelock = "fr.bigbrother.app.relock"
 
     // MARK: - Snapshot History
 

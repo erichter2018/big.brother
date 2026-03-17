@@ -124,4 +124,15 @@ enum CKFieldName {
 
     // BBHeartbeat (self-unlock reporting)
     static let selfUnlocksUsedToday = "selfUnlocksUsedToday"
+    static let temporaryUnlockOrigin = "tempUnlockOrigin"
+
+    // BBHeartbeat (device info)
+    static let hbOSVersion = "hbOSVersion"
+    static let hbModelIdentifier = "hbModelIdentifier"
+    static let hbAppBuildNumber = "hbAppBuildNumber"
+
+    // BBHeartbeat (diagnostics)
+    static let hbEnforcementError = "hbEnforcementError"
+    static let hbActiveScheduleWindow = "hbActiveScheduleWindow"
+    static let hbLastCommandProcessedAt = "hbLastCmdAt"
 }

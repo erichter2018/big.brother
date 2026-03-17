@@ -4,6 +4,8 @@ import BigBrotherCore
 /// Detail view for a child profile — devices, mode controls, approved apps.
 struct ChildDetailView: View {
     @Bindable var viewModel: ChildDetailViewModel
+    /// The dominant mode as computed by the parent dashboard (single source of truth).
+    var dominantMode: LockMode?
     @State private var showRevokeAllConfirmation = false
     @State private var deviceToRevokeAll: ChildDevice?
 
@@ -88,6 +90,23 @@ struct ChildDetailView: View {
         } message: {
             Text("This will block all currently allowed apps on \(deviceToRevokeAll?.displayName ?? "this device"). This cannot be undone.")
         }
+        .alert(
+            "Unenroll Device",
+            isPresented: Binding(
+                get: { deviceToUnenroll != nil },
+                set: { if !$0 { deviceToUnenroll = nil } }
+            )
+        ) {
+            Button("Unenroll & Delete", role: .destructive) {
+                if let device = deviceToUnenroll {
+                    Task { await viewModel.unenrollDevice(device) }
+                }
+                deviceToUnenroll = nil
+            }
+            Button("Cancel", role: .cancel) { deviceToUnenroll = nil }
+        } message: {
+            Text("This will unenroll \(deviceToUnenroll?.displayName ?? "this device") and delete it. You'll need to re-enroll it with a new code.")
+        }
         .refreshable {
             await viewModel.refresh()
         }
@@ -121,13 +140,27 @@ struct ChildDetailView: View {
                                 Text(device.displayName)
                                     .font(.subheadline)
                                     .fontWeight(.medium)
-                                Text(DeviceIcon.displayName(for: device.modelIdentifier))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                HStack(spacing: 6) {
+                                    Text(DeviceIcon.displayName(for: device.modelIdentifier))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    if let ts = hb?.timestamp {
+                                        Image(systemName: "heart.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
+                                        Text(ts, style: .relative)
+                                            .font(.caption2)
+                                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
+                                        + Text(" ago")
+                                            .font(.caption2)
+                                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
+                                    }
+                                }
                                 HStack(spacing: 8) {
                                     Text("iOS \(device.osVersion)")
                                         .font(.caption2)
                                         .foregroundStyle(.tertiary)
+                                    buildBadge(childBuild: hb?.appBuildNumber)
                                     if let battery = hb?.batteryLevel {
                                         HStack(spacing: 2) {
                                             Image(systemName: hb?.isCharging == true ? "battery.100.bolt" : "battery.50")
@@ -150,7 +183,7 @@ struct ChildDetailView: View {
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 2) {
-                                if let mode = device.confirmedMode {
+                                if let mode = dominantMode ?? device.confirmedMode {
                                     ModeBadge(mode: mode)
                                 }
                                 HStack(spacing: 4) {
@@ -191,10 +224,19 @@ struct ChildDetailView: View {
                     .padding(10)
                     .background(.regularMaterial)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            deviceToUnenroll = device
+                        } label: {
+                            Label("Unenroll Device", systemImage: "trash")
+                        }
+                    }
                 }
             }
         }
     }
+
+    @State private var deviceToUnenroll: ChildDevice?
 
     @ViewBuilder
     private var temporaryAllowedAppsSection: some View {
@@ -362,6 +404,23 @@ struct ChildDetailView: View {
     }
 
     // MARK: - Helpers
+
+    @ViewBuilder
+    private func buildBadge(childBuild: Int?) -> some View {
+        if let childBuild {
+            let matches = childBuild == AppConstants.appBuildNumber
+            HStack(spacing: 2) {
+                Text("b\(childBuild)")
+                    .font(.caption2)
+                if matches {
+                    Image(systemName: "checkmark")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
+            }
+            .foregroundStyle(matches ? Color.secondary : Color.orange)
+        }
+    }
 
     private static func formatDisk(available: Int64, total: Int64?) -> String {
         let gb = Double(available) / 1_000_000_000

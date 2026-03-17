@@ -1,6 +1,8 @@
 import SwiftUI
 import CloudKit
+import UserNotifications
 import BigBrotherCore
+import FirebaseCore
 
 // MARK: - Launch Diagnostics (inline to avoid cross-file resolution issues)
 
@@ -48,6 +50,13 @@ struct BigBrotherApp: App {
     init() {
         _LaunchLog.start()
         _LaunchLog.log("App struct init")
+        // Configure Firebase only if GoogleService-Info.plist is present.
+        if Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist") != nil {
+            FirebaseApp.configure()
+            _LaunchLog.log("Firebase configured")
+        } else {
+            _LaunchLog.log("Firebase: GoogleService-Info.plist not found, skipping")
+        }
         self._appState = State(initialValue: AppState())
         _LaunchLog.log("AppState created, role=\(self._appState.wrappedValue.deviceRole)")
     }
@@ -63,6 +72,9 @@ struct BigBrotherApp: App {
 
     private func setupOnLaunch() async {
         _LaunchLog.log("setupOnLaunch started")
+
+        // Clear badge on launch.
+        try? await UNUserNotificationCenter.current().setBadgeCount(0)
 
         // Wire AppState into the AppDelegate for push notification handling.
         appDelegate.appState = appState
@@ -172,6 +184,9 @@ struct BigBrotherApp: App {
                     monitor.startMonitoring()
                     appState.startUnlockRequestPolling()
                     _LaunchLog.log("Parent: DeviceMonitor + unlock request polling started")
+
+                    // Initialize AllowanceTracker timer integration if enabled.
+                    appState.initializeTimerServiceIfNeeded()
                 }
 
                 // Run CloudKit cleanup to prune old records.

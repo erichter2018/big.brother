@@ -22,6 +22,7 @@ import BigBrotherCore
 final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
     private let baseStore: ManagedSettingsStore
+    private let scheduleStore: ManagedSettingsStore
     private let tempUnlockStore: ManagedSettingsStore
     private let storage: any SharedStorageProtocol
     private let fcManager: any FamilyControlsManagerProtocol
@@ -32,6 +33,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     ) {
         self.baseStore = ManagedSettingsStore(
             named: ManagedSettingsStore.Name(rawValue: AppConstants.managedSettingsStoreBase)
+        )
+        self.scheduleStore = ManagedSettingsStore(
+            named: ManagedSettingsStore.Name(rawValue: AppConstants.managedSettingsStoreSchedule)
         )
         self.tempUnlockStore = ManagedSettingsStore(
             named: ManagedSettingsStore.Name(rawValue: AppConstants.managedSettingsStoreTempUnlock)
@@ -60,11 +64,15 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         case .unlocked:
             clearAllShieldStores()
 
-        case .dailyMode:
-            applyShield(allowExemptions: true)
-
-        case .essentialOnly:
-            applyShield(allowExemptions: false)
+        case .dailyMode, .essentialOnly:
+            // If schedule profile says we're in a free window, defer to the monitor extension.
+            // The monitor manages all stores during free windows — don't re-shield here.
+            if let profile = storage.readActiveScheduleProfile(),
+               profile.isInFreeWindow(at: Date()) {
+                clearAllShieldStores()
+            } else {
+                applyShield(allowExemptions: policy.resolvedMode == .dailyMode)
+            }
         }
 
         // Update shield config for the shield extension UI.
@@ -117,7 +125,29 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             print("[BigBrother] Shield applied — \(allowExemptions ? "category-only" : "essential") block with \(allowedTokens.count) exemptions")
             #endif
         }
-        baseStore.shield.webDomainCategories = .all()
+        applyWebBlocking()
+    }
+
+    /// Apply web domain blocking.
+    /// ManagedSettings doesn't support string-based domain allowlists — WebDomainToken
+    /// is opaque and requires a picker. So we use a simple on/off: if the parent has
+    /// configured allowed domains, web browsing is permitted entirely (app blocking
+    /// still applies). Otherwise all web categories are blocked.
+    private func applyWebBlocking() {
+        if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
+           let domains = try? JSONDecoder().decode([String].self, from: data),
+           !domains.isEmpty {
+            // Parent has allowed web access — don't block web categories.
+            baseStore.shield.webDomainCategories = nil
+            #if DEBUG
+            print("[BigBrother] Web blocking: disabled (\(domains.count) allowed domains configured)")
+            #endif
+        } else {
+            baseStore.shield.webDomainCategories = .all()
+            #if DEBUG
+            print("[BigBrother] Web blocking: all domains blocked")
+            #endif
+        }
     }
 
     /// Load app tokens from the saved FamilyActivitySelection.
@@ -129,12 +159,21 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         return selection.applicationTokens
     }
 
-    /// Clear the base store shield properties.
+    /// Clear shield properties on ALL named stores.
+    /// ManagedSettings merges across stores — if any store blocks, it's blocked.
     private func clearAllShieldStores() {
-        baseStore.shield.applications = nil
-        baseStore.shield.applicationCategories = nil
-        baseStore.shield.webDomainCategories = nil
-        baseStore.shield.webDomains = nil
+        for store in [baseStore, scheduleStore, tempUnlockStore] {
+            store.shield.applications = nil
+            store.shield.applicationCategories = nil
+            store.shield.webDomainCategories = nil
+            store.shield.webDomains = nil
+        }
+        // Also clear the default (unnamed) store in case anything leaked there.
+        let defaultStore = ManagedSettingsStore()
+        defaultStore.shield.applications = nil
+        defaultStore.shield.applicationCategories = nil
+        defaultStore.shield.webDomainCategories = nil
+        defaultStore.shield.webDomains = nil
     }
 
     /// Collect tokens for apps that should NOT be shielded (parent-approved).
@@ -199,21 +238,28 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     // MARK: - Private
 
     /// Apply device-level restrictions from parent settings.
-    /// Uses the default (unnamed) ManagedSettingsStore — named stores may not
-    /// enforce system-level restrictions like denyAppRemoval.
+    /// Clears stale restrictions from ALL stores first, then sets on default store.
     private func applyRestrictions() {
         let r = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+
+        // Clear restrictions from ALL named stores (stale values from earlier code).
+        for store in [baseStore, scheduleStore, tempUnlockStore] {
+            store.application.denyAppRemoval = nil
+            store.media.denyExplicitContent = nil
+            store.account.lockAccounts = nil
+            store.dateAndTime.requireAutomaticDateAndTime = nil
+        }
+
+        // Apply on the default (unnamed) store.
         let store = ManagedSettingsStore()
         store.application.denyAppRemoval = r.denyAppRemoval ? true : nil
         store.media.denyExplicitContent = r.denyExplicitContent ? true : nil
         store.account.lockAccounts = r.lockAccounts ? true : nil
         store.dateAndTime.requireAutomaticDateAndTime = r.requireAutomaticDateAndTime ? true : nil
 
-        // Read back to verify
-        let readBack = store.application.denyAppRemoval
         #if DEBUG
         print("[BigBrother] Restrictions applied: removal=\(r.denyAppRemoval) explicit=\(r.denyExplicitContent) accounts=\(r.lockAccounts) dateTime=\(r.requireAutomaticDateAndTime)")
-        print("[BigBrother] Restrictions readback: denyAppRemoval=\(String(describing: readBack))")
+        print("[BigBrother] Restrictions readback: denyAppRemoval=\(String(describing: store.application.denyAppRemoval))")
         #endif
     }
 

@@ -35,8 +35,15 @@ struct ModeActionButtons: View {
                     Label("2 hours", systemImage: "clock")
                 }
                 Divider()
+                Button { onTemporaryUnlock(Self.secondsUntilMidnight) } label: {
+                    Label("Until midnight", systemImage: "moon.fill")
+                }
                 Button { onTemporaryUnlock(24 * 3600) } label: {
                     Label("24 hours", systemImage: "clock.badge.checkmark")
+                }
+                Divider()
+                Button { onTemporaryUnlock(7 * 24 * 3600) } label: {
+                    Label("Indefinitely", systemImage: "infinity")
                 }
             } label: {
                 VStack(spacing: 2) {
@@ -49,7 +56,11 @@ struct ModeActionButtons: View {
                 .foregroundStyle(.green)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             } primaryAction: {
-                onTemporaryUnlock(15 * 60)
+                if let remaining = remainingSeconds, remaining > 0 {
+                    onTemporaryUnlock(remaining + 15 * 60)
+                } else {
+                    onTemporaryUnlock(15 * 60)
+                }
             }
 
             // Lock: tap = until midnight, long-press = duration menu
@@ -110,5 +121,11 @@ struct ModeActionButtons: View {
             .foregroundStyle(color)
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+    }
+
+    static var secondsUntilMidnight: Int {
+        let now = Date()
+        let midnight = Calendar.current.startOfDay(for: now).addingTimeInterval(86400)
+        return max(60, Int(midnight.timeIntervalSince(now)))
     }
 }

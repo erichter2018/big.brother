@@ -44,7 +44,7 @@ public struct Schedule: Codable, Sendable, Identifiable, Equatable {
 }
 
 /// Time of day without a date component.
-public struct DayTime: Codable, Sendable, Equatable, Comparable {
+public struct DayTime: Codable, Sendable, Equatable, Hashable, Comparable {
     public let hour: Int   // 0–23
     public let minute: Int // 0–59
 

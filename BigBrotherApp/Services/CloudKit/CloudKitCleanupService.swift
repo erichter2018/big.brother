@@ -17,7 +17,7 @@ enum CloudKitCleanupService {
     // MARK: - Retention Periods
 
     /// Commands and receipts older than this are deleted.
-    private static let commandRetention: TimeInterval = 48 * 3600 // 48 hours
+    private static let commandRetention: TimeInterval = 4 * 3600 // 4 hours
 
     /// Event logs older than this are deleted.
     private static let eventRetention: TimeInterval = 7 * 86400 // 7 days
@@ -35,7 +35,7 @@ enum CloudKitCleanupService {
 
         // 1. Old commands (applied, failed, or expired).
         let commandCutoff = Date().addingTimeInterval(-commandRetention)
-        for status in ["applied", "failed", "expired"] {
+        for status in ["applied", "failed", "expired", "pending"] {
             let predicate = NSPredicate(
                 format: "%K == %@ AND %K == %@ AND %K < %@",
                 CKFieldName.familyID, familyID.rawValue,

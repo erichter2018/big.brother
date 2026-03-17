@@ -17,6 +17,10 @@ final class ChildHomeViewModel {
         self.appState = appState
     }
 
+    /// Whether a parent PIN is configured in Keychain (independent of parentAuthEnabled toggle).
+    /// Stored property so @Observable triggers UI updates; refreshed by the 1s timer.
+    var isPINConfigured = false
+
     var currentMode: LockMode {
         appState.currentEffectivePolicy?.resolvedMode ?? .unlocked
     }
@@ -33,37 +37,6 @@ final class ChildHomeViewModel {
 
     var timedUnlockInfo: TimedUnlockInfo? {
         appState.storage.readTimedUnlockInfo()
-    }
-
-    /// Whether the device is in the penalty phase of a timed unlock.
-    var isInPenaltyPhase: Bool {
-        guard let info = timedUnlockInfo else { return false }
-        return now < info.unlockAt
-    }
-
-    /// Whether the device is in the unlock phase of a timed unlock.
-    var isInTimedUnlockPhase: Bool {
-        guard let info = timedUnlockInfo else { return false }
-        return now >= info.unlockAt && now < info.lockAt
-    }
-
-    /// Countdown string for the current timed unlock phase.
-    var timedUnlockCountdown: String? {
-        guard let info = timedUnlockInfo else { return nil }
-        let target: Date
-        if now < info.unlockAt {
-            target = info.unlockAt  // Counting down penalty
-        } else if now < info.lockAt {
-            target = info.lockAt   // Counting down free time
-        } else {
-            return nil  // Expired
-        }
-        let remaining = Int(target.timeIntervalSince(now))
-        guard remaining > 0 else { return nil }
-        let h = remaining / 3600
-        let m = (remaining % 3600) / 60
-        let s = remaining % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
     // MARK: - Schedule
@@ -134,8 +107,11 @@ final class ChildHomeViewModel {
 
     /// Consume one self-unlock and trigger a 15-minute temporary unlock.
     func useSelfUnlock() {
-        guard canUseSelfUnlock, let state = selfUnlockState else { return }
         let today = SelfUnlockState.todayDateString()
+        guard let raw = appState.storage.readSelfUnlockState() else { return }
+        let state = raw.resettingIfNeeded(currentDate: today)
+        guard state.budget > 0, state.isAvailable,
+              currentMode == .dailyMode, !isTemporaryUnlock, timedUnlockInfo == nil else { return }
         let updated = state.consuming(one: today)
         try? appState.storage.writeSelfUnlockState(updated)
         appState.applySelfUnlock()
@@ -143,36 +119,8 @@ final class ChildHomeViewModel {
 
     // MARK: - Penalty Timer (relayed from parent via CloudKit)
 
-    /// Penalty seconds from the device's CloudKit record.
-    var penaltySeconds: Int? { appState.childPenaltySeconds }
-
-    /// Penalty timer end time from the device's CloudKit record.
     var penaltyTimerEndTime: Date? { appState.childPenaltyTimerEndTime }
-
-    /// Whether a penalty timer is actively counting down.
-    var isPenaltyRunning: Bool {
-        guard let end = penaltyTimerEndTime else { return false }
-        return end.timeIntervalSinceNow > 0
-    }
-
-    /// Remaining penalty seconds (running countdown or banked).
-    var penaltyRemaining: Int? {
-        if let end = penaltyTimerEndTime, end.timeIntervalSinceNow > 0 {
-            return Int(end.timeIntervalSinceNow)
-        }
-        guard let secs = penaltySeconds, secs > 0 else { return nil }
-        return secs
-    }
-
-    /// Formatted penalty timer string.
-    var penaltyDisplayString: String? {
-        guard let secs = penaltyRemaining, secs > 0 else { return nil }
-        let h = secs / 3600
-        let m = (secs % 3600) / 60
-        let s = secs % 60
-        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
-        return String(format: "%d:%02d", m, s)
-    }
+    var penaltySeconds: Int? { appState.childPenaltySeconds }
 
     var authStatusDescription: String {
         guard let status = appState.enforcement?.authorizationStatus else { return "unknown" }
@@ -378,10 +326,14 @@ final class ChildHomeViewModel {
         guard needsReauthorization else { return }
 
         authRetryTimer?.invalidate()
-        authRetryTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        authRetryTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] timer in
             Task { @MainActor in
-                guard let self, self.needsReauthorization else {
-                    self?.stopAuthRetry()
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
+                guard self.needsReauthorization else {
+                    self.stopAuthRetry()
                     return
                 }
                 await self.silentAuthRetry()
@@ -417,11 +369,85 @@ final class ChildHomeViewModel {
         }
     }
 
+    /// Send a heartbeat immediately so the parent dashboard reflects the state change.
+    private func sendHeartbeatNow() {
+        Task {
+            try? await appState.heartbeatService?.sendNow(force: true)
+        }
+    }
+
+    func refreshPINConfigured() {
+        isPINConfigured = (try? appState.keychain.getData(forKey: StorageKeys.parentPINHash)) != nil
+    }
+
+    /// Tracks which timed unlock phase we last saw, to detect transitions.
+    private enum TimedPhase { case none, penalty, unlock }
+    private var lastTimedPhase: TimedPhase = .none
+
     func startTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.now = Date() }
+        refreshPINConfigured()
+        // Initialize phase without triggering transition actions.
+        let startNow = Date()
+        if let info = timedUnlockInfo {
+            if startNow < info.unlockAt { lastTimedPhase = .penalty }
+            else if startNow < info.lockAt { lastTimedPhase = .unlock }
+            else { lastTimedPhase = .none }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
+                self.now = Date()
+                self.checkTimedUnlockPhases()
+                if !self.isPINConfigured {
+                    self.refreshPINConfigured()
+                }
+            }
         }
         startAuthRetryIfNeeded()
+    }
+
+    /// Check timed unlock phases and apply enforcement on transitions.
+    /// This is the main-app safety net — the monitor extension should also handle this,
+    /// but it may not fire if iOS killed it.
+    private func checkTimedUnlockPhases() {
+        guard let info = appState.storage.readTimedUnlockInfo() else {
+            lastTimedPhase = .none
+            return
+        }
+
+        let currentPhase: TimedPhase
+        if now < info.unlockAt {
+            currentPhase = .penalty
+        } else if now < info.lockAt {
+            currentPhase = .unlock
+        } else {
+            currentPhase = .none
+        }
+
+        // Penalty ended → unlock device
+        if lastTimedPhase == .penalty && currentPhase == .unlock {
+            let remaining = Int(info.lockAt.timeIntervalSince(now))
+            if remaining > 0 {
+                appState.applyTimedUnlockStart()
+                sendHeartbeatNow()
+            }
+        }
+
+        // Free time ended → re-lock device and clear state
+        if lastTimedPhase == .unlock && currentPhase == .none {
+            appState.applyTimedUnlockEnd()
+            sendHeartbeatNow()
+        }
+
+        // Fully expired on first check (app launched after both phases passed)
+        if lastTimedPhase == .none && currentPhase == .none && now >= info.lockAt {
+            try? appState.storage.clearTimedUnlockInfo()
+        }
+
+        lastTimedPhase = currentPhase
     }
 
     func stopTimer() {

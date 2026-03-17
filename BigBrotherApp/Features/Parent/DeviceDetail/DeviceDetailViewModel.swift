@@ -107,10 +107,12 @@ final class DeviceDetailViewModel: CommandSendable {
     /// Assign (or clear) a heartbeat monitoring profile for this device.
     func assignProfile(_ profileID: UUID?) async {
         device.heartbeatProfileID = profileID
-        guard let cloudKit = appState.cloudKit else { return }
 
         do {
-            try await cloudKit.saveDevice(device)
+            try await appState.sendCommand(
+                target: .device(device.id),
+                action: .setHeartbeatProfile(profileID: profileID)
+            )
             if let idx = appState.childDevices.firstIndex(where: { $0.id == device.id }) {
                 appState.childDevices[idx].heartbeatProfileID = profileID
             }
@@ -120,24 +122,33 @@ final class DeviceDetailViewModel: CommandSendable {
         }
     }
 
-    /// Assign (or clear) a schedule profile for this device.
-    /// Stamps the profile version so the child only applies this specific version.
+    /// Assign (or clear) a schedule profile for this device via remote command.
     func assignScheduleProfile(_ profileID: UUID?) async {
-        device.scheduleProfileID = profileID
-        // Stamp the version so the child applies exactly this version of the profile.
+        let profileVersion: Date?
         if let profileID,
            let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) {
-            device.scheduleProfileVersion = profile.updatedAt
+            profileVersion = profile.updatedAt
         } else {
-            device.scheduleProfileVersion = nil
+            profileVersion = nil
         }
-        guard let cloudKit = appState.cloudKit else { return }
+        device.scheduleProfileID = profileID
+        device.scheduleProfileVersion = profileVersion
 
         do {
-            try await cloudKit.saveDevice(device)
+            if let profileID {
+                try await appState.sendCommand(
+                    target: .device(device.id),
+                    action: .setScheduleProfile(profileID: profileID, versionDate: profileVersion ?? Date())
+                )
+            } else {
+                try await appState.sendCommand(
+                    target: .device(device.id),
+                    action: .clearScheduleProfile
+                )
+            }
             if let idx = appState.childDevices.firstIndex(where: { $0.id == device.id }) {
                 appState.childDevices[idx].scheduleProfileID = profileID
-                appState.childDevices[idx].scheduleProfileVersion = device.scheduleProfileVersion
+                appState.childDevices[idx].scheduleProfileVersion = profileVersion
             }
         } catch {
             commandFeedback = "Failed to save schedule profile: \(error.localizedDescription)"

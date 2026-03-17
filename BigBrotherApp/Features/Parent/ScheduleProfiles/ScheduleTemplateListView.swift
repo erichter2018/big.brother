@@ -1,7 +1,9 @@
 import SwiftUI
 import BigBrotherCore
 
-struct ScheduleProfileListView: View {
+/// Manage schedule templates: create, edit, delete.
+/// Accessed via "Manage Templates" from ScheduleOverviewView.
+struct ScheduleTemplateListView: View {
     @Bindable var viewModel: ScheduleProfileListViewModel
     @State private var editingProfile: ScheduleProfile?
 
@@ -9,9 +11,9 @@ struct ScheduleProfileListView: View {
         List {
             if viewModel.profiles.isEmpty && !viewModel.isLoading {
                 ContentUnavailableView(
-                    "No Schedule Profiles",
+                    "No Schedule Templates",
                     systemImage: "calendar.badge.clock",
-                    description: Text("Add a profile to automatically unlock devices on a schedule.")
+                    description: Text("Create a template to define unlock windows for your kids.")
                 )
             }
 
@@ -38,11 +40,11 @@ struct ScheduleProfileListView: View {
                 }
             }
         }
-        .navigationTitle("Schedule Profiles")
+        .navigationTitle("Schedule Templates")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button("New Custom Profile") {
+                    Button("New Custom Template") {
                         editingProfile = ScheduleProfile(
                             familyID: viewModel.appState.parentState?.familyID ?? FamilyID(rawValue: ""),
                             name: "",

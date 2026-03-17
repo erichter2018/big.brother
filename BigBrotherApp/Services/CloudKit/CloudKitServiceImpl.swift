@@ -46,8 +46,50 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     }
 
     func saveDevice(_ device: ChildDevice) async throws {
-        let record = CKRecordConversion.toCKRecord(device)
-        try await save(record)
+        // Fetch the existing record so .changedKeys can detect actual changes,
+        // including fields set to nil (clearing a value).
+        let recordID = CKRecordConversion.recordID(device.id.rawValue, type: CKRecordType.childDevice)
+        let existing: CKRecord
+        do {
+            existing = try await database.record(for: recordID)
+        } catch {
+            // Record doesn't exist yet — create a new one.
+            existing = CKRecord(recordType: CKRecordType.childDevice, recordID: recordID)
+        }
+        CKRecordConversion.updateCKRecord(existing, from: device)
+        try await save(existing)
+    }
+
+    func updateDeviceFields(deviceID: DeviceID, fields: [String: CKRecordValue?]) async throws {
+        // Retry up to 3 times on serverRecordChanged conflicts.
+        for attempt in 1...3 {
+            let recordID = CKRecordConversion.recordID(deviceID.rawValue, type: CKRecordType.childDevice)
+            let existing = try await database.record(for: recordID)
+            for (key, value) in fields {
+                existing[key] = value
+            }
+            do {
+                try await save(existing)
+                return // success
+            } catch {
+                let ckError = error as? CloudKitError
+                let isConflict: Bool
+                if case .serverError(let underlying) = ckError,
+                   (underlying as NSError).code == CKError.serverRecordChanged.rawValue {
+                    isConflict = true
+                } else {
+                    isConflict = false
+                }
+                if isConflict && attempt < 3 {
+                    #if DEBUG
+                    print("[BigBrother] updateDeviceFields conflict, retry \(attempt + 1)/3")
+                    #endif
+                    try? await Task.sleep(for: .milliseconds(500))
+                    continue
+                }
+                throw error
+            }
+        }
     }
 
     func deleteDevice(_ id: DeviceID) async throws {
@@ -108,6 +150,11 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         }
         existing[CKFieldName.status] = status.rawValue
         try await save(existing)
+    }
+
+    func deleteCommand(_ commandID: UUID) async throws {
+        let recordID = CKRecordConversion.recordID(commandID.uuidString, type: CKRecordType.remoteCommand)
+        try await database.deleteRecord(withID: recordID)
     }
 
     func saveReceipt(_ receipt: CommandReceipt) async throws {
@@ -388,10 +435,29 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         op.qualityOfService = .userInitiated
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            var perRecordError: Error?
+
+            op.perRecordSaveBlock = { recordID, result in
+                if case .failure(let error) = result {
+                    perRecordError = error
+                    #if DEBUG
+                    print("[BigBrother] CloudKit per-record save FAILED: \(recordID.recordName) — \(error.localizedDescription)")
+                    #endif
+                } else {
+                    #if DEBUG
+                    print("[BigBrother] CloudKit saved record: \(recordID.recordName)")
+                    #endif
+                }
+            }
+
             op.modifyRecordsResultBlock = { result in
                 switch result {
                 case .success:
-                    continuation.resume()
+                    if let error = perRecordError {
+                        continuation.resume(throwing: CloudKitError.serverError(error))
+                    } else {
+                        continuation.resume()
+                    }
                 case .failure(let error):
                     continuation.resume(throwing: CloudKitError.serverError(error))
                 }

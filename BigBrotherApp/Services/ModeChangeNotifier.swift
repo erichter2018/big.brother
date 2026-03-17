@@ -48,19 +48,24 @@ enum ModeChangeNotifier {
         }
     }
 
+    /// Format seconds as a human-readable duration, rounding up to the nearest minute.
+    static func formatDuration(_ seconds: Int) -> String {
+        let totalMinutes = (seconds + 59) / 60  // round up
+        let hours = totalMinutes / 60
+        let mins = totalMinutes % 60
+        if hours > 0 && mins > 0 {
+            return "\(hours) hour\(hours == 1 ? "" : "s") \(mins) min"
+        } else if hours > 0 {
+            return "\(hours) hour\(hours == 1 ? "" : "s")"
+        } else {
+            return "\(mins) minute\(mins == 1 ? "" : "s")"
+        }
+    }
+
     /// Notify about a temporary unlock.
     static func notifyTemporaryUnlock(durationSeconds: Int) {
         let content = UNMutableNotificationContent()
-        let hours = durationSeconds / 3600
-        let mins = (durationSeconds % 3600) / 60
-        let durationStr: String
-        if hours > 0 && mins > 0 {
-            durationStr = "\(hours) hour\(hours == 1 ? "" : "s") \(mins) min"
-        } else if hours > 0 {
-            durationStr = "\(hours) hour\(hours == 1 ? "" : "s")"
-        } else {
-            durationStr = "\(mins) minute\(mins == 1 ? "" : "s")"
-        }
+        let durationStr = formatDuration(durationSeconds)
         content.title = "Temporary Unlock"
         content.body = "Device unlocked for \(durationStr)."
         content.sound = .default
@@ -89,6 +94,24 @@ enum ModeChangeNotifier {
             trigger: nil
         )
 
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Notify that a penalty-offset unlock has started (device locked during penalty).
+    static func notifyPenaltyStarted(penaltySeconds: Int, unlockSeconds: Int) {
+        let content = UNMutableNotificationContent()
+        let penaltyStr = formatDuration(penaltySeconds)
+        let unlockStr = formatDuration(unlockSeconds)
+        content.title = "Penalty Time"
+        content.body = "Device locked for \(penaltyStr), then unlocked for \(unlockStr)."
+        content.sound = .default
+        content.categoryIdentifier = "MODE_CHANGE"
+
+        let request = UNNotificationRequest(
+            identifier: "mode-change-penalty-start",
+            content: content,
+            trigger: nil
+        )
         UNUserNotificationCenter.current().add(request)
     }
 

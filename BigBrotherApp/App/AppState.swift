@@ -366,6 +366,12 @@ final class AppState {
             Task { try? await hbService?.sendNow(force: true) }
         }
 
+        // Wire up command processing on heartbeat success — if the device is online
+        // enough to send a heartbeat, it should also process pending commands.
+        hbService.onHeartbeatSent = { [weak cmdProcessor] in
+            Task { try? await cmdProcessor?.processIncomingCommands() }
+        }
+
         // Listen for iCloud account changes on child devices.
         if deviceRole == .child {
             NotificationCenter.default.addObserver(
@@ -706,13 +712,19 @@ final class AppState {
                     devices[idx].confirmedMode = heartbeat.currentMode
                     devices[idx].confirmedPolicyVersion = heartbeat.policyVersion
                     devices[idx].familyControlsAuthorized = heartbeat.familyControlsAuthorized
+                    if let os = heartbeat.osVersion { devices[idx].osVersion = os }
+                    if let model = heartbeat.modelIdentifier { devices[idx].modelIdentifier = model }
                 }
             }
+            // Preserve parent-set fields that may not have propagated to CloudKit yet.
+            preserveLocalDeviceFields(into: &devices)
             // Publish merged data in one shot — no intermediate empty state.
             childDevices = devices
             latestHeartbeats = heartbeats
         } else if let devices = fetchedDevices {
-            childDevices = devices
+            var merged = devices
+            preserveLocalDeviceFields(into: &merged)
+            childDevices = merged
         } else if let heartbeats = fetchedHeartbeats {
             latestHeartbeats = heartbeats
             // Re-merge into existing devices.
@@ -722,6 +734,8 @@ final class AppState {
                     childDevices[idx].confirmedMode = heartbeat.currentMode
                     childDevices[idx].confirmedPolicyVersion = heartbeat.policyVersion
                     childDevices[idx].familyControlsAuthorized = heartbeat.familyControlsAuthorized
+                    if let os = heartbeat.osVersion { childDevices[idx].osVersion = os }
+                    if let model = heartbeat.modelIdentifier { childDevices[idx].modelIdentifier = model }
                 }
             }
         }
@@ -731,11 +745,136 @@ final class AppState {
         if let hbp = fetchedHBProfiles { heartbeatProfiles = hbp }
         if let sp = fetchedScheduleProfiles { scheduleProfiles = sp }
 
+        // Preserve parent-set fields on remaining paths.
+
         // Enrich approved app names from heartbeat data.
         enrichApprovedAppNames(from: latestHeartbeats)
 
         // Check for new unlock requests and post notifications.
         checkForUnlockRequestNotifications(familyID: familyID)
+
+        // Ensure child devices have the latest parent PIN hash.
+        await syncPINToChildDevices()
+
+        // Clean up stale pending commands — throttled to once per 5 minutes.
+        let cleanupKey = "fr.bigbrother.lastCleanupAt"
+        let lastCleanup = UserDefaults.standard.double(forKey: cleanupKey)
+        if Date().timeIntervalSince1970 - lastCleanup > 300 {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cleanupKey)
+            Task.detached { [cloudKit, familyID] in
+                await Self.cleanupStaleCommands(cloudKit: cloudKit, familyID: familyID)
+            }
+        }
+
+        // One-time nuke: delete ALL pending config commands to clear the backlog.
+        let nukeKey = "fr.bigbrother.commandNukeComplete_v3"
+        if !UserDefaults.standard.bool(forKey: nukeKey) {
+            UserDefaults.standard.set(true, forKey: nukeKey) // Mark done immediately to prevent re-runs
+            Task.detached { [cloudKit, familyID] in
+                do {
+                    let since = Date().addingTimeInterval(-86400 * 30)
+                    let all = try await cloudKit.fetchRecentCommands(familyID: familyID, since: since)
+                    let configPending = all.filter { cmd in
+                        guard cmd.status == .pending else { return false }
+                        switch cmd.action {
+                        case .setSelfUnlockBudget, .setRestrictions, .nameApp, .syncPINHash,
+                             .setScheduleProfile, .clearScheduleProfile, .setHeartbeatProfile,
+                             .setPenaltyTimer, .requestHeartbeat, .requestAppConfiguration,
+                             .setAllowedWebDomains:
+                            return true
+                        default:
+                            return false
+                        }
+                    }
+                    if !configPending.isEmpty {
+                        #if DEBUG
+                        print("[BigBrother] NUKE: Deleting \(configPending.count) stale config commands")
+                        #endif
+                        for cmd in configPending {
+                            try? await cloudKit.deleteCommand(cmd.id)
+                        }
+                        #if DEBUG
+                        print("[BigBrother] NUKE: Done — deleted \(configPending.count)")
+                        #endif
+                    }
+                } catch {
+                    #if DEBUG
+                    print("[BigBrother] NUKE failed: \(error.localizedDescription)")
+                    #endif
+                }
+            }
+        }
+    }
+
+    /// Mark old pending commands as expired. Runs on the parent because only the record
+    /// creator (parent) has write permission in CloudKit public database.
+    private static func cleanupStaleCommands(
+        cloudKit: any CloudKitServiceProtocol,
+        familyID: FamilyID
+    ) async {
+        do {
+            let since = Date().addingTimeInterval(-86400 * 2) // last 2 days
+            let commands = try await cloudKit.fetchRecentCommands(familyID: familyID, since: since)
+            // Only delete DUPLICATE config commands — keep the newest of each type per target,
+            // delete older duplicates. This way a budget change still reaches an offline kid,
+            // but 50 identical budget commands get collapsed to 1.
+            let pending = commands.filter { $0.status == .pending }
+
+            // Group by (action description + target) to find duplicates.
+            var grouped: [String: [RemoteCommand]] = [:]
+            for cmd in pending {
+                let targetKey: String
+                switch cmd.target {
+                case .child(let cid): targetKey = "child:\(cid.rawValue)"
+                case .device(let did): targetKey = "device:\(did.rawValue)"
+                case .allDevices: targetKey = "all"
+                }
+                let key = "\(cmd.action.displayDescription)|\(targetKey)"
+                grouped[key, default: []].append(cmd)
+            }
+
+            // For each group with more than 1 command, keep the newest and delete the rest.
+            var stale: [RemoteCommand] = []
+            for (_, cmds) in grouped where cmds.count > 1 {
+                let sorted = cmds.sorted { $0.issuedAt > $1.issuedAt }
+                stale.append(contentsOf: sorted.dropFirst()) // Keep newest, delete rest
+            }
+            guard !stale.isEmpty else { return }
+            #if DEBUG
+            print("[BigBrother] Parent cleaning up \(stale.count) stale pending commands")
+            #endif
+            for command in stale {
+                try? await cloudKit.deleteCommand(command.id)
+            }
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Stale command cleanup failed: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
+    /// Preserve parent-set fields from existing in-memory devices when CloudKit
+    /// returns nil for those fields (write may not have propagated yet).
+    private func preserveLocalDeviceFields(into devices: inout [ChildDevice]) {
+        for i in devices.indices {
+            if let existing = childDevices.first(where: { $0.id == devices[i].id }) {
+                // If the fetched device has nil but our in-memory device has a value,
+                // the parent likely set it recently and CloudKit hasn't caught up.
+                if devices[i].scheduleProfileID == nil, existing.scheduleProfileID != nil {
+                    devices[i].scheduleProfileID = existing.scheduleProfileID
+                    devices[i].scheduleProfileVersion = existing.scheduleProfileVersion
+                }
+                if devices[i].penaltySeconds == nil, existing.penaltySeconds != nil {
+                    devices[i].penaltySeconds = existing.penaltySeconds
+                }
+                if devices[i].penaltyTimerEndTime == nil, existing.penaltyTimerEndTime != nil {
+                    devices[i].penaltyTimerEndTime = existing.penaltyTimerEndTime
+                }
+                if devices[i].selfUnlocksPerDay == nil, existing.selfUnlocksPerDay != nil {
+                    devices[i].selfUnlocksPerDay = existing.selfUnlocksPerDay
+                }
+            }
+        }
     }
 
     /// Start polling for unlock requests every 10 seconds (parent mode).
@@ -780,9 +919,12 @@ final class AppState {
         #endif
     }
 
+    /// Tracks last relayed penalty timer values per child to avoid command spam.
+    var lastRelayedPenalty: [ChildProfileID: (seconds: Int?, endTime: Date?)] = [:]
+
     /// Pushes timer data from Firestore to child device records in CloudKit.
+    /// Only sends a command when the values actually change.
     private func relayTimerDataToCloudKit(_ timers: [String: TimerIntegrationService.KidTimerState]) {
-        guard let cloudKit else { return }
         let config = TimerIntegrationConfig.load()
 
         for mapping in config.kidMappings {
@@ -791,21 +933,28 @@ final class AppState {
             let seconds = timer?.penaltySeconds
             let endTime = timer?.timerEndTime
 
-            // Update all devices for this child.
-            let devices = childDevices.filter { $0.childProfileID == childID }
-            for var device in devices {
-                // Skip if unchanged.
-                if device.penaltySeconds == seconds && device.penaltyTimerEndTime == endTime { continue }
+            // Skip if unchanged from last relay.
+            if let last = lastRelayedPenalty[childID],
+               last.seconds == seconds && last.endTime == endTime {
+                continue
+            }
+            lastRelayedPenalty[childID] = (seconds, endTime)
 
-                device.penaltySeconds = seconds
-                device.penaltyTimerEndTime = endTime
+            // Update in-memory for display.
+            let devices = childDevices.filter { $0.childProfileID == childID }
+            for device in devices {
                 if let idx = childDevices.firstIndex(where: { $0.id == device.id }) {
                     childDevices[idx].penaltySeconds = seconds
                     childDevices[idx].penaltyTimerEndTime = endTime
                 }
-                Task {
-                    try? await cloudKit.saveDevice(device)
-                }
+            }
+
+            // Send one command per child (not per device).
+            Task {
+                try? await sendCommand(
+                    target: .child(childID),
+                    action: .setPenaltyTimer(seconds: seconds, endTime: endTime)
+                )
             }
         }
     }
@@ -842,6 +991,20 @@ final class AppState {
             issuedBy: "Parent"
         )
         try await cloudKit.pushCommand(command)
+    }
+
+    /// Push the parent PIN hash to all child devices via remote command.
+    private var lastSyncedPINBase64: String?
+
+    func syncPINToChildDevices() async {
+        // Don't sync if there are no children.
+        guard !childProfiles.isEmpty else { return }
+        guard let hashData = try? keychain.getData(forKey: StorageKeys.parentPINHash) else { return }
+        let base64 = hashData.base64EncodedString()
+        // Only send if the PIN hash changed since last sync.
+        guard base64 != lastSyncedPINBase64 else { return }
+        lastSyncedPINBase64 = base64
+        try? await sendCommand(target: .allDevices, action: .syncPINHash(base64: base64))
     }
 
     // MARK: - Child Actions
@@ -1015,12 +1178,89 @@ final class AppState {
 
     // MARK: - Self Unlock
 
+    /// Penalty phase ended — unlock the device for the free time window.
+    func applyTimedUnlockStart() {
+        guard let info = storage.readTimedUnlockInfo() else { return }
+        let remainingFreeTime = Int(info.lockAt.timeIntervalSinceNow)
+        guard remainingFreeTime > 0 else { return }
+        guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
+        guard let enrollment = try? keychain.get(
+            ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
+        ) else { return }
+        do {
+            try cmdProcessor.applyTemporaryUnlockDirect(
+                durationSeconds: remainingFreeTime,
+                enrollment: enrollment
+            )
+            refreshLocalState()
+            ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: remainingFreeTime)
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Timed unlock start failed: \(error)")
+            #endif
+        }
+    }
+
+    /// Ensure device is locked during the penalty phase of a timed unlock.
+    /// Called as a safety net from BGTask if the device somehow unlocked.
+    func enforcePenaltyPhaseLock() {
+        guard enforcement != nil else { return }
+        guard let snapshot = storage.readPolicySnapshot() else { return }
+        if snapshot.effectivePolicy.resolvedMode == .unlocked {
+            // Device is unlocked but should be locked during penalty — re-apply.
+            // Save timed unlock info before applyModeDirect clears it.
+            let savedInfo = storage.readTimedUnlockInfo()
+            let mode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .dailyMode
+            guard let enrollment = try? keychain.get(
+                ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
+            ) else { return }
+            guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
+            try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+            // Re-write timed unlock info since applyModeDirect clears it.
+            if let info = savedInfo {
+                try? storage.writeTimedUnlockInfo(info)
+            }
+            refreshLocalState()
+        }
+    }
+
+    /// Free time window ended — re-lock the device.
+    func applyTimedUnlockEnd() {
+        try? storage.clearTimedUnlockInfo()
+        try? storage.clearTemporaryUnlockState()
+        guard enforcement != nil else { return }
+        let mode: LockMode
+        if let profile = storage.readActiveScheduleProfile() {
+            mode = profile.resolvedMode(at: Date())
+        } else {
+            mode = .dailyMode
+        }
+        guard let enrollment = try? keychain.get(
+            ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
+        ) else { return }
+        guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
+        do {
+            try cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+            refreshLocalState()
+            ModeChangeNotifier.notify(newMode: mode)
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Timed unlock end failed: \(error)")
+            #endif
+        }
+    }
+
     /// Trigger a child-initiated self-unlock (15 minutes).
     func applySelfUnlock() {
         guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
         do {
             try cmdProcessor.applySelfUnlock(durationSeconds: 900)
             refreshLocalState()
+            // Send heartbeat so parent sees the self-unlock immediately.
+            Task {
+                try? await heartbeatService?.sendNow(force: true)
+                try? await eventLogger?.syncPendingEvents()
+            }
         } catch {
             #if DEBUG
             print("[BigBrother] Self-unlock failed: \(error)")
@@ -1036,10 +1276,10 @@ final class AppState {
 
         if budget > 0 {
             if let current, current.date == today {
-                // Same day — update budget if parent changed it, keep usedCount.
+                // Same day — update budget if parent changed it, cap usedCount to new budget.
                 if current.budget != budget {
                     try? storage.writeSelfUnlockState(SelfUnlockState(
-                        date: today, usedCount: current.usedCount, budget: budget
+                        date: today, usedCount: min(current.usedCount, budget), budget: budget
                     ))
                 }
             } else {

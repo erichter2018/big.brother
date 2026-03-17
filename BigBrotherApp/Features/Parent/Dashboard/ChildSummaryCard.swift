@@ -17,8 +17,13 @@ struct ChildSummaryCard: View {
     let selfUnlockBudget: Int?
     let avatarHexColor: String?
     let avatarImageUrl: String?
+    let unlockOrigin: TemporaryUnlockOrigin?
+    let isHeartbeatConfirmed: Bool
+    let isInPenaltyPhase: Bool
     let isScheduleActive: Bool
-    let scheduleLabel: String?
+    let scheduleLabel: String?      // e.g. "Middle School Schedule"
+    let scheduleStatus: String?     // e.g. "Locked until 3:00 PM"
+    let scheduleStatusIsFree: Bool
     let onLock: (LockDuration) -> Void
     let onUnlock: (Int) -> Void
     let onUnlockWithTimer: ((Int) -> Void)?
@@ -35,10 +40,33 @@ struct ChildSummaryCard: View {
                     .font(.headline)
                     .lineLimit(1)
 
-                if let countdown {
-                    // Unlocked with countdown — show on one line
+                if isInPenaltyPhase {
+                    HStack(spacing: 3) {
+                        if !isHeartbeatConfirmed {
+                            Image(systemName: "clock")
+                                .font(.caption2)
+                                .foregroundStyle(.gray)
+                        }
+                        Text("Locked — pending timer")
+                            .font(.caption)
+                            .foregroundStyle(.blue)
+                    }
+                } else if let countdown {
+                    // Unlocked with countdown — show origin + time
                     HStack(spacing: 4) {
-                        let label = (isScheduleActive && dominantMode == .unlocked) ? "Self-unlocked" : dominantMode.displayName
+                        if !isHeartbeatConfirmed {
+                            Image(systemName: "clock")
+                                .font(.caption2)
+                                .foregroundStyle(.gray)
+                        }
+                        let label: String = {
+                            switch unlockOrigin {
+                            case .selfUnlock: return "Self-unlocked"
+                            case .localPINUnlock: return "PIN unlocked"
+                            case .remoteCommand: return "Unlocked"
+                            case .none: return dominantMode.displayName
+                            }
+                        }()
                         Text(label)
                             .font(.caption)
                             .foregroundStyle(.green)
@@ -52,26 +80,45 @@ struct ChildSummaryCard: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                         .lineLimit(1)
+                    if let scheduleStatus {
+                        Text(scheduleStatus)
+                            .font(.caption)
+                            .foregroundStyle(scheduleStatusIsFree ? .green : .blue)
+                            .lineLimit(1)
+                    }
                 } else {
-                    Text(dominantMode.displayName)
-                        .font(.caption)
-                        .foregroundStyle(modeColor)
+                    HStack(spacing: 3) {
+                        if !isHeartbeatConfirmed {
+                            Image(systemName: "clock")
+                                .font(.caption2)
+                                .foregroundStyle(.gray)
+                        }
+                        Text(dominantMode.displayName)
+                            .font(.caption)
+                            .foregroundStyle(modeColor)
+                    }
                 }
 
-                HStack(spacing: 8) {
+                HStack(spacing: 2) {
                     if let penaltyTimer {
-                        Label(penaltyTimer, systemImage: isPenaltyRunning ? "timer" : "hourglass")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.red)
+                        Image(systemName: isPenaltyRunning ? "timer" : "hourglass")
+                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
+                        Text(penaltyTimer)
+                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
                     }
 
                     if let used = selfUnlocksUsed, let budget = selfUnlockBudget, budget > 0 {
                         let remaining = max(0, budget - used)
-                        Label("\(remaining)/\(budget) SU", systemImage: "lock.open.rotation")
-                            .font(.caption2)
+                        if penaltyTimer != nil {
+                            Text(" ")
+                        }
+                        Image(systemName: "lock.open.rotation")
+                            .foregroundStyle(.teal)
+                        Text("\(remaining)/\(budget) \(penaltyTimer != nil ? "SU" : "Self-Unlocks")")
                             .foregroundStyle(.teal)
                     }
                 }
+                .font(.caption.monospacedDigit())
             }
 
             Spacer()
@@ -151,6 +198,7 @@ struct ChildSummaryCard: View {
             Button { onUnlock(5400) } label: { Label("1.5 hours", systemImage: "clock") }
             Button { onUnlock(2 * 3600) } label: { Label("2 hours", systemImage: "clock") }
             Divider()
+            Button { onUnlock(Self.secondsUntilMidnight) } label: { Label("Until midnight", systemImage: "moon.fill") }
             Button { onUnlock(24 * 3600) } label: { Label("24 hours", systemImage: "clock.badge.checkmark") }
             if let onUnlockWithTimer {
                 Divider()
@@ -160,16 +208,20 @@ struct ChildSummaryCard: View {
         } label: {
             actionIconLabel("lock.open.fill", color: .green, active: isUnlocked)
         } primaryAction: {
-            onUnlock(15 * 60)
+            if let remaining = remainingSeconds, remaining > 0 {
+                onUnlock(remaining + 15 * 60)
+            } else {
+                onUnlock(15 * 60)
+            }
         }
     }
 
     private var isUnlocked: Bool {
-        dominantMode == .unlocked && !isScheduleActive
+        dominantMode == .unlocked
     }
 
     private var isLocked: Bool {
-        (dominantMode == .dailyMode || dominantMode == .essentialOnly) && !isScheduleActive
+        dominantMode == .dailyMode || dominantMode == .essentialOnly
     }
 
     @ViewBuilder
@@ -245,6 +297,12 @@ struct ChildSummaryCard: View {
 
     private var cardBackground: some ShapeStyle {
         .regularMaterial
+    }
+
+    static var secondsUntilMidnight: Int {
+        let now = Date()
+        let midnight = Calendar.current.startOfDay(for: now).addingTimeInterval(86400)
+        return max(60, Int(midnight.timeIntervalSince(now)))
     }
 }
 

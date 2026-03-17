@@ -66,12 +66,19 @@ struct ParentTabView: View {
             }
 
             NavigationStack {
-                ScheduleProfileListView(
-                    viewModel: ScheduleProfileListViewModel(appState: appState)
+                ScheduleOverviewView(
+                    viewModel: ScheduleOverviewViewModel(appState: appState)
                 )
             }
             .tabItem {
                 Label("Schedules", systemImage: "calendar.badge.clock")
+            }
+
+            NavigationStack {
+                InsightsView(viewModel: InsightsViewModel(appState: appState))
+            }
+            .tabItem {
+                Label("Insights", systemImage: "chart.bar.xaxis")
             }
 
             NavigationStack {
