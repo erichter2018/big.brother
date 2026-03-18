@@ -128,12 +128,24 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         applyWebBlocking()
     }
 
-    /// Apply web domain blocking.
-    /// ManagedSettings doesn't support string-based domain allowlists — WebDomainToken
-    /// is opaque and requires a picker. So we use a simple on/off: if the parent has
-    /// configured allowed domains, web browsing is permitted entirely (app blocking
-    /// still applies). Otherwise all web categories are blocked.
+    /// Apply web domain blocking based on the denyWebWhenLocked restriction.
+    /// When the restriction is off, web stays open even when locked.
+    /// When on, blocks all web categories unless the parent has configured allowed domains.
     private func applyWebBlocking() {
+        let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+        guard restrictions.denyWebWhenLocked else {
+            // Clear web blocking on ALL stores — ManagedSettings merges across stores,
+            // so stale webDomainCategories on any store will keep blocking.
+            for store in [baseStore, scheduleStore, tempUnlockStore] {
+                store.shield.webDomainCategories = nil
+            }
+            ManagedSettingsStore().shield.webDomainCategories = nil
+            #if DEBUG
+            print("[BigBrother] Web blocking: disabled (denyWebWhenLocked=false) — cleared all stores")
+            #endif
+            return
+        }
+
         if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
            let domains = try? JSONDecoder().decode([String].self, from: data),
            !domains.isEmpty {

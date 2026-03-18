@@ -331,6 +331,12 @@ struct ChildDetailView: View {
                 isOn: viewModel.restrictions.requireAutomaticDateAndTime,
                 toggle: { viewModel.toggleRestriction(\.requireAutomaticDateAndTime) }
             )
+            restrictionToggle(
+                "Block Websites When Locked",
+                icon: "globe.badge.chevron.backward",
+                isOn: viewModel.restrictions.denyWebWhenLocked,
+                toggle: { viewModel.toggleRestriction(\.denyWebWhenLocked) }
+            )
         }
     }
 

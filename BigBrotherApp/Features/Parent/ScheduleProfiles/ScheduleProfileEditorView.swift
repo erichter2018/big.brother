@@ -42,12 +42,12 @@ struct ScheduleProfileEditorView: View {
             }
 
             Section("Free Windows") {
-                Text("During these windows, the device is unlocked. Outside them, the locked mode above is applied automatically.")
+                Text("During these windows, the device is fully unlocked.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
                 ForEach($profile.freeWindows) { $window in
-                    windowEditor(window: $window)
+                    windowEditor(window: $window, tint: .green)
                 }
                 .onDelete { indexSet in
                     profile.freeWindows.remove(atOffsets: indexSet)
@@ -62,7 +62,32 @@ struct ScheduleProfileEditorView: View {
                         )
                     )
                 } label: {
-                    Label("Add Window", systemImage: "plus.circle")
+                    Label("Add Free Window", systemImage: "plus.circle")
+                }
+            }
+
+            Section("Essential Windows") {
+                Text("During these windows, only essential apps (Phone, Messages) are available. Use for bedtime or overnight.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                ForEach($profile.essentialWindows) { $window in
+                    windowEditor(window: $window, tint: .purple)
+                }
+                .onDelete { indexSet in
+                    profile.essentialWindows.remove(atOffsets: indexSet)
+                }
+
+                Button {
+                    profile.essentialWindows.append(
+                        ActiveWindow(
+                            daysOfWeek: Set(DayOfWeek.allCases),
+                            startTime: DayTime(hour: 21, minute: 30),
+                            endTime: DayTime(hour: 7, minute: 0)
+                        )
+                    )
+                } label: {
+                    Label("Add Essential Window", systemImage: "plus.circle")
                 }
             }
         }
@@ -84,7 +109,7 @@ struct ScheduleProfileEditorView: View {
     }
 
     @ViewBuilder
-    private func windowEditor(window: Binding<ActiveWindow>) -> some View {
+    private func windowEditor(window: Binding<ActiveWindow>, tint: Color = .accentColor) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             // Day selector circles
             HStack(spacing: 4) {
@@ -101,7 +126,7 @@ struct ScheduleProfileEditorView: View {
                             .font(.caption)
                             .fontWeight(.semibold)
                             .frame(width: 32, height: 32)
-                            .background(selected ? Color.accentColor : Color.secondary.opacity(0.15))
+                            .background(selected ? tint : Color.secondary.opacity(0.15))
                             .foregroundStyle(selected ? .white : .primary)
                             .clipShape(Circle())
                     }

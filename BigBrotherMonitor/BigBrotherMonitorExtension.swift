@@ -29,6 +29,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Prefix used by ScheduleRegistrar for free-window activities.
     private let scheduleProfilePrefix = "bigbrother.scheduleprofile."
+    /// Prefix used by ScheduleRegistrar for essential-window activities.
+    private let essentialWindowPrefix = "bigbrother.essentialwindow."
     /// Prefix used for penalty-offset timed unlocks.
     private let timedUnlockPrefix = "bigbrother.timedunlock."
     /// Prefix used for temporary unlock expiry (auto-relock).
@@ -46,6 +48,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Schedule profile free window — unlock if today matches.
         if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
             handleFreeWindowStart(activity)
+            return
+        }
+
+        // Essential window — apply essential-only mode if today matches.
+        if activity.rawValue.hasPrefix(essentialWindowPrefix) {
+            handleEssentialWindowStart(activity)
             return
         }
 
@@ -88,6 +96,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Schedule profile free window ended — re-lock.
         if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
             handleFreeWindowEnd(activity)
+            return
+        }
+
+        // Essential window ended — return to locked mode.
+        if activity.rawValue.hasPrefix(essentialWindowPrefix) {
+            handleEssentialWindowEnd(activity)
             return
         }
 
@@ -157,6 +171,50 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         sendModeNotification(
             title: "Free Time Ended",
             body: "Device locked — \(profile.lockedMode.displayName) mode active."
+        )
+    }
+
+    // MARK: - Essential Window Handling
+
+    /// Essential window started: apply essential-only mode if today matches.
+    private func handleEssentialWindowStart(_ activity: DeviceActivityName) {
+        guard let profile = storage.readActiveScheduleProfile() else { return }
+
+        let windowID = String(activity.rawValue.dropFirst(essentialWindowPrefix.count))
+        guard let window = profile.essentialWindows.first(where: { $0.id.uuidString == windowID }) else {
+            return
+        }
+
+        let today = Calendar.current.component(.weekday, from: Date())
+        guard let day = DayOfWeek(rawValue: today), window.daysOfWeek.contains(day) else {
+            return
+        }
+
+        // Don't override if currently in a free window (free > essential).
+        if profile.isInFreeWindow(at: Date()) { return }
+
+        // Apply essential-only mode on ALL stores.
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
+        logEvent(.scheduleTriggered, details: "Essential window started: \(activity.rawValue)")
+        sendModeNotification(title: "Essential Mode", body: "Only essential apps are available.")
+    }
+
+    /// Essential window ended: return to the profile's locked mode.
+    private func handleEssentialWindowEnd(_ activity: DeviceActivityName) {
+        guard let profile = storage.readActiveScheduleProfile() else { return }
+
+        // If in a free window, don't re-lock.
+        if profile.isInFreeWindow(at: Date()) { return }
+        // If in another essential window, stay essential.
+        if profile.isInEssentialWindow(at: Date()) { return }
+
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
+        logEvent(.scheduleEnded, details: "Essential window ended, locked to \(profile.lockedMode.rawValue)")
+        sendModeNotification(
+            title: "Essential Mode Ended",
+            body: "Device returned to \(profile.lockedMode.displayName) mode."
         )
     }
 

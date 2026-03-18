@@ -66,25 +66,11 @@ struct ModeActionButtons: View {
             // Lock: tap = until midnight, long-press = duration menu
             if let onLockWithDuration {
                 Menu {
+                    Button { onLockWithDuration(.indefinite) } label: {
+                        Label("Lock", systemImage: "lock.fill")
+                    }
                     Button { onLockWithDuration(.returnToSchedule) } label: {
                         Label("Return to Schedule", systemImage: "calendar.badge.clock")
-                    }
-                    Divider()
-                    Button { onLockWithDuration(.untilMidnight) } label: {
-                        Label("Until Midnight", systemImage: "moon.fill")
-                    }
-                    Button { onLockWithDuration(.indefinite) } label: {
-                        Label("Indefinite", systemImage: "lock.fill")
-                    }
-                    Divider()
-                    Button { onLockWithDuration(.hours(1)) } label: {
-                        Label("1 hour", systemImage: "clock")
-                    }
-                    Button { onLockWithDuration(.hours(2)) } label: {
-                        Label("2 hours", systemImage: "clock")
-                    }
-                    Button { onLockWithDuration(.hours(4)) } label: {
-                        Label("4 hours", systemImage: "clock")
                     }
                 } label: {
                     VStack(spacing: 2) {
@@ -97,7 +83,7 @@ struct ModeActionButtons: View {
                     .foregroundStyle(.blue)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 } primaryAction: {
-                    onLockWithDuration(.untilMidnight)
+                    onLockWithDuration(.indefinite)
                 }
             } else {
                 modeButton("Lock", icon: "lock.fill", color: .blue, mode: .dailyMode)

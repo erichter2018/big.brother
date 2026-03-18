@@ -151,7 +151,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             print("[BigBrother] Command result: \(result.logReason)")
             #endif
 
-            // Post receipt if needed.
+            // Post receipt and try to update command record directly.
             if result.shouldPostReceipt, let receiptStatus = result.receiptStatus {
                 let receipt = makeReceipt(
                     commandID: command.id,
@@ -161,14 +161,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                     reason: result == .applied ? nil : result.logReason
                 )
                 try? await cloudKit.saveReceipt(receipt)
+
+                // Also try to update the command record status directly.
+                // May fail in CloudKit public DB (only creator can modify) — that's OK,
+                // the receipt is the authoritative status source for the parent.
+                try? await cloudKit.updateCommandStatus(command.id, status: receiptStatus)
             }
 
             try? storage.markCommandProcessed(command.id)
-
-            // NOTE: We don't update command status on the server here because
-            // CloudKit public database only allows the record creator (parent) to
-            // modify records. The child can't write to parent-created commands.
-            // The parent-side cleanup in AppState.cleanupStaleCommands handles this.
 
             // Log diagnostic.
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -233,6 +233,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             switch command.action {
             case .setMode(let mode):
                 try applyMode(mode, enrollment: enrollment, commandID: command.id)
+                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(false, forKey: "scheduleDrivenMode")
                 eventLogger.log(.commandApplied, details: "Mode set to \(mode.rawValue)")
                 ModeChangeNotifier.notify(newMode: mode)
                 return .applied
@@ -335,6 +336,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
 
             case .returnToSchedule:
                 try applyReturnToSchedule(enrollment: enrollment, commandID: command.id)
+                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(true, forKey: "scheduleDrivenMode")
                 eventLogger.log(.commandApplied, details: "Returned to schedule-driven mode")
                 return .applied
 
@@ -1233,7 +1235,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             deviceID: deviceID,
             familyID: familyID,
             status: status,
-            appliedAt: status == .applied ? Date() : nil,
+            appliedAt: Date(),
             failureReason: reason
         )
     }

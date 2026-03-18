@@ -112,6 +112,14 @@ struct ChildHomeView: View {
                 .font(.body)
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
+
+            if let reason = viewModel.lockReasonText {
+                Text(reason)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundStyle(lockReasonColor(reason))
+                    .multilineTextAlignment(.center)
+            }
         }
         .padding(.vertical, 30)
     }
@@ -332,17 +340,24 @@ struct ChildHomeView: View {
 
     @ViewBuilder
     private func scheduleCard(profile: ScheduleProfile) -> some View {
-        VStack(spacing: 12) {
+        let active = viewModel.isScheduleDriving
+
+        VStack(spacing: active ? 12 : 8) {
             HStack(spacing: 8) {
                 Image(systemName: "calendar")
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(.white.opacity(active ? 0.8 : 0.3))
                 Text(profile.name)
-                    .font(.subheadline)
+                    .font(active ? .subheadline : .caption)
                     .fontWeight(.medium)
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(.white.opacity(active ? 0.8 : 0.3))
+                if !active {
+                    Text("(paused)")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.25))
+                }
             }
 
-            if let status = viewModel.scheduleStatusText {
+            if active, let status = viewModel.scheduleStatusText {
                 Text(status)
                     .font(.title3)
                     .fontWeight(.semibold)
@@ -353,19 +368,19 @@ struct ChildHomeView: View {
             if !windows.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Today's free windows:")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(active ? 0.5 : 0.2))
                     ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
                         Text("\(window.start) – \(window.end)")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.7))
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(active ? 0.7 : 0.25))
                     }
                 }
             }
         }
-        .padding(.vertical, 20)
-        .padding(.horizontal, 30)
-        .background(Color.orange.opacity(0.12))
+        .padding(.vertical, active ? 20 : 12)
+        .padding(.horizontal, active ? 30 : 20)
+        .background(Color.orange.opacity(active ? 0.12 : 0.05))
         .clipShape(RoundedRectangle(cornerRadius: 20))
     }
 
@@ -411,6 +426,13 @@ struct ChildHomeView: View {
     }
 
     // MARK: - Styling
+
+    private func lockReasonColor(_ reason: String) -> Color {
+        if reason.hasPrefix("Free") { return .green }
+        if reason.hasPrefix("Essential") { return .purple }
+        if reason.contains("until") { return .blue }
+        return .white.opacity(0.6)
+    }
 
     private var modeIcon: String {
         switch viewModel.currentMode {

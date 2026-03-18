@@ -45,16 +45,30 @@ public struct ActiveWindow: Codable, Sendable, Equatable, Hashable, Identifiable
 
     /// Returns `true` if the given date falls within this window
     /// (matching day-of-week and time range).
+    /// Supports cross-midnight windows (e.g., 9:30 PM – 7:00 AM).
     public func contains(_ date: Date, calendar: Calendar = .current) -> Bool {
         let weekday = calendar.component(.weekday, from: date)
-        guard let day = DayOfWeek(rawValue: weekday),
-              daysOfWeek.contains(day) else {
-            return false
-        }
+        guard let day = DayOfWeek(rawValue: weekday) else { return false }
         let hour = calendar.component(.hour, from: date)
         let minute = calendar.component(.minute, from: date)
         let now = DayTime(hour: hour, minute: minute)
-        return now >= startTime && now < endTime
+
+        if startTime < endTime {
+            // Same-day window (e.g., 3:00 PM – 8:00 PM)
+            return daysOfWeek.contains(day) && now >= startTime && now < endTime
+        } else {
+            // Cross-midnight window (e.g., 9:30 PM – 7:00 AM)
+            // After start (evening portion): check today's day
+            if now >= startTime && daysOfWeek.contains(day) {
+                return true
+            }
+            // Before end (morning portion): check yesterday's day
+            let yesterday = calendar.component(.weekday, from: calendar.date(byAdding: .day, value: -1, to: date)!)
+            if now < endTime, let prevDay = DayOfWeek(rawValue: yesterday), daysOfWeek.contains(prevDay) {
+                return true
+            }
+            return false
+        }
     }
 }
 

@@ -34,6 +34,9 @@ struct InsightsView: View {
                     if !viewModel.lockPrecisionRecords.isEmpty {
                         lockPrecisionSection
                     }
+                    if !viewModel.scheduleTransitionRecords.isEmpty {
+                        schedulePrecisionSection
+                    }
                     if !viewModel.bucketCounts.isEmpty {
                         latencyHistogram
                     }
@@ -199,6 +202,69 @@ struct InsightsView: View {
                 Text("No temporary unlocks with expiry data yet.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
+            }
+        }
+        .padding()
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    // MARK: - Schedule Precision
+
+    @ViewBuilder
+    private var schedulePrecisionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "calendar.badge.clock")
+                    .foregroundStyle(.orange)
+                Text("Schedule Precision")
+                    .font(.subheadline.weight(.semibold))
+            }
+
+            let drifts = viewModel.scheduleTransitionRecords.map(\.driftSeconds)
+            let avgDrift = drifts.reduce(0, +) / Double(max(1, drifts.count))
+            let maxDrift = drifts.max() ?? 0
+            let onTime = drifts.filter { abs($0) < 30 }.count
+
+            HStack(spacing: 20) {
+                statLabel("On Time", value: "\(onTime)/\(drifts.count)")
+                statLabel("Avg Drift", value: formatDrift(avgDrift))
+                statLabel("Worst", value: formatDrift(maxDrift))
+            }
+
+            ForEach(viewModel.scheduleTransitionRecords.prefix(10)) { record in
+                HStack(spacing: 8) {
+                    driftIcon(record.driftSeconds)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 4) {
+                            if let name = record.childName {
+                                Text(name)
+                                    .font(.caption.weight(.medium))
+                            }
+                            Text(record.transitionType.rawValue)
+                                .font(.caption)
+                                .foregroundStyle(record.transitionType == .unlock ? .green : .blue)
+                        }
+                        Text(record.actualTime, style: .relative)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                        + Text(" ago")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Spacer()
+
+                    Text(formatDrift(record.driftSeconds))
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(driftColor(record.driftSeconds).opacity(0.15))
+                        .foregroundStyle(driftColor(record.driftSeconds))
+                        .clipShape(Capsule())
+                }
+                .padding(.vertical, 2)
             }
         }
         .padding()

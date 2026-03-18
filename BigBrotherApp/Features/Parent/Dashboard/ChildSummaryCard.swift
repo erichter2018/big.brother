@@ -83,7 +83,7 @@ struct ChildSummaryCard: View {
                     if let scheduleStatus {
                         Text(scheduleStatus)
                             .font(.caption)
-                            .foregroundStyle(scheduleStatusIsFree ? .green : .blue)
+                            .foregroundStyle(scheduleStatusIsFree ? .green : scheduleStatus.hasPrefix("Essential") ? .purple : .blue)
                             .lineLimit(1)
                     }
                 } else {
@@ -227,30 +227,16 @@ struct ChildSummaryCard: View {
     @ViewBuilder
     private var lockButton: some View {
         Menu {
+            Button { onLock(.indefinite) } label: {
+                Label("Lock", systemImage: "lock.fill")
+            }
             Button { onLock(.returnToSchedule) } label: {
                 Label("Return to Schedule", systemImage: "calendar.badge.clock")
-            }
-            Divider()
-            Button { onLock(.untilMidnight) } label: {
-                Label("Until Midnight", systemImage: "moon.fill")
-            }
-            Button { onLock(.indefinite) } label: {
-                Label("Indefinite", systemImage: "lock.fill")
-            }
-            Divider()
-            Button { onLock(.hours(1)) } label: {
-                Label("1 hour", systemImage: "clock")
-            }
-            Button { onLock(.hours(2)) } label: {
-                Label("2 hours", systemImage: "clock")
-            }
-            Button { onLock(.hours(4)) } label: {
-                Label("4 hours", systemImage: "clock")
             }
         } label: {
             actionIconLabel("lock.fill", color: .blue, active: isLocked)
         } primaryAction: {
-            onLock(.untilMidnight)
+            onLock(.indefinite)
         }
     }
 

@@ -14,6 +14,7 @@ final class InsightsViewModel {
     var recentCommands: [CommandLatencyRecord] = []
     var bucketCounts: [BucketCount] = []
     var lockPrecisionRecords: [LockPrecisionRecord] = []
+    var scheduleTransitionRecords: [ScheduleTransitionRecord] = []
 
     init(appState: AppState) {
         self.appState = appState
@@ -209,6 +210,80 @@ final class InsightsViewModel {
                 ))
             }
             lockPrecisionRecords = precisionRecords.sorted { $0.lockExpiredAt > $1.lockExpiredAt }
+
+            // --- Schedule transition precision ---
+            let scheduleStarts = events
+                .filter { $0.eventType == .scheduleTriggered }
+                .sorted { $0.timestamp < $1.timestamp }
+            let scheduleEnds = events
+                .filter { $0.eventType == .scheduleEnded }
+                .sorted { $0.timestamp < $1.timestamp }
+
+            let deviceProfileMap = Dictionary(
+                uniqueKeysWithValues: appState.childDevices
+                    .compactMap { dev in dev.scheduleProfileID.map { (dev.id, $0) } }
+            )
+            let profileMap = Dictionary(
+                uniqueKeysWithValues: appState.scheduleProfiles.map { ($0.id, $0) }
+            )
+            let windowPrefix = "bigbrother.scheduleprofile."
+            let cal = Calendar.current
+            var transitionRecords: [ScheduleTransitionRecord] = []
+
+            // Unlock transitions (free window start)
+            for event in scheduleStarts {
+                guard let details = event.details,
+                      let range = details.range(of: windowPrefix) else { continue }
+                let windowIDStr = String(details[range.upperBound...])
+                guard let windowUUID = UUID(uuidString: windowIDStr),
+                      let profileID = deviceProfileMap[event.deviceID],
+                      let profile = profileMap[profileID],
+                      let window = profile.freeWindows.first(where: { $0.id == windowUUID }) else { continue }
+
+                var comps = cal.dateComponents([.year, .month, .day], from: event.timestamp)
+                comps.hour = window.startTime.hour
+                comps.minute = window.startTime.minute
+                comps.second = 0
+                guard let expectedDate = cal.date(from: comps) else { continue }
+
+                let childName = deviceToChild[event.deviceID].flatMap { childNameMap[$0] }
+                transitionRecords.append(ScheduleTransitionRecord(
+                    id: event.id, childName: childName, transitionType: .unlock,
+                    scheduledTime: expectedDate, actualTime: event.timestamp
+                ))
+            }
+
+            // Lock transitions (free window end)
+            for event in scheduleEnds {
+                guard let details = event.details,
+                      details.hasPrefix("Free window ended") else { continue }
+                // Match to most recent scheduleTriggered on same device to identify the window
+                guard let matchingStart = scheduleStarts.last(where: {
+                    $0.deviceID == event.deviceID && $0.timestamp < event.timestamp
+                }),
+                let startDetails = matchingStart.details,
+                let range = startDetails.range(of: windowPrefix) else { continue }
+
+                let windowIDStr = String(startDetails[range.upperBound...])
+                guard let windowUUID = UUID(uuidString: windowIDStr),
+                      let profileID = deviceProfileMap[event.deviceID],
+                      let profile = profileMap[profileID],
+                      let window = profile.freeWindows.first(where: { $0.id == windowUUID }) else { continue }
+
+                var comps = cal.dateComponents([.year, .month, .day], from: event.timestamp)
+                comps.hour = window.endTime.hour
+                comps.minute = window.endTime.minute
+                comps.second = 0
+                guard let expectedDate = cal.date(from: comps) else { continue }
+
+                let childName = deviceToChild[event.deviceID].flatMap { childNameMap[$0] }
+                transitionRecords.append(ScheduleTransitionRecord(
+                    id: event.id, childName: childName, transitionType: .lock,
+                    scheduledTime: expectedDate, actualTime: event.timestamp
+                ))
+            }
+
+            scheduleTransitionRecords = transitionRecords.sorted { $0.actualTime > $1.actualTime }
 
             // Build heartbeat lookup by deviceID.
             let heartbeatMap = Dictionary(uniqueKeysWithValues: heartbeats.map { ($0.deviceID, $0) })

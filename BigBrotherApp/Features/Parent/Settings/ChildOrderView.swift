@@ -5,29 +5,43 @@ import BigBrotherCore
 struct ChildOrderView: View {
     let appState: AppState
     @State private var orderedChildren: [ChildProfile] = []
+    @State private var editMode: EditMode = .active
 
     var body: some View {
         List {
-            ForEach(orderedChildren) { child in
-                HStack {
-                    Text(String(child.name.prefix(1)).uppercased())
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(.tint))
-                    Text(child.name)
-                        .font(.body)
-                    Spacer()
-                    Image(systemName: "line.3.horizontal")
-                        .foregroundStyle(.secondary)
+            Section {
+                ForEach(orderedChildren) { child in
+                    HStack(spacing: 12) {
+                        Text(String(child.name.prefix(1)).uppercased())
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(.tint))
+                        Text(child.name)
+                            .font(.body)
+                        Spacer()
+                    }
                 }
+                .onMove { from, to in
+                    orderedChildren.move(fromOffsets: from, toOffset: to)
+                    appState.childOrder = orderedChildren.map(\.id)
+                }
+            } footer: {
+                Text("Drag to reorder how children appear on the dashboard.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .onMove { from, to in
-                orderedChildren.move(fromOffsets: from, toOffset: to)
-                appState.childOrder = orderedChildren.map(\.id)
+
+            Section {
+                Button("Reset to Default") {
+                    appState.childOrder = []
+                    orderedChildren = appState.orderedChildProfiles
+                }
+                .foregroundStyle(.red)
             }
         }
-        .environment(\.editMode, .constant(.active))
+        .listStyle(.insetGrouped)
+        .environment(\.editMode, $editMode)
         .navigationTitle("Reorder Children")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {

@@ -127,3 +127,22 @@ struct LockPrecisionRecord: Identifiable {
         return lockExpiredAt.timeIntervalSince(expected)
     }
 }
+
+/// Tracks drift between scheduled free window start/end and actual enforcement.
+struct ScheduleTransitionRecord: Identifiable {
+    let id: UUID
+    let childName: String?
+    let transitionType: TransitionType
+    let scheduledTime: Date
+    let actualTime: Date
+
+    /// Positive = late, negative = early.
+    var driftSeconds: Double {
+        actualTime.timeIntervalSince(scheduledTime)
+    }
+
+    enum TransitionType: String {
+        case unlock = "Unlock"
+        case lock = "Lock"
+    }
+}

@@ -21,6 +21,10 @@ final class ChildHomeViewModel {
     /// Stored property so @Observable triggers UI updates; refreshed by the 1s timer.
     var isPINConfigured = false
 
+    /// Whether the current snapshot's policy is driven by a schedule (vs a parent command).
+    /// Stored property refreshed by the 1s timer so UI reacts to command changes.
+    var isScheduleDriving = false
+
     var currentMode: LockMode {
         appState.currentEffectivePolicy?.resolvedMode ?? .unlocked
     }
@@ -44,6 +48,43 @@ final class ChildHomeViewModel {
     /// Active schedule profile from App Group storage.
     var activeScheduleProfile: ScheduleProfile? {
         appState.storage.readActiveScheduleProfile()
+    }
+
+    /// Contextual lock reason for the mode header subtitle.
+    var lockReasonText: String? {
+        // Unlocked (not temp) — no reason needed
+        if currentMode == .unlocked && !isTemporaryUnlock { return nil }
+
+        // Temp unlock — countdown card already shows, skip
+        if isTemporaryUnlock { return nil }
+
+        // Schedule-driven — show next transition time
+        if isScheduleDriving, let profile = activeScheduleProfile {
+            let inFree = profile.isInFreeWindow(at: now)
+            let inEssential = profile.isInEssentialWindow(at: now)
+            let formatter = DateFormatter()
+            formatter.dateFormat = "h:mm a"
+
+            if inFree {
+                if let transition = profile.nextTransitionTime(from: now) {
+                    return "Free until \(formatter.string(from: transition))"
+                }
+                return "Free time"
+            } else if inEssential {
+                if let transition = profile.nextTransitionTime(from: now) {
+                    return "Essential until \(formatter.string(from: transition))"
+                }
+                return "Essential mode"
+            } else {
+                if let transition = profile.nextTransitionTime(from: now) {
+                    return "Locked until \(formatter.string(from: transition))"
+                }
+                return "Locked — \(profile.name)"
+            }
+        }
+
+        // Parent locked indefinitely
+        return "Locked"
     }
 
     /// Human-readable schedule status, e.g. "Free until 8:00 PM" or "Locked until 3:00 PM".
@@ -380,12 +421,18 @@ final class ChildHomeViewModel {
         isPINConfigured = (try? appState.keychain.getData(forKey: StorageKeys.parentPINHash)) != nil
     }
 
+    func refreshScheduleDriving() {
+        isScheduleDriving = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.bool(forKey: "scheduleDrivenMode") ?? false
+    }
+
     /// Tracks which timed unlock phase we last saw, to detect transitions.
     private enum TimedPhase { case none, penalty, unlock }
     private var lastTimedPhase: TimedPhase = .none
+    private var scheduleCheckCounter = 0
 
     func startTimer() {
         refreshPINConfigured()
+        refreshScheduleDriving()
         // Initialize phase without triggering transition actions.
         let startNow = Date()
         if let info = timedUnlockInfo {
@@ -401,6 +448,13 @@ final class ChildHomeViewModel {
                 }
                 self.now = Date()
                 self.checkTimedUnlockPhases()
+                self.refreshScheduleDriving()
+                // Check schedule transitions every 10s (not every 1s — disk reads).
+                self.scheduleCheckCounter += 1
+                if self.scheduleCheckCounter >= 10 {
+                    self.scheduleCheckCounter = 0
+                    self.appState.enforceScheduleTransition()
+                }
                 if !self.isPINConfigured {
                     self.refreshPINConfigured()
                 }

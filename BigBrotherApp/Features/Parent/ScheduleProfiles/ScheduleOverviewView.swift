@@ -98,6 +98,10 @@ struct ScheduleOverviewView: View {
                     .foregroundStyle(.secondary)
 
                 freeWindowSummary(schedule.freeWindows)
+
+                if !schedule.essentialWindows.isEmpty {
+                    essentialWindowSummary(schedule.essentialWindows)
+                }
             }
         }
         .padding(.vertical, 4)
@@ -191,6 +195,25 @@ struct ScheduleOverviewView: View {
             }
         }
     }
+
+    // MARK: - Essential Window Summary
+
+    @ViewBuilder
+    private func essentialWindowSummary(_ windows: [ActiveWindow]) -> some View {
+        let lines = FreeWindowFormatter.format(windows)
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Essential Only")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.purple)
+                ForEach(lines, id: \.self) { line in
+                    Text(line)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.purple.opacity(0.7))
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Assign Schedule Sheet
@@ -250,16 +273,28 @@ private struct AssignScheduleSheet: View {
                 if let profileID = selectedProfileID,
                    let profile = viewModel.appState.scheduleProfiles.first(where: { $0.id == profileID }) {
                     Section("Preview") {
-                        let lines = FreeWindowFormatter.format(profile.freeWindows)
-                        if lines.isEmpty {
+                        let freeLines = FreeWindowFormatter.format(profile.freeWindows)
+                        if freeLines.isEmpty {
                             Text("No free windows defined")
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         } else {
-                            ForEach(lines, id: \.self) { line in
+                            ForEach(freeLines, id: \.self) { line in
                                 Text(line)
                                     .font(.caption.monospaced())
                                     .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        let essentialLines = FreeWindowFormatter.format(profile.essentialWindows)
+                        if !essentialLines.isEmpty {
+                            Text("Essential Only")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.purple)
+                            ForEach(essentialLines, id: \.self) { line in
+                                Text(line)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.purple.opacity(0.7))
                             }
                         }
                     }

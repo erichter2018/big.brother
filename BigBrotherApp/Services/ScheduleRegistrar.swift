@@ -12,8 +12,10 @@ import BigBrotherCore
 /// DeviceActivity schedules persist across app launches and reboots (after first unlock).
 enum ScheduleRegistrar {
 
-    /// Prefix for all schedule profile activities.
+    /// Prefix for free-window schedule activities.
     static let activityPrefix = "bigbrother.scheduleprofile."
+    /// Prefix for essential-window schedule activities.
+    static let essentialPrefix = "bigbrother.essentialwindow."
 
     /// Register DeviceActivity schedules for the given profile.
     /// Clears any previously registered schedule profile activities first.
@@ -28,24 +30,31 @@ enum ScheduleRegistrar {
 
         // Register one DeviceActivity per free window.
         for window in profile.freeWindows {
-            let activityName = DeviceActivityName(rawValue: "\(activityPrefix)\(window.id.uuidString)")
+            registerWindow(window, prefix: activityPrefix, label: "free", center: center)
+        }
 
-            let schedule = DeviceActivitySchedule(
-                intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
-                intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
-                repeats: true
-            )
+        // Register one DeviceActivity per essential window.
+        for window in profile.essentialWindows {
+            registerWindow(window, prefix: essentialPrefix, label: "essential", center: center)
+        }
+    }
 
-            do {
-                try center.startMonitoring(activityName, during: schedule)
-                #if DEBUG
-                print("[BigBrother] Registered schedule activity: \(activityName.rawValue) (\(window.startTime.hour):\(String(format: "%02d", window.startTime.minute))-\(window.endTime.hour):\(String(format: "%02d", window.endTime.minute)))")
-                #endif
-            } catch {
-                #if DEBUG
-                print("[BigBrother] Failed to register schedule activity: \(error.localizedDescription)")
-                #endif
-            }
+    private static func registerWindow(_ window: ActiveWindow, prefix: String, label: String, center: DeviceActivityCenter) {
+        let activityName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)")
+        let schedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
+            intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
+            repeats: true
+        )
+        do {
+            try center.startMonitoring(activityName, during: schedule)
+            #if DEBUG
+            print("[BigBrother] Registered \(label) activity: \(activityName.rawValue) (\(window.startTime.hour):\(String(format: "%02d", window.startTime.minute))-\(window.endTime.hour):\(String(format: "%02d", window.endTime.minute)))")
+            #endif
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Failed to register \(label) activity: \(error.localizedDescription)")
+            #endif
         }
     }
 
@@ -58,7 +67,7 @@ enum ScheduleRegistrar {
     /// Clear all schedule profile activities from DeviceActivityCenter.
     private static func clearAll(center: DeviceActivityCenter) {
         for activity in center.activities {
-            if activity.rawValue.hasPrefix(activityPrefix) {
+            if activity.rawValue.hasPrefix(activityPrefix) || activity.rawValue.hasPrefix(essentialPrefix) {
                 center.stopMonitoring([activity])
             }
         }

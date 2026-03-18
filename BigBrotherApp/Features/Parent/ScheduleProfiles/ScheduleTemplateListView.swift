@@ -97,8 +97,11 @@ struct ScheduleTemplateListView: View {
             }
 
             HStack(spacing: 12) {
-                Label("\(profile.freeWindows.count) window\(profile.freeWindows.count == 1 ? "" : "s")",
-                      systemImage: "clock")
+                Label("\(profile.freeWindows.count) free", systemImage: "clock")
+                if !profile.essentialWindows.isEmpty {
+                    Label("\(profile.essentialWindows.count) essential", systemImage: "shield")
+                        .foregroundStyle(.purple)
+                }
                 Label("Locked: \(profile.lockedMode.displayName)", systemImage: "lock")
             }
             .font(.caption)

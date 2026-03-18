@@ -322,7 +322,12 @@ final class ParentDashboardViewModel: CommandSendable {
         guard let profile = scheduleProfile(for: child) else { return nil }
         let mode = profile.resolvedMode(at: now)
         let isFree = mode == .unlocked
-        let modeLabel = isFree ? "Free" : "Locked"
+        let modeLabel: String
+        switch mode {
+        case .unlocked: modeLabel = "Free"
+        case .essentialOnly: modeLabel = "Essential"
+        case .dailyMode: modeLabel = "Locked"
+        }
 
         if let transition = profile.nextTransitionTime(from: self.now) {
             let formatter = DateFormatter()

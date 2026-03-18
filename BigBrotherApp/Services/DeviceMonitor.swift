@@ -120,7 +120,11 @@ final class DeviceMonitor {
     private func checkDeviceStatus() {
         let now = Date()
 
+        let knownChildIDs = Set(appState.childProfiles.map(\.id))
         for device in appState.childDevices {
+            // Skip orphaned devices that don't belong to any known child profile.
+            guard knownChildIDs.contains(device.childProfileID) else { continue }
+
             let key = device.id.rawValue
             let heartbeat = appState.latestHeartbeats.first { $0.deviceID == device.id }
             let profile = resolveProfile(for: device)

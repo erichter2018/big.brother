@@ -581,6 +581,11 @@ enum CKRecordConversion {
             record[CKFieldName.freeWindowsJSON] = windowsStr
         }
 
+        if let essentialData = try? JSONEncoder().encode(profile.essentialWindows),
+           let essentialStr = String(data: essentialData, encoding: .utf8) {
+            record[CKFieldName.essentialWindowsJSON] = essentialStr
+        }
+
         return record
     }
 
@@ -605,11 +610,19 @@ enum CKRecordConversion {
             windows = decoded
         }
 
+        var essentialWindows: [ActiveWindow] = []
+        if let json = record[CKFieldName.essentialWindowsJSON] as? String,
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([ActiveWindow].self, from: data) {
+            essentialWindows = decoded
+        }
+
         return ScheduleProfile(
             id: profileID,
             familyID: FamilyID(rawValue: familyID),
             name: name,
             freeWindows: windows,
+            essentialWindows: essentialWindows,
             lockedMode: lockedMode,
             isDefault: isDefaultInt != 0,
             updatedAt: updatedAt

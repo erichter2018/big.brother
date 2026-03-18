@@ -127,6 +127,7 @@ final class AppState {
         loadRole()
         loadApprovedApps()
         loadChildOrder()
+        loadCachedDashboard()
     }
 
     /// Read role and enrollment state from Keychain.
@@ -206,6 +207,33 @@ final class AppState {
     private func persistChildOrder() {
         guard let data = try? JSONEncoder().encode(childOrder) else { return }
         UserDefaults.standard.set(data, forKey: Self.childOrderKey)
+    }
+
+    // MARK: - Dashboard Cache
+
+    private static let cachedChildProfilesKey = "fr.bigbrother.cachedChildProfiles"
+    private static let cachedChildDevicesKey = "fr.bigbrother.cachedChildDevices"
+
+    func loadCachedDashboard() {
+        let decoder = JSONDecoder()
+        if let data = UserDefaults.standard.data(forKey: Self.cachedChildProfilesKey),
+           let profiles = try? decoder.decode([ChildProfile].self, from: data) {
+            childProfiles = profiles
+        }
+        if let data = UserDefaults.standard.data(forKey: Self.cachedChildDevicesKey),
+           let devices = try? decoder.decode([ChildDevice].self, from: data) {
+            childDevices = devices
+        }
+    }
+
+    func persistDashboardCache() {
+        let encoder = JSONEncoder()
+        if let data = try? encoder.encode(childProfiles) {
+            UserDefaults.standard.set(data, forKey: Self.cachedChildProfilesKey)
+        }
+        if let data = try? encoder.encode(childDevices) {
+            UserDefaults.standard.set(data, forKey: Self.cachedChildDevicesKey)
+        }
     }
 
     /// Returns child profiles sorted by user-defined order.
@@ -745,6 +773,9 @@ final class AppState {
         if let hbp = fetchedHBProfiles { heartbeatProfiles = hbp }
         if let sp = fetchedScheduleProfiles { scheduleProfiles = sp }
 
+        // Cache for instant display on next launch.
+        persistDashboardCache()
+
         // Preserve parent-set fields on remaining paths.
 
         // Enrich approved app names from heartbeat data.
@@ -1114,35 +1145,23 @@ final class AppState {
                 return
             }
 
-            // Check if we already have this exact assigned version registered.
+            // Check if we already have this exact version registered.
             let currentProfile = storage.readActiveScheduleProfile()
-            let assignedVersion = myDevice.scheduleProfileVersion
-
-            if let current = currentProfile,
-               current.id == profileID,
-               let assignedVersion,
-               current.updatedAt == assignedVersion {
-                // Already registered with the explicitly assigned version.
-                return
-            }
 
             // Fetch the full schedule profile.
             let profiles = try await cloudKit.fetchScheduleProfiles(familyID: enrollment.familyID)
             guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
 
-            // Only apply the version that was explicitly assigned by the parent.
-            // If the profile was edited (updatedAt changed) but not re-assigned
-            // (scheduleProfileVersion still points to old version), skip.
-            if let assignedVersion, profile.updatedAt != assignedVersion {
-                // Profile was edited but not re-assigned to this device.
-                // Use the stored profile if we have one, otherwise register anyway (first assignment).
-                if currentProfile?.id == profileID {
-                    return
-                }
+            // Skip if already registered with the same version.
+            if let current = currentProfile,
+               current.id == profileID,
+               current.updatedAt == profile.updatedAt {
+                return
             }
 
             if familyControlsAvailable {
                 ScheduleRegistrar.register(profile, storage: storage)
+                scheduleNextScheduleBGTask()
                 #if DEBUG
                 print("[BigBrother] Schedule profile registered: \(profile.name) (\(profile.freeWindows.count) windows)")
                 #endif
@@ -1248,6 +1267,46 @@ final class AppState {
             print("[BigBrother] Timed unlock end failed: \(error)")
             #endif
         }
+    }
+
+    // MARK: - Schedule Transition Enforcement
+
+    /// Enforce the correct mode based on the active schedule profile.
+    /// Called from the 1s timer and BGTask as a safety net in case the
+    /// DeviceActivityMonitor extension missed a free window transition.
+    func enforceScheduleTransition() {
+        guard enforcement != nil else { return }
+        guard let profile = storage.readActiveScheduleProfile() else { return }
+        // Don't override active temporary/timed unlocks.
+        if let temp = storage.readTemporaryUnlockState(), temp.expiresAt > Date() { return }
+        if storage.readTimedUnlockInfo() != nil { return }
+
+        let now = Date()
+        let expectedMode = profile.resolvedMode(at: now)
+        let currentMode = snapshotStore?.loadCurrentSnapshot()?.effectivePolicy.resolvedMode
+
+        if expectedMode != currentMode {
+            guard let enrollment = try? keychain.get(
+                ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
+            ) else { return }
+            guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
+            try? cmdProcessor.applyModeDirect(expectedMode, enrollment: enrollment)
+            refreshLocalState()
+            eventLogger?.log(.policyReconciled, details: "Timer safety net: applied \(expectedMode.rawValue) from schedule")
+            #if DEBUG
+            print("[BigBrother] Schedule safety net: applied \(expectedMode.rawValue)")
+            #endif
+        }
+    }
+
+    /// Schedule a BGProcessingTask at the next schedule transition time.
+    func scheduleNextScheduleBGTask() {
+        guard let profile = storage.readActiveScheduleProfile(),
+              let nextTransition = profile.nextTransitionTime(from: Date()) else { return }
+        AppDelegate.scheduleRelockTask(at: nextTransition)
+        #if DEBUG
+        print("[BigBrother] Scheduled BGTask for next schedule transition at \(nextTransition)")
+        #endif
     }
 
     /// Trigger a child-initiated self-unlock (15 minutes).

@@ -176,7 +176,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     // MARK: - Enforcement Safety Net
 
-    /// Check for expired temporary/timed unlocks and re-lock.
+    /// Check for expired temporary/timed unlocks and schedule transitions, then re-lock/unlock as needed.
     /// Called from both the heartbeat BGTask and the re-lock BGProcessingTask.
     @MainActor
     private func checkAndRelockExpiredUnlocks(appState: AppState) {
@@ -204,6 +204,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 appState.applyTimedUnlockEnd()
             }
         }
+
+        // Check schedule transitions (free window start/end).
+        appState.enforceScheduleTransition()
+        // Schedule the next BGTask for the upcoming schedule transition.
+        appState.scheduleNextScheduleBGTask()
     }
 
     // MARK: - Re-lock BGProcessingTask

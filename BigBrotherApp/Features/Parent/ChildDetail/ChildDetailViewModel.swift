@@ -68,10 +68,13 @@ final class ChildDetailViewModel: CommandSendable {
             .contains { $0.isChildAuthorization == true }
     }
 
+    private var didFinishInit = false
+
     init(appState: AppState, child: ChildProfile) {
         self.appState = appState
         self.child = child
         self.selfUnlockBudget = Self.loadSelfUnlockBudget(for: child.id)
+        self.didFinishInit = true
     }
 
     // MARK: - Self Unlock Budget
@@ -80,7 +83,7 @@ final class ChildDetailViewModel: CommandSendable {
     /// Stored property so @Observable can track mutations for Stepper binding.
     var selfUnlockBudget: Int = 0 {
         didSet {
-            guard selfUnlockBudget != oldValue else { return }
+            guard didFinishInit, selfUnlockBudget != oldValue else { return }
             Self.saveSelfUnlockBudget(selfUnlockBudget, for: child.id)
             debounceSelfUnlockBudget()
         }
@@ -92,10 +95,15 @@ final class ChildDetailViewModel: CommandSendable {
     private func debounceSelfUnlockBudget() {
         budgetDebounceTask?.cancel()
         let budget = selfUnlockBudget
+        let childID = child.id
+        let lastSentKey = "selfUnlockBudgetLastSent.\(childID.rawValue)"
+        let lastSent = UserDefaults.standard.integer(forKey: lastSentKey)
+        guard budget != lastSent else { return }
         budgetDebounceTask = Task {
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
             await saveSelfUnlockBudgetToCloudKit(budget)
+            UserDefaults.standard.set(budget, forKey: lastSentKey)
         }
     }
 

@@ -112,6 +112,7 @@ enum CKFieldName {
 
     // BBScheduleProfile
     static let freeWindowsJSON = "freeWindowsJSON"
+    static let essentialWindowsJSON = "essentialWindowsJSON"
     static let lockedMode = "lockedMode"
 
     // BBChildDevice (profile links)
