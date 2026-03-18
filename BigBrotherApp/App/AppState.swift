@@ -686,9 +686,21 @@ final class AppState {
 
     /// Fetch all child profiles and devices from CloudKit (parent mode).
     /// Individual query failures are logged but don't block the rest.
+    /// Set when this parent's invite has been revoked by the primary parent.
+    var isParentRevoked = false
+
     func refreshDashboard() async throws {
         guard let familyID = parentState?.familyID,
               let cloudKit else { return }
+
+        // Check if this invited parent has been revoked.
+        if let inviteCode = parentState?.inviteCode {
+            if let invite = try? await cloudKit.fetchEnrollmentInvite(code: inviteCode),
+               invite.revoked {
+                isParentRevoked = true
+                return // Stop loading — parent is locked out.
+            }
+        }
 
         // Profiles are the critical query — let this one throw.
         let fetchedProfiles = try await cloudKit.fetchChildProfiles(familyID: familyID)

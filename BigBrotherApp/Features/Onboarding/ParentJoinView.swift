@@ -106,8 +106,8 @@ struct ParentJoinView: View {
                     return
                 }
 
-                // Set up as parent with the existing familyID.
-                let parentState = ParentState(familyID: invite.familyID)
+                // Set up as parent with the existing familyID, storing the invite code for revocation checks.
+                let parentState = ParentState(familyID: invite.familyID, inviteCode: invite.code)
                 try appState.setRole(.parent)
                 try appState.setParentState(parentState)
                 appState.configureServices()

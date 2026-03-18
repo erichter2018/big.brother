@@ -63,9 +63,15 @@ public struct ChildEnrollmentState: Codable, Sendable, Equatable {
 public struct ParentState: Codable, Sendable, Equatable {
     public let familyID: FamilyID
     public let setupAt: Date
+    /// The invite code used to join (nil for the original/primary parent).
+    public let inviteCode: String?
 
-    public init(familyID: FamilyID, setupAt: Date = Date()) {
+    public init(familyID: FamilyID, setupAt: Date = Date(), inviteCode: String? = nil) {
         self.familyID = familyID
         self.setupAt = setupAt
+        self.inviteCode = inviteCode
     }
+
+    /// Whether this is the original parent (created the family, not invited).
+    public var isPrimaryParent: Bool { inviteCode == nil }
 }

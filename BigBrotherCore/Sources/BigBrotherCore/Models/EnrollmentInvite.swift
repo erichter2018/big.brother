@@ -15,13 +15,19 @@ public struct EnrollmentInvite: Codable, Sendable, Equatable {
     public let expiresAt: Date
     public var used: Bool
     public var usedByDeviceID: DeviceID?
+    public var revoked: Bool
 
     public var isExpired: Bool {
         Date() > expiresAt
     }
 
     public var isValid: Bool {
-        !used && !isExpired
+        !used && !isExpired && !revoked
+    }
+
+    /// Whether this is a parent invite (vs child enrollment).
+    public var isParentInvite: Bool {
+        childProfileID.rawValue == "__parent_invite__"
     }
 
     public init(
@@ -31,7 +37,8 @@ public struct EnrollmentInvite: Codable, Sendable, Equatable {
         createdAt: Date = Date(),
         expiresAt: Date? = nil,
         used: Bool = false,
-        usedByDeviceID: DeviceID? = nil
+        usedByDeviceID: DeviceID? = nil,
+        revoked: Bool = false
     ) {
         self.code = code
         self.familyID = familyID
@@ -40,5 +47,6 @@ public struct EnrollmentInvite: Codable, Sendable, Equatable {
         self.expiresAt = expiresAt ?? createdAt.addingTimeInterval(1800)
         self.used = used
         self.usedByDeviceID = usedByDeviceID
+        self.revoked = revoked
     }
 }

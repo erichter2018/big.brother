@@ -205,6 +205,25 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await save(existing)
     }
 
+    func fetchParentInvites(familyID: FamilyID) async throws -> [EnrollmentInvite] {
+        let predicate = NSPredicate(
+            format: "%K == %@ AND %K == %@",
+            CKFieldName.familyID, familyID.rawValue,
+            CKFieldName.profileID, "__parent_invite__"
+        )
+        return try await query(CKRecordType.enrollmentInvite, predicate: predicate)
+            .compactMap(CKRecordConversion.enrollmentInvite)
+    }
+
+    func revokeInvite(code: String) async throws {
+        let recordID = CKRecordConversion.recordID(code, type: CKRecordType.enrollmentInvite)
+        guard let existing = try? await database.record(for: recordID) else {
+            throw CloudKitError.recordNotFound
+        }
+        existing[CKFieldName.revoked] = 1 as NSNumber
+        try await save(existing)
+    }
+
     // MARK: - Heartbeat
 
     func sendHeartbeat(_ heartbeat: DeviceHeartbeat) async throws {
@@ -529,12 +548,26 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 let query = CKQuery(recordType: recordType, predicate: predicate)
                 var allRecords: [CKRecord] = []
 
-                let (results, _) = try await database.records(matching: query, resultsLimit: 200)
-                for (_, result) in results {
+                // Paginate through all results (CloudKit returns max 200 per page).
+                var cursor: CKQueryOperation.Cursor?
+                let (firstResults, firstCursor) = try await database.records(matching: query, resultsLimit: 200)
+                for (_, result) in firstResults {
                     if case .success(let record) = result {
                         allRecords.append(record)
                     }
                 }
+                cursor = firstCursor
+
+                while let activeCursor = cursor {
+                    let (moreResults, nextCursor) = try await database.records(continuingMatchFrom: activeCursor, resultsLimit: 200)
+                    for (_, result) in moreResults {
+                        if case .success(let record) = result {
+                            allRecords.append(record)
+                        }
+                    }
+                    cursor = nextCursor
+                }
+
                 return allRecords
             } catch let error as CKError where error.code == .unknownItem && attempt == 0 {
                 #if DEBUG

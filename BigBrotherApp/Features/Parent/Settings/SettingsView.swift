@@ -58,6 +58,14 @@ struct SettingsView: View {
                 } label: {
                     Label("Invite Parent", systemImage: "person.2.badge.key")
                 }
+
+                if appState.parentState?.isPrimaryParent == true {
+                    NavigationLink {
+                        ManageParentsView(appState: appState)
+                    } label: {
+                        Label("Manage Parent Access", systemImage: "person.badge.minus")
+                    }
+                }
             }
 
             Section("Monitoring") {

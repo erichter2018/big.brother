@@ -175,6 +175,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.createdAt] = Date() as NSDate
         r[CKFieldName.expiresAt] = Date() as NSDate
         r[CKFieldName.used] = 1 as NSNumber
+        r[CKFieldName.revoked] = 0 as NSNumber
         return r
     }
 

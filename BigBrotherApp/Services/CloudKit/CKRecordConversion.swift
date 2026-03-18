@@ -420,6 +420,7 @@ enum CKRecordConversion {
         record[CKFieldName.expiresAt] = invite.expiresAt as NSDate
         record[CKFieldName.used] = (invite.used ? 1 : 0) as NSNumber
         record[CKFieldName.usedByDeviceID] = invite.usedByDeviceID?.rawValue
+        record[CKFieldName.revoked] = (invite.revoked ? 1 : 0) as NSNumber
         return record
     }
 
@@ -438,6 +439,8 @@ enum CKRecordConversion {
             usedByDevice = DeviceID(rawValue: ubdStr)
         }
 
+        let revokedInt = record[CKFieldName.revoked] as? Int64 ?? 0
+
         return EnrollmentInvite(
             code: code,
             familyID: FamilyID(rawValue: familyID),
@@ -445,7 +448,8 @@ enum CKRecordConversion {
             createdAt: createdAt,
             expiresAt: expiresAt,
             used: usedInt != 0,
-            usedByDeviceID: usedByDevice
+            usedByDeviceID: usedByDevice,
+            revoked: revokedInt != 0
         )
     }
 

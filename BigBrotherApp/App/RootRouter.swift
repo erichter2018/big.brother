@@ -17,13 +17,35 @@ struct RootRouter: View {
                 OnboardingView(appState: appState)
 
             case .parent:
-                ParentGate(appState: appState) {
-                    ParentTabView(appState: appState)
+                if appState.isParentRevoked {
+                    revokedParentView
+                } else {
+                    ParentGate(appState: appState) {
+                        ParentTabView(appState: appState)
+                    }
                 }
 
             case .child:
                 ChildHomeView(viewModel: ChildHomeViewModel(appState: appState))
             }
+        }
+    }
+
+    @ViewBuilder
+    private var revokedParentView: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            Image(systemName: "person.badge.minus")
+                .font(.system(size: 64))
+                .foregroundStyle(.red)
+            Text("Access Revoked")
+                .font(.title2.weight(.bold))
+            Text("Your parent access to this family has been revoked by the primary parent.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Spacer()
         }
     }
 }

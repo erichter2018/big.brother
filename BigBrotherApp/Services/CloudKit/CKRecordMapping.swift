@@ -95,6 +95,7 @@ enum CKFieldName {
     static let code = "code"
     static let used = "used"
     static let usedByDeviceID = "usedByDeviceID"
+    static let revoked = "revoked"
 
     // BBSchedule
     static let scheduleName = "scheduleName"

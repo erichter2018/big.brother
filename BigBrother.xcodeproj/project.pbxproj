@@ -101,6 +101,7 @@
 		BA0CD64CE80B3BC86F80D0D7 /* CloudKitServiceImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33D8321C9F9209BE46A858C1 /* CloudKitServiceImpl.swift */; };
 		BAA54D7A8A572826EBD6154E /* BigBrotherShieldExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F85AF48051FD61F7CC41174 /* BigBrotherShieldExtension.swift */; };
 		BB25BA24BA35CF5CF6AE004F /* BigBrotherMonitorExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B798B36FE0FAEB8B606C217 /* BigBrotherMonitorExtension.swift */; };
+		BC809B52E3AB20A74B635C50 /* ManageParentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A71169F2B01120A2C83B1C8E /* ManageParentsView.swift */; };
 		BDF57CCF089834D095F39F7D /* InsightsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5DC2165FE4CA5A8229AB9A /* InsightsView.swift */; };
 		BE4F33E2AC94D8F17A4F9804 /* CKRecordConversion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DFC4955AC83380BE38C8BC0 /* CKRecordConversion.swift */; };
 		BF984E9549D8C02FC9AEA0C2 /* EventLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = C36012B3D4C1E766E3A6A4B0 /* EventLogger.swift */; };
@@ -271,6 +272,7 @@
 		A3B2932282E5C1291793D282 /* LocalParentUnlockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalParentUnlockViewModel.swift; sourceTree = "<group>"; };
 		A6A461145FB5FD80DC25AFDC /* HeartbeatServiceImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeartbeatServiceImpl.swift; sourceTree = "<group>"; };
 		A6E1E462E13CE9E0E219EF8A /* DeviceDetailViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDetailViewModel.swift; sourceTree = "<group>"; };
+		A71169F2B01120A2C83B1C8E /* ManageParentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManageParentsView.swift; sourceTree = "<group>"; };
 		AA85E1CC4A1434B891C4E64C /* BigBrotherShieldActionExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherShieldActionExtension.swift; sourceTree = "<group>"; };
 		AACED8D5F3C28F38FE2F29DD /* WarningBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarningBanner.swift; sourceTree = "<group>"; };
 		B0812888B0C4E1FDDB0CFD3B /* TemporaryUnlockCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemporaryUnlockCard.swift; sourceTree = "<group>"; };
@@ -761,6 +763,7 @@
 			children = (
 				BA7238370DF087C7217A13FB /* ChildOrderView.swift */,
 				B8752127CB5FC369C78C19C4 /* ManageChildrenView.swift */,
+				A71169F2B01120A2C83B1C8E /* ManageParentsView.swift */,
 				9EF44812A1D9A0E3823406A7 /* ParentInviteView.swift */,
 				87FED7DA09DE4FD29C084934 /* SecuritySettingsView.swift */,
 				CD131A23AA70CAC2AB9EEF2F /* SettingsView.swift */,
@@ -1109,6 +1112,7 @@
 				2C07273E33EED3CF492EC083 /* LocalParentUnlockViewModel.swift in Sources */,
 				FB2ED62CFB885FBB6B7365E4 /* LocalUnlockView.swift in Sources */,
 				D77A7F9D1DC021A985241CF9 /* ManageChildrenView.swift in Sources */,
+				BC809B52E3AB20A74B635C50 /* ManageParentsView.swift in Sources */,
 				7B3312E6AA989AE1BF8B462A /* ModeActionButtons.swift in Sources */,
 				A1F94FAF8FE6823598C8AFD2 /* ModeBadge.swift in Sources */,
 				AAB88F89F3CA4CA0972BD263 /* ModeChangeNotifier.swift in Sources */,

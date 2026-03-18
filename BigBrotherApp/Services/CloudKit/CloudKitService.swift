@@ -41,6 +41,8 @@ protocol CloudKitServiceProtocol: Sendable {
     func saveEnrollmentInvite(_ invite: EnrollmentInvite) async throws
     func fetchEnrollmentInvite(code: String) async throws -> EnrollmentInvite?
     func markInviteUsed(code: String, deviceID: DeviceID) async throws
+    func fetchParentInvites(familyID: FamilyID) async throws -> [EnrollmentInvite]
+    func revokeInvite(code: String) async throws
 
     // MARK: - Heartbeat
 
