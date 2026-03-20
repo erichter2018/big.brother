@@ -98,6 +98,24 @@ public enum CommandAction: Codable, Sendable, Equatable {
     /// Empty array = block all web. nil domains in the array are ignored.
     case setAllowedWebDomains(domains: [String])
 
+    private static let lockUntilFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        return f
+    }()
+
+    /// Whether this action changes the device-wide lock mode.
+    /// Mode commands supersede each other — only the latest pending one matters.
+    /// Per-app commands (allowApp, blockManagedApp, etc.) are NOT mode commands.
+    public var isModeCommand: Bool {
+        switch self {
+        case .setMode, .temporaryUnlock, .timedUnlock, .lockUntil, .returnToSchedule:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Human-readable description for UI feedback.
     public var displayDescription: String {
         switch self {
@@ -156,9 +174,7 @@ public enum CommandAction: Codable, Sendable, Equatable {
         case .returnToSchedule:
             return "Return to schedule"
         case .lockUntil(let date):
-            let formatter = DateFormatter()
-            formatter.dateFormat = "h:mm a"
-            return "Lock until \(formatter.string(from: date))"
+            return "Lock until \(Self.lockUntilFormatter.string(from: date))"
         case .syncPINHash:
             return "Sync parent PIN"
         case .setScheduleProfile:

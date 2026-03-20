@@ -5,6 +5,8 @@ import BigBrotherCore
 /// Command delivery insights and device health analytics.
 struct InsightsView: View {
     @Bindable var viewModel: InsightsViewModel
+    @State private var lockPrecisionExpanded = false
+    @State private var schedulePrecisionExpanded = false
 
     var body: some View {
         ScrollView {
@@ -143,65 +145,82 @@ struct InsightsView: View {
     @ViewBuilder
     private var lockPrecisionSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "lock.badge.clock")
-                    .foregroundStyle(.blue)
-                Text("Lock Precision")
-                    .font(.subheadline.weight(.semibold))
-            }
-
-            // Summary stats
-            let drifts = viewModel.lockPrecisionRecords.map(\.driftSeconds)
-            let avgDrift = drifts.reduce(0, +) / Double(max(1, drifts.count))
-            let maxDrift = drifts.max() ?? 0
-            let onTime = drifts.filter { abs($0) < 30 }.count
-
-            HStack(spacing: 20) {
-                statLabel("On Time", value: "\(onTime)/\(drifts.count)")
-                statLabel("Avg Drift", value: formatDrift(avgDrift))
-                statLabel("Worst", value: formatDrift(maxDrift))
-            }
-
-            // Per-record list
-            ForEach(viewModel.lockPrecisionRecords.prefix(10)) { record in
-                HStack(spacing: 8) {
-                    driftIcon(record.driftSeconds)
-
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 4) {
-                            if let name = record.childName {
-                                Text(name)
-                                    .font(.caption.weight(.medium))
-                            }
-                            Text(formatDuration(record.expectedDurationSeconds))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text(record.unlockStartedAt, style: .relative)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                        + Text(" ago")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                    }
-
-                    Spacer()
-
-                    Text(formatDrift(record.driftSeconds))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(driftColor(record.driftSeconds).opacity(0.15))
-                        .foregroundStyle(driftColor(record.driftSeconds))
-                        .clipShape(Capsule())
+            // Tappable header with summary stats inline
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    lockPrecisionExpanded.toggle()
                 }
-                .padding(.vertical, 2)
-            }
+            } label: {
+                let drifts = viewModel.lockPrecisionRecords.map(\.driftSeconds)
+                let avgDrift = drifts.reduce(0, +) / Double(max(1, drifts.count))
+                let onTime = drifts.filter { abs($0) < 30 }.count
 
-            if viewModel.lockPrecisionRecords.isEmpty {
-                Text("No temporary unlocks with expiry data yet.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                HStack {
+                    Image(systemName: "lock.badge.clock")
+                        .foregroundStyle(.blue)
+                    Text("Lock Precision")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text("\(onTime)/\(drifts.count) on-time")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(formatDrift(avgDrift))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(driftColor(avgDrift))
+                    Image(systemName: lockPrecisionExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if lockPrecisionExpanded {
+                let drifts = viewModel.lockPrecisionRecords.map(\.driftSeconds)
+                let avgDrift = drifts.reduce(0, +) / Double(max(1, drifts.count))
+                let maxDrift = drifts.max() ?? 0
+                let onTime = drifts.filter { abs($0) < 30 }.count
+
+                HStack(spacing: 20) {
+                    statLabel("On Time", value: "\(onTime)/\(drifts.count)")
+                    statLabel("Avg Drift", value: formatDrift(avgDrift))
+                    statLabel("Worst", value: formatDrift(maxDrift))
+                }
+
+                ForEach(viewModel.lockPrecisionRecords.prefix(10)) { record in
+                    HStack(spacing: 8) {
+                        driftIcon(record.driftSeconds)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 4) {
+                                if let name = record.childName {
+                                    Text(name)
+                                        .font(.caption.weight(.medium))
+                                }
+                                Text(formatDuration(record.expectedDurationSeconds))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(record.unlockStartedAt, style: .relative)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                            + Text(" ago")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        }
+
+                        Spacer()
+
+                        Text(formatDrift(record.driftSeconds))
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(driftColor(record.driftSeconds).opacity(0.15))
+                            .foregroundStyle(driftColor(record.driftSeconds))
+                            .clipShape(Capsule())
+                    }
+                    .padding(.vertical, 2)
+                }
             }
         }
         .padding()
@@ -214,57 +233,81 @@ struct InsightsView: View {
     @ViewBuilder
     private var schedulePrecisionSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "calendar.badge.clock")
-                    .foregroundStyle(.orange)
-                Text("Schedule Precision")
-                    .font(.subheadline.weight(.semibold))
-            }
-
-            let drifts = viewModel.scheduleTransitionRecords.map(\.driftSeconds)
-            let avgDrift = drifts.reduce(0, +) / Double(max(1, drifts.count))
-            let maxDrift = drifts.max() ?? 0
-            let onTime = drifts.filter { abs($0) < 30 }.count
-
-            HStack(spacing: 20) {
-                statLabel("On Time", value: "\(onTime)/\(drifts.count)")
-                statLabel("Avg Drift", value: formatDrift(avgDrift))
-                statLabel("Worst", value: formatDrift(maxDrift))
-            }
-
-            ForEach(viewModel.scheduleTransitionRecords.prefix(10)) { record in
-                HStack(spacing: 8) {
-                    driftIcon(record.driftSeconds)
-
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 4) {
-                            if let name = record.childName {
-                                Text(name)
-                                    .font(.caption.weight(.medium))
-                            }
-                            Text(record.transitionType.rawValue)
-                                .font(.caption)
-                                .foregroundStyle(record.transitionType == .unlock ? .green : .blue)
-                        }
-                        Text(record.actualTime, style: .relative)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                        + Text(" ago")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                    }
-
-                    Spacer()
-
-                    Text(formatDrift(record.driftSeconds))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(driftColor(record.driftSeconds).opacity(0.15))
-                        .foregroundStyle(driftColor(record.driftSeconds))
-                        .clipShape(Capsule())
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    schedulePrecisionExpanded.toggle()
                 }
-                .padding(.vertical, 2)
+            } label: {
+                let drifts = viewModel.scheduleTransitionRecords.map(\.driftSeconds)
+                let avgDrift = drifts.reduce(0, +) / Double(max(1, drifts.count))
+                let onTime = drifts.filter { abs($0) < 30 }.count
+
+                HStack {
+                    Image(systemName: "calendar.badge.clock")
+                        .foregroundStyle(.orange)
+                    Text("Schedule Precision")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text("\(onTime)/\(drifts.count) on-time")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(formatDrift(avgDrift))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(driftColor(avgDrift))
+                    Image(systemName: schedulePrecisionExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if schedulePrecisionExpanded {
+                let drifts = viewModel.scheduleTransitionRecords.map(\.driftSeconds)
+                let avgDrift = drifts.reduce(0, +) / Double(max(1, drifts.count))
+                let maxDrift = drifts.max() ?? 0
+                let onTime = drifts.filter { abs($0) < 30 }.count
+
+                HStack(spacing: 20) {
+                    statLabel("On Time", value: "\(onTime)/\(drifts.count)")
+                    statLabel("Avg Drift", value: formatDrift(avgDrift))
+                    statLabel("Worst", value: formatDrift(maxDrift))
+                }
+
+                ForEach(viewModel.scheduleTransitionRecords.prefix(10)) { record in
+                    HStack(spacing: 8) {
+                        driftIcon(record.driftSeconds)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 4) {
+                                if let name = record.childName {
+                                    Text(name)
+                                        .font(.caption.weight(.medium))
+                                }
+                                Text(record.transitionType.rawValue)
+                                    .font(.caption)
+                                    .foregroundStyle(record.transitionType == .unlock ? .green : .blue)
+                            }
+                            Text(record.actualTime, style: .relative)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                            + Text(" ago")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        }
+
+                        Spacer()
+
+                        Text(formatDrift(record.driftSeconds))
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(driftColor(record.driftSeconds).opacity(0.15))
+                            .foregroundStyle(driftColor(record.driftSeconds))
+                            .clipShape(Capsule())
+                    }
+                    .padding(.vertical, 2)
+                }
             }
         }
         .padding()

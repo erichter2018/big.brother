@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import CloudKit
+import os
 import BigBrotherCore
 
 /// Handles background refresh and silent push notification wakeups.
@@ -23,7 +24,11 @@ enum BackgroundRefreshHandler {
     private static let pushDebounceInterval: TimeInterval = 10
 
     /// Timestamp of last push-triggered sync (child path only).
-    private nonisolated(unsafe) static var lastPushSync: Date = .distantPast
+    private static let _lastPushSyncLock = OSAllocatedUnfairLock(initialState: Date.distantPast)
+    private static var lastPushSync: Date {
+        get { _lastPushSyncLock.withLock { $0 } }
+        set { _lastPushSyncLock.withLock { $0 = newValue } }
+    }
 
     /// Handle a CloudKit silent push notification.
     ///

@@ -44,7 +44,7 @@ public struct Schedule: Codable, Sendable, Identifiable, Equatable {
 }
 
 /// Time of day without a date component.
-public struct DayTime: Codable, Sendable, Equatable, Hashable, Comparable {
+public struct DayTime: Sendable, Equatable, Hashable, Comparable {
     public let hour: Int   // 0–23
     public let minute: Int // 0–59
 
@@ -55,6 +55,13 @@ public struct DayTime: Codable, Sendable, Equatable, Hashable, Comparable {
         self.minute = minute
     }
 
+    /// Safe initializer that clamps out-of-range values instead of crashing.
+    /// Used by the Codable decoder to handle malformed CloudKit data.
+    public init(clampingHour hour: Int, minute: Int) {
+        self.hour = min(max(hour, 0), 23)
+        self.minute = min(max(minute, 0), 59)
+    }
+
     /// Total minutes since midnight, used for comparison.
     public var minutesSinceMidnight: Int {
         hour * 60 + minute
@@ -62,6 +69,20 @@ public struct DayTime: Codable, Sendable, Equatable, Hashable, Comparable {
 
     public static func < (lhs: DayTime, rhs: DayTime) -> Bool {
         lhs.minutesSinceMidnight < rhs.minutesSinceMidnight
+    }
+}
+
+extension DayTime: Codable {
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let h = try container.decode(Int.self, forKey: .hour)
+        let m = try container.decode(Int.self, forKey: .minute)
+        // Clamp instead of crashing on malformed data from CloudKit.
+        self.init(clampingHour: h, minute: m)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case hour, minute
     }
 }
 

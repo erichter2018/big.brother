@@ -95,7 +95,7 @@ public struct PolicySnapshot: Sendable, Equatable {
         authorizationHealth: AuthorizationHealth? = nil,
         policyFingerprint: String? = nil,
         childProfile: ChildProfile? = nil,
-        writerVersion: Int = 1
+        writerVersion: Int = AppConstants.appBuildNumber
     ) {
         self.snapshotID = snapshotID
         self.generation = generation

@@ -1,6 +1,7 @@
 import SwiftUI
 
 /// Quick global actions for all devices — Lock All and Unlock All.
+/// Glassmorphic capsule chip style.
 struct GlobalActionsBar: View {
     let viewModel: ParentDashboardViewModel
     /// Minimum remaining seconds across all children with active countdowns.
@@ -50,13 +51,7 @@ struct GlobalActionsBar: View {
                     }
                 }
             } label: {
-                Label("Unlock All", systemImage: "lock.open")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(Color.green.opacity(0.12))
-                    .foregroundStyle(.green)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                chipLabel("Unlock All", icon: "lock.open", color: Color(.systemGreen).opacity(0.7))
             } primaryAction: {
                 if let remaining = minRemaining, remaining > 0 {
                     Task { await viewModel.unlockAll(seconds: remaining + 15 * 60) }
@@ -88,13 +83,7 @@ struct GlobalActionsBar: View {
                     Label("4 hours", systemImage: "clock")
                 }
             } label: {
-                Label("Lock All", systemImage: "lock.fill")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(Color.blue.opacity(0.12))
-                    .foregroundStyle(.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                chipLabel("Lock All", icon: "lock.fill", color: Color(.systemBlue).opacity(0.7))
             } primaryAction: {
                 Task { await viewModel.lockAll(duration: .untilMidnight) }
             }
@@ -103,22 +92,30 @@ struct GlobalActionsBar: View {
             Button {
                 Task { await viewModel.scheduleAll() }
             } label: {
-                Label("Schedule", systemImage: "calendar.badge.clock")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(Color.orange.opacity(0.12))
-                    .foregroundStyle(.orange)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                chipLabel("Schedule", icon: "calendar.badge.clock", color: Color(.systemOrange).opacity(0.7))
             }
         }
         .disabled(viewModel.isSendingCommand)
         .opacity(viewModel.isSendingCommand ? 0.6 : 1)
     }
 
+    @ViewBuilder
+    private func chipLabel(_ title: String, icon: String, color: Color) -> some View {
+        Label(title, systemImage: icon)
+            .font(.subheadline)
+            .fontWeight(.medium)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial)
+            .foregroundStyle(color)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(color.opacity(0.2), lineWidth: 1)
+            )
+    }
+
     static var secondsUntilMidnight: Int {
-        let now = Date()
-        let midnight = Calendar.current.startOfDay(for: now).addingTimeInterval(86400)
-        return max(60, Int(midnight.timeIntervalSince(now)))
+        ChildSummaryCard.secondsUntilMidnight
     }
 }

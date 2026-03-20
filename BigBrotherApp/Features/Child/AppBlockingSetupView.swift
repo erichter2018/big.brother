@@ -99,13 +99,9 @@ struct AppBlockingSetupView: View {
             isAuthenticated = true
             pinError = nil
         case .failure(let remaining):
-            if remaining == 0 {
-                // No PIN hash on this device — parent already authenticated via
-                // the remote command, so allow access.
-                isAuthenticated = true
-                return
-            }
-            pinError = "Incorrect PIN (\(remaining) attempts remaining)"
+            pinError = remaining > 0
+                ? "Incorrect PIN (\(remaining) attempts remaining)"
+                : "Too many attempts. Try again later."
             pinEntry = ""
         case .lockedOut(let until):
             let formatter = RelativeDateTimeFormatter()

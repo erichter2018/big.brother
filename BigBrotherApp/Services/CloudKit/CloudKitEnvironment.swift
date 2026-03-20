@@ -47,7 +47,9 @@ enum CloudKitEnvironment {
                     try await Task.sleep(for: .seconds(5))
                     return .unknown("CloudKit check timed out")
                 }
-                let first = try await group.next()!
+                guard let first = try await group.next() else {
+                    return .unknown("CloudKit check returned no result")
+                }
                 group.cancelAll()
                 return first
             }

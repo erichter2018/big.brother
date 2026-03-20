@@ -43,6 +43,10 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         self.storage = storage
         self.enforcement = enforcement
         self.interval = interval
+
+        #if canImport(UIKit)
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        #endif
     }
 
     // MARK: - HeartbeatServiceProtocol
@@ -88,7 +92,15 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         try? storage.writeHeartbeatStatus(attemptStatus)
 
         let snapshot = storage.readPolicySnapshot()
-        let currentMode = snapshot?.effectivePolicy.resolvedMode ?? .unlocked
+        // Prefer ExtensionSharedState for currentMode — the Monitor extension updates it
+        // during schedule transitions without writing a full PolicySnapshot.
+        let extState = storage.readExtensionSharedState()
+        let currentMode: LockMode
+        if let ext = extState, ext.writtenAt > (snapshot?.createdAt ?? .distantPast) {
+            currentMode = ext.currentMode
+        } else {
+            currentMode = snapshot?.effectivePolicy.resolvedMode ?? .unlocked
+        }
         let policyVersion = snapshot?.effectivePolicy.policyVersion ?? 0
         let tempUnlockState: TemporaryUnlockState? = {
             // Only report if the device is actually unlocked.
@@ -103,6 +115,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let blockingConfig = storage.readAppBlockingConfig()
         let cachedAppNames = Self.discoveredAppNames(from: storage)
         let allowedNames = Self.resolvedAllowedAppNames(from: storage)
+        let allowedTokenCount = Self.rawAllowedAppTokenCount(from: storage)
         let tempAllowedNames = Self.resolvedTemporaryAllowedAppNames(from: storage)
 
         let selfUnlocksUsed: Int? = {
@@ -139,6 +152,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             heartbeatSeq: seqCounter,
             cloudKitStatus: ckStatus,
             allowedAppNames: allowedNames.isEmpty ? nil : allowedNames,
+            allowedAppCount: allowedTokenCount > 0 ? allowedTokenCount : nil,
             temporaryAllowedAppNames: tempAllowedNames.isEmpty ? nil : tempAllowedNames,
             temporaryUnlockExpiresAt: tempUnlockExpiry,
             isChildAuthorization: UserDefaults.standard.string(forKey: "fr.bigbrother.authorizationType") == "child",
@@ -200,7 +214,6 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
     private static var batteryLevel: Double? {
         #if canImport(UIKit)
-        UIDevice.current.isBatteryMonitoringEnabled = true
         let level = UIDevice.current.batteryLevel
         // UIDevice.batteryLevel rounds to 5% increments.
         // Return nil if monitoring isn't available (-1.0).
@@ -213,7 +226,6 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
     private static var isCharging: Bool? {
         #if canImport(UIKit)
-        UIDevice.current.isBatteryMonitoringEnabled = true
         let state = UIDevice.current.batteryState
         return state == .charging || state == .full
         #else
@@ -271,6 +283,19 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     }
 
     /// Resolve names for permanently allowed apps using the name cache.
+    /// Raw count of permanently allowed app tokens (no name resolution needed).
+    private static func rawAllowedAppTokenCount(from storage: any SharedStorageProtocol) -> Int {
+        #if canImport(ManagedSettings)
+        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data) {
+            return tokens.count
+        }
+        #endif
+        return 0
+    }
+
+    /// Resolve names for allowed apps. Uses cached names when available,
+    /// falls back to "App N" placeholders so the count is always accurate.
     private static func resolvedAllowedAppNames(from storage: any SharedStorageProtocol) -> [String] {
         let cache = storage.readAllCachedAppNames()
         var names: [String] = []
@@ -278,12 +303,17 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         #if canImport(ManagedSettings)
         if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
            let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data) {
+            var index = 1
             for token in tokens {
-                guard let tokenData = try? JSONEncoder().encode(token) else { continue }
-                let key = tokenData.base64EncodedString()
-                if let name = cache[key], isUsefulAppName(name) {
-                    names.append(name)
+                var resolved: String?
+                if let tokenData = try? JSONEncoder().encode(token) {
+                    let key = tokenData.base64EncodedString()
+                    if let name = cache[key], isUsefulAppName(name) {
+                        resolved = name
+                    }
                 }
+                names.append(resolved ?? "App \(index)")
+                index += 1
             }
         }
         #endif

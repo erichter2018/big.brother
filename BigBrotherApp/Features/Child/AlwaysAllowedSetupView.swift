@@ -7,23 +7,34 @@ import BigBrotherCore
 /// Picker for selecting apps that are always allowed in daily mode.
 /// Triggered remotely by the parent via requestAlwaysAllowedSetup command.
 /// Selected tokens are saved to allowedAppTokens and enforcement is reapplied.
+/// Uses the sheet-style picker which includes Apple's built-in search bar.
 struct AlwaysAllowedSetupView: View {
     let appState: AppState
     @State private var selection = FamilyActivitySelection()
+    @State private var showingPicker = false
     @State private var isSaving = false
     @State private var feedbackMessage: String?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 12) {
+            VStack(spacing: 16) {
                 Text("Select apps that should always be available in Daily Mode. These apps will NOT be blocked.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
 
-                FamilyActivityPicker(selection: $selection)
+                Button {
+                    showingPicker = true
+                } label: {
+                    Label("Choose Apps", systemImage: "app.badge.checkmark")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
 
                 if !selection.applicationTokens.isEmpty {
                     Text("\(selection.applicationTokens.count) app\(selection.applicationTokens.count == 1 ? "" : "s") selected")
@@ -36,7 +47,14 @@ struct AlwaysAllowedSetupView: View {
                         .font(.caption)
                         .foregroundStyle(feedback.hasPrefix("Failed") ? .red : .green)
                 }
+
+                Spacer()
             }
+            .padding(.top, 8)
+            .familyActivityPicker(
+                isPresented: $showingPicker,
+                selection: $selection
+            )
             .navigationTitle("Always Allowed Apps")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -45,17 +63,26 @@ struct AlwaysAllowedSetupView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { saveSelection() }
-                        .disabled(isSaving)
+                        .disabled(isSaving || selection.applicationTokens.isEmpty)
                 }
             }
-            .onAppear { loadExisting() }
+            .onAppear {
+                loadExisting()
+                // Auto-open picker on first appearance.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    showingPicker = true
+                }
+            }
         }
     }
 
     private func loadExisting() {
-        // Load current allowed tokens and build a selection from them.
-        // Start fresh — the parent will select all apps they want allowed.
-        selection = FamilyActivitySelection()
+        // Pre-populate with currently allowed tokens so the picker shows
+        // previously selected apps as already checked. New picks are additive.
+        if let data = appState.storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data) {
+            selection.applicationTokens = tokens
+        }
     }
 
     private func saveSelection() {
@@ -90,6 +117,7 @@ struct AlwaysAllowedSetupView: View {
             print("[BigBrother] Saved \(tokens.count) always-allowed app tokens")
             #endif
 
+            isSaving = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 dismiss()
             }

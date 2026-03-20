@@ -104,6 +104,36 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await save(record)
     }
 
+    func fetchPendingModeCommands(familyID: FamilyID, target: CommandTarget) async throws -> [RemoteCommand] {
+        let predicate: NSPredicate
+        switch target {
+        case .child(let cid):
+            predicate = NSPredicate(
+                format: "%K == %@ AND %K == %@ AND %K == %@",
+                CKFieldName.targetType, "child",
+                CKFieldName.targetID, cid.rawValue,
+                CKFieldName.status, CommandStatus.pending.rawValue
+            )
+        case .device(let did):
+            predicate = NSPredicate(
+                format: "%K == %@ AND %K == %@ AND %K == %@",
+                CKFieldName.targetType, "device",
+                CKFieldName.targetID, did.rawValue,
+                CKFieldName.status, CommandStatus.pending.rawValue
+            )
+        case .allDevices:
+            predicate = NSPredicate(
+                format: "%K == %@ AND %K == %@ AND %K == %@",
+                CKFieldName.targetType, "all",
+                CKFieldName.familyID, familyID.rawValue,
+                CKFieldName.status, CommandStatus.pending.rawValue
+            )
+        }
+        return try await query(CKRecordType.remoteCommand, predicate: predicate)
+            .compactMap(CKRecordConversion.remoteCommand)
+            .filter { $0.action.isModeCommand }
+    }
+
     func fetchPendingCommands(
         deviceID: DeviceID,
         childProfileID: ChildProfileID,
@@ -227,8 +257,16 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Heartbeat
 
     func sendHeartbeat(_ heartbeat: DeviceHeartbeat) async throws {
-        let record = CKRecordConversion.toCKRecord(heartbeat)
-        try await save(record)
+        // Fetch existing record to preserve change tag (avoids serverRecordChanged on repeat saves).
+        let recordID = CKRecordConversion.recordID(heartbeat.deviceID.rawValue, type: CKRecordType.heartbeat)
+        let existing: CKRecord
+        do {
+            existing = try await database.record(for: recordID)
+        } catch {
+            existing = CKRecord(recordType: CKRecordType.heartbeat, recordID: recordID)
+        }
+        CKRecordConversion.updateCKRecord(existing, from: heartbeat)
+        try await save(existing)
     }
 
     func fetchLatestHeartbeats(familyID: FamilyID) async throws -> [DeviceHeartbeat] {
@@ -262,8 +300,16 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Policy
 
     func savePolicy(_ policy: Policy) async throws {
-        let record = CKRecordConversion.toCKRecord(policy)
-        try await save(record)
+        // Fetch existing record to preserve change tag (avoids serverRecordChanged on repeat saves).
+        let recordID = CKRecordConversion.recordID(policy.targetDeviceID.rawValue, type: CKRecordType.policy)
+        let existing: CKRecord
+        do {
+            existing = try await database.record(for: recordID)
+        } catch {
+            existing = CKRecord(recordType: CKRecordType.policy, recordID: recordID)
+        }
+        CKRecordConversion.updateCKRecord(existing, from: policy)
+        try await save(existing)
     }
 
     func fetchPolicy(deviceID: DeviceID) async throws -> Policy? {
@@ -494,8 +540,6 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         op.qualityOfService = .userInitiated
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            var resumed = false
-
             op.perRecordSaveBlock = { recordID, result in
                 switch result {
                 case .success:
@@ -510,8 +554,6 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             }
 
             op.modifyRecordsResultBlock = { result in
-                guard !resumed else { return }
-                resumed = true
                 switch result {
                 case .success:
                     continuation.resume()

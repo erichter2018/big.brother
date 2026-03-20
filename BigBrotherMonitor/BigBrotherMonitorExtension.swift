@@ -150,6 +150,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // ManagedSettings merges across stores with OR logic — clearing only
         // the schedule store leaves the base store shields active.
         clearAllShieldStores()
+
+        // Update shared state so the heartbeat reports .unlocked.
+        updateSharedState(mode: .unlocked)
+
         logEvent(.scheduleTriggered, details: "Free window started: \(activity.rawValue)")
         sendModeNotification(title: "Free Time Started", body: "All apps are now accessible.")
     }
@@ -167,6 +171,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Re-lock using the profile's locked mode on ALL stores.
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
+
+        // Update shared state so the heartbeat reports the locked mode.
+        updateSharedState(mode: profile.lockedMode)
+
         logEvent(.scheduleEnded, details: "Free window ended, locked to \(profile.lockedMode.rawValue)")
         sendModeNotification(
             title: "Free Time Ended",
@@ -196,6 +204,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Apply essential-only mode on ALL stores.
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
+        updateSharedState(mode: .essentialOnly)
         logEvent(.scheduleTriggered, details: "Essential window started: \(activity.rawValue)")
         sendModeNotification(title: "Essential Mode", body: "Only essential apps are available.")
     }
@@ -211,6 +220,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
+        updateSharedState(mode: profile.lockedMode)
         logEvent(.scheduleEnded, details: "Essential window ended, locked to \(profile.lockedMode.rawValue)")
         sendModeNotification(
             title: "Essential Mode Ended",
@@ -249,13 +259,18 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     // MARK: - Temporary Unlock Expiry
 
     /// Temporary unlock timer expired — re-lock the device using the previous mode.
+    /// If a manual mode was set (scheduleDrivenMode=false), revert to previousMode.
+    /// If schedule-driven, use the schedule's current resolved mode.
     private func handleTempUnlockExpired(_ activity: DeviceActivityName) {
         let unlockState = storage.readTemporaryUnlockState()
         let previousMode = unlockState?.previousMode ?? .dailyMode
 
-        // Check schedule profile — if one is assigned, use its resolved mode instead.
         let mode: LockMode
-        if let profile = storage.readActiveScheduleProfile() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let isScheduleDriven = defaults?.object(forKey: "scheduleDrivenMode") == nil
+            || (defaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+
+        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
         } else {
             mode = previousMode
@@ -317,7 +332,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 let unlockState = storage.readTemporaryUnlockState()
                 let previousMode = unlockState?.previousMode ?? .dailyMode
                 let mode: LockMode
-                if let profile = storage.readActiveScheduleProfile() {
+                let reconcileDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                let reconcileScheduleDriven = reconcileDefaults?.object(forKey: "scheduleDrivenMode") == nil
+                    || (reconcileDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+                if reconcileScheduleDriven, let profile = storage.readActiveScheduleProfile() {
                     mode = profile.resolvedMode(at: Date())
                 } else {
                     mode = previousMode
@@ -344,7 +362,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             } else {
                 // Expired temp unlock the monitor never caught — re-lock now.
                 let mode: LockMode
-                if let profile = storage.readActiveScheduleProfile() {
+                let staleDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                let staleScheduleDriven = staleDefaults?.object(forKey: "scheduleDrivenMode") == nil
+                    || (staleDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+                if staleScheduleDriven, let profile = storage.readActiveScheduleProfile() {
                     mode = profile.resolvedMode(at: Date())
                 } else {
                     mode = unlockState.previousMode
@@ -397,6 +418,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if let profile = storage.readActiveScheduleProfile(),
            profile.isInFreeWindow(at: Date()) {
             clearAllShieldStores()
+            updateSharedState(mode: .unlocked)
             logEvent(.policyReconciled, details: "Reconciliation: in free window, stores cleared")
             return
         }
@@ -451,6 +473,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             let allowedTokens = allowExemptions ? collectAllowedTokens() : []
             let pickerTokens = loadPickerTokens()
 
+            // Check if web blocking is enabled in device restrictions.
+            let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+            let blockWeb = restrictions.denyWebWhenLocked
+
             if !pickerTokens.isEmpty && allowExemptions {
                 let tokensToBlock = pickerTokens.subtracting(allowedTokens)
                 let perAppTokens: Set<ApplicationToken>
@@ -463,7 +489,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 for s in [baseStore, store] {
                     s.shield.applications = perAppTokens
                     s.shield.applicationCategories = .all(except: allowedTokens)
-                    s.shield.webDomainCategories = .all()
+                    s.shield.webDomainCategories = blockWeb ? .all() : nil
                 }
             } else {
                 let apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
@@ -474,7 +500,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     } else {
                         s.shield.applicationCategories = .all(except: allowedTokens)
                     }
-                    s.shield.webDomainCategories = .all()
+                    s.shield.webDomainCategories = blockWeb ? .all() : nil
                 }
             }
         }
@@ -509,7 +535,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             } else {
                 store.shield.applicationCategories = .all(except: allowedTokens)
             }
-            store.shield.webDomainCategories = .all()
+            let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+            store.shield.webDomainCategories = restrictions.denyWebWhenLocked ? .all() : nil
         }
     }
 
@@ -551,6 +578,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Update ExtensionSharedState so the heartbeat reports the correct mode
+    /// after schedule transitions (the Monitor doesn't write full PolicySnapshots).
+    private func updateSharedState(mode: LockMode) {
+        let snapshot = storage.readPolicySnapshot()
+        let authHealth = storage.readAuthorizationHealth()
+        let shieldConfig = try? storage.readShieldConfiguration()
+        let state = ExtensionSharedState(
+            currentMode: mode,
+            isTemporaryUnlock: false,
+            authorizationAvailable: authHealth?.isAuthorized ?? true,
+            enforcementDegraded: !(authHealth?.isAuthorized ?? true) && mode != .unlocked,
+            shieldConfig: shieldConfig ?? ShieldConfig(),
+            policyVersion: snapshot?.effectivePolicy.policyVersion ?? 0
+        )
+        try? storage.writeExtensionSharedState(state)
     }
 
     private func logEvent(_ type: EventType, details: String?) {

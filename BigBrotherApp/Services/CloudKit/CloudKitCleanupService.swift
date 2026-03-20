@@ -6,8 +6,8 @@ import BigBrotherCore
 ///
 /// Runs on the parent device only (child devices don't need to clean up).
 /// Targets:
-///   - Old commands (applied/failed/expired, older than 48 hours)
-///   - Old command receipts (older than 48 hours)
+///   - Old commands (applied/failed/expired, older than 4 hours)
+///   - Old command receipts (older than 4 hours)
 ///   - Old event logs (older than 7 days)
 ///
 /// Heartbeats use an upsert pattern (one record per device) so they don't

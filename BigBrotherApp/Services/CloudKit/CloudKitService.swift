@@ -30,6 +30,7 @@ protocol CloudKitServiceProtocol: Sendable {
         childProfileID: ChildProfileID,
         familyID: FamilyID
     ) async throws -> [RemoteCommand]
+    func fetchPendingModeCommands(familyID: FamilyID, target: CommandTarget) async throws -> [RemoteCommand]
     func updateCommandStatus(_ commandID: UUID, status: CommandStatus) async throws
     func deleteCommand(_ commandID: UUID) async throws
     func saveReceipt(_ receipt: CommandReceipt) async throws

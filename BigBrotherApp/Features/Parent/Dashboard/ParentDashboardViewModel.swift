@@ -19,10 +19,10 @@ final class ParentDashboardViewModel: CommandSendable {
     var now = Date()
     private var countdownTimer: Timer?
 
-    /// Children whose enforcement is driven by their schedule (no manual override).
-    /// Persisted in UserDefaults so it survives app relaunch.
-    var scheduleActiveChildren: Set<ChildProfileID> {
-        didSet { persistScheduleActiveChildren() }
+    /// Proxy for appState.scheduleActiveChildren (shared across all view models).
+    private var scheduleActiveChildren: Set<ChildProfileID> {
+        get { appState.scheduleActiveChildren }
+        set { appState.scheduleActiveChildren = newValue }
     }
 
     /// Tracks timed unlock phases (penalty → unlock) per child.
@@ -34,17 +34,17 @@ final class ParentDashboardViewModel: CommandSendable {
         didSet { persistTimedUnlockPhases() }
     }
 
-    private static let scheduleActiveKey = "scheduleActiveChildIDs"
     private static let unlockExpiriesKey = "unlockExpiries"
     private static let timedUnlockPhasesKey = "timedUnlockPhases"
 
     init(appState: AppState) {
         self.appState = appState
-        // Restore persisted schedule-active set.
-        if let raw = UserDefaults.standard.array(forKey: Self.scheduleActiveKey) as? [String] {
-            self.scheduleActiveChildren = Set(raw.map { ChildProfileID(rawValue: $0) })
-        } else {
-            self.scheduleActiveChildren = []
+        // Migrate old schedule-active data to appState if needed.
+        if appState.scheduleActiveChildren.isEmpty,
+           let raw = UserDefaults.standard.array(forKey: "scheduleActiveChildIDs") as? [String],
+           !raw.isEmpty {
+            appState.scheduleActiveChildren = Set(raw.map { ChildProfileID(rawValue: $0) })
+            UserDefaults.standard.removeObject(forKey: "scheduleActiveChildIDs")
         }
         // Restore persisted unlock expiries (prune expired).
         if let data = UserDefaults.standard.data(forKey: Self.unlockExpiriesKey),
@@ -77,9 +77,9 @@ final class ParentDashboardViewModel: CommandSendable {
         }
     }
 
-    private func persistScheduleActiveChildren() {
-        let raw = scheduleActiveChildren.map(\.rawValue)
-        UserDefaults.standard.set(raw, forKey: Self.scheduleActiveKey)
+    deinit {
+        countdownTimer?.invalidate()
+        confirmationTask?.cancel()
     }
 
     private func persistUnlockExpiries() {
@@ -102,8 +102,12 @@ final class ParentDashboardViewModel: CommandSendable {
     var childDevices: [ChildDevice] { appState.childDevices }
     var latestHeartbeats: [DeviceHeartbeat] { appState.latestHeartbeats }
 
+    /// Devices for a child, sorted so iPhones come before iPads.
+    /// This makes heartbeat age, mode, and status prefer the phone when a kid has both.
     func devices(for child: ChildProfile) -> [ChildDevice] {
-        childDevices.filter { $0.childProfileID == child.id }
+        childDevices
+            .filter { $0.childProfileID == child.id }
+            .sorted { lhs, _ in lhs.displayName.localizedCaseInsensitiveContains("iPhone") }
     }
 
     func heartbeat(for device: ChildDevice) -> DeviceHeartbeat? {
@@ -356,7 +360,33 @@ final class ParentDashboardViewModel: CommandSendable {
     }
 
     private func computeMode(for child: ChildProfile) -> (mode: LockMode, isTemp: Bool) {
-        // 0. If schedule is active, use schedule mode — but override if there's
+        // 0. Check if parent explicitly set mode — this takes priority over everything
+        //    (including schedule) because it represents the most recent parent intent.
+        //    Covers setMode from both dashboard and child detail views.
+        if let expected = appState.expectedModes[child.id] {
+            let devs = devices(for: child)
+            let confirmed = !devs.isEmpty && devs.allSatisfy { dev in
+                heartbeat(for: dev)?.currentMode == expected.mode
+            }
+            if confirmed {
+                // Heartbeat agrees — clear expectedModes and always remove from
+                // scheduleActiveChildren. A manual mode command overrides the schedule
+                // regardless of whether the modes happen to match right now.
+                appState.expectedModes.removeValue(forKey: child.id)
+                scheduleActiveChildren.remove(child.id)
+                return (expected.mode, expected.mode == .unlocked)
+            } else if now.timeIntervalSince(expected.sentAt) > 120 {
+                // Auto-expire after 2 minutes. Also clear scheduleActiveChildren —
+                // the parent intended a manual override even if heartbeat was slow.
+                appState.expectedModes.removeValue(forKey: child.id)
+                scheduleActiveChildren.remove(child.id)
+                // Don't fall through — trust the heartbeat if available.
+            } else {
+                return (expected.mode, expected.mode == .unlocked)
+            }
+        }
+
+        // 1. If schedule is active, use schedule mode — but override if there's
         //    an active temporary unlock (parent-initiated or self-unlock).
         if isScheduleActive(for: child) {
             if let phase = timedUnlockPhases[child.id] {
@@ -385,22 +415,6 @@ final class ParentDashboardViewModel: CommandSendable {
             }
         }
 
-        // 1. Check if parent explicitly set mode — trust until heartbeat confirms.
-        if let expected = appState.expectedModes[child.id] {
-            let devs = devices(for: child)
-            let confirmed = !devs.isEmpty && devs.allSatisfy { dev in
-                heartbeat(for: dev)?.currentMode == expected.mode
-            }
-            if confirmed {
-                appState.expectedModes.removeValue(forKey: child.id)
-            } else if now.timeIntervalSince(expected.sentAt) > 120 {
-                // Auto-expire after 2 minutes.
-                appState.expectedModes.removeValue(forKey: child.id)
-            } else {
-                return (expected.mode, expected.mode == .unlocked)
-            }
-        }
-
         // 2a. Check timed unlock phases (penalty → unlock).
         if let phase = timedUnlockPhases[child.id] {
             if now < phase.penaltyEndsAt {
@@ -408,7 +422,8 @@ final class ParentDashboardViewModel: CommandSendable {
             } else if now < phase.unlockEndsAt {
                 return (.unlocked, true)
             } else {
-                timedUnlockPhases.removeValue(forKey: child.id)
+                // Phase expired — don't mutate state here (this is called during render).
+                // The timer callback prunes expired phases.
                 return (lastKnownLockedMode(for: child), false)
             }
         }
@@ -503,6 +518,7 @@ final class ParentDashboardViewModel: CommandSendable {
     // MARK: - Countdown Timer
 
     private var lastHeartbeatRefresh = Date()
+    private var isRefreshing = false
 
     func startCountdownTimer() {
         guard countdownTimer == nil else { return }
@@ -513,25 +529,44 @@ final class ParentDashboardViewModel: CommandSendable {
                 self.now = Date()
 
                 // Refresh heartbeats every 15 seconds to pick up confirmation changes.
-                if self.now.timeIntervalSince(self.lastHeartbeatRefresh) >= 15 {
+                // Guard against stacking: skip if a previous refresh is still in-flight.
+                if self.now.timeIntervalSince(self.lastHeartbeatRefresh) >= 15, !self.isRefreshing {
                     self.lastHeartbeatRefresh = self.now
+                    self.isRefreshing = true
+                    defer { self.isRefreshing = false }
                     try? await self.appState.refreshDashboard()
                     if !self.appState.childProfiles.isEmpty {
                         self.loadingState = .loaded(self.appState.childProfiles)
                     }
                 }
 
-                // Prune expired timed unlock phases and clear Firebase timers (penalty served).
+                // Clear penalty timer when penalty phase ends (device unlocks),
+                // not when the whole unlock window expires.
+                for (childID, phase) in self.timedUnlockPhases {
+                    if self.now >= phase.penaltyEndsAt,
+                       self.now < phase.unlockEndsAt,
+                       let child = self.childProfiles.first(where: { $0.id == childID }) {
+                        // Check if we already cleared this timer (avoid repeated calls).
+                        let timer = self.penaltyTimer(for: child)
+                        if timer?.penaltySeconds ?? 0 > 0 || timer?.isActivelyRunning == true {
+                            await self.clearPenaltyTimer(for: child)
+                            #if DEBUG
+                            print("[BigBrother] Penalty phase ended for \(child.name), cleared timer (device now unlocked)")
+                            #endif
+                        }
+                    }
+                }
+
+                // Prune fully expired timed unlock phases.
                 let expiredPhases = self.timedUnlockPhases.filter { $0.value.unlockEndsAt <= self.now }
                 if !expiredPhases.isEmpty {
                     self.timedUnlockPhases = self.timedUnlockPhases.filter { $0.value.unlockEndsAt > self.now }
                     for (childID, _) in expiredPhases {
-                        print("[BigBrother] Timed unlock expired for child \(childID.rawValue.prefix(8)), clearing penalty timer")
+                        #if DEBUG
+                        print("[BigBrother] Timed unlock fully expired for child \(childID.rawValue.prefix(8))")
+                        #endif
                         if let child = self.childProfiles.first(where: { $0.id == childID }) {
                             await self.clearPenaltyTimer(for: child)
-                            print("[BigBrother] clearPenaltyTimer called for \(child.name)")
-                        } else {
-                            print("[BigBrother] WARNING: child not found in childProfiles for expired phase")
                         }
                     }
                 }
@@ -583,7 +618,15 @@ final class ParentDashboardViewModel: CommandSendable {
             return expiry
         }.max()
 
-        return heartbeatExpiry ?? unlockExpiries[child.id]
+        // Use whichever is later — the parent's local expiry may reflect
+        // a recent extend that the heartbeat hasn't confirmed yet.
+        let localExpiry = unlockExpiries[child.id]
+        switch (heartbeatExpiry, localExpiry) {
+        case let (hb?, local?): return max(hb, local)
+        case let (hb?, nil):    return hb
+        case let (nil, local?): return local
+        case (nil, nil):        return nil
+        }
     }
 
     /// Remaining seconds for a child's temporary unlock. Nil if not active.
@@ -671,6 +714,12 @@ final class ParentDashboardViewModel: CommandSendable {
     }
 
     func unlockOrigin(for child: ChildProfile) -> TemporaryUnlockOrigin? {
+        // If the parent initiated this unlock (tracked by unlockExpiries or timedUnlockPhases),
+        // always report .remoteCommand — the heartbeat may still carry a stale origin
+        // from a previous self-unlock or PIN unlock.
+        if unlockExpiries[child.id] != nil || timedUnlockPhases[child.id] != nil {
+            return .remoteCommand
+        }
         let deviceIDs = Set(appState.childDevices.filter { $0.childProfileID == child.id }.map(\.id))
         return appState.latestHeartbeats
             .filter { deviceIDs.contains($0.deviceID) }

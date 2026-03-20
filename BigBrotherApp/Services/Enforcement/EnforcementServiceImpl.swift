@@ -150,12 +150,19 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
            let domains = try? JSONDecoder().decode([String].self, from: data),
            !domains.isEmpty {
             // Parent has allowed web access — don't block web categories.
-            baseStore.shield.webDomainCategories = nil
+            // Clear on all stores since Monitor may have set it on schedule store too.
+            for store in [baseStore, scheduleStore, tempUnlockStore] {
+                store.shield.webDomainCategories = nil
+            }
+            ManagedSettingsStore().shield.webDomainCategories = nil
             #if DEBUG
             print("[BigBrother] Web blocking: disabled (\(domains.count) allowed domains configured)")
             #endif
         } else {
-            baseStore.shield.webDomainCategories = .all()
+            // Block on all stores to ensure coverage after schedule transitions.
+            for store in [baseStore, scheduleStore] {
+                store.shield.webDomainCategories = .all()
+            }
             #if DEBUG
             print("[BigBrother] Web blocking: all domains blocked")
             #endif

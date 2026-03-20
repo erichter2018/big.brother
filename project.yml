@@ -139,6 +139,7 @@ targets:
           - "**/*.entitlements"
     dependencies:
       - package: BigBrotherCore
+      - sdk: FamilyControls.framework
       - sdk: ManagedSettings.framework
       - sdk: DeviceActivity.framework
     settings:

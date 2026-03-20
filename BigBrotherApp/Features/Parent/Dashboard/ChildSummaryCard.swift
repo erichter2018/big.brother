@@ -2,7 +2,7 @@ import SwiftUI
 import BigBrotherCore
 
 /// Compact child card for the parent dashboard.
-/// Avatar + name on left, mode + countdown center, action icons right.
+/// Glassmorphic card with avatar ring, status lines, and single contextual pill button.
 struct ChildSummaryCard: View {
     let child: ChildProfile
     let devices: [ChildDevice]
@@ -31,117 +31,61 @@ struct ChildSummaryCard: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Avatar
-            avatar
+            // Avatar with mode ring
+            avatarWithRing
 
-            // Name + mode
+            // Name + status lines
             VStack(alignment: .leading, spacing: 2) {
-                Text(child.name)
+                Text(child.name + (isOnOldBuild ? "…" : ""))
                     .font(.headline)
                     .lineLimit(1)
 
-                if isInPenaltyPhase {
-                    HStack(spacing: 3) {
-                        if !isHeartbeatConfirmed {
-                            Image(systemName: "clock")
-                                .font(.caption2)
-                                .foregroundStyle(.gray)
-                        }
-                        Text("Locked — pending timer")
-                            .font(.caption)
-                            .foregroundStyle(.blue)
-                    }
-                } else if let countdown {
-                    // Unlocked with countdown — show origin + time
-                    HStack(spacing: 4) {
-                        if !isHeartbeatConfirmed {
-                            Image(systemName: "clock")
-                                .font(.caption2)
-                                .foregroundStyle(.gray)
-                        }
-                        let label: String = {
-                            switch unlockOrigin {
-                            case .selfUnlock: return "Self-unlocked"
-                            case .localPINUnlock: return "PIN unlocked"
-                            case .remoteCommand: return "Unlocked"
-                            case .none: return dominantMode.displayName
-                            }
-                        }()
-                        Text(label)
-                            .font(.caption)
-                            .foregroundStyle(.green)
-                        Text(countdown)
-                            .font(.caption.monospacedDigit())
-                            .fontWeight(.bold)
-                            .foregroundStyle(.green)
-                    }
-                } else if let scheduleLabel, isScheduleActive {
-                    Text(scheduleLabel)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .lineLimit(1)
-                    if let scheduleStatus {
-                        Text(scheduleStatus)
-                            .font(.caption)
-                            .foregroundStyle(scheduleStatusIsFree ? .green : scheduleStatus.hasPrefix("Essential") ? .purple : .blue)
-                            .lineLimit(1)
-                    }
-                } else {
-                    HStack(spacing: 3) {
-                        if !isHeartbeatConfirmed {
-                            Image(systemName: "clock")
-                                .font(.caption2)
-                                .foregroundStyle(.gray)
-                        }
-                        Text(dominantMode.displayName)
-                            .font(.caption)
-                            .foregroundStyle(modeColor)
-                    }
-                }
+                statusLine
 
-                HStack(spacing: 2) {
-                    if let penaltyTimer {
-                        Image(systemName: isPenaltyRunning ? "timer" : "hourglass")
-                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
-                        Text(penaltyTimer)
-                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
-                    }
-
-                    if let used = selfUnlocksUsed, let budget = selfUnlockBudget, budget > 0 {
-                        let remaining = max(0, budget - used)
-                        if penaltyTimer != nil {
-                            Text(" ")
-                        }
-                        Image(systemName: "lock.open.rotation")
-                            .foregroundStyle(.teal)
-                        Text("\(remaining)/\(budget) \(penaltyTimer != nil ? "SU" : "Self-Unlocks")")
-                            .foregroundStyle(.teal)
-                    }
-                }
-                .font(.caption.monospacedDigit())
+                tertiaryLine
             }
 
-            Spacer()
+            Spacer(minLength: 0)
 
-            // Action buttons
-            HStack(spacing: 6) {
-                unlockButton
-                lockButton
-                scheduleButton(action: onSchedule)
-            }
-            .disabled(isSending)
-            .opacity(isSending ? 0.5 : 1)
+            // Single contextual pill button
+            pillButton
+                .disabled(isSending)
+                .opacity(isSending ? 0.5 : 1)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .background(cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.ultraThinMaterial)
+                .overlay(alignment: .leading) {
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 16,
+                        bottomLeadingRadius: 16,
+                        bottomTrailingRadius: 0,
+                        topTrailingRadius: 0
+                    )
+                    .fill(mutedModeColor.opacity(0.4))
+                    .frame(width: 2)
+                }
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
-    // MARK: - Avatar
+    // MARK: - Avatar with Glow
 
     @ViewBuilder
-    private var avatar: some View {
+    private var avatarWithRing: some View {
+        avatarContent
+            .background(
+                Circle()
+                    .fill(modeColor.opacity(0.5))
+                    .blur(radius: 14)
+                    .scaleEffect(1.25)
+            )
+    }
+
+    @ViewBuilder
+    private var avatarContent: some View {
         if let base64 = avatarImageUrl,
            let data = Data(base64Encoded: base64),
            let uiImage = UIImage(data: data) {
@@ -177,102 +121,244 @@ struct ChildSummaryCard: View {
             (.blue, .cyan), (.purple, .pink), (.green, .mint),
             (.orange, .yellow), (.indigo, .purple), (.teal, .green)
         ]
-        let index = abs(child.name.hashValue) % colors.count
+        let index = abs(child.id.rawValue.utf8.reduce(5381) { ($0 << 5) &+ $0 &+ Int($1) }) % colors.count
         let pair = colors[index]
         return LinearGradient(colors: [pair.0, pair.1], startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 
-    // MARK: - Buttons
+    // MARK: - Status Line (Line 2)
 
     @ViewBuilder
-    private var unlockButton: some View {
-        Menu {
-            if let remaining = remainingSeconds, remaining > 0 {
-                Button { onUnlock(remaining + 15 * 60) } label: {
-                    Label("+15 minutes", systemImage: "plus.circle")
+    private var statusLine: some View {
+        if isInPenaltyPhase {
+            HStack(spacing: 3) {
+                if !isHeartbeatConfirmed {
+                    Image(systemName: "clock")
+                        .font(.caption2)
+                        .foregroundStyle(.gray)
                 }
-                Divider()
+                Text("Locked \u{00B7} pending timer")
+                    .font(.caption)
+                    .foregroundStyle(Self.mutedBlue)
             }
-            Button { onUnlock(15 * 60) } label: { Label("15 minutes", systemImage: "clock") }
-            Button { onUnlock(1 * 3600) } label: { Label("1 hour", systemImage: "clock") }
-            Button { onUnlock(5400) } label: { Label("1.5 hours", systemImage: "clock") }
-            Button { onUnlock(2 * 3600) } label: { Label("2 hours", systemImage: "clock") }
-            Divider()
-            Button { onUnlock(Self.secondsUntilMidnight) } label: { Label("Until midnight", systemImage: "moon.fill") }
-            Button { onUnlock(24 * 3600) } label: { Label("24 hours", systemImage: "clock.badge.checkmark") }
-            if let onUnlockWithTimer {
-                Divider()
-                Button { onUnlockWithTimer(1 * 3600) } label: { Label("1 hour + timer", systemImage: "timer") }
-                Button { onUnlockWithTimer(2 * 3600) } label: { Label("2 hours + timer", systemImage: "timer") }
+        } else if let countdown {
+            HStack(spacing: 4) {
+                if !isHeartbeatConfirmed {
+                    Image(systemName: "clock")
+                        .font(.caption2)
+                        .foregroundStyle(.gray)
+                }
+                let label: String = {
+                    switch unlockOrigin {
+                    case .selfUnlock: return "Self-unlocked"
+                    case .localPINUnlock: return "PIN unlocked"
+                    case .remoteCommand: return "Unlocked"
+                    case .none: return "Unlocked"
+                    }
+                }()
+                Text("\(label) \u{00B7} \(countdown) left")
+                    .font(.caption)
+                    .foregroundStyle(Self.mutedGreen)
             }
-        } label: {
-            actionIconLabel("lock.open.fill", color: .green, active: isUnlocked)
-        } primaryAction: {
-            if let remaining = remainingSeconds, remaining > 0 {
-                onUnlock(remaining + 15 * 60)
-            } else {
-                onUnlock(15 * 60)
+        } else if let scheduleLabel, isScheduleActive {
+            HStack(spacing: 3) {
+                if !isHeartbeatConfirmed {
+                    Image(systemName: "clock")
+                        .font(.caption2)
+                        .foregroundStyle(.gray)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(scheduleLabel)
+                        .font(.caption)
+                        .foregroundStyle(Self.mutedOrange)
+                        .lineLimit(1)
+                    if let scheduleStatus {
+                        Text(scheduleStatus)
+                            .font(.caption)
+                            .foregroundStyle(scheduleStatusIsFree ? Self.mutedGreen : scheduleStatus.hasPrefix("Essential") ? Self.mutedPurple : Self.mutedBlue)
+                            .lineLimit(1)
+                    }
+                }
+            }
+        } else {
+            HStack(spacing: 3) {
+                if !isHeartbeatConfirmed {
+                    Image(systemName: "clock")
+                        .font(.caption2)
+                        .foregroundStyle(.gray)
+                }
+                Text(dominantMode.displayName)
+                    .font(.caption)
+                    .foregroundStyle(mutedModeColor)
             }
         }
     }
+
+    // MARK: - Tertiary Line (Line 3)
+
+    @ViewBuilder
+    private var tertiaryLine: some View {
+        HStack(spacing: 4) {
+            if let penaltyTimer {
+                Image(systemName: isPenaltyRunning ? "timer" : "hourglass")
+                    .foregroundStyle(Self.mutedRed)
+                Text(penaltyTimer)
+                    .foregroundStyle(Self.mutedRed)
+            }
+
+            if let used = selfUnlocksUsed, let budget = selfUnlockBudget, budget > 0 {
+                let remaining = max(0, budget - used)
+                if penaltyTimer != nil {
+                    Text("\u{00B7}")
+                        .foregroundStyle(.secondary)
+                }
+                Text("\(remaining)/\(budget) SU")
+                    .foregroundStyle(Self.mutedTeal)
+            }
+
+            // Online indicator from heartbeats
+            if let lastSeen = latestHeartbeatAge {
+                if penaltyTimer != nil || (selfUnlocksUsed != nil && selfUnlockBudget != nil) {
+                    Text("\u{00B7}")
+                        .foregroundStyle(.secondary)
+                }
+                if lastSeen < 30 {
+                    HStack(spacing: 2) {
+                        Circle().fill(Self.mutedGreen).frame(width: 5, height: 5)
+                        Text("online")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    HStack(spacing: 2) {
+                        Circle().fill(Self.mutedRed).frame(width: 5, height: 5)
+                        Text(formatAge(lastSeen))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .font(.caption2.monospacedDigit())
+    }
+
+    /// Seconds since latest heartbeat, preferring iPhone over iPad.
+    /// The `devices` array is pre-sorted with iPhones first by the view model.
+    private var latestHeartbeatAge: TimeInterval? {
+        // Prefer the first device's (iPhone if available) heartbeat.
+        for device in devices {
+            if let hb = heartbeats.first(where: { $0.deviceID == device.id }) {
+                return Date().timeIntervalSince(hb.timestamp)
+            }
+        }
+        return nil
+    }
+
+    private func formatAge(_ seconds: TimeInterval) -> String {
+        if seconds < 60 { return "\(Int(seconds))s ago" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+        return "\(Int(seconds / 3600))h ago"
+    }
+
+    // MARK: - Pill Button
+
+    @ViewBuilder
+    private var pillButton: some View {
+        if isUnlocked {
+            // Show "Lock" button with extend options
+            Menu {
+                if let remaining = remainingSeconds, remaining > 0 {
+                    Button { onUnlock(remaining + 15 * 60) } label: {
+                        Label("+15 minutes", systemImage: "plus.circle")
+                    }
+                    Button { onUnlock(remaining + 30 * 60) } label: {
+                        Label("+30 minutes", systemImage: "plus.circle")
+                    }
+                    Button { onUnlock(remaining + 3600) } label: {
+                        Label("+1 hour", systemImage: "plus.circle")
+                    }
+                    Divider()
+                }
+                Button { onLock(.indefinite) } label: {
+                    Label("Lock", systemImage: "lock.fill")
+                }
+                Button { onLock(.returnToSchedule) } label: {
+                    Label("Return to Schedule", systemImage: "calendar.badge.clock")
+                }
+            } label: {
+                pillLabel("Lock", icon: "lock.fill")
+            } primaryAction: {
+                onLock(.indefinite)
+            }
+        } else {
+            // Show "Unlock" button
+            Menu {
+                if let remaining = remainingSeconds, remaining > 0 {
+                    Button { onUnlock(remaining + 15 * 60) } label: {
+                        Label("+15 minutes", systemImage: "plus.circle")
+                    }
+                    Divider()
+                }
+                Button { onUnlock(15 * 60) } label: { Label("15 minutes", systemImage: "clock") }
+                Button { onUnlock(1 * 3600) } label: { Label("1 hour", systemImage: "clock") }
+                Button { onUnlock(5400) } label: { Label("1.5 hours", systemImage: "clock") }
+                Button { onUnlock(2 * 3600) } label: { Label("2 hours", systemImage: "clock") }
+                Divider()
+                Button { onUnlock(Self.secondsUntilMidnight) } label: { Label("Until midnight", systemImage: "moon.fill") }
+                Button { onUnlock(24 * 3600) } label: { Label("24 hours", systemImage: "clock.badge.checkmark") }
+                if let onUnlockWithTimer {
+                    Divider()
+                    Button { onUnlockWithTimer(1 * 3600) } label: { Label("1 hour + timer", systemImage: "timer") }
+                    Button { onUnlockWithTimer(2 * 3600) } label: { Label("2 hours + timer", systemImage: "timer") }
+                }
+                Divider()
+                Button { onLock(.returnToSchedule) } label: {
+                    Label("Return to Schedule", systemImage: "calendar.badge.clock")
+                }
+            } label: {
+                pillLabel("Unlock", icon: "lock.open.fill")
+            } primaryAction: {
+                if let remaining = remainingSeconds, remaining > 0 {
+                    onUnlock(remaining + 15 * 60)
+                } else {
+                    onUnlock(15 * 60)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func pillLabel(_ title: String, icon: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.caption)
+            Text(title)
+                .font(.subheadline)
+                .fontWeight(.medium)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.quaternary.opacity(0.5))
+        .clipShape(Capsule())
+    }
+
+    // MARK: - Helpers
 
     private var isUnlocked: Bool {
         dominantMode == .unlocked
     }
 
-    private var isLocked: Bool {
-        dominantMode == .dailyMode || dominantMode == .essentialOnly
+    /// True if ANY of this child's devices is running an older build than current.
+    private var isOnOldBuild: Bool {
+        let deviceIDs = Set(devices.map(\.id))
+        let builds = heartbeats
+            .filter { deviceIDs.contains($0.deviceID) }
+            .compactMap(\.appBuildNumber)
+        guard !builds.isEmpty else { return false }
+        // Worst case: if any device is old, show the indicator.
+        return builds.min()! < AppConstants.appBuildNumber
     }
 
-    @ViewBuilder
-    private var lockButton: some View {
-        Menu {
-            Button { onLock(.indefinite) } label: {
-                Label("Lock", systemImage: "lock.fill")
-            }
-            Button { onLock(.returnToSchedule) } label: {
-                Label("Return to Schedule", systemImage: "calendar.badge.clock")
-            }
-        } label: {
-            actionIconLabel("lock.fill", color: .blue, active: isLocked)
-        } primaryAction: {
-            onLock(.indefinite)
-        }
-    }
-
-    @ViewBuilder
-    private func scheduleButton(action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: "calendar.badge.clock")
-                .font(.body)
-                .frame(width: 40, height: 40)
-                .background(Color.orange.opacity(isScheduleActive ? 0.3 : 0.15))
-                .foregroundStyle(.orange)
-                .clipShape(Circle())
-                .shadow(color: isScheduleActive ? Color.orange.opacity(0.6) : .clear, radius: 8)
-        }
-    }
-
-    @ViewBuilder
-    private func actionIcon(_ icon: String, color: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            actionIconLabel(icon, color: color)
-        }
-    }
-
-    @ViewBuilder
-    private func actionIconLabel(_ icon: String, color: Color, active: Bool = false) -> some View {
-        Image(systemName: icon)
-            .font(.body)
-            .frame(width: 40, height: 40)
-            .background(color.opacity(active ? 0.3 : 0.15))
-            .foregroundStyle(color)
-            .clipShape(Circle())
-            .shadow(color: active ? color.opacity(0.6) : .clear, radius: 8)
-    }
-
-    // MARK: - Styling
-
+    /// Vivid color — used only for avatar glow.
     private var modeColor: Color {
         switch dominantMode {
         case .unlocked: return .green
@@ -281,9 +367,21 @@ struct ChildSummaryCard: View {
         }
     }
 
-    private var cardBackground: some ShapeStyle {
-        .regularMaterial
+    /// Muted color — used for text, pill buttons, left border.
+    private var mutedModeColor: Color {
+        switch dominantMode {
+        case .unlocked: return Color(.systemGreen).opacity(0.7)
+        case .dailyMode: return Color(.systemBlue).opacity(0.7)
+        case .essentialOnly: return Color(.systemPurple).opacity(0.7)
+        }
     }
+
+    private static let mutedGreen = Color(.systemGreen).opacity(0.7)
+    private static let mutedBlue = Color(.systemBlue).opacity(0.7)
+    private static let mutedPurple = Color(.systemPurple).opacity(0.7)
+    private static let mutedOrange = Color(.systemOrange).opacity(0.7)
+    private static let mutedTeal = Color(.systemTeal).opacity(0.7)
+    private static let mutedRed = Color(red: 1.0, green: 0.45, blue: 0.4).opacity(0.8)
 
     static var secondsUntilMidnight: Int {
         let now = Date()

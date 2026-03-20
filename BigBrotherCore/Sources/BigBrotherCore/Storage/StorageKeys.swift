@@ -16,7 +16,7 @@ public enum StorageKeys {
     /// Serialized ParentState (parent devices only).
     public static let parentState = "fr.bigbrother.keychain.parentState"
 
-    /// bcrypt hash of the parent PIN.
+    /// PBKDF2 hash of the parent PIN.
     public static let parentPINHash = "fr.bigbrother.keychain.parentPINHash"
 
     /// The familyID, also stored in Keychain for tamper resistance.

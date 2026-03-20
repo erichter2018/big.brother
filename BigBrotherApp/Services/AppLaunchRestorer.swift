@@ -123,7 +123,12 @@ struct AppLaunchRestorer {
             }
 
         case .noChangeNeeded:
-            eventLogger.log(.policyReconciled, details: "Launch reconciliation: no change needed")
+            // Still re-apply enforcement — the OS may have cleared ManagedSettingsStore
+            // state during an app update even though our snapshot is unchanged.
+            if let snapshot = currentSnapshot {
+                try? enforcement.apply(snapshot.effectivePolicy)
+            }
+            eventLogger.log(.policyReconciled, details: "Launch reconciliation: no change needed (restrictions refreshed)")
         }
 
         // Schedule-aware reconciliation: if a schedule profile is active,

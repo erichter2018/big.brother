@@ -31,7 +31,7 @@ public enum Defaults {
 
     /// Character set for enrollment code generation.
     /// Excludes ambiguous characters: 0/O, 1/I/L.
-    /// 32 characters → 8-char code = ~1.1 trillion combinations.
+    /// 31 characters → 8-char code = ~853 billion combinations.
     public static let enrollmentCodeCharacterSet: [Character] = Array(
         "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
     )

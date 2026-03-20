@@ -53,7 +53,7 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
     /// Heuristic: device is considered online if heartbeat is within 10 minutes.
     public var isOnline: Bool {
         guard let hb = lastHeartbeat else { return false }
-        return Date().timeIntervalSince(hb) < 600
+        return Date().timeIntervalSince(hb) < AppConstants.onlineThresholdSeconds
     }
 
     public init(

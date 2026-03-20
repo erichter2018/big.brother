@@ -11,9 +11,9 @@ enum InsightsTimeRange: String, CaseIterable, Identifiable {
 
     var since: Date {
         switch self {
-        case .day: Calendar.current.date(byAdding: .day, value: -1, to: Date())!
-        case .week: Calendar.current.date(byAdding: .day, value: -7, to: Date())!
-        case .month: Calendar.current.date(byAdding: .day, value: -30, to: Date())!
+        case .day: Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
+        case .week: Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+        case .month: Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
         }
     }
 }
@@ -121,10 +121,21 @@ struct LockPrecisionRecord: Identifiable {
     let expectedDurationSeconds: Int
     let unlockStartedAt: Date
     let lockExpiredAt: Date
+    /// How long the device was actually unlocked.
+    var actualDurationSeconds: Double {
+        lockExpiredAt.timeIntervalSince(unlockStartedAt)
+    }
+
     /// Positive = locked late, negative = locked early.
     var driftSeconds: Double {
         let expected = unlockStartedAt.addingTimeInterval(Double(expectedDurationSeconds))
         return lockExpiredAt.timeIntervalSince(expected)
+    }
+
+    /// True if the unlock was manually overridden (actual < 10% of expected).
+    /// These aren't timing precision issues — a parent sent a lock command early.
+    var wasManuallyOverridden: Bool {
+        actualDurationSeconds < Double(expectedDurationSeconds) * 0.1
     }
 }
 

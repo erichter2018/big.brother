@@ -81,6 +81,21 @@ final class AppState {
     /// Cleared when a heartbeat confirms the mode.
     var expectedModes: [ChildProfileID: (mode: LockMode, sentAt: Date)] = [:]
 
+    /// Children whose enforcement is driven by their schedule (no manual override).
+    /// Shared across all view models so both dashboard and child detail views can modify it.
+    /// Persisted in UserDefaults so it survives app relaunch.
+    var scheduleActiveChildren: Set<ChildProfileID> = {
+        if let raw = UserDefaults.standard.array(forKey: "scheduleActiveChildIDs_v2") as? [String] {
+            return Set(raw.map { ChildProfileID(rawValue: $0) })
+        }
+        return []
+    }() {
+        didSet {
+            let raw = scheduleActiveChildren.map(\.rawValue)
+            UserDefaults.standard.set(raw, forKey: "scheduleActiveChildIDs_v2")
+        }
+    }
+
     /// Set by notification tap to deep-link into a specific child's detail view.
     var pendingChildNavigation: ChildProfileID?
 
@@ -1023,9 +1038,69 @@ final class AppState {
     }
 
     /// Send a command to a specific target (parent mode).
+    ///
+    /// If the new command is a mode command (lock/unlock/schedule), any older pending
+    /// mode commands for the same target are expired first — they're superseded and
+    /// would just waste processing time on the child device.
     func sendCommand(target: CommandTarget, action: CommandAction) async throws {
         guard let familyID = parentState?.familyID,
               let cloudKit else { return }
+
+        // setMode is a hard manual override — schedule should be deactivated.
+        // temporaryUnlock/timedUnlock/lockUntil are temporary — schedule stays active.
+        // returnToSchedule explicitly activates the schedule.
+        switch action {
+        case .setMode:
+            // Clear schedule for the targeted child(ren).
+            switch target {
+            case .child(let cid): scheduleActiveChildren.remove(cid)
+            case .device(let did):
+                if let cid = childDevices.first(where: { $0.id == did })?.childProfileID {
+                    scheduleActiveChildren.remove(cid)
+                }
+            case .allDevices:
+                scheduleActiveChildren.removeAll()
+            }
+        case .returnToSchedule:
+            switch target {
+            case .child(let cid): scheduleActiveChildren.insert(cid)
+            case .device(let did):
+                if let cid = childDevices.first(where: { $0.id == did })?.childProfileID {
+                    scheduleActiveChildren.insert(cid)
+                }
+            case .allDevices:
+                for child in orderedChildProfiles { scheduleActiveChildren.insert(child.id) }
+            }
+        default:
+            break
+        }
+
+        // Expire stale pending mode commands for this target BEFORE pushing the new one.
+        // This must complete synchronously so the child doesn't pick up stale commands
+        // in the window between the old commands existing and the new one arriving.
+        if action.isModeCommand {
+            do {
+                let stale = try await cloudKit.fetchPendingModeCommands(
+                    familyID: familyID, target: target
+                )
+                // Expire all stale commands concurrently for speed.
+                await withTaskGroup(of: Void.self) { group in
+                    for cmd in stale {
+                        group.addTask {
+                            try? await cloudKit.updateCommandStatus(cmd.id, status: .expired)
+                            #if DEBUG
+                            print("[BigBrother] Expired stale pending command: \(cmd.action.displayDescription) (id=\(cmd.id))")
+                            #endif
+                        }
+                    }
+                }
+            } catch {
+                // Non-fatal — child-side dedup handles it as a safety net.
+                #if DEBUG
+                print("[BigBrother] Failed to expire stale commands: \(error)")
+                #endif
+            }
+        }
 
         let command = RemoteCommand(
             familyID: familyID,
@@ -1257,14 +1332,19 @@ final class AppState {
 
     /// Free time window ended — re-lock the device.
     func applyTimedUnlockEnd() {
+        // Read previous mode BEFORE clearing state.
+        let previousMode = storage.readTemporaryUnlockState()?.previousMode ?? .dailyMode
         try? storage.clearTimedUnlockInfo()
         try? storage.clearTemporaryUnlockState()
         guard enforcement != nil else { return }
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let isScheduleDriven = defaults.object(forKey: "scheduleDrivenMode") == nil
+            || defaults.bool(forKey: "scheduleDrivenMode")
         let mode: LockMode
-        if let profile = storage.readActiveScheduleProfile() {
+        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
         } else {
-            mode = .dailyMode
+            mode = previousMode
         }
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
@@ -1292,6 +1372,12 @@ final class AppState {
         // Don't override active temporary/timed unlocks.
         if let temp = storage.readTemporaryUnlockState(), temp.expiresAt > Date() { return }
         if storage.readTimedUnlockInfo() != nil { return }
+        // Don't override manual mode commands (parent sent setMode directly).
+        // scheduleDrivenMode is set to false by setMode and true by returnToSchedule.
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        if defaults.object(forKey: "scheduleDrivenMode") != nil && !defaults.bool(forKey: "scheduleDrivenMode") {
+            return
+        }
 
         let now = Date()
         let expectedMode = profile.resolvedMode(at: now)

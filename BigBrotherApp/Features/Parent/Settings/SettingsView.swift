@@ -7,6 +7,12 @@ struct SettingsView: View {
     @State private var showNukeConfirm = false
     @State private var nukeStatus: String?
     @State private var isNuking = false
+    @State private var expectedChildCount: Int
+
+    init(appState: AppState) {
+        self.appState = appState
+        self._expectedChildCount = State(initialValue: UserDefaults.standard.integer(forKey: "expectedChildCount"))
+    }
 
     var body: some View {
         List {
@@ -33,6 +39,13 @@ struct SettingsView: View {
                     Text("\(appState.childProfiles.count)")
                         .foregroundStyle(.secondary)
                 }
+
+                Stepper("Expected Children: \(expectedChildCount == 0 ? "—" : "\(expectedChildCount)")",
+                        value: $expectedChildCount, in: 0...20)
+                    .onChange(of: expectedChildCount) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: "expectedChildCount")
+                    }
+                    .font(.subheadline)
 
                 HStack {
                     Text("Devices")

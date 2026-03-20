@@ -95,6 +95,17 @@ struct BigBrotherApp: App {
         appState.performRestoration()
         _LaunchLog.log("performRestoration complete")
 
+        // Safety net: re-apply enforcement after a short delay.
+        // On Xcode reinstall, the OS may clear ManagedSettingsStore slightly after
+        // the app launches, undoing the restoration above.
+        if appState.deviceRole == .child {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(3))
+                appState.performRestoration()
+                _LaunchLog.log("Delayed re-restoration complete")
+            }
+        }
+
         // --- UI-presenting requests (MUST run on MainActor, NOT in Task.detached) ---
         if appState.deviceRole == .child {
             // Request notification permission. This presents a system dialog.

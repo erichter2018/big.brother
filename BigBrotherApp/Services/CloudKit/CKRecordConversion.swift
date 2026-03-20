@@ -141,13 +141,18 @@ enum CKRecordConversion {
     static func toCKRecord(_ policy: Policy) -> CKRecord {
         let id = recordID(policy.targetDeviceID.rawValue, type: CKRecordType.policy)
         let record = CKRecord(recordType: CKRecordType.policy, recordID: id)
+        updateCKRecord(record, from: policy)
+        return record
+    }
+
+    /// Update an existing CKRecord with policy fields (preserves change tag).
+    static func updateCKRecord(_ record: CKRecord, from policy: Policy) {
         record[CKFieldName.deviceID] = policy.targetDeviceID.rawValue
         record[CKFieldName.mode] = policy.mode.rawValue
         record[CKFieldName.tempUnlockUntil] = policy.temporaryUnlockUntil as NSDate?
         record[CKFieldName.scheduleID] = policy.activeScheduleID?.uuidString
         record[CKFieldName.version] = policy.version as NSNumber
         record[CKFieldName.updatedAt] = policy.updatedAt as NSDate
-        return record
     }
 
     static func policy(from record: CKRecord) -> Policy? {
@@ -286,40 +291,45 @@ enum CKRecordConversion {
     // MARK: - DeviceHeartbeat
 
     static func toCKRecord(_ hb: DeviceHeartbeat) -> CKRecord {
-        // Upsert: one record per device, updated in place.
         let id = recordID(hb.deviceID.rawValue, type: CKRecordType.heartbeat)
         let record = CKRecord(recordType: CKRecordType.heartbeat, recordID: id)
+        updateCKRecord(record, from: hb)
+        return record
+    }
+
+    /// Update an existing CKRecord with heartbeat fields (preserves change tag).
+    static func updateCKRecord(_ record: CKRecord, from hb: DeviceHeartbeat) {
         record[CKFieldName.deviceID] = hb.deviceID.rawValue
         record[CKFieldName.familyID] = hb.familyID.rawValue
         record[CKFieldName.timestamp] = hb.timestamp as NSDate
         record[CKFieldName.currentMode] = hb.currentMode.rawValue
         record[CKFieldName.policyVersion] = hb.policyVersion as NSNumber
         record[CKFieldName.fcAuthorized] = (hb.familyControlsAuthorized ? 1 : 0) as NSNumber
-        if let bl = hb.batteryLevel { record[CKFieldName.batteryLevel] = bl as NSNumber }
-        if let ic = hb.isCharging { record[CKFieldName.isCharging] = (ic ? 1 : 0) as NSNumber }
-        if let abc = hb.appBlockingConfigured { record[CKFieldName.appBlockingConfigured] = (abc ? 1 : 0) as NSNumber }
-        if let bcc = hb.blockedCategoryCount { record[CKFieldName.blockedCategoryCount] = bcc as NSNumber }
-        if let bac = hb.blockedAppCount { record[CKFieldName.blockedAppCount] = bac as NSNumber }
-        if let names = hb.blockedAppNames, !names.isEmpty { record[CKFieldName.blockedAppNames] = names as NSArray }
-        if let names = hb.blockedCategoryNames, !names.isEmpty { record[CKFieldName.blockedCategoryNames] = names as NSArray }
-        if let iid = hb.installID { record[CKFieldName.installID] = iid.uuidString }
-        if let seq = hb.heartbeatSeq { record[CKFieldName.heartbeatSeq] = seq as NSNumber }
-        if let cks = hb.cloudKitStatus { record[CKFieldName.cloudKitStatus] = cks }
-        if let names = hb.allowedAppNames, !names.isEmpty { record[CKFieldName.allowedAppNames] = names as NSArray }
-        if let names = hb.temporaryAllowedAppNames, !names.isEmpty { record[CKFieldName.temporaryAllowedAppNames] = names as NSArray }
-        if let expiry = hb.temporaryUnlockExpiresAt { record[CKFieldName.temporaryUnlockExpiresAt] = expiry as NSDate }
-        if let isChild = hb.isChildAuthorization { record[CKFieldName.isChildAuthorization] = (isChild ? 1 : 0) as NSNumber }
-        if let disk = hb.availableDiskSpace { record[CKFieldName.availableDiskSpace] = disk as NSNumber }
-        if let total = hb.totalDiskSpace { record[CKFieldName.totalDiskSpace] = total as NSNumber }
-        if let s = hb.selfUnlocksUsedToday { record[CKFieldName.selfUnlocksUsedToday] = s as NSNumber }
-        if let origin = hb.temporaryUnlockOrigin { record[CKFieldName.temporaryUnlockOrigin] = origin.rawValue }
-        if let os = hb.osVersion { record[CKFieldName.hbOSVersion] = os }
-        if let model = hb.modelIdentifier { record[CKFieldName.hbModelIdentifier] = model }
-        if let build = hb.appBuildNumber { record[CKFieldName.hbAppBuildNumber] = build as NSNumber }
-        if let err = hb.enforcementError { record[CKFieldName.hbEnforcementError] = err }
-        if let win = hb.activeScheduleWindowName { record[CKFieldName.hbActiveScheduleWindow] = win }
-        if let cmdAt = hb.lastCommandProcessedAt { record[CKFieldName.hbLastCommandProcessedAt] = cmdAt as NSDate }
-        return record
+        record[CKFieldName.batteryLevel] = hb.batteryLevel.map { $0 as NSNumber }
+        record[CKFieldName.isCharging] = hb.isCharging.map { ($0 ? 1 : 0) as NSNumber }
+        record[CKFieldName.appBlockingConfigured] = hb.appBlockingConfigured.map { ($0 ? 1 : 0) as NSNumber }
+        record[CKFieldName.blockedCategoryCount] = hb.blockedCategoryCount.map { $0 as NSNumber }
+        record[CKFieldName.blockedAppCount] = hb.blockedAppCount.map { $0 as NSNumber }
+        record[CKFieldName.blockedAppNames] = hb.blockedAppNames.flatMap { $0.isEmpty ? nil : $0 as NSArray }
+        record[CKFieldName.blockedCategoryNames] = hb.blockedCategoryNames.flatMap { $0.isEmpty ? nil : $0 as NSArray }
+        record[CKFieldName.installID] = hb.installID?.uuidString
+        record[CKFieldName.heartbeatSeq] = hb.heartbeatSeq.map { $0 as NSNumber }
+        record[CKFieldName.cloudKitStatus] = hb.cloudKitStatus
+        record[CKFieldName.allowedAppNames] = hb.allowedAppNames.flatMap { $0.isEmpty ? nil : $0 as NSArray }
+        record[CKFieldName.allowedAppCount] = hb.allowedAppCount.map { $0 as NSNumber }
+        record[CKFieldName.temporaryAllowedAppNames] = hb.temporaryAllowedAppNames.flatMap { $0.isEmpty ? nil : $0 as NSArray }
+        record[CKFieldName.temporaryUnlockExpiresAt] = hb.temporaryUnlockExpiresAt.map { $0 as NSDate }
+        record[CKFieldName.isChildAuthorization] = hb.isChildAuthorization.map { ($0 ? 1 : 0) as NSNumber }
+        record[CKFieldName.availableDiskSpace] = hb.availableDiskSpace.map { $0 as NSNumber }
+        record[CKFieldName.totalDiskSpace] = hb.totalDiskSpace.map { $0 as NSNumber }
+        record[CKFieldName.selfUnlocksUsedToday] = hb.selfUnlocksUsedToday.map { $0 as NSNumber }
+        record[CKFieldName.temporaryUnlockOrigin] = hb.temporaryUnlockOrigin?.rawValue
+        record[CKFieldName.hbOSVersion] = hb.osVersion
+        record[CKFieldName.hbModelIdentifier] = hb.modelIdentifier
+        record[CKFieldName.hbAppBuildNumber] = hb.appBuildNumber.map { $0 as NSNumber }
+        record[CKFieldName.hbEnforcementError] = hb.enforcementError
+        record[CKFieldName.hbActiveScheduleWindow] = hb.activeScheduleWindowName
+        record[CKFieldName.hbLastCommandProcessedAt] = hb.lastCommandProcessedAt.map { $0 as NSDate }
     }
 
     static func deviceHeartbeat(from record: CKRecord) -> DeviceHeartbeat? {
@@ -356,6 +366,7 @@ enum CKRecordConversion {
             heartbeatSeq: record[CKFieldName.heartbeatSeq] as? Int64,
             cloudKitStatus: record[CKFieldName.cloudKitStatus] as? String,
             allowedAppNames: record[CKFieldName.allowedAppNames] as? [String],
+            allowedAppCount: (record[CKFieldName.allowedAppCount] as? Int64).map { Int($0) },
             temporaryAllowedAppNames: record[CKFieldName.temporaryAllowedAppNames] as? [String],
             temporaryUnlockExpiresAt: record[CKFieldName.temporaryUnlockExpiresAt] as? Date,
             isChildAuthorization: (record[CKFieldName.isChildAuthorization] as? Int64).map { $0 != 0 },

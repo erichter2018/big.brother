@@ -58,26 +58,24 @@ struct ParentDashboardView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("Big Brother Dashboard")
-                        .font(.system(size: 24, weight: .semibold))
-                    Text("b\(AppConstants.appBuildNumber)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                VStack(spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("Big Brother Dashboard")
+                            .font(.system(size: 24, weight: .semibold))
+                        Text("b\(AppConstants.appBuildNumber)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    deviceSummaryLine
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
-                NavigationLink {
-                    AddChildView(appState: viewModel.appState)
-                } label: {
-                    Image(systemName: "person.badge.plus")
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task { await viewModel.loadDashboard() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
+            if showAddChild {
+                ToolbarItem(placement: .primaryAction) {
+                    NavigationLink {
+                        AddChildView(appState: viewModel.appState)
+                    } label: {
+                        Image(systemName: "person.badge.plus")
+                    }
                 }
             }
         }
@@ -88,6 +86,31 @@ struct ParentDashboardView: View {
             await viewModel.loadDashboard()
             viewModel.startCountdownTimer()
         }
+    }
+
+    // MARK: - Add Child Visibility
+
+    private var showAddChild: Bool {
+        let expected = UserDefaults.standard.integer(forKey: "expectedChildCount")
+        // Show button if no limit set (0) or haven't reached the limit yet.
+        return expected == 0 || viewModel.childProfiles.count < expected
+    }
+
+    // MARK: - Device Summary
+
+    @ViewBuilder
+    private var deviceSummaryLine: some View {
+        let totalDevices = viewModel.childDevices.count
+        let onlineCount = viewModel.latestHeartbeats.filter {
+            Date().timeIntervalSince($0.timestamp) < 60
+        }.count
+        let lockedCount = viewModel.childProfiles.filter {
+            viewModel.dominantMode(for: $0).mode != .unlocked
+        }.count
+
+        Text("\(totalDevices) Devices \u{00B7} \(onlineCount) Online \u{00B7} \(lockedCount) Locked")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     @ViewBuilder

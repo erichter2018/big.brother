@@ -80,12 +80,19 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             return
         }
         
-        // Ensure we clear the gate when done.
-        defer {
-            Task {
-                await processingGate.finish()
-            }
+        // Clear the gate when done. We use do/catch + explicit await instead of
+        // defer { Task { ... } } which would clear the gate asynchronously and could
+        // cause the next invocation to be skipped.
+        do {
+            try await _processIncomingCommandsBody()
+        } catch {
+            await processingGate.finish()
+            throw error
         }
+        await processingGate.finish()
+    }
+
+    private func _processIncomingCommandsBody() async throws {
 
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self,
@@ -111,6 +118,35 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         let enforcementCommands = unprocessed.filter { Self.isEnforcementCommand($0.action) }
         let configCommands = unprocessed.filter { !Self.isEnforcementCommand($0.action) }
 
+        // For mode commands (setMode, temporaryUnlock, timedUnlock, lockUntil, returnToSchedule),
+        // only the LATEST one matters — earlier ones are superseded. Per-app enforcement
+        // commands (allowApp, blockManagedApp, etc.) still all execute.
+        let modeCommands = enforcementCommands.filter { $0.action.isModeCommand }
+        let perAppCommands = enforcementCommands.filter { !$0.action.isModeCommand }
+
+        var effectiveModeCommands: [RemoteCommand] = []
+        if let latestMode = modeCommands.max(by: { $0.issuedAt < $1.issuedAt }) {
+            effectiveModeCommands = [latestMode]
+            // Mark superseded mode commands as processed so they're never re-fetched.
+            for cmd in modeCommands where cmd.id != latestMode.id {
+                #if DEBUG
+                print("[BigBrother] Superseded mode command: \(cmd.action.displayDescription) (id=\(cmd.id))")
+                #endif
+                try? storage.markCommandProcessed(cmd.id)
+                // Post a receipt so the parent sees it was superseded, not stuck pending.
+                let receipt = makeReceipt(
+                    commandID: cmd.id,
+                    deviceID: enrollment.deviceID,
+                    familyID: enrollment.familyID,
+                    status: .applied,
+                    reason: "Superseded by newer mode command"
+                )
+                try? await cloudKit.saveReceipt(receipt)
+                try? await cloudKit.updateCommandStatus(cmd.id, status: .applied)
+            }
+        }
+        let skippedMode = modeCommands.count - effectiveModeCommands.count
+
         // For config commands, only process the LATEST of each type — older duplicates
         // are stale and just waste time. Group by action description as a key.
         var latestConfig: [String: RemoteCommand] = [:]
@@ -129,8 +165,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             }
         }
 
-        // Process enforcement first, then only the latest config commands.
-        let sorted = enforcementCommands.sorted { $0.issuedAt < $1.issuedAt }
+        // Process: latest mode command first, then per-app enforcement, then latest config.
+        let sorted = effectiveModeCommands
+            + perAppCommands.sorted { $0.issuedAt < $1.issuedAt }
             + latestConfig.values.sorted { $0.issuedAt < $1.issuedAt }
 
         let skippedConfig = configCommands.count - latestConfig.count
@@ -138,7 +175,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         if sorted.isEmpty && !commands.isEmpty {
             print("[BigBrother] All commands already processed (deduped)")
         } else {
-            print("[BigBrother] \(enforcementCommands.count) enforcement + \(latestConfig.count) config to process (\(skippedConfig) stale config skipped)")
+            print("[BigBrother] \(effectiveModeCommands.count) mode + \(perAppCommands.count) per-app + \(latestConfig.count) config to process (\(skippedMode) mode + \(skippedConfig) config skipped)")
         }
         #endif
 
@@ -239,6 +276,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                 return .applied
 
             case .temporaryUnlock(let durationSeconds):
+                let wasUnlocked = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode == .unlocked
                 try applyTemporaryUnlock(
                     durationSeconds: durationSeconds,
                     enrollment: enrollment,
@@ -247,8 +285,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                 let h = durationSeconds / 3600
                 let m = (durationSeconds % 3600) / 60
                 let dur = h > 0 ? (m > 0 ? "\(h)h \(m)m" : "\(h)h") : "\(m)m"
-                eventLogger.log(.commandApplied, details: "Temporary unlock for \(dur)")
-                ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: durationSeconds)
+                eventLogger.log(.commandApplied, details: "\(wasUnlocked ? "Extended" : "Temporary") unlock for \(dur)")
+                ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: durationSeconds, isExtension: wasUnlocked)
                 return .applied
 
             case .requestHeartbeat:
@@ -1190,7 +1228,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
 
     private func findBundleIDForRequest(_ requestID: UUID) -> String? {
         // Try to find the bundle ID in the keychain cache from the last shield event.
-        let keychain = KeychainManager()
+        let keychain = self.keychain
         if let cached = try? keychain.get(LastShieldedAppKeychain.self, forKey: StorageKeys.lastShieldedAppKeychain),
            cached.timestamp > Date().addingTimeInterval(-3600).timeIntervalSince1970 {
             return cached.bundleID

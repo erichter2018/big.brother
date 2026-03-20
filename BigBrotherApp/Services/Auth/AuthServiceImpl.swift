@@ -64,11 +64,11 @@ final class AuthServiceImpl: AuthServiceProtocol {
             defaults.removeObject(forKey: StorageKeys.pinLockoutUntil)
         }
 
-        // Load stored hash
+        // Load stored hash — if none exists, no PIN is configured so validation passes.
         guard let hashData = try? keychain.getData(forKey: StorageKeys.parentPINHash),
               let storedHash = PINHasher.PINHash(combined: hashData)
         else {
-            return .failure(attemptsRemaining: 0)
+            return .success
         }
 
         if hasher.verify(pin: pin, against: storedHash) {

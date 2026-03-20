@@ -8,7 +8,7 @@ public enum TokenFingerprint {
 
     /// Compute a 16-character hex fingerprint (FNV-1a 64-bit) for raw data.
     public static func fingerprint(for data: Data) -> String {
-        var hash: UInt64 = 1469598103934665603
+        var hash: UInt64 = 14695981039346656037
         for byte in data {
             hash ^= UInt64(byte)
             hash &*= 1099511628211

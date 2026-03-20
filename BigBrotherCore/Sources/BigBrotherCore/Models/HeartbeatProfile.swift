@@ -63,7 +63,8 @@ public struct ActiveWindow: Codable, Sendable, Equatable, Hashable, Identifiable
                 return true
             }
             // Before end (morning portion): check yesterday's day
-            let yesterday = calendar.component(.weekday, from: calendar.date(byAdding: .day, value: -1, to: date)!)
+            guard let previousDate = calendar.date(byAdding: .day, value: -1, to: date) else { return false }
+            let yesterday = calendar.component(.weekday, from: previousDate)
             if now < endTime, let prevDay = DayOfWeek(rawValue: yesterday), daysOfWeek.contains(prevDay) {
                 return true
             }

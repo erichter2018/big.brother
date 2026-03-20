@@ -41,7 +41,13 @@ final class EventLoggerImpl: EventLoggerProtocol {
             eventType: eventType,
             details: details
         )
-        try? storage.appendEventLog(entry)
+        do {
+            try storage.appendEventLog(entry)
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Failed to log event: \(error.localizedDescription)")
+            #endif
+        }
     }
 
     func syncPendingEvents() async throws {
@@ -149,7 +155,13 @@ final class EventLoggerImpl: EventLoggerProtocol {
                 eventType: eventType,
                 details: details
             )
-            try? storage.appendEventLog(entry)
+            do {
+                try storage.appendEventLog(entry)
+            } catch {
+                #if DEBUG
+                print("[BigBrother] Failed to log event: \(error.localizedDescription)")
+                #endif
+            }
             return
         }
 
@@ -160,6 +172,12 @@ final class EventLoggerImpl: EventLoggerProtocol {
             eventType: eventType,
             details: details
         )
-        try? storage.appendEventLog(entry)
+        do {
+            try storage.appendEventLog(entry)
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Failed to log event: \(error.localizedDescription)")
+            #endif
+        }
     }
 }

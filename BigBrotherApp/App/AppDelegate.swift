@@ -168,6 +168,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // If iOS kills the task, cancel our work.
         task.expirationHandler = {
             workTask.cancel()
+            task.setTaskCompleted(success: false)
             #if DEBUG
             print("[BGTask] Heartbeat refresh expired by system")
             #endif
@@ -261,6 +262,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         task.expirationHandler = {
             workTask.cancel()
+            task.setTaskCompleted(success: false)
         }
     }
 

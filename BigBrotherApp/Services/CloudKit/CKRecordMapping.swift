@@ -80,6 +80,7 @@ enum CKFieldName {
     static let heartbeatSeq = "heartbeatSeq"
     static let cloudKitStatus = "cloudKitStatus"
     static let allowedAppNames = "allowedAppNames"
+    static let allowedAppCount = "allowedAppCount"
     static let temporaryAllowedAppNames = "temporaryAllowedAppNames"
     static let temporaryUnlockExpiresAt = "tempUnlockExpiresAt"
     static let isChildAuthorization = "isChildAuth"

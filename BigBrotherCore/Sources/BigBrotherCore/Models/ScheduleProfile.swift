@@ -92,9 +92,13 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
                     return calendar.date(from: comps)
                 } else {
                     // Cross-midnight window — end is tomorrow if we're in evening portion
-                    let baseDate = now >= window.startTime
-                        ? calendar.date(byAdding: .day, value: 1, to: date)!
-                        : date
+                    let baseDate: Date
+                    if now >= window.startTime {
+                        guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: date) else { return nil }
+                        baseDate = tomorrow
+                    } else {
+                        baseDate = date
+                    }
                     var comps = calendar.dateComponents([.year, .month, .day], from: baseDate)
                     comps.hour = window.endTime.hour
                     comps.minute = window.endTime.minute

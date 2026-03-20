@@ -136,31 +136,17 @@ struct ChildDetailView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             DeviceIcon(modelIdentifier: device.modelIdentifier, size: .title3)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(device.displayName)
+                            VStack(alignment: .leading, spacing: 3) {
+                                // Line 1: Model name (e.g. "iPhone 12 mini")
+                                Text(DeviceIcon.displayName(for: device.modelIdentifier))
                                     .font(.subheadline)
                                     .fontWeight(.medium)
-                                HStack(spacing: 6) {
-                                    Text(DeviceIcon.displayName(for: device.modelIdentifier))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    if let ts = hb?.timestamp {
-                                        Image(systemName: "heart.fill")
-                                            .font(.caption2)
-                                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
-                                        Text(ts, style: .relative)
-                                            .font(.caption2)
-                                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
-                                        + Text(" ago")
-                                            .font(.caption2)
-                                            .foregroundStyle(Color(red: 1.0, green: 0.4, blue: 0.35))
-                                    }
-                                }
+
+                                // Line 2: iOS version, battery, space
                                 HStack(spacing: 8) {
                                     Text("iOS \(device.osVersion)")
                                         .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                    buildBadge(childBuild: hb?.appBuildNumber)
+                                        .foregroundStyle(.secondary)
                                     if let battery = hb?.batteryLevel {
                                         HStack(spacing: 2) {
                                             Image(systemName: hb?.isCharging == true ? "battery.100.bolt" : "battery.50")
@@ -179,6 +165,30 @@ struct ChildDetailView: View {
                                         }
                                         .foregroundStyle(disk < 1_000_000_000 ? .red : .secondary)
                                     }
+                                }
+
+                                // Line 3: Build, apps allowed
+                                HStack(spacing: 8) {
+                                    buildBadge(childBuild: hb?.appBuildNumber)
+                                    let appCount = hb?.allowedAppCount ?? hb?.allowedAppNames?.count ?? 0
+                                    if appCount > 0 {
+                                        Text("\(appCount) apps allowed")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+
+                                // Line 4: Heartbeat
+                                if let ts = hb?.timestamp {
+                                    HStack(spacing: 2) {
+                                        Image(systemName: "heart.fill")
+                                            .font(.system(size: 8))
+                                        Text(ts, style: .relative)
+                                            .font(.caption2)
+                                        + Text(" ago")
+                                            .font(.caption2)
+                                    }
+                                    .foregroundStyle(.pink.opacity(0.6))
                                 }
                             }
                             Spacer()

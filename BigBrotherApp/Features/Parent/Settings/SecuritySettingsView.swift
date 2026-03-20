@@ -8,6 +8,17 @@ struct SecuritySettingsView: View {
     @State private var feedback: String?
     @State private var authEnabled: Bool
 
+    // PIN re-auth for destructive actions
+    @State private var showPINChallenge = false
+    @State private var pendingAction: PendingAction?
+    @State private var challengePIN = ""
+    @State private var challengeError: String?
+
+    private enum PendingAction {
+        case removePIN
+        case disableAuth
+    }
+
     init(appState: AppState) {
         self.appState = appState
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
@@ -27,8 +38,15 @@ struct SecuritySettingsView: View {
             Section(footer: Text("When off, the app relies on device-level protection (Face ID / passcode) instead.")) {
                 Toggle("Require Authentication", isOn: $authEnabled)
                     .onChange(of: authEnabled) { _, newValue in
-                        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
-                        defaults.set(newValue, forKey: StorageKeys.parentAuthEnabled)
+                        if !newValue && hasPIN {
+                            // Turning off auth requires PIN verification first.
+                            authEnabled = true // revert toggle
+                            pendingAction = .disableAuth
+                            showPINChallenge = true
+                        } else {
+                            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+                            defaults.set(newValue, forKey: StorageKeys.parentAuthEnabled)
+                        }
                     }
             }
 
@@ -47,7 +65,8 @@ struct SecuritySettingsView: View {
                         }
 
                         Button("Remove PIN", role: .destructive) {
-                            showRemoveConfirmation = true
+                            pendingAction = .removePIN
+                            showPINChallenge = true
                         }
                     } else {
                         Button("Set Up PIN") {
@@ -70,14 +89,57 @@ struct SecuritySettingsView: View {
                 ParentPINSetupView(appState: appState, isInitialSetup: false)
             }
         }
-        .alert("Remove PIN?", isPresented: $showRemoveConfirmation) {
-            Button("Remove", role: .destructive) {
+        .alert("Enter PIN", isPresented: $showPINChallenge) {
+            SecureField("Parent PIN", text: $challengePIN)
+                .keyboardType(.numberPad)
+            Button("Verify") {
+                verifyChallengeAndExecute()
+            }
+            Button("Cancel", role: .cancel) {
+                challengePIN = ""
+                challengeError = nil
+                pendingAction = nil
+            }
+        } message: {
+            if let challengeError {
+                Text(challengeError)
+            } else {
+                Text("Enter your current PIN to continue.")
+            }
+        }
+    }
+
+    private func verifyChallengeAndExecute() {
+        guard let auth = appState.auth else { return }
+        let result = auth.validatePIN(challengePIN)
+        challengePIN = ""
+
+        switch result {
+        case .success:
+            challengeError = nil
+            switch pendingAction {
+            case .removePIN:
                 try? appState.keychain.delete(forKey: StorageKeys.parentPINHash)
                 feedback = "PIN removed. App relies on device lock for security."
+            case .disableAuth:
+                authEnabled = false
+                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+                defaults.set(false, forKey: StorageKeys.parentAuthEnabled)
+                feedback = "Authentication disabled."
+            case .none:
+                break
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The app will no longer require a PIN. Your device passcode / Face ID is the only protection.")
+            pendingAction = nil
+        case .failure(let remaining):
+            challengeError = remaining > 0
+                ? "Incorrect PIN (\(remaining) attempts remaining)"
+                : "Too many attempts."
+            // Re-show the challenge
+            showPINChallenge = true
+        case .lockedOut(let until):
+            let formatter = RelativeDateTimeFormatter()
+            challengeError = "Locked out. Try again \(formatter.localizedString(for: until, relativeTo: Date()))."
+            pendingAction = nil
         }
     }
 }

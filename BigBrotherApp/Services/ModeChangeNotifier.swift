@@ -62,12 +62,17 @@ enum ModeChangeNotifier {
         }
     }
 
-    /// Notify about a temporary unlock.
-    static func notifyTemporaryUnlock(durationSeconds: Int) {
+    /// Notify about a temporary unlock or extension.
+    static func notifyTemporaryUnlock(durationSeconds: Int, isExtension: Bool = false) {
         let content = UNMutableNotificationContent()
         let durationStr = formatDuration(durationSeconds)
-        content.title = "Temporary Unlock"
-        content.body = "Device unlocked for \(durationStr)."
+        if isExtension {
+            content.title = "Unlock Extended"
+            content.body = "Time extended — \(durationStr) total remaining."
+        } else {
+            content.title = "Temporary Unlock"
+            content.body = "Device unlocked for \(durationStr)."
+        }
         content.sound = .default
         content.categoryIdentifier = "MODE_CHANGE"
 

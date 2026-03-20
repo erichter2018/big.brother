@@ -75,7 +75,7 @@ public struct PINHasher: Sendable {
         let pinData = Data(pin.utf8)
         var derivedKey = Data(count: Self.keyLength)
 
-        _ = derivedKey.withUnsafeMutableBytes { derivedBuffer in
+        let status = derivedKey.withUnsafeMutableBytes { derivedBuffer in
             salt.withUnsafeBytes { saltBuffer in
                 pinData.withUnsafeBytes { pinBuffer in
                     CCKeyDerivationPBKDF(
@@ -91,6 +91,16 @@ public struct PINHasher: Sendable {
                     )
                 }
             }
+        }
+
+        // If PBKDF2 fails, return random data so verification always fails
+        // rather than producing a predictable all-zeros key.
+        if status != kCCSuccess {
+            var fallback = Data(count: Self.keyLength)
+            fallback.withUnsafeMutableBytes { buffer in
+                _ = SecRandomCopyBytes(kSecRandomDefault, Self.keyLength, buffer.baseAddress!)
+            }
+            return fallback
         }
 
         return derivedKey

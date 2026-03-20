@@ -37,6 +37,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// Human-readable names of temporarily allowed apps with expiry dates.
     public let temporaryAllowedAppNames: [String]?
 
+    /// Number of permanently allowed apps (raw token count, independent of name resolution).
+    public let allowedAppCount: Int?
+
     /// When a temporary unlock expires (nil if not in temp unlock).
     /// Used by parent dashboard to show countdown.
     public let temporaryUnlockExpiresAt: Date?
@@ -93,6 +96,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         heartbeatSeq: Int64? = nil,
         cloudKitStatus: String? = nil,
         allowedAppNames: [String]? = nil,
+        allowedAppCount: Int? = nil,
         temporaryAllowedAppNames: [String]? = nil,
         temporaryUnlockExpiresAt: Date? = nil,
         isChildAuthorization: Bool? = nil,
@@ -124,6 +128,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.heartbeatSeq = heartbeatSeq
         self.cloudKitStatus = cloudKitStatus
         self.allowedAppNames = allowedAppNames
+        self.allowedAppCount = allowedAppCount
         self.temporaryAllowedAppNames = temporaryAllowedAppNames
         self.temporaryUnlockExpiresAt = temporaryUnlockExpiresAt
         self.isChildAuthorization = isChildAuthorization
@@ -147,7 +152,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case appBlockingConfigured, blockedCategoryCount, blockedAppCount
         case blockedAppNames, blockedCategoryNames
         case installID, heartbeatSeq, cloudKitStatus
-        case allowedAppNames, temporaryAllowedAppNames
+        case allowedAppNames, allowedAppCount, temporaryAllowedAppNames
         case temporaryUnlockExpiresAt
         case isChildAuthorization
         case availableDiskSpace
@@ -181,6 +186,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         heartbeatSeq = try container.decodeIfPresent(Int64.self, forKey: .heartbeatSeq)
         cloudKitStatus = try container.decodeIfPresent(String.self, forKey: .cloudKitStatus)
         allowedAppNames = try container.decodeIfPresent([String].self, forKey: .allowedAppNames)
+        allowedAppCount = try container.decodeIfPresent(Int.self, forKey: .allowedAppCount)
         temporaryAllowedAppNames = try container.decodeIfPresent([String].self, forKey: .temporaryAllowedAppNames)
         temporaryUnlockExpiresAt = try container.decodeIfPresent(Date.self, forKey: .temporaryUnlockExpiresAt)
         isChildAuthorization = try container.decodeIfPresent(Bool.self, forKey: .isChildAuthorization)

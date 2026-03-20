@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -135,6 +135,7 @@
 		F503AA2FCAF5C9FE4549D3D7 /* EnrollmentServiceImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C9757BB2C3F8BCD2469D0EB /* EnrollmentServiceImpl.swift */; };
 		F587BAA1061EB1A4A0E0D898 /* ScheduleProfileListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1676616D8201A2351754419 /* ScheduleProfileListViewModel.swift */; };
 		F5A704A8F29CB3E9B03060B6 /* AppLaunchRestorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B990D2705A50DABAD5E9BE6E /* AppLaunchRestorer.swift */; };
+		F7297331D3C5C2129A64504B /* FamilyControls.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8C79763117C61AD8C6C71E31 /* FamilyControls.framework */; };
 		F769EAB5135B8524DE985B3B /* CKRecordMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F4546B78CBB0E676E0F52A1 /* CKRecordMapping.swift */; };
 		FB2DF0709AD02AFEFC5B9AFC /* ScheduleRegistrar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CEA41AEE818CDD3D848EC8A /* ScheduleRegistrar.swift */; };
 		FB2ED62CFB885FBB6B7365E4 /* LocalUnlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9D1291EB600DF958D8E04FF /* LocalUnlockView.swift */; };
@@ -226,7 +227,7 @@
 		40B7EEE122D0DBB23D59C7BC /* ParentPINEntryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentPINEntryView.swift; sourceTree = "<group>"; };
 		430C6D0168B773C0C8A82CEE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		439E2595BA6673DD7180F128 /* EnrollmentPermissionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentPermissionsView.swift; sourceTree = "<group>"; };
-		4584CB0570246B4E67123861 /* BigBrotherCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BigBrotherCore; path = BigBrotherCore; sourceTree = SOURCE_ROOT; };
+		4584CB0570246B4E67123861 /* BigBrotherCore */ = {isa = PBXFileReference; lastKnownFileType = folder; path = BigBrotherCore; sourceTree = SOURCE_ROOT; };
 		48249F6BA483A02C1511EE96 /* HeartbeatService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeartbeatService.swift; sourceTree = "<group>"; };
 		4833A3196E6024880CCF1A39 /* CloudKitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitService.swift; sourceTree = "<group>"; };
 		4A4B29C488B4C2B865CE5069 /* ModeBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModeBadge.swift; sourceTree = "<group>"; };
@@ -279,7 +280,7 @@
 		B177EFF146758126614A476D /* SyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncCoordinator.swift; sourceTree = "<group>"; };
 		B33EA033B68C98649EBD6B4A /* DeviceActivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DeviceActivity.framework; path = System/Library/Frameworks/DeviceActivity.framework; sourceTree = SDKROOT; };
 		B3540B7DED0E46E1B9F57BD1 /* BigBrotherApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherApp.swift; sourceTree = "<group>"; };
-		B47F68B7FDFE2D310901A80E /* BigBrotherShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B47F68B7FDFE2D310901A80E /* BigBrotherShieldAction.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BigBrotherShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B7D78A40DA38C5873164B394 /* NameMyAppsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NameMyAppsView.swift; sourceTree = "<group>"; };
 		B8752127CB5FC369C78C19C4 /* ManageChildrenView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManageChildrenView.swift; sourceTree = "<group>"; };
 		B8CE6210160D58C87F2CF988 /* ManagedSettingsUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ManagedSettingsUI.framework; path = System/Library/Frameworks/ManagedSettingsUI.framework; sourceTree = SDKROOT; };
@@ -302,12 +303,12 @@
 		D8CF4700D57C3049078838A3 /* EnrollmentCodeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentCodeView.swift; sourceTree = "<group>"; };
 		D9D1291EB600DF958D8E04FF /* LocalUnlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalUnlockView.swift; sourceTree = "<group>"; };
 		DE5B1871C1F66FEF4A3237B5 /* ShieldApplicationsTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShieldApplicationsTestView.swift; sourceTree = "<group>"; };
-		E0FF80F527CC553F50B8EEFC /* BigBrotherActivityReport.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherActivityReport.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		E0FF80F527CC553F50B8EEFC /* BigBrotherActivityReport.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BigBrotherActivityReport.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		E1DCDFE461F1C12A6D7B6DA0 /* DeviceMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMonitor.swift; sourceTree = "<group>"; };
 		E7BF810951465150BD8D5998 /* EnrollmentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentService.swift; sourceTree = "<group>"; };
 		E8E69CBD8075823F88CE3E5F /* BigBrotherActivityReportExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherActivityReportExtension.swift; sourceTree = "<group>"; };
 		EA9A711B4B274B6536E84F10 /* CloudKitSchemaBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitSchemaBootstrap.swift; sourceTree = "<group>"; };
-		EB676145E24ED9B27FDE3EAF /* BigBrotherShield.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherShield.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		EB676145E24ED9B27FDE3EAF /* BigBrotherShield.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BigBrotherShield.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		EBE922CC1D119DC068B1B419 /* HeartbeatProfileListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeartbeatProfileListView.swift; sourceTree = "<group>"; };
 		ECC8AE34732E820D470DACBD /* ChildHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildHomeView.swift; sourceTree = "<group>"; };
 		ED0B79790676DE3996AF9691 /* ParentJoinView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentJoinView.swift; sourceTree = "<group>"; };
@@ -318,9 +319,9 @@
 		F1676616D8201A2351754419 /* ScheduleProfileListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleProfileListViewModel.swift; sourceTree = "<group>"; };
 		F7F1F75F84C7478AFA8FAD74 /* WrappingHStack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WrappingHStack.swift; sourceTree = "<group>"; };
 		F8B3CD66EB52CDADB271694F /* ParentGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentGate.swift; sourceTree = "<group>"; };
-		FA178EAE5D1AD471940B5939 /* BigBrother.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BigBrother.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FA178EAE5D1AD471940B5939 /* BigBrother.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BigBrother.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FBA4F5F43FA9EC59E65C9E79 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		FE86A1FEE3AF5EEAB849EF81 /* BigBrotherMonitor.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		FE86A1FEE3AF5EEAB849EF81 /* BigBrotherMonitor.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BigBrotherMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -374,6 +375,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3D6198980D8B24C094A75D58 /* BigBrotherCore in Frameworks */,
+				F7297331D3C5C2129A64504B /* FamilyControls.framework in Frameworks */,
 				5F09329D23003A8B4302B1AD /* ManagedSettings.framework in Frameworks */,
 				CB796E08DCC775A7133BB958 /* DeviceActivity.framework in Frameworks */,
 			);
@@ -888,8 +890,6 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					205008D2826FE5FB4D7AD957 = {
-						DevelopmentTeam = Y2G5FUN342;
-						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -903,8 +903,6 @@
 						};
 					};
 					2C71CD525E4D1170CE718865 = {
-						DevelopmentTeam = Y2G5FUN342;
-						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -927,8 +925,6 @@
 						};
 					};
 					6D2FC41B94CC7D2460862C64 = {
-						DevelopmentTeam = Y2G5FUN342;
-						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -942,8 +938,6 @@
 						};
 					};
 					6F3F6815D1946D5D294161EC = {
-						DevelopmentTeam = Y2G5FUN342;
-						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -957,8 +951,6 @@
 						};
 					};
 					BA72BAB9C817F610D5003229 = {
-						DevelopmentTeam = Y2G5FUN342;
-						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -987,7 +979,6 @@
 				FF5E84990CB6C04CF3755BD0 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
 				ACE0B81636460BE5712D1B63 /* XCLocalSwiftPackageReference "BigBrotherCore" */,
 			);
-			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -1252,7 +1243,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShield/BigBrotherShield.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShield/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1263,6 +1256,7 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.shield;
 				PRODUCT_NAME = BigBrotherShield;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1272,7 +1266,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherActivityReport/BigBrotherActivityReport.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherActivityReport/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1283,6 +1279,7 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = "fr.bigbrother.app.activity-report";
 				PRODUCT_NAME = BigBrotherActivityReport;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1292,7 +1289,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherMonitor/BigBrotherMonitor.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherMonitor/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1303,6 +1302,7 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.monitor;
 				PRODUCT_NAME = BigBrotherMonitor;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1313,8 +1313,9 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = BigBrotherApp/BigBrother.entitlements;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				INFOPLIST_FILE = BigBrotherApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1322,6 +1323,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app;
 				PRODUCT_NAME = BigBrother;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1331,7 +1333,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShieldAction/BigBrotherShieldAction.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShieldAction/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1342,6 +1346,7 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = "fr.bigbrother.app.shield-action";
 				PRODUCT_NAME = BigBrotherShieldAction;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1351,7 +1356,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShield/BigBrotherShield.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShield/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1362,6 +1369,7 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.shield;
 				PRODUCT_NAME = BigBrotherShield;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1371,7 +1379,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShieldAction/BigBrotherShieldAction.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShieldAction/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1382,6 +1392,7 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = "fr.bigbrother.app.shield-action";
 				PRODUCT_NAME = BigBrotherShieldAction;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1391,7 +1402,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherMonitor/BigBrotherMonitor.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherMonitor/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1402,6 +1415,7 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.monitor;
 				PRODUCT_NAME = BigBrotherMonitor;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1470,8 +1484,9 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = BigBrotherApp/BigBrother.entitlements;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				INFOPLIST_FILE = BigBrotherApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1479,6 +1494,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app;
 				PRODUCT_NAME = BigBrother;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1488,7 +1504,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherActivityReport/BigBrotherActivityReport.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherActivityReport/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1499,6 +1517,7 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = "fr.bigbrother.app.activity-report";
 				PRODUCT_NAME = BigBrotherActivityReport;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

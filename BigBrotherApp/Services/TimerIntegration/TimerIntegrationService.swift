@@ -87,12 +87,14 @@ final class TimerIntegrationService {
         // Also listen for auth state changes — Firebase restores sessions async,
         // so currentUser may be nil at init but available moments later.
         authHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
-            guard let self else { return }
-            self.isSignedIn = user != nil
-            if user != nil && self.listener == nil {
-                let cfg = TimerIntegrationConfig.load()
-                if cfg.isEnabled, let familyID = cfg.firebaseFamilyID {
-                    self.startListening(familyID: familyID)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isSignedIn = user != nil
+                if user != nil && self.listener == nil {
+                    let cfg = TimerIntegrationConfig.load()
+                    if cfg.isEnabled, let familyID = cfg.firebaseFamilyID {
+                        self.startListening(familyID: familyID)
+                    }
                 }
             }
         }
@@ -163,7 +165,7 @@ final class TimerIntegrationService {
         listener = db.collection("families").document(familyID)
             .collection("kids")
             .addSnapshotListener { [weak self] snapshot, error in
-                guard let self, let documents = snapshot?.documents else { return }
+                guard let documents = snapshot?.documents else { return }
 
                 var newTimers: [String: KidTimerState] = [:]
                 for doc in documents {
@@ -184,8 +186,12 @@ final class TimerIntegrationService {
                         timerEndTime: timerEndTime
                     )
                 }
-                self.kidTimers = newTimers
-                self.onTimerDataChanged?(newTimers)
+                // Dispatch to main thread — @Observable mutations must happen on main.
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.kidTimers = newTimers
+                    self.onTimerDataChanged?(newTimers)
+                }
             }
     }
 
