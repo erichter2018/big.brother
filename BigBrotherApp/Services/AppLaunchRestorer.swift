@@ -150,36 +150,28 @@ struct AppLaunchRestorer {
     private func reconcileScheduleState() {
         guard let profile = storage.readActiveScheduleProfile() else { return }
         let now = Date()
-        let inFreeWindow = profile.isInFreeWindow(at: now)
+        let scheduleMode = profile.resolvedMode(at: now)
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentMode = currentSnapshot?.effectivePolicy.resolvedMode
 
-        // If we're in a free window but enforcement shows locked (or vice versa),
-        // re-apply the correct state.
-        if inFreeWindow && currentMode != .unlocked {
-            // Should be unlocked but isn't — extension missed the start.
-            #if DEBUG
-            print("[BigBrother] Schedule reconciliation: in free window but mode=\(currentMode?.rawValue ?? "nil"), clearing shields")
-            #endif
+        // Don't override active temporary unlocks.
+        if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > now {
+            return
+        }
+
+        guard scheduleMode != currentMode else { return }
+
+        switch scheduleMode {
+        case .unlocked:
+            // Free window — clear shields but keep device restrictions.
             try? enforcement.clearAllRestrictions()
-            // Re-apply restrictions (they should always be on).
-            if let snapshot = currentSnapshot {
-                try? enforcement.apply(snapshot.effectivePolicy)
-            }
-            eventLogger.log(.policyReconciled, details: "Schedule reconciliation: cleared shields for active free window")
-        } else if !inFreeWindow && currentMode == .unlocked {
-            // Check if there's a temporary unlock active — don't override that.
-            if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > now {
-                return // Active temp unlock, don't re-lock.
-            }
-            // Should be locked but isn't — extension missed the end.
-            #if DEBUG
-            print("[BigBrother] Schedule reconciliation: outside free window but unlocked, re-locking")
-            #endif
+            eventLogger.log(.policyReconciled, details: "Schedule reconciliation: cleared shields for free window")
+        case .essentialOnly, .dailyMode:
+            // Locked or essential — re-apply enforcement from snapshot.
             if let snapshot = currentSnapshot {
                 try? enforcement.reconcile(with: snapshot)
             }
-            eventLogger.log(.policyReconciled, details: "Schedule reconciliation: re-locked after missed free window end")
+            eventLogger.log(.policyReconciled, details: "Schedule reconciliation: applied \(scheduleMode.rawValue)")
         }
     }
 
@@ -189,9 +181,14 @@ struct AppLaunchRestorer {
     private func commitAndApply(_ snapshot: PolicySnapshot) {
         do {
             let result = try snapshotStore.commit(snapshot)
-            if case .committed(let committed) = result {
+            switch result {
+            case .committed(let committed):
                 try enforcement.apply(committed.effectivePolicy)
                 try snapshotStore.markApplied()
+            case .unchanged, .rejectedAsStale:
+                // Still apply enforcement — the snapshot fingerprint may match but
+                // ManagedSettingsStore could be out of sync (e.g., temp unlock expired).
+                try enforcement.apply(snapshot.effectivePolicy)
             }
         } catch {
             eventLogger.log(.commandFailed, details: "Commit/apply failed: \(error.localizedDescription)")

@@ -65,11 +65,17 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             clearAllShieldStores()
 
         case .dailyMode, .essentialOnly:
-            // If schedule profile says we're in a free window, defer to the monitor extension.
-            // The monitor manages all stores during free windows — don't re-shield here.
-            if let profile = storage.readActiveScheduleProfile(),
-               profile.isInFreeWindow(at: Date()) {
-                clearAllShieldStores()
+            if let profile = storage.readActiveScheduleProfile() {
+                let scheduleMode = profile.resolvedMode(at: Date())
+                if scheduleMode == .unlocked {
+                    clearAllShieldStores()
+                } else {
+                    // Use the schedule-resolved mode for shield decisions —
+                    // essential windows should get essentialOnly enforcement
+                    // even if the base policy says dailyMode.
+                    let effectiveMode = scheduleMode == .essentialOnly ? .essentialOnly : policy.resolvedMode
+                    applyShield(allowExemptions: effectiveMode == .dailyMode)
+                }
             } else {
                 applyShield(allowExemptions: policy.resolvedMode == .dailyMode)
             }

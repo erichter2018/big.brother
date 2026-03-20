@@ -16,6 +16,7 @@ schemes:
         BigBrotherShield: all
         BigBrotherShieldAction: all
         BigBrotherActivityReport: all
+        BigBrotherWidget: all
     run:
       config: Debug
       executable: BigBrother
@@ -56,6 +57,7 @@ targets:
       - target: BigBrotherShield
       - target: BigBrotherShieldAction
       - target: BigBrotherActivityReport
+      - target: BigBrotherWidget
       - package: firebase-ios-sdk
         product: FirebaseAuth
       - package: firebase-ios-sdk
@@ -266,6 +268,50 @@ targets:
         com.apple.Keychain:
           enabled: 1
         com.apple.FamilyControls:
+          enabled: 1
+
+  # ============================================================
+  # Widget Extension (child device status widget)
+  # ============================================================
+  BigBrotherWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: BigBrotherWidget
+        excludes:
+          - "**/*.entitlements"
+          - "**/*.plist"
+    dependencies:
+      - package: BigBrotherCore
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fr.bigbrother.app.widget
+        CODE_SIGN_ENTITLEMENTS: BigBrotherWidget/BigBrotherWidget.entitlements
+        PRODUCT_NAME: BigBrotherWidget
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_DEBUG_DYLIB: NO
+        MERGED_BINARY_TYPE: none
+    info:
+      path: BigBrotherWidget/Info.plist
+      properties:
+        CFBundleDisplayName: BigBrotherWidget
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: BigBrotherWidget/BigBrotherWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - "group.fr.bigbrother.shared"
+        keychain-access-groups:
+          - "$(AppIdentifierPrefix)fr.bigbrother.shared"
+    attributes:
+      SystemCapabilities:
+        com.apple.ApplicationGroups.iOS:
+          enabled: 1
+        com.apple.Keychain:
           enabled: 1
 
   # ============================================================

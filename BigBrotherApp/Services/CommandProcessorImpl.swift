@@ -379,6 +379,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                 return .applied
 
             case .lockUntil(let date):
+                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(false, forKey: "scheduleDrivenMode")
                 try applyLockUntil(date: date, enrollment: enrollment, commandID: command.id)
                 let formatter = DateFormatter()
                 formatter.dateFormat = "h:mm a"

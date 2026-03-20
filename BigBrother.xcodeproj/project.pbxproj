@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 63;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -18,6 +18,7 @@
 		10DB470975DF1BC4B524AA51 /* TimerIntegrationSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B182B8FC9DC1DDE31881C5 /* TimerIntegrationSettingsView.swift */; };
 		10E28E73BA59CC2ED14596DB /* UnlockRequestPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80835F4F3592BD8FA99A77D4 /* UnlockRequestPickerView.swift */; };
 		12693B9BA31E8C9DDFEE2679 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 8970A002B3B6BDCD8E73B612 /* FirebaseAuth */; };
+		12A992FB6A2BFCE74B6527E3 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8C3939798BF967B152FD03DA /* WidgetKit.framework */; };
 		1388286ED65D3E8B317600D7 /* ScheduleFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = CED1645C78764A9692A27103 /* ScheduleFormatting.swift */; };
 		18E1CE741E8B697EDA04B8E9 /* SyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B177EFF146758126614A476D /* SyncCoordinator.swift */; };
 		1A842D8C523CC78746CB9163 /* ParentAppNameMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BB7CF9073113D2C6EAD80E0 /* ParentAppNameMapping.swift */; };
@@ -26,6 +27,7 @@
 		1E0C0735CE0D055F49F92255 /* ManagedSettingsUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B8CE6210160D58C87F2CF988 /* ManagedSettingsUI.framework */; };
 		1E430872292AB065D4B6437B /* GlobalActionsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8409B59F82A2B2B02AED7631 /* GlobalActionsBar.swift */; };
 		20A56B6E0D0F2B23AE20D3F7 /* ChildSummaryCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D234EF261F5F38369916E5 /* ChildSummaryCard.swift */; };
+		28E4C5F8E9ED4BE1D277AC66 /* BigBrotherWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F86CFA23355E9739773F4D3 /* BigBrotherWidget.swift */; };
 		2C07273E33EED3CF492EC083 /* LocalParentUnlockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B2932282E5C1291793D282 /* LocalParentUnlockViewModel.swift */; };
 		2FAFBBB2E116F22FE3F34104 /* ScheduleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7425110E1AD24BCA7B6F62EE /* ScheduleManager.swift */; };
 		3052250EB127B85C0D3C219F /* HeartbeatProfileListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBE922CC1D119DC068B1B419 /* HeartbeatProfileListView.swift */; };
@@ -36,6 +38,7 @@
 		37ADED53FF15FE544BB9B6FE /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18652D93CEE63E93A2ED1C86 /* AppState.swift */; };
 		3A3B45A1C1F77B0DA870D7F0 /* ScheduleListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32E0AEC9003140FEC925C6B0 /* ScheduleListView.swift */; };
 		3D6198980D8B24C094A75D58 /* BigBrotherCore in Frameworks */ = {isa = PBXBuildFile; productRef = 99310E40518DAA20A6EB3AF3 /* BigBrotherCore */; };
+		3E8076C3F90192D3F1A7A07D /* BigBrotherCore in Frameworks */ = {isa = PBXBuildFile; productRef = 68B44ADF85D5BD9BF210324E /* BigBrotherCore */; };
 		3F8D30E56A7E2BC60E838882 /* ParentPINEntryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40B7EEE122D0DBB23D59C7BC /* ParentPINEntryView.swift */; };
 		45486D4B34A2C11F0475E19D /* EnrollmentCodeEntryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF81945A93EAFCF8EE68AB47 /* EnrollmentCodeEntryView.swift */; };
 		456373CDA1B204EDB1D6067D /* BigBrotherCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5221B26C56257EC16028DEB0 /* BigBrotherCore */; };
@@ -50,6 +53,7 @@
 		58B9CB32F534DA14E3F10507 /* ParentJoinView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED0B79790676DE3996AF9691 /* ParentJoinView.swift */; };
 		59029416293F2117553684E0 /* ChildDetailViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07395C4A7FA6A27B2702AD0 /* ChildDetailViewModel.swift */; };
 		5D1122960CBB68CB184568CA /* ManagedSettings.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2F2C1FAF31FCCB98CFE58693 /* ManagedSettings.framework */; };
+		5ED6F99BE794A3CC34A33621 /* BigBrotherWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 12A0430AFFE62313FDCAB50F /* BigBrotherWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		5F09329D23003A8B4302B1AD /* ManagedSettings.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2F2C1FAF31FCCB98CFE58693 /* ManagedSettings.framework */; };
 		60B44CC42D73BDA6CDC2C1E1 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = F649B59110E5DA48E452F1CC /* FirebaseFirestore */; };
 		62DF1B781414210168430A30 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 08D57E94AF00921B2043EDD0 /* Assets.xcassets */; };
@@ -91,6 +95,7 @@
 		A85582936F912A61FAB05248 /* BigBrotherActivityReport.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E0FF80F527CC553F50B8EEFC /* BigBrotherActivityReport.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A868A1F90263812F0774C13C /* DeviceDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8195715243C101C3954C7A3A /* DeviceDetailView.swift */; };
 		AAB88F89F3CA4CA0972BD263 /* ModeChangeNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A6038FA70DCFA9E944B73C2 /* ModeChangeNotifier.swift */; };
+		AB8CE740E5498C079A6CFB4F /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E98B4E6C5BE16333B396C051 /* SwiftUI.framework */; };
 		AE4B26E5E0026301D9869B45 /* BigBrotherShieldAction.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B47F68B7FDFE2D310901A80E /* BigBrotherShieldAction.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		AE72DF39A20C330CC25A523D /* CommandProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2ACF78BD6A37BB1AA7C14F /* CommandProcessor.swift */; };
 		AF19BD088C036D121C9E251C /* UnlockRequestNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0DBC61635D3A9E9DF2BC8D /* UnlockRequestNotificationService.swift */; };
@@ -160,6 +165,13 @@
 			remoteGlobalIDString = 6D2FC41B94CC7D2460862C64;
 			remoteInfo = BigBrotherShield;
 		};
+		4B10F632A9FE0009F1AD31DB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DF0F3EF874C6EA0924C8903F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5FD4A56BC4865664985066C4;
+			remoteInfo = BigBrotherWidget;
+		};
 		8B914F06A938CEF88BC6B3B9 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = DF0F3EF874C6EA0924C8903F /* Project object */;
@@ -187,6 +199,7 @@
 				A422507DA0C6EFBA60B3F879 /* BigBrotherShield.appex in Embed Foundation Extensions */,
 				AE4B26E5E0026301D9869B45 /* BigBrotherShieldAction.appex in Embed Foundation Extensions */,
 				A85582936F912A61FAB05248 /* BigBrotherActivityReport.appex in Embed Foundation Extensions */,
+				5ED6F99BE794A3CC34A33621 /* BigBrotherWidget.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -201,6 +214,7 @@
 		075D44522EE453F581F377A0 /* FamilyControlsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FamilyControlsManager.swift; sourceTree = "<group>"; };
 		08D57E94AF00921B2043EDD0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		12062A760C31C85F803CA4CC /* FamilyControlsManagerImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FamilyControlsManagerImpl.swift; sourceTree = "<group>"; };
+		12A0430AFFE62313FDCAB50F /* BigBrotherWidget.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		134EA3946A8F4FABF8A8F8E9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		13F3975C33F9CD2FF966FC1D /* AppNamingPromptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNamingPromptView.swift; sourceTree = "<group>"; };
 		1422E5C82CC6D132879C5627 /* EnrollmentCompleteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentCompleteView.swift; sourceTree = "<group>"; };
@@ -209,6 +223,7 @@
 		1A2ACF78BD6A37BB1AA7C14F /* CommandProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandProcessor.swift; sourceTree = "<group>"; };
 		1B5DC2165FE4CA5A8229AB9A /* InsightsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsView.swift; sourceTree = "<group>"; };
 		1BB7CF9073113D2C6EAD80E0 /* ParentAppNameMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentAppNameMapping.swift; sourceTree = "<group>"; };
+		1F86CFA23355E9739773F4D3 /* BigBrotherWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherWidget.swift; sourceTree = "<group>"; };
 		1F8E53364DF4E12B275CB1A3 /* CodeGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeGenerator.swift; sourceTree = "<group>"; };
 		21D9F4B16AB65B9226B9D66C /* ParentDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentDashboardView.swift; sourceTree = "<group>"; };
 		25278626B1E7D32CA00C882C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -227,7 +242,7 @@
 		40B7EEE122D0DBB23D59C7BC /* ParentPINEntryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentPINEntryView.swift; sourceTree = "<group>"; };
 		430C6D0168B773C0C8A82CEE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		439E2595BA6673DD7180F128 /* EnrollmentPermissionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentPermissionsView.swift; sourceTree = "<group>"; };
-		4584CB0570246B4E67123861 /* BigBrotherCore */ = {isa = PBXFileReference; lastKnownFileType = folder; path = BigBrotherCore; sourceTree = SOURCE_ROOT; };
+		4584CB0570246B4E67123861 /* BigBrotherCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BigBrotherCore; path = BigBrotherCore; sourceTree = SOURCE_ROOT; };
 		48249F6BA483A02C1511EE96 /* HeartbeatService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeartbeatService.swift; sourceTree = "<group>"; };
 		4833A3196E6024880CCF1A39 /* CloudKitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitService.swift; sourceTree = "<group>"; };
 		4A4B29C488B4C2B865CE5069 /* ModeBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModeBadge.swift; sourceTree = "<group>"; };
@@ -255,6 +270,7 @@
 		87FED7DA09DE4FD29C084934 /* SecuritySettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecuritySettingsView.swift; sourceTree = "<group>"; };
 		8A2B8283DF2B8F94B78B92F0 /* ScheduleOverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleOverviewView.swift; sourceTree = "<group>"; };
 		8B0DBC61635D3A9E9DF2BC8D /* UnlockRequestNotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnlockRequestNotificationService.swift; sourceTree = "<group>"; };
+		8C3939798BF967B152FD03DA /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		8C79763117C61AD8C6C71E31 /* FamilyControls.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FamilyControls.framework; path = System/Library/Frameworks/FamilyControls.framework; sourceTree = SDKROOT; };
 		8DFC4955AC83380BE38C8BC0 /* CKRecordConversion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CKRecordConversion.swift; sourceTree = "<group>"; };
 		91518144830989A2476588B2 /* DiagnosticsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsViewModel.swift; sourceTree = "<group>"; };
@@ -280,7 +296,7 @@
 		B177EFF146758126614A476D /* SyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncCoordinator.swift; sourceTree = "<group>"; };
 		B33EA033B68C98649EBD6B4A /* DeviceActivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DeviceActivity.framework; path = System/Library/Frameworks/DeviceActivity.framework; sourceTree = SDKROOT; };
 		B3540B7DED0E46E1B9F57BD1 /* BigBrotherApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherApp.swift; sourceTree = "<group>"; };
-		B47F68B7FDFE2D310901A80E /* BigBrotherShieldAction.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BigBrotherShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B47F68B7FDFE2D310901A80E /* BigBrotherShieldAction.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherShieldAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B7D78A40DA38C5873164B394 /* NameMyAppsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NameMyAppsView.swift; sourceTree = "<group>"; };
 		B8752127CB5FC369C78C19C4 /* ManageChildrenView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManageChildrenView.swift; sourceTree = "<group>"; };
 		B8CE6210160D58C87F2CF988 /* ManagedSettingsUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ManagedSettingsUI.framework; path = System/Library/Frameworks/ManagedSettingsUI.framework; sourceTree = SDKROOT; };
@@ -303,12 +319,13 @@
 		D8CF4700D57C3049078838A3 /* EnrollmentCodeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentCodeView.swift; sourceTree = "<group>"; };
 		D9D1291EB600DF958D8E04FF /* LocalUnlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalUnlockView.swift; sourceTree = "<group>"; };
 		DE5B1871C1F66FEF4A3237B5 /* ShieldApplicationsTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShieldApplicationsTestView.swift; sourceTree = "<group>"; };
-		E0FF80F527CC553F50B8EEFC /* BigBrotherActivityReport.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BigBrotherActivityReport.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		E0FF80F527CC553F50B8EEFC /* BigBrotherActivityReport.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherActivityReport.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		E1DCDFE461F1C12A6D7B6DA0 /* DeviceMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMonitor.swift; sourceTree = "<group>"; };
 		E7BF810951465150BD8D5998 /* EnrollmentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentService.swift; sourceTree = "<group>"; };
 		E8E69CBD8075823F88CE3E5F /* BigBrotherActivityReportExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherActivityReportExtension.swift; sourceTree = "<group>"; };
+		E98B4E6C5BE16333B396C051 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		EA9A711B4B274B6536E84F10 /* CloudKitSchemaBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitSchemaBootstrap.swift; sourceTree = "<group>"; };
-		EB676145E24ED9B27FDE3EAF /* BigBrotherShield.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BigBrotherShield.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		EB676145E24ED9B27FDE3EAF /* BigBrotherShield.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherShield.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		EBE922CC1D119DC068B1B419 /* HeartbeatProfileListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeartbeatProfileListView.swift; sourceTree = "<group>"; };
 		ECC8AE34732E820D470DACBD /* ChildHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildHomeView.swift; sourceTree = "<group>"; };
 		ED0B79790676DE3996AF9691 /* ParentJoinView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentJoinView.swift; sourceTree = "<group>"; };
@@ -319,9 +336,9 @@
 		F1676616D8201A2351754419 /* ScheduleProfileListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleProfileListViewModel.swift; sourceTree = "<group>"; };
 		F7F1F75F84C7478AFA8FAD74 /* WrappingHStack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WrappingHStack.swift; sourceTree = "<group>"; };
 		F8B3CD66EB52CDADB271694F /* ParentGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentGate.swift; sourceTree = "<group>"; };
-		FA178EAE5D1AD471940B5939 /* BigBrother.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BigBrother.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FA178EAE5D1AD471940B5939 /* BigBrother.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BigBrother.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FBA4F5F43FA9EC59E65C9E79 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		FE86A1FEE3AF5EEAB849EF81 /* BigBrotherMonitor.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BigBrotherMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		FE86A1FEE3AF5EEAB849EF81 /* BigBrotherMonitor.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -351,6 +368,16 @@
 				7272FF72DCBF1C0A659B0029 /* BigBrotherCore in Frameworks */,
 				9158FC3FD64FD81B9052FEF5 /* DeviceActivity.framework in Frameworks */,
 				FCD95A39A429392AD275D90A /* ManagedSettings.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E83956E4F72DC02D7846D61B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3E8076C3F90192D3F1A7A07D /* BigBrotherCore in Frameworks */,
+				12A992FB6A2BFCE74B6527E3 /* WidgetKit.framework in Frameworks */,
+				AB8CE740E5498C079A6CFB4F /* SwiftUI.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -449,8 +476,17 @@
 				FE86A1FEE3AF5EEAB849EF81 /* BigBrotherMonitor.appex */,
 				EB676145E24ED9B27FDE3EAF /* BigBrotherShield.appex */,
 				B47F68B7FDFE2D310901A80E /* BigBrotherShieldAction.appex */,
+				12A0430AFFE62313FDCAB50F /* BigBrotherWidget.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		217535BEFEAFB2B5D9B79D2A /* BigBrotherWidget */ = {
+			isa = PBXGroup;
+			children = (
+				1F86CFA23355E9739773F4D3 /* BigBrotherWidget.swift */,
+			);
+			path = BigBrotherWidget;
 			sourceTree = "<group>";
 		};
 		26CB9C82D0EFC3BC785F61C2 /* Parent */ = {
@@ -628,6 +664,7 @@
 				7B5BD44401F9EEDB5375D7EA /* BigBrotherMonitor */,
 				0DD95ABBD76129425AB96991 /* BigBrotherShield */,
 				93DD4CC549AD2FD923EC2495 /* BigBrotherShieldAction */,
+				217535BEFEAFB2B5D9B79D2A /* BigBrotherWidget */,
 				EF396527467DC79D4A5A5F80 /* Packages */,
 				F49AFDE71AF02DE7C19D1BE7 /* Frameworks */,
 				1A3D77C43A50EE16CA832B58 /* Products */,
@@ -725,6 +762,8 @@
 				39D547439C7BB4F7846B68D4 /* LocalAuthentication.framework */,
 				2F2C1FAF31FCCB98CFE58693 /* ManagedSettings.framework */,
 				B8CE6210160D58C87F2CF988 /* ManagedSettingsUI.framework */,
+				E98B4E6C5BE16333B396C051 /* SwiftUI.framework */,
+				8C3939798BF967B152FD03DA /* WidgetKit.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -812,6 +851,7 @@
 				8B33712ADDDBB113404696D2 /* PBXTargetDependency */,
 				6E019E7BF74C8815D22AC4F0 /* PBXTargetDependency */,
 				3646992A01B44B42623038D5 /* PBXTargetDependency */,
+				8675C9C51DE3113EE947EA9E /* PBXTargetDependency */,
 			);
 			name = BigBrother;
 			packageProductDependencies = (
@@ -822,6 +862,25 @@
 			productName = BigBrother;
 			productReference = FA178EAE5D1AD471940B5939 /* BigBrother.app */;
 			productType = "com.apple.product-type.application";
+		};
+		5FD4A56BC4865664985066C4 /* BigBrotherWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EE3591A93A9798740328C57E /* Build configuration list for PBXNativeTarget "BigBrotherWidget" */;
+			buildPhases = (
+				E332D7F8CAD9FC0DFEFE1A8B /* Sources */,
+				E83956E4F72DC02D7846D61B /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BigBrotherWidget;
+			packageProductDependencies = (
+				68B44ADF85D5BD9BF210324E /* BigBrotherCore */,
+			);
+			productName = BigBrotherWidget;
+			productReference = 12A0430AFFE62313FDCAB50F /* BigBrotherWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		6D2FC41B94CC7D2460862C64 /* BigBrotherShield */ = {
 			isa = PBXNativeTarget;
@@ -890,6 +949,8 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					205008D2826FE5FB4D7AD957 = {
+						DevelopmentTeam = Y2G5FUN342;
+						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -903,6 +964,8 @@
 						};
 					};
 					2C71CD525E4D1170CE718865 = {
+						DevelopmentTeam = Y2G5FUN342;
+						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -924,7 +987,21 @@
 							};
 						};
 					};
+					5FD4A56BC4865664985066C4 = {
+						DevelopmentTeam = Y2G5FUN342;
+						ProvisioningStyle = Automatic;
+						SystemCapabilities = {
+							com.apple.ApplicationGroups.iOS = {
+								enabled = 1;
+							};
+							com.apple.Keychain = {
+								enabled = 1;
+							};
+						};
+					};
 					6D2FC41B94CC7D2460862C64 = {
+						DevelopmentTeam = Y2G5FUN342;
+						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -938,6 +1015,8 @@
 						};
 					};
 					6F3F6815D1946D5D294161EC = {
+						DevelopmentTeam = Y2G5FUN342;
+						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -951,6 +1030,8 @@
 						};
 					};
 					BA72BAB9C817F610D5003229 = {
+						DevelopmentTeam = Y2G5FUN342;
+						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
@@ -979,6 +1060,7 @@
 				FF5E84990CB6C04CF3755BD0 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
 				ACE0B81636460BE5712D1B63 /* XCLocalSwiftPackageReference "BigBrotherCore" */,
 			);
+			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -987,6 +1069,7 @@
 				6F3F6815D1946D5D294161EC /* BigBrotherMonitor */,
 				6D2FC41B94CC7D2460862C64 /* BigBrotherShield */,
 				BA72BAB9C817F610D5003229 /* BigBrotherShieldAction */,
+				5FD4A56BC4865664985066C4 /* BigBrotherWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -1033,6 +1116,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				BAA54D7A8A572826EBD6154E /* BigBrotherShieldExtension.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E332D7F8CAD9FC0DFEFE1A8B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				28E4C5F8E9ED4BE1D277AC66 /* BigBrotherWidget.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1166,6 +1257,11 @@
 			target = BA72BAB9C817F610D5003229 /* BigBrotherShieldAction */;
 			targetProxy = 8B914F06A938CEF88BC6B3B9 /* PBXContainerItemProxy */;
 		};
+		8675C9C51DE3113EE947EA9E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5FD4A56BC4865664985066C4 /* BigBrotherWidget */;
+			targetProxy = 4B10F632A9FE0009F1AD31DB /* PBXContainerItemProxy */;
+		};
 		8B33712ADDDBB113404696D2 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 6D2FC41B94CC7D2460862C64 /* BigBrotherShield */;
@@ -1174,6 +1270,26 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		09F4B91D4F106DBAADCA08D4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = BigBrotherWidget/BigBrotherWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_DEBUG_DYLIB = NO;
+				INFOPLIST_FILE = BigBrotherWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MERGED_BINARY_TYPE = none;
+				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.widget;
+				PRODUCT_NAME = BigBrotherWidget;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 		18EA57BFE185A20970B8E75A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1243,9 +1359,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShield/BigBrotherShield.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShield/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1256,7 +1370,6 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.shield;
 				PRODUCT_NAME = BigBrotherShield;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1266,9 +1379,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherActivityReport/BigBrotherActivityReport.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherActivityReport/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1279,7 +1390,6 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = "fr.bigbrother.app.activity-report";
 				PRODUCT_NAME = BigBrotherActivityReport;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1289,9 +1399,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherMonitor/BigBrotherMonitor.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherMonitor/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1302,7 +1410,6 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.monitor;
 				PRODUCT_NAME = BigBrotherMonitor;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1313,9 +1420,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = BigBrotherApp/BigBrother.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				INFOPLIST_FILE = BigBrotherApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1323,7 +1429,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app;
 				PRODUCT_NAME = BigBrother;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1333,9 +1438,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShieldAction/BigBrotherShieldAction.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShieldAction/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1346,7 +1449,26 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = "fr.bigbrother.app.shield-action";
 				PRODUCT_NAME = BigBrotherShieldAction;
-				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		5A2CB7302A93B30854FD968A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = BigBrotherWidget/BigBrotherWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_DEBUG_DYLIB = NO;
+				INFOPLIST_FILE = BigBrotherWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MERGED_BINARY_TYPE = none;
+				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.widget;
+				PRODUCT_NAME = BigBrotherWidget;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1356,9 +1478,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShield/BigBrotherShield.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShield/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1369,7 +1489,6 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.shield;
 				PRODUCT_NAME = BigBrotherShield;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1379,9 +1498,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShieldAction/BigBrotherShieldAction.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShieldAction/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1392,7 +1509,6 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = "fr.bigbrother.app.shield-action";
 				PRODUCT_NAME = BigBrotherShieldAction;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1402,9 +1518,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherMonitor/BigBrotherMonitor.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherMonitor/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1415,7 +1529,6 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app.monitor;
 				PRODUCT_NAME = BigBrotherMonitor;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1484,9 +1597,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = BigBrotherApp/BigBrother.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				INFOPLIST_FILE = BigBrotherApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1494,7 +1606,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = fr.bigbrother.app;
 				PRODUCT_NAME = BigBrother;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1504,9 +1615,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherActivityReport/BigBrotherActivityReport.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherActivityReport/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1517,7 +1626,6 @@
 				MERGED_BINARY_TYPE = none;
 				PRODUCT_BUNDLE_IDENTIFIER = "fr.bigbrother.app.activity-report";
 				PRODUCT_NAME = BigBrotherActivityReport;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1580,6 +1688,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		EE3591A93A9798740328C57E /* Build configuration list for PBXNativeTarget "BigBrotherWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				09F4B91D4F106DBAADCA08D4 /* Debug */,
+				5A2CB7302A93B30854FD968A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -1610,6 +1727,10 @@
 			productName = BigBrotherCore;
 		};
 		5221B26C56257EC16028DEB0 /* BigBrotherCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BigBrotherCore;
+		};
+		68B44ADF85D5BD9BF210324E /* BigBrotherCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = BigBrotherCore;
 		};

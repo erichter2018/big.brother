@@ -85,6 +85,11 @@ struct BigBrotherApp: App {
             return
         }
 
+        // Record that the main app launched with this build number.
+        // The Monitor extension checks this to prompt re-launch after updates.
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(AppConstants.appBuildNumber, forKey: "mainAppLastLaunchedBuild")
+
         // Configure all services (creates ManagedSettingsStore, CloudKit, etc.).
         _LaunchLog.log("Calling configureServices (role=\(appState.deviceRole))")
         appState.configureServices()

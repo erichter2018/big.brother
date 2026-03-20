@@ -21,6 +21,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     private let enforcement: (any EnforcementServiceProtocol)?
 
     private var timer: Timer?
+    private var extensionCheckTimer: Timer?
     private let interval: TimeInterval
 
     /// Called after a successful heartbeat send — piggyback command processing
@@ -56,8 +57,13 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task {
-                try? await self.sendNow(force: false)
+                try? await self.sendNow(force: self.checkExtensionHeartbeatRequest())
             }
+        }
+        // Also check more frequently (every 30s) for extension-requested heartbeats.
+        extensionCheckTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            guard let self, self.checkExtensionHeartbeatRequest() else { return }
+            Task { try? await self.sendNow(force: true) }
         }
         // Fire immediately on start.
         Task { try? await sendNow(force: false) }
@@ -66,6 +72,24 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     func stopHeartbeat() {
         timer?.invalidate()
         timer = nil
+        extensionCheckTimer?.invalidate()
+        extensionCheckTimer = nil
+    }
+
+    /// Check if the Monitor extension requested a heartbeat via App Group flag.
+    /// Returns true and clears the flag if a recent request exists.
+    private func checkExtensionHeartbeatRequest() -> Bool {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let requestedAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt")
+        guard let requestedAt, requestedAt > 0 else { return false }
+        let age = Date().timeIntervalSince1970 - requestedAt
+        // Only honor requests from the last 5 minutes.
+        guard age < 300 else { return false }
+        defaults?.removeObject(forKey: "extensionHeartbeatRequestedAt")
+        #if DEBUG
+        print("[BigBrother] Extension requested heartbeat \(Int(age))s ago — sending")
+        #endif
+        return true
     }
 
     func sendNow(force: Bool = false) async throws {
@@ -92,12 +116,17 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         try? storage.writeHeartbeatStatus(attemptStatus)
 
         let snapshot = storage.readPolicySnapshot()
-        // Prefer ExtensionSharedState for currentMode — the Monitor extension updates it
-        // during schedule transitions without writing a full PolicySnapshot.
+        // Determine current mode from multiple sources, in priority order:
+        // 1. ExtensionSharedState (Monitor writes this on schedule transitions)
+        // 2. Schedule profile (direct check — catches cases where shared state was clobbered)
+        // 3. PolicySnapshot (base policy mode)
         let extState = storage.readExtensionSharedState()
         let currentMode: LockMode
         if let ext = extState, ext.writtenAt > (snapshot?.createdAt ?? .distantPast) {
             currentMode = ext.currentMode
+        } else if let profile = storage.readActiveScheduleProfile() {
+            // Check schedule directly — the base snapshot doesn't reflect free/essential windows.
+            currentMode = profile.resolvedMode(at: Date())
         } else {
             currentMode = snapshot?.effectivePolicy.resolvedMode ?? .unlocked
         }
@@ -198,13 +227,16 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     // MARK: - Enforcement Reconciliation
 
     /// Re-apply enforcement as a safety net after each heartbeat.
-    /// Skips during free windows to avoid fighting the monitor extension.
+    /// Skips during schedule-managed windows (free or essential) to avoid fighting the monitor extension.
     private func reconcileEnforcement() {
         guard let enforcement else { return }
-        // Don't re-enforce during free windows — monitor manages stores.
-        if let profile = storage.readActiveScheduleProfile(),
-           profile.isInFreeWindow(at: Date()) {
-            return
+        // Don't re-enforce during schedule-managed windows — Monitor handles this.
+        if let profile = storage.readActiveScheduleProfile() {
+            let scheduleMode = profile.resolvedMode(at: Date())
+            if scheduleMode != profile.lockedMode {
+                // In a schedule-managed window (free or essential) — Monitor handles this.
+                return
+            }
         }
         guard let snapshot = storage.readPolicySnapshot() else { return }
         try? enforcement.apply(snapshot.effectivePolicy)

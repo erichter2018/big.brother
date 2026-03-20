@@ -368,22 +368,11 @@ final class ParentDashboardViewModel: CommandSendable {
             let confirmed = !devs.isEmpty && devs.allSatisfy { dev in
                 heartbeat(for: dev)?.currentMode == expected.mode
             }
-            if confirmed {
-                // Heartbeat agrees — clear expectedModes and always remove from
-                // scheduleActiveChildren. A manual mode command overrides the schedule
-                // regardless of whether the modes happen to match right now.
-                appState.expectedModes.removeValue(forKey: child.id)
-                scheduleActiveChildren.remove(child.id)
-                return (expected.mode, expected.mode == .unlocked)
-            } else if now.timeIntervalSince(expected.sentAt) > 120 {
-                // Auto-expire after 2 minutes. Also clear scheduleActiveChildren —
-                // the parent intended a manual override even if heartbeat was slow.
-                appState.expectedModes.removeValue(forKey: child.id)
-                scheduleActiveChildren.remove(child.id)
-                // Don't fall through — trust the heartbeat if available.
-            } else {
+            if confirmed || now.timeIntervalSince(expected.sentAt) <= 120 {
                 return (expected.mode, expected.mode == .unlocked)
             }
+            // Timed out and not confirmed — fall through to other sources.
+            // Cleanup happens in pruneConfirmedModes() via the timer.
         }
 
         // 1. If schedule is active, use schedule mode — but override if there's
@@ -471,6 +460,23 @@ final class ParentDashboardViewModel: CommandSendable {
         return .dailyMode
     }
 
+    /// Prune confirmed or timed-out expectedModes. Called from timer, NOT during render.
+    private func pruneConfirmedModes() {
+        for (childID, expected) in appState.expectedModes {
+            let devs = childDevices.filter { $0.childProfileID == childID }
+            let confirmed = !devs.isEmpty && devs.allSatisfy { dev in
+                latestHeartbeats.first(where: { $0.deviceID == dev.id })?.currentMode == expected.mode
+            }
+            if confirmed {
+                appState.expectedModes.removeValue(forKey: childID)
+                scheduleActiveChildren.remove(childID)
+            } else if now.timeIntervalSince(expected.sentAt) > 120 {
+                appState.expectedModes.removeValue(forKey: childID)
+                scheduleActiveChildren.remove(childID)
+            }
+        }
+    }
+
     // MARK: - Confirmation Polling
 
     private var confirmationTask: Task<Void, Never>?
@@ -527,6 +533,7 @@ final class ParentDashboardViewModel: CommandSendable {
             Task { @MainActor in
                 guard let self else { return }
                 self.now = Date()
+                self.pruneConfirmedModes()
 
                 // Refresh heartbeats every 15 seconds to pick up confirmation changes.
                 // Guard against stacking: skip if a previous refresh is still in-flight.

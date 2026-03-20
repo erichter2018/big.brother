@@ -87,17 +87,22 @@ public final class PolicySnapshotStore: @unchecked Sendable {
             try? appendTransition(transition)
         }
 
-        // Update extension shared state
-        let extState = ExtensionSharedState(
-            currentMode: snapshot.effectivePolicy.resolvedMode,
-            isTemporaryUnlock: snapshot.effectivePolicy.isTemporaryUnlock,
-            temporaryUnlockExpiresAt: snapshot.effectivePolicy.temporaryUnlockExpiresAt,
-            authorizationAvailable: snapshot.authorizationHealth?.isAuthorized ?? true,
-            enforcementDegraded: snapshot.authorizationHealth?.enforcementDegraded ?? false,
-            shieldConfig: shieldConfig(for: snapshot),
-            policyVersion: snapshot.effectivePolicy.policyVersion
-        )
-        try? storage.writeExtensionSharedState(extState)
+        // Update extension shared state — but don't overwrite if the Monitor extension
+        // wrote a more recent schedule-aware state (e.g., free window unlock).
+        let existingExt = storage.readExtensionSharedState()
+        let monitorOwnsState = existingExt != nil && existingExt!.writtenAt > snapshot.createdAt
+        if !monitorOwnsState {
+            let extState = ExtensionSharedState(
+                currentMode: snapshot.effectivePolicy.resolvedMode,
+                isTemporaryUnlock: snapshot.effectivePolicy.isTemporaryUnlock,
+                temporaryUnlockExpiresAt: snapshot.effectivePolicy.temporaryUnlockExpiresAt,
+                authorizationAvailable: snapshot.authorizationHealth?.isAuthorized ?? true,
+                enforcementDegraded: snapshot.authorizationHealth?.enforcementDegraded ?? false,
+                shieldConfig: shieldConfig(for: snapshot),
+                policyVersion: snapshot.effectivePolicy.policyVersion
+            )
+            try? storage.writeExtensionSharedState(extState)
+        }
 
         // Update shield config
         try? storage.writeShieldConfiguration(shieldConfig(for: snapshot))
