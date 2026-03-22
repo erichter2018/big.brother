@@ -168,11 +168,13 @@ final class ChildDetailViewModel: CommandSendable {
     /// Poll CloudKit for updated heartbeats every 10s so device status stays current.
     func startAutoRefresh() {
         guard refreshTimer == nil else { return }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             Task { [weak self] in
                 try? await self?.appState.refreshDashboard()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
     }
 
     func stopAutoRefresh() {

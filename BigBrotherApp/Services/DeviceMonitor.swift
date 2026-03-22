@@ -65,20 +65,16 @@ final class DeviceMonitor {
         requestNotificationPermission()
 
         // Periodic heartbeat-freshness check.
-        checkTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.checkIntervalSeconds,
-            repeats: true
-        ) { [weak self] _ in
+        let chkTimer = Timer(timeInterval: Self.checkIntervalSeconds, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.checkDeviceStatus()
             }
         }
+        RunLoop.main.add(chkTimer, forMode: .common)
+        checkTimer = chkTimer
 
         // Periodic dashboard refresh so heartbeat data stays current.
-        refreshTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.dashboardRefreshIntervalSeconds,
-            repeats: true
-        ) { [weak self] _ in
+        let refTimer = Timer(timeInterval: Self.dashboardRefreshIntervalSeconds, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
@@ -93,6 +89,8 @@ final class DeviceMonitor {
                 }
             }
         }
+        RunLoop.main.add(refTimer, forMode: .common)
+        refreshTimer = refTimer
 
         // Run an initial check right now.
         checkDeviceStatus()
@@ -304,15 +302,20 @@ final class DeviceMonitor {
     }
 
     private func sendOfflineNotification(device: ChildDevice, heartbeat: DeviceHeartbeat?) {
+        let reason = offlineReason(heartbeat: heartbeat)
+
+        // Only notify for suspicious events (tampering, never connected).
+        // Normal offline (battery died, sleeping, etc.) is visible on the dashboard.
+        guard reason.isSuspicious else { return }
+
         let content = UNMutableNotificationContent()
         let name = childName(for: device)
 
-        let reason = offlineReason(heartbeat: heartbeat)
         content.title = reason.title
         content.body = "\(name)'s \(device.displayName) — \(reason.body)"
 
-        content.sound = reason.isSuspicious ? .defaultCritical : .default
-        content.interruptionLevel = reason.isSuspicious ? .critical : .timeSensitive
+        content.sound = .defaultCritical
+        content.interruptionLevel = .critical
         content.threadIdentifier = "device-monitor"
 
         let request = UNNotificationRequest(
@@ -332,31 +335,11 @@ final class DeviceMonitor {
 
     private func sendOnlineNotification(device: ChildDevice) {
         // Remove the offline notification from Notification Center.
+        // No "back online" notification — the dashboard shows status,
+        // and these just flood the notification center with 8 devices.
         UNUserNotificationCenter.current().removeDeliveredNotifications(
             withIdentifiers: ["offline-\(device.id.rawValue)"]
         )
-
-        let content = UNMutableNotificationContent()
-        let name = childName(for: device)
-
-        content.title = "Device Back Online"
-        content.body = "\(name)'s \(device.displayName) is checking in again."
-        content.sound = .default
-        content.threadIdentifier = "device-monitor"
-
-        let request = UNNotificationRequest(
-            identifier: "online-\(device.id.rawValue)",
-            content: content,
-            trigger: nil
-        )
-
-        UNUserNotificationCenter.current().add(request) { error in
-            #if DEBUG
-            if let error {
-                print("[DeviceMonitor] Failed to post online notification: \(error.localizedDescription)")
-            }
-            #endif
-        }
     }
 
     // MARK: - Offline Reason Analysis

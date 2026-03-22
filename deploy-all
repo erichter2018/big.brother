@@ -1,0 +1,360 @@
+#!/bin/zsh
+# Deploy Big Brother to all child devices (and parent).
+# Usage: ./deploy-all [--kids-only] [--parent-only] [--no-build]
+#
+# Builds once, then installs to all devices. Retries every 5 minutes
+# for devices that aren't reachable until all are deployed.
+
+set -e
+
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$PROJECT_DIR"
+
+RETRY_INTERVAL=300  # 5 minutes
+VERIFY_DELAY=8      # seconds to wait before verifying app is still running
+LAUNCH_RETRIES=3    # max launch attempts per deploy cycle
+
+# Device list: "name|device_id|is_parent"
+DEVICE_LIST=(
+    "e phone (parent)|4B516D91-B596-52F5-8C1D-41B14B4A1540|1"
+    "Simon's iPhone|66E78D1B-93D0-5D58-8505-DCF40709942F|0"
+    "Olivia's iPhone|A3A7322E-9740-5388-9B4C-E99B7537F2E6|0"
+    "Daphne's iPhone|39B6646E-F780-572D-AC85-9CB24851A113|0"
+    "Daphne's iPad|875F45A5-CA62-515B-8C70-116B06D8021F|0"
+    "Isla's iPhone|DB7F2BA3-46E4-59D1-9BE1-60EAB324F183|0"
+    "Isla's iPad|35427EB0-3804-50B7-A069-970F7307D977|0"
+    "Sebastian's iPad|C17B60F1-467D-5EC5-BA70-783D19C91249|0"
+    "Juliet's iPad|3B6FC561-C28A-5F20-8232-E8058A24DDCE|0"
+)
+
+# ANSI escape codes
+BOLD="\033[1m"
+DIM="\033[2m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RED="\033[31m"
+CYAN="\033[36m"
+RESET="\033[0m"
+CLEAR_LINE="\033[2K"
+MOVE_UP="\033[A"
+
+# Parse args
+KIDS_ONLY=false
+PARENT_ONLY=false
+NO_BUILD=false
+for arg in "$@"; do
+    case $arg in
+        --kids-only) KIDS_ONLY=true ;;
+        --parent-only) PARENT_ONLY=true ;;
+        --no-build) NO_BUILD=true ;;
+    esac
+done
+
+# Build target list (filtered by flags)
+TARGETS=()
+for entry in $DEVICE_LIST; do
+    local name="${entry%%|*}"
+    local rest="${entry#*|}"
+    local device_id="${rest%%|*}"
+    local is_parent="${rest##*|}"
+
+    if $KIDS_ONLY && [[ "$is_parent" == "1" ]]; then continue; fi
+    if $PARENT_ONLY && [[ "$is_parent" == "0" ]]; then continue; fi
+
+    TARGETS+=("$name|$device_id")
+done
+
+TOTAL=${#TARGETS}
+
+# Step 1: Build
+BUILD_DIR="/tmp/bb-deploy"
+if ! $NO_BUILD; then
+    BUILD_NUM=$(grep 'appBuildNumber' "$PROJECT_DIR/BigBrotherCore/Sources/BigBrotherCore/Constants/AppConstants.swift" | grep -o '[0-9]*')
+    echo ""
+    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo "${BOLD}  Big Brother Deploy${RESET}  ${DIM}b${BUILD_NUM} · $(date '+%H:%M')${RESET}"
+    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+    echo "🔨 Building...  ${DIM}(warnings hidden)${RESET}"
+    BUILD_START=$(date +%s)
+    # Clean previous build and strip resource forks.
+    rm -rf "$BUILD_DIR" 2>/dev/null || true
+    xattr -cr "$PROJECT_DIR" 2>/dev/null || true
+    BUILD_LOG=$(mktemp)
+    if ! xcodebuild -project BigBrother.xcodeproj \
+        -scheme BigBrother \
+        -destination 'generic/platform=iOS' \
+        -derivedDataPath "$BUILD_DIR" \
+        -quiet \
+        build >"$BUILD_LOG" 2>&1; then
+        echo "${RED}❌ Build failed:${RESET}"
+        cat "$BUILD_LOG"
+        rm -f "$BUILD_LOG"
+        exit 1
+    fi
+    rm -f "$BUILD_LOG"
+    BUILD_END=$(date +%s)
+    BUILD_SECS=$((BUILD_END - BUILD_START))
+    BUILD_MIN=$((BUILD_SECS / 60))
+    BUILD_SEC=$((BUILD_SECS % 60))
+    if [[ $BUILD_MIN -gt 0 ]]; then
+        BUILD_TIME="${BUILD_MIN}m ${BUILD_SEC}s"
+    else
+        BUILD_TIME="${BUILD_SEC}s"
+    fi
+else
+    BUILD_NUM=$(grep 'appBuildNumber' "$PROJECT_DIR/BigBrotherCore/Sources/BigBrotherCore/Constants/AppConstants.swift" | grep -o '[0-9]*')
+    echo ""
+    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo "${BOLD}  Big Brother Deploy${RESET}  ${DIM}b${BUILD_NUM} · $(date '+%H:%M') · skip build${RESET}"
+    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+    BUILD_TIME="skipped"
+fi
+
+APP_PATH=$(find "$BUILD_DIR" -name "BigBrother.app" -path "*/Debug-iphoneos/*" | head -1)
+if [[ -z "$APP_PATH" ]]; then
+    echo "${RED}❌ Can't find .app bundle${RESET}"
+    exit 1
+fi
+echo "${GREEN}✅ Build OK${RESET}  ${DIM}(${BUILD_TIME})${RESET}"
+echo ""
+
+# Step 2: Deploy + Launch loop
+# States: pending → trying → deployed → launched (or failed, retries)
+# Deploy retries every 5 min. Launch retries every 60s. Ctrl-C to stop.
+typeset -A DEVICE_STATUS   # pending | trying | deployed | launched | failed
+typeset -A DEVICE_IS_PARENT
+typeset -A DEVICE_ID_MAP
+typeset -A DEVICE_LAST_ATTEMPT
+
+for entry in $TARGETS; do
+    local name="${entry%%|*}"
+    local device_id="${entry#*|}"
+    local safe_name=$(echo "$name" | tr ' /()'"'" '_____')
+    DEVICE_STATUS[$safe_name]="pending"
+    DEVICE_ID_MAP[$safe_name]="$device_id"
+    # Check if parent
+    local is_parent=0
+    for dentry in $DEVICE_LIST; do
+        local dname="${dentry%%|*}"
+        local drest="${dentry#*|}"
+        local dp="${drest##*|}"
+        if [[ "$dname" == "$name" && "$dp" == "1" ]]; then is_parent=1; break; fi
+    done
+    DEVICE_IS_PARENT[$safe_name]=$is_parent
+done
+
+# Move cursor up N lines and clear them for a table redraw.
+move_up_and_clear() {
+    local n=$1
+    for ((i=0; i<n; i++)); do
+        printf "${MOVE_UP}${CLEAR_LINE}"
+    done
+}
+
+print_status() {
+    echo "${BOLD}  Device                   Status${RESET}"
+    echo "  ${DIM}─────────────────────────────────────────${RESET}"
+    for entry in $TARGETS; do
+        local name="${entry%%|*}"
+        local safe_name=$(echo "$name" | tr ' /()'"'" '_____')
+        local st="${DEVICE_STATUS[$safe_name]}"
+        local padded=$(printf "%-24s" "$name")
+        case $st in
+            launched)   echo "  ${GREEN}✅ ${padded}${RESET} ${GREEN}deployed + verified running${RESET}" ;;
+            deployed)   echo "  ${GREEN}✅ ${padded}${RESET} ${GREEN}deployed${RESET} ${DIM}(verifying launch...)${RESET}" ;;
+            crashed)    echo "  ${RED}💥 ${padded}${RESET} ${RED}app crashed after launch${RESET} ${DIM}(retrying...)${RESET}" ;;
+            failed)     echo "  ${YELLOW}⏸  ${padded}${RESET} ${DIM}not reachable${RESET}${DEVICE_LAST_ATTEMPT[$safe_name]:+ ${DIM}(${DEVICE_LAST_ATTEMPT[$safe_name]})${RESET}}" ;;
+            trying)     echo "  ${CYAN}⟳  ${padded}${RESET} ${CYAN}installing...${RESET}" ;;
+            *)          echo "  ${DIM}·  ${padded} waiting${RESET}" ;;
+        esac
+    done
+}
+
+TABLE_LINES=$((TOTAL + 2))
+FOOTER_LINES=0
+print_status
+echo ""
+echo "  ${DIM}Starting...${RESET}"
+FOOTER_LINES=2
+
+trap "echo ''; echo '  ${DIM}Stopped.${RESET}'; echo ''; exit 0" INT
+
+LAST_DEPLOY_TIME=0
+TICK=0
+
+while true; do
+    TICK=$((TICK + 1))
+    NOW=$(date +%s)
+    RESULT_DIR=$(mktemp -d)
+    PIDS=()
+    DID_WORK=false
+
+    # Count states
+    local n_pending=0 n_deployed=0 n_launched=0 n_failed=0
+    for entry in $TARGETS; do
+        local safe_name=$(echo "${entry%%|*}" | tr ' /()'"'" '_____')
+        case "${DEVICE_STATUS[$safe_name]}" in
+            pending|failed|trying|crashed) n_pending=$((n_pending + 1)) ;;
+            deployed) n_deployed=$((n_deployed + 1)) ;;
+            launched) n_launched=$((n_launched + 1)) ;;
+        esac
+    done
+
+    # All done?
+    if [[ $((n_launched + (TOTAL - n_pending - n_deployed))) -ge $TOTAL && $n_pending -eq 0 && $n_deployed -eq 0 ]]; then
+        break
+    fi
+    # Parent devices count as "launched" once deployed (no launch needed)
+    local all_done=true
+    for entry in $TARGETS; do
+        local safe_name=$(echo "${entry%%|*}" | tr ' /()'"'" '_____')
+        local st="${DEVICE_STATUS[$safe_name]}"
+        if [[ "$st" != "launched" ]]; then
+            if [[ "${DEVICE_IS_PARENT[$safe_name]}" == "1" && "$st" == "deployed" ]]; then
+                continue  # parent doesn't need launch
+            fi
+            all_done=false
+        fi
+    done
+    if $all_done; then break; fi
+
+    # Deploy: try every 5 minutes (or on first tick)
+    if [[ $((NOW - LAST_DEPLOY_TIME)) -ge $RETRY_INTERVAL || $TICK -eq 1 ]]; then
+        LAST_DEPLOY_TIME=$NOW
+        for entry in $TARGETS; do
+            local name="${entry%%|*}"
+            local safe_name=$(echo "$name" | tr ' /()'"'" '_____')
+            local st="${DEVICE_STATUS[$safe_name]}"
+            if [[ "$st" == "deployed" || "$st" == "launched" ]]; then continue; fi
+            DEVICE_STATUS[$safe_name]="trying"
+            local did="${DEVICE_ID_MAP[$safe_name]}"
+            (
+                if xcrun devicectl device install app --device "$did" "$APP_PATH" >/dev/null 2>&1; then
+                    touch "$RESULT_DIR/${safe_name}_installed"
+                    # Try launch + verify for child devices
+                    if [[ "${DEVICE_IS_PARENT[$safe_name]}" != "1" ]]; then
+                        for attempt in $(seq 1 $LAUNCH_RETRIES); do
+                            if ! xcrun devicectl device process launch --device "$did" fr.bigbrother.app >/dev/null 2>&1; then
+                                continue
+                            fi
+                            # Wait and verify the app is still running
+                            sleep $VERIFY_DELAY
+                            if xcrun devicectl device info processes --device "$did" 2>/dev/null | grep -q "fr.bigbrother.app"; then
+                                touch "$RESULT_DIR/${safe_name}_launched"
+                                break
+                            fi
+                            # App crashed — will retry
+                        done
+                    fi
+                fi
+            ) &
+            PIDS+=($!)
+            DID_WORK=true
+        done
+    fi
+
+    # Launch: try every tick (60s) for deployed-but-not-launched child devices
+    for entry in $TARGETS; do
+        local name="${entry%%|*}"
+        local safe_name=$(echo "$name" | tr ' /()'"'" '_____')
+        if [[ ("${DEVICE_STATUS[$safe_name]}" == "deployed" || "${DEVICE_STATUS[$safe_name]}" == "crashed") && "${DEVICE_IS_PARENT[$safe_name]}" != "1" ]]; then
+            local did="${DEVICE_ID_MAP[$safe_name]}"
+            (
+                for attempt in $(seq 1 $LAUNCH_RETRIES); do
+                    if ! xcrun devicectl device process launch --device "$did" fr.bigbrother.app >/dev/null 2>&1; then
+                        continue
+                    fi
+                    sleep $VERIFY_DELAY
+                    if xcrun devicectl device info processes --device "$did" 2>/dev/null | grep -q "fr.bigbrother.app"; then
+                        touch "$RESULT_DIR/${safe_name}_launched"
+                        break
+                    fi
+                done
+            ) &
+            PIDS+=($!)
+            DID_WORK=true
+        fi
+    done
+
+    # Wait for all parallel operations
+    for pid in $PIDS; do
+        wait $pid 2>/dev/null
+    done
+
+    # Update statuses from results
+    ATTEMPT_TIME=$(date '+%H:%M')
+    for entry in $TARGETS; do
+        local name="${entry%%|*}"
+        local safe_name=$(echo "$name" | tr ' /()'"'" '_____')
+        local st="${DEVICE_STATUS[$safe_name]}"
+        if [[ "$st" == "launched" ]]; then continue; fi
+        if [[ -f "$RESULT_DIR/${safe_name}_launched" ]]; then
+            DEVICE_STATUS[$safe_name]="launched"
+        elif [[ -f "$RESULT_DIR/${safe_name}_installed" ]]; then
+            if [[ "${DEVICE_IS_PARENT[$safe_name]}" == "1" ]]; then
+                DEVICE_STATUS[$safe_name]="launched"  # parent doesn't need launch
+            else
+                # Installed but launch verification failed — app likely crashed
+                DEVICE_STATUS[$safe_name]="crashed"
+                DEVICE_LAST_ATTEMPT[$safe_name]="$ATTEMPT_TIME"
+            fi
+        elif [[ "$st" == "trying" ]]; then
+            DEVICE_STATUS[$safe_name]="failed"
+            DEVICE_LAST_ATTEMPT[$safe_name]="$ATTEMPT_TIME"
+        fi
+    done
+    rm -rf "$RESULT_DIR"
+
+    # Recount
+    local done_count=0 launch_count=0
+    for entry in $TARGETS; do
+        local safe_name=$(echo "${entry%%|*}" | tr ' /()'"'" '_____')
+        local st="${DEVICE_STATUS[$safe_name]}"
+        if [[ "$st" == "deployed" || "$st" == "launched" ]]; then done_count=$((done_count + 1)); fi
+        if [[ "$st" == "launched" ]]; then launch_count=$((launch_count + 1)); fi
+    done
+
+    # Redraw
+    move_up_and_clear $((TABLE_LINES + FOOTER_LINES))
+    print_status
+
+    # Check if fully done
+    local all_final=true
+    for entry in $TARGETS; do
+        local safe_name=$(echo "${entry%%|*}" | tr ' /()'"'" '_____')
+        local st="${DEVICE_STATUS[$safe_name]}"
+        if [[ "$st" != "launched" ]]; then all_final=false; break; fi
+    done
+
+    if $all_final; then
+        echo ""
+        echo "  ${GREEN}${BOLD}${TOTAL}/${TOTAL}${RESET} ${GREEN}all deployed + launched!${RESET}  🎉"
+        FOOTER_LINES=2
+        break
+    fi
+
+    echo ""
+    local status_parts=""
+    if [[ $done_count -lt $TOTAL ]]; then
+        status_parts="${BOLD}${done_count}/${TOTAL}${RESET} deployed"
+    else
+        status_parts="${GREEN}${BOLD}${done_count}/${TOTAL}${RESET} ${GREEN}deployed${RESET}"
+    fi
+    local need_launch=$((done_count - launch_count))
+    if [[ $need_launch -gt 0 ]]; then
+        status_parts="${status_parts} · ${CYAN}${need_launch} awaiting launch${RESET}"
+    fi
+    echo "  ${status_parts} ${DIM}(Ctrl-C to stop)${RESET}"
+    FOOTER_LINES=2
+
+    # Wait 60 seconds (launch interval), showing countdown
+    for ((s=60; s>0; s--)); do
+        printf "\r  ${status_parts} ${DIM}· next attempt in ${s}s${RESET}  "
+        sleep 1
+    done
+    printf "\r${CLEAR_LINE}"
+done
+
+echo ""

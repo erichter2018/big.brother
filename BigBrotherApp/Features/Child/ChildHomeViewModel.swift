@@ -146,8 +146,15 @@ final class ChildHomeViewModel {
         canShowSelfUnlock && (selfUnlockState?.isAvailable ?? false)
     }
 
+    /// Prevents double-tap from consuming two self-unlocks.
+    private var isProcessingSelfUnlock = false
+
     /// Consume one self-unlock and trigger a 15-minute temporary unlock.
     func useSelfUnlock() {
+        guard !isProcessingSelfUnlock else { return }
+        isProcessingSelfUnlock = true
+        defer { isProcessingSelfUnlock = false }
+
         let today = SelfUnlockState.todayDateString()
         guard let raw = appState.storage.readSelfUnlockState() else { return }
         let state = raw.resettingIfNeeded(currentDate: today)
@@ -367,7 +374,7 @@ final class ChildHomeViewModel {
         guard needsReauthorization else { return }
 
         authRetryTimer?.invalidate()
-        authRetryTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] timer in
+        let arTimer = Timer(timeInterval: 30, repeats: true) { [weak self] timer in
             Task { @MainActor in
                 guard let self else {
                     timer.invalidate()
@@ -380,6 +387,8 @@ final class ChildHomeViewModel {
                 await self.silentAuthRetry()
             }
         }
+        RunLoop.main.add(arTimer, forMode: .common)
+        authRetryTimer = arTimer
     }
 
     private func silentAuthRetry() async {
@@ -440,7 +449,7 @@ final class ChildHomeViewModel {
             else if startNow < info.lockAt { lastTimedPhase = .unlock }
             else { lastTimedPhase = .none }
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] timer in
+        let tickTimer = Timer(timeInterval: 1, repeats: true) { [weak self] timer in
             Task { @MainActor in
                 guard let self else {
                     timer.invalidate()
@@ -460,6 +469,8 @@ final class ChildHomeViewModel {
                 }
             }
         }
+        RunLoop.main.add(tickTimer, forMode: .common)
+        timer = tickTimer
         startAuthRetryIfNeeded()
     }
 

@@ -35,7 +35,7 @@ public struct EnforcementStatus: Codable, Sendable, Equatable {
         enforcementLastAppliedAt: Date? = nil,
         isDegraded: Bool = false,
         failSafeApplied: Bool = false,
-        currentMode: LockMode = .unlocked,
+        currentMode: LockMode = .dailyMode,
         currentModeIsBestEffort: Bool = false,
         warnings: [CapabilityWarning] = []
     ) {
@@ -59,7 +59,7 @@ public struct EnforcementStatus: Codable, Sendable, Equatable {
     ) -> EnforcementStatus {
         let authAvailable = authHealth?.isAuthorized ?? false
         let tempActive = temporaryUnlockState?.isActive ?? false
-        let mode = snapshot?.effectivePolicy.resolvedMode ?? .unlocked
+        let mode = snapshot?.effectivePolicy.resolvedMode ?? .dailyMode
         let warnings = snapshot?.effectivePolicy.warnings ?? []
 
         let isDegraded = !authAvailable

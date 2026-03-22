@@ -73,8 +73,16 @@ struct BigBrotherApp: App {
     private func setupOnLaunch() async {
         _LaunchLog.log("setupOnLaunch started")
 
-        // Clear badge on launch.
+        // Clear badge and force-close nag notifications on launch.
         try? await UNUserNotificationCenter.current().setBadgeCount(0)
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["force-close-nag", "app-launch-needed"])
+
+        // Clear force-close web block — the app is running now.
+        let appGroupDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if appGroupDefaults?.bool(forKey: "forceCloseWebBlocked") == true {
+            appGroupDefaults?.removeObject(forKey: "forceCloseWebBlocked")
+            appGroupDefaults?.removeObject(forKey: "forceCloseLastNagAt")
+        }
 
         // Wire AppState into the AppDelegate for push notification handling.
         appDelegate.appState = appState
@@ -173,6 +181,7 @@ struct BigBrotherApp: App {
                     )
                 }
                 await MainActor.run { appState.startChildSync() }
+                await appState.recoverModeIfNeeded()
                 try? await appState.syncCoordinator?.performFullSync()
 
                 // Schedule BGTask for periodic heartbeat when app is suspended.

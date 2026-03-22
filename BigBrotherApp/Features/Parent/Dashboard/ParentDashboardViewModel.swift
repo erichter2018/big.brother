@@ -62,18 +62,24 @@ final class ParentDashboardViewModel: CommandSendable {
             let expired = decoded.filter { $0.value.unlockEndsAt <= now }
             self.timedUnlockPhases = active
                 .reduce(into: [:]) { $0[ChildProfileID(rawValue: $1.key)] = $1.value }
-            // Clear Firebase timers for phases that expired while app was closed.
+            // Stop (not clear) Firebase timers for phases that expired while app was closed.
+            // stopPenaltyTimer preserves remaining penalty time (e.g., 5h - 2h = 3h).
+            // clearPenaltyTimer would zero it out, which is wrong.
             if !expired.isEmpty {
                 let expiredChildIDs = expired.map { ChildProfileID(rawValue: $0.key) }
                 Task {
                     for childID in expiredChildIDs {
                         if let child = self.appState.childProfiles.first(where: { $0.id == childID })
                             ?? self.appState.orderedChildProfiles.first(where: { $0.id == childID }) {
-                            await self.clearPenaltyTimer(for: child)
+                            await self.stopPenaltyTimer(for: child)
                         }
                     }
                 }
             }
+        }
+        // Restart countdown timer if there are active phases or expiries to track.
+        if !unlockExpiries.isEmpty || !timedUnlockPhases.isEmpty {
+            startCountdownTimer()
         }
     }
 
@@ -143,6 +149,8 @@ final class ParentDashboardViewModel: CommandSendable {
         }
         commandFeedback = "Lock All sent"
         isSendingCommand = false
+        // Track for retry — use .dailyMode as the representative lock action.
+        trackPendingCommand(.setMode(.dailyMode), target: .allDevices)
         startConfirmationPolling()
         autoDismissFeedback()
     }
@@ -167,7 +175,9 @@ final class ParentDashboardViewModel: CommandSendable {
             appState.expectedModes.removeValue(forKey: child.id)
         }
         startCountdownTimer()
-        await performCommand(.temporaryUnlock(durationSeconds: seconds), target: .allDevices)
+        let action: CommandAction = .temporaryUnlock(durationSeconds: seconds)
+        trackPendingCommand(action, target: .allDevices)
+        await performCommand(action, target: .allDevices)
         startConfirmationPolling()
     }
 
@@ -185,26 +195,32 @@ final class ParentDashboardViewModel: CommandSendable {
         timedUnlockPhases.removeValue(forKey: child.id)
         scheduleActiveChildren.remove(child.id)
 
+        let commandAction: CommandAction
         switch duration {
         case .returnToSchedule:
             appState.expectedModes.removeValue(forKey: child.id)
             scheduleActiveChildren.insert(child.id)
-            try? await appState.sendCommand(target: .child(child.id), action: .returnToSchedule)
+            commandAction = .returnToSchedule
+            try? await appState.sendCommand(target: .child(child.id), action: commandAction)
 
         case .indefinite:
             appState.expectedModes[child.id] = (.dailyMode, Date())
-            try? await appState.sendCommand(target: .child(child.id), action: .setMode(.dailyMode))
+            commandAction = .setMode(.dailyMode)
+            try? await appState.sendCommand(target: .child(child.id), action: commandAction)
 
         case .untilMidnight:
             let midnight = Calendar.current.startOfDay(for: Date()).addingTimeInterval(86400)
             appState.expectedModes[child.id] = (.dailyMode, Date())
-            try? await appState.sendCommand(target: .child(child.id), action: .lockUntil(date: midnight))
+            commandAction = .lockUntil(date: midnight)
+            try? await appState.sendCommand(target: .child(child.id), action: commandAction)
 
         case .hours(let h):
-            let target = Date().addingTimeInterval(Double(h) * 3600)
+            let lockTarget = Date().addingTimeInterval(Double(h) * 3600)
             appState.expectedModes[child.id] = (.dailyMode, Date())
-            try? await appState.sendCommand(target: .child(child.id), action: .lockUntil(date: target))
+            commandAction = .lockUntil(date: lockTarget)
+            try? await appState.sendCommand(target: .child(child.id), action: commandAction)
         }
+        trackPendingCommand(commandAction, target: .child(child.id))
         // Stop Firebase penalty timer on any lock action.
         await stopPenaltyTimer(for: child)
     }
@@ -215,7 +231,9 @@ final class ParentDashboardViewModel: CommandSendable {
         // Don't remove from scheduleActiveChildren — child returns to schedule after expiry.
         appState.expectedModes.removeValue(forKey: child.id)
         startCountdownTimer()
-        await performCommand(.temporaryUnlock(durationSeconds: seconds), target: .child(child.id))
+        let action: CommandAction = .temporaryUnlock(durationSeconds: seconds)
+        trackPendingCommand(action, target: .child(child.id))
+        await performCommand(action, target: .child(child.id))
         startConfirmationPolling()
     }
 
@@ -238,19 +256,33 @@ final class ParentDashboardViewModel: CommandSendable {
             // No penalty — immediate unlock for full duration.
             await unlockChild(child, seconds: seconds)
         } else {
-            // Send timed unlock command — child device handles the delay.
-            // Device stays locked during penalty, then unlocks for remaining time.
+            // Timed unlock with penalty offset.
+            // totalSeconds = requested free time window.
+            // penaltySeconds = current penalty (consumed first).
+            // Actual free time = max(0, totalSeconds - penaltySeconds).
+            // If penalty >= total, the kid gets 0 free time but penalty decreases.
             now = Date()
-            let unlockAt = now.addingTimeInterval(Double(penaltySecs))
-            let lockAt = now.addingTimeInterval(Double(seconds))
-            timedUnlockPhases[child.id] = TimedUnlockPhase(
-                penaltyEndsAt: unlockAt, unlockEndsAt: lockAt
-            )
+            let actualFreeTime = max(0, seconds - penaltySecs)
+            let penaltyConsumed = min(penaltySecs, seconds)
+            let windowEnd = now.addingTimeInterval(Double(seconds))
+
+            if actualFreeTime > 0 {
+                // Kid gets some free time after serving penalty.
+                let unlockAt = now.addingTimeInterval(Double(penaltyConsumed))
+                timedUnlockPhases[child.id] = TimedUnlockPhase(
+                    penaltyEndsAt: unlockAt, unlockEndsAt: windowEnd
+                )
+            } else {
+                // Penalty exceeds free time — device stays locked the entire window.
+                // Show penalty phase consuming the full duration.
+                timedUnlockPhases[child.id] = TimedUnlockPhase(
+                    penaltyEndsAt: windowEnd, unlockEndsAt: windowEnd
+                )
+            }
             startCountdownTimer()
-            await performCommand(
-                .timedUnlock(totalSeconds: seconds, penaltySeconds: penaltySecs),
-                target: .child(child.id)
-            )
+            let action: CommandAction = .timedUnlock(totalSeconds: seconds, penaltySeconds: penaltySecs)
+            trackPendingCommand(action, target: .child(child.id))
+            await performCommand(action, target: .child(child.id))
             startConfirmationPolling()
         }
     }
@@ -260,11 +292,19 @@ final class ParentDashboardViewModel: CommandSendable {
         timedUnlockPhases.removeValue(forKey: child.id)
         scheduleActiveChildren.remove(child.id)
         appState.expectedModes[child.id] = (.essentialOnly, Date())
-        await performCommand(.setMode(.essentialOnly), target: .child(child.id))
+        let action: CommandAction = .setMode(.essentialOnly)
+        trackPendingCommand(action, target: .child(child.id))
+        await performCommand(action, target: .child(child.id))
         startConfirmationPolling()
     }
 
     // MARK: - Schedule Mode
+
+    /// Send requestHeartbeat to all devices. Triggers silent push → app wakes → heartbeat.
+    func pingAllDevices() async {
+        try? await appState.sendCommand(target: .allDevices, action: .requestHeartbeat)
+        try? await appState.refreshDashboard()
+    }
 
     /// Put a child back on their schedule (clear overrides).
     func scheduleChild(_ child: ChildProfile) async {
@@ -272,7 +312,9 @@ final class ParentDashboardViewModel: CommandSendable {
         timedUnlockPhases.removeValue(forKey: child.id)
         appState.expectedModes.removeValue(forKey: child.id)
         scheduleActiveChildren.insert(child.id)
-        await performCommand(.returnToSchedule, target: .child(child.id))
+        let action: CommandAction = .returnToSchedule
+        trackPendingCommand(action, target: .child(child.id))
+        await performCommand(action, target: .child(child.id))
         startConfirmationPolling()
     }
 
@@ -288,6 +330,7 @@ final class ParentDashboardViewModel: CommandSendable {
             scheduleActiveChildren.insert(child.id)
             try? await appState.sendCommand(target: .child(child.id), action: .returnToSchedule)
         }
+        trackPendingCommand(.returnToSchedule, target: .allDevices)
         commandFeedback = "Schedule All sent"
         isSendingCommand = false
         startConfirmationPolling()
@@ -354,7 +397,11 @@ final class ParentDashboardViewModel: CommandSendable {
         if devs.isEmpty { return (result.mode, result.isTemp, true) }
         let heartbeatAgrees = devs.allSatisfy { dev in
             guard let hb = heartbeat(for: dev) else { return false }
-            return hb.currentMode == result.mode
+            if hb.currentMode == result.mode { return true }
+            // A lock intent is confirmed if the device is in ANY locked mode.
+            // e.g., parent sent .dailyMode but schedule drove child to .essentialOnly — both are locked.
+            if result.mode != .unlocked && hb.currentMode != .unlocked { return true }
+            return false
         }
         return (result.mode, result.isTemp, heartbeatAgrees)
     }
@@ -366,9 +413,16 @@ final class ParentDashboardViewModel: CommandSendable {
         if let expected = appState.expectedModes[child.id] {
             let devs = devices(for: child)
             let confirmed = !devs.isEmpty && devs.allSatisfy { dev in
-                heartbeat(for: dev)?.currentMode == expected.mode
+                guard let hbMode = heartbeat(for: dev)?.currentMode else { return false }
+                if hbMode == expected.mode { return true }
+                // Accept any locked mode as confirming a lock intent.
+                if expected.mode != .unlocked && hbMode != .unlocked { return true }
+                return false
             }
-            if confirmed || now.timeIntervalSince(expected.sentAt) <= 120 {
+            // Lock commands get a longer timeout — command delivery via heartbeat
+            // can take up to 5 minutes. Unlock commands confirm faster (120s).
+            let timeout: TimeInterval = expected.mode == .unlocked ? 120 : 600
+            if confirmed || now.timeIntervalSince(expected.sentAt) <= timeout {
                 return (expected.mode, expected.mode == .unlocked)
             }
             // Timed out and not confirmed — fall through to other sources.
@@ -388,15 +442,9 @@ final class ParentDashboardViewModel: CommandSendable {
             if let expiry = unlockExpiries[child.id], expiry > now {
                 return (.unlocked, true)
             }
-            let devs = devices(for: child)
-            for dev in devs {
-                if let hb = heartbeat(for: dev),
-                   hb.currentMode == .unlocked,
-                   let expiry = hb.temporaryUnlockExpiresAt,
-                   expiry > now {
-                    return (.unlocked, true)
-                }
-            }
+            // Don't check heartbeat for temp unlocks here — if the parent just
+            // sent returnToSchedule, the heartbeat still shows the old unlock
+            // until the child processes the command. Trust the schedule instead.
             if let profile = scheduleProfile(for: child) {
                 return (profile.resolvedMode(at: now), false)
             } else {
@@ -442,7 +490,8 @@ final class ParentDashboardViewModel: CommandSendable {
 
         // 4. Fall back to heartbeat-reported modes.
         let modes = devs.compactMap(\.confirmedMode)
-        if modes.isEmpty { return (.unlocked, false) }
+        // If no heartbeat data at all, assume locked (safer than assuming unlocked).
+        if modes.isEmpty { return (.dailyMode, false) }
         if modes.contains(.essentialOnly) { return (.essentialOnly, false) }
         if modes.contains(.dailyMode) { return (.dailyMode, false) }
         return (.unlocked, false)
@@ -465,13 +514,22 @@ final class ParentDashboardViewModel: CommandSendable {
         for (childID, expected) in appState.expectedModes {
             let devs = childDevices.filter { $0.childProfileID == childID }
             let confirmed = !devs.isEmpty && devs.allSatisfy { dev in
-                latestHeartbeats.first(where: { $0.deviceID == dev.id })?.currentMode == expected.mode
+                guard let hbMode = latestHeartbeats.first(where: { $0.deviceID == dev.id })?.currentMode else { return false }
+                if hbMode == expected.mode { return true }
+                // Accept any locked mode as confirming a lock intent.
+                if expected.mode != .unlocked && hbMode != .unlocked { return true }
+                return false
             }
+            // Lock commands get a longer timeout (600s) to account for up to 5-minute
+            // command delivery via heartbeat polling. Unlock commands use 120s.
+            let timeout: TimeInterval = expected.mode == .unlocked ? 120 : 600
             if confirmed {
                 appState.expectedModes.removeValue(forKey: childID)
+                pendingCommands.removeValue(forKey: childID)
                 scheduleActiveChildren.remove(childID)
-            } else if now.timeIntervalSince(expected.sentAt) > 120 {
+            } else if now.timeIntervalSince(expected.sentAt) > timeout {
                 appState.expectedModes.removeValue(forKey: childID)
+                pendingCommands.removeValue(forKey: childID)
                 scheduleActiveChildren.remove(childID)
             }
         }
@@ -480,6 +538,17 @@ final class ParentDashboardViewModel: CommandSendable {
     // MARK: - Confirmation Polling
 
     private var confirmationTask: Task<Void, Never>?
+
+    /// Tracks pending commands per child so we can re-send on heartbeat mismatch.
+    private struct PendingCommand {
+        let action: CommandAction
+        let target: CommandTarget
+        var retryCount: Int = 0
+    }
+    private var pendingCommands: [ChildProfileID: PendingCommand] = [:]
+
+    /// Maximum number of automatic re-sends when heartbeat disagrees after polling.
+    private static let maxCommandRetries = 2
 
     /// Auto-dismiss command feedback after 10 seconds.
     private func autoDismissFeedback() {
@@ -492,32 +561,107 @@ final class ParentDashboardViewModel: CommandSendable {
         }
     }
 
+    /// Track a command for potential re-send if heartbeat doesn't confirm.
+    private func trackPendingCommand(_ action: CommandAction, target: CommandTarget) {
+        switch target {
+        case .child(let childID):
+            pendingCommands[childID] = PendingCommand(action: action, target: target)
+        case .allDevices:
+            for child in childProfiles {
+                pendingCommands[child.id] = PendingCommand(action: action, target: .child(child.id))
+            }
+        case .device:
+            break // Device-level commands don't need retry tracking
+        }
+    }
+
     /// After sending a command, poll CloudKit every 3s for up to 30s
     /// to pick up the child's updated heartbeat. Stops early if heartbeat changes.
+    /// If heartbeat still disagrees after polling, re-sends the command (up to 2 retries).
     private func startConfirmationPolling() {
         confirmationTask?.cancel()
         let previousHeartbeats = appState.latestHeartbeats
         confirmationTask = Task { [weak self] in
+            // Poll every 3s for up to 30s.
+            var confirmed = false
             for _ in 0..<10 {
                 try? await Task.sleep(for: .seconds(3))
                 guard let self, !Task.isCancelled else { return }
                 do {
                     try await self.appState.refreshDashboard()
-                    // Update loading state without flashing the spinner.
                     if !self.appState.childProfiles.isEmpty {
                         self.loadingState = .loaded(self.appState.childProfiles)
                     }
-                    // Stop early if any heartbeat mode changed.
                     if self.appState.latestHeartbeats != previousHeartbeats {
                         #if DEBUG
                         print("[BigBrother] Heartbeat change detected, stopping confirmation poll")
                         #endif
-                        return
+                        confirmed = true
+                        break
                     }
                 } catch {
                     // Non-fatal — keep polling.
                 }
             }
+
+            guard let self, !Task.isCancelled else { return }
+
+            // If heartbeat didn't change, check for mismatches and re-send.
+            if !confirmed {
+                await self.retryUnconfirmedCommands()
+            }
+
+            // Clear confirmed pending commands.
+            self.pruneConfirmedPendingCommands()
+        }
+    }
+
+    /// Re-send commands for children whose heartbeat still disagrees with the expected mode.
+    private func retryUnconfirmedCommands() async {
+        var retried = false
+        for (childID, pending) in pendingCommands {
+            guard pending.retryCount < Self.maxCommandRetries else {
+                #if DEBUG
+                print("[BigBrother] Max retries (\(Self.maxCommandRetries)) reached for child \(childID.rawValue.prefix(8))")
+                #endif
+                continue
+            }
+
+            // Check if heartbeat still disagrees.
+            guard let expected = appState.expectedModes[childID] else { continue }
+            let devs = childDevices.filter { $0.childProfileID == childID }
+            let agrees = !devs.isEmpty && devs.allSatisfy { dev in
+                guard let hbMode = latestHeartbeats.first(where: { $0.deviceID == dev.id })?.currentMode else { return false }
+                if hbMode == expected.mode { return true }
+                if expected.mode != .unlocked && hbMode != .unlocked { return true }
+                return false
+            }
+
+            if !agrees {
+                #if DEBUG
+                let childName = childProfiles.first(where: { $0.id == childID })?.name ?? childID.rawValue.prefix(8).description
+                print("[BigBrother] Heartbeat mismatch for \(childName) after polling — re-sending command (retry \(pending.retryCount + 1)/\(Self.maxCommandRetries))")
+                #endif
+
+                pendingCommands[childID]?.retryCount += 1
+                // Re-send the command and also request an immediate heartbeat.
+                try? await appState.sendCommand(target: pending.target, action: pending.action)
+                try? await appState.sendCommand(target: pending.target, action: .requestHeartbeat)
+                retried = true
+            }
+        }
+
+        // If we retried anything, poll again for confirmation.
+        if retried {
+            startConfirmationPolling()
+        }
+    }
+
+    /// Remove pending commands that have been confirmed by heartbeat.
+    private func pruneConfirmedPendingCommands() {
+        pendingCommands = pendingCommands.filter { (childID, _) in
+            // Keep only commands that still have an unconfirmed expectedMode.
+            appState.expectedModes[childID] != nil
         }
     }
 
@@ -529,7 +673,10 @@ final class ParentDashboardViewModel: CommandSendable {
     func startCountdownTimer() {
         guard countdownTimer == nil else { return }
         lastHeartbeatRefresh = Date()
-        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        // Use Timer.init (not .scheduledTimer) to avoid scheduling on a background
+        // thread's RunLoop when called from an async context. Explicitly add to
+        // RunLoop.main in .common mode so it fires even during UI interaction.
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.now = Date()
@@ -547,24 +694,26 @@ final class ParentDashboardViewModel: CommandSendable {
                     }
                 }
 
-                // Clear penalty timer when penalty phase ends (device unlocks),
-                // not when the whole unlock window expires.
+                // Stop (not clear) penalty timer when penalty phase ends.
+                // stopPenaltyTimer preserves remaining time; clearPenaltyTimer zeroes it out.
                 for (childID, phase) in self.timedUnlockPhases {
                     if self.now >= phase.penaltyEndsAt,
                        self.now < phase.unlockEndsAt,
                        let child = self.childProfiles.first(where: { $0.id == childID }) {
-                        // Check if we already cleared this timer (avoid repeated calls).
+                        // Check if we already stopped this timer (avoid repeated calls).
                         let timer = self.penaltyTimer(for: child)
                         if timer?.penaltySeconds ?? 0 > 0 || timer?.isActivelyRunning == true {
-                            await self.clearPenaltyTimer(for: child)
+                            await self.stopPenaltyTimer(for: child)
                             #if DEBUG
-                            print("[BigBrother] Penalty phase ended for \(child.name), cleared timer (device now unlocked)")
+                            print("[BigBrother] Penalty phase ended for \(child.name), stopped timer (device now unlocked)")
                             #endif
                         }
                     }
                 }
 
                 // Prune fully expired timed unlock phases.
+                // Use stopPenaltyTimer to preserve any remaining penalty time
+                // (e.g., kid had 2.5h penalty but window was only 2h → 30min remains).
                 let expiredPhases = self.timedUnlockPhases.filter { $0.value.unlockEndsAt <= self.now }
                 if !expiredPhases.isEmpty {
                     self.timedUnlockPhases = self.timedUnlockPhases.filter { $0.value.unlockEndsAt > self.now }
@@ -573,7 +722,7 @@ final class ParentDashboardViewModel: CommandSendable {
                         print("[BigBrother] Timed unlock fully expired for child \(childID.rawValue.prefix(8))")
                         #endif
                         if let child = self.childProfiles.first(where: { $0.id == childID }) {
-                            await self.clearPenaltyTimer(for: child)
+                            await self.stopPenaltyTimer(for: child)
                         }
                     }
                 }
@@ -585,8 +734,15 @@ final class ParentDashboardViewModel: CommandSendable {
                         await self.stopPenaltyTimer(for: child)
                     }
                 }
+
+                // Auto-stop timer when nothing active to save battery.
+                if self.unlockExpiries.isEmpty && self.timedUnlockPhases.isEmpty {
+                    self.stopCountdownTimer()
+                }
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        countdownTimer = timer
     }
 
     func stopCountdownTimer() {

@@ -54,17 +54,21 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
     func startHeartbeat() {
         stopHeartbeat()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        let hbTimer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task {
                 try? await self.sendNow(force: self.checkExtensionHeartbeatRequest())
             }
         }
+        RunLoop.main.add(hbTimer, forMode: .common)
+        timer = hbTimer
         // Also check more frequently (every 30s) for extension-requested heartbeats.
-        extensionCheckTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        let extTimer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             guard let self, self.checkExtensionHeartbeatRequest() else { return }
             Task { try? await self.sendNow(force: true) }
         }
+        RunLoop.main.add(extTimer, forMode: .common)
+        extensionCheckTimer = extTimer
         // Fire immediately on start.
         Task { try? await sendNow(force: false) }
     }
@@ -77,15 +81,24 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     }
 
     /// Check if the Monitor extension requested a heartbeat via App Group flag.
-    /// Returns true and clears the flag if a recent request exists.
+    /// Always clears the flag to prove liveness (prevents false force-close detection).
+    /// Returns true only for recent requests (< 5 min) to trigger a forced heartbeat send.
     private func checkExtensionHeartbeatRequest() -> Bool {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let requestedAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt")
         guard let requestedAt, requestedAt > 0 else { return false }
         let age = Date().timeIntervalSince1970 - requestedAt
-        // Only honor requests from the last 5 minutes.
-        guard age < 300 else { return false }
+        // ALWAYS clear the flag — this proves the main app is alive and prevents
+        // the Monitor's isAppForceClosed() from triggering a false positive when
+        // the app was merely suspended by iOS (e.g., during a resource-intensive game).
         defaults?.removeObject(forKey: "extensionHeartbeatRequestedAt")
+        // Only trigger a forced heartbeat send for recent requests.
+        guard age < 300 else {
+            #if DEBUG
+            print("[BigBrother] Extension heartbeat flag cleared (stale: \(Int(age))s ago)")
+            #endif
+            return false
+        }
         #if DEBUG
         print("[BigBrother] Extension requested heartbeat \(Int(age))s ago — sending")
         #endif
@@ -118,17 +131,23 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let snapshot = storage.readPolicySnapshot()
         // Determine current mode from multiple sources, in priority order:
         // 1. ExtensionSharedState (Monitor writes this on schedule transitions)
-        // 2. Schedule profile (direct check — catches cases where shared state was clobbered)
-        // 3. PolicySnapshot (base policy mode)
+        // 2. PolicySnapshot (ground truth after command processing)
+        // 3. Schedule profile (direct check — catches cases where both are stale)
+        //
+        // Note: PolicySnapshot MUST take priority over schedule profile because
+        // a parent command (e.g., temporaryUnlock) overrides the schedule.
+        // The schedule would report .dailyMode during a locked period even though
+        // the snapshot says .unlocked from the parent's command.
         let extState = storage.readExtensionSharedState()
         let currentMode: LockMode
         if let ext = extState, ext.writtenAt > (snapshot?.createdAt ?? .distantPast) {
             currentMode = ext.currentMode
+        } else if let snap = snapshot {
+            currentMode = snap.effectivePolicy.resolvedMode
         } else if let profile = storage.readActiveScheduleProfile() {
-            // Check schedule directly — the base snapshot doesn't reflect free/essential windows.
             currentMode = profile.resolvedMode(at: Date())
         } else {
-            currentMode = snapshot?.effectivePolicy.resolvedMode ?? .unlocked
+            currentMode = .unlocked
         }
         let policyVersion = snapshot?.effectivePolicy.policyVersion ?? 0
         let tempUnlockState: TemporaryUnlockState? = {
@@ -194,7 +213,8 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             appBuildNumber: AppConstants.appBuildNumber,
             enforcementError: Self.lastEnforcementError(from: storage),
             activeScheduleWindowName: Self.activeScheduleWindowName(from: storage),
-            lastCommandProcessedAt: Self.lastCommandProcessedAt(from: storage)
+            lastCommandProcessedAt: Self.lastCommandProcessedAt(from: storage),
+            monitorLastActiveAt: Self.monitorLastActiveAt()
         )
 
         do {
@@ -202,6 +222,11 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
             let successStatus = attemptStatus.recordingSuccess()
             try? storage.writeHeartbeatStatus(successStatus)
+
+            // Record successful heartbeat timestamp so the Monitor can distinguish
+            // between a truly force-closed app and one merely suspended by iOS.
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "lastHeartbeatSentAt")
 
             // Update device record with current OS version + model if changed.
             await updateDeviceRecordIfNeeded(enrollment: enrollment)
@@ -436,6 +461,12 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     private static func lastCommandProcessedAt(from storage: any SharedStorageProtocol) -> Date? {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
         let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
+        return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
+    }
+
+    private static func monitorLastActiveAt() -> Date? {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let timestamp = defaults.double(forKey: "monitorLastActiveAt")
         return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
     }
 

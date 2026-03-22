@@ -196,14 +196,7 @@ struct ChildDetailView: View {
                                 if let mode = dominantMode ?? device.confirmedMode {
                                     ModeBadge(mode: mode)
                                 }
-                                HStack(spacing: 4) {
-                                    Circle()
-                                        .fill(device.isOnline ? Color.green : Color.red.opacity(0.6))
-                                        .frame(width: 6, height: 6)
-                                    Text(device.isOnline ? "Online" : "Offline")
-                                        .font(.caption2)
-                                        .foregroundStyle(device.isOnline ? .green : .red)
-                                }
+                                deviceStatusBadge(device: device, heartbeat: hb)
                             }
                         }
                         HStack(spacing: 8) {
@@ -436,6 +429,46 @@ struct ChildDetailView: View {
             }
             .foregroundStyle(matches ? Color.secondary : Color.orange)
         }
+    }
+
+    /// Per-device status badge: online, app closed, or time since last heartbeat.
+    @ViewBuilder
+    private func deviceStatusBadge(device: ChildDevice, heartbeat hb: DeviceHeartbeat?) -> some View {
+        if device.isOnline {
+            HStack(spacing: 4) {
+                Circle().fill(Color.green).frame(width: 6, height: 6)
+                Text("Online")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            }
+        } else if let hb, isDeviceAppClosed(heartbeat: hb) {
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.orange)
+                Text("App Closed")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        } else {
+            HStack(spacing: 4) {
+                Circle().fill(Color.red.opacity(0.6)).frame(width: 6, height: 6)
+                Text("Offline")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    /// Detect if the main app was force-closed on this device.
+    /// True when heartbeat is stale (>1h locked / >2h unlocked) but the
+    /// DeviceActivityMonitor was active within 2 hours.
+    private func isDeviceAppClosed(heartbeat hb: DeviceHeartbeat) -> Bool {
+        let heartbeatAge = Date().timeIntervalSince(hb.timestamp)
+        let threshold: TimeInterval = (dominantMode == .unlocked) ? 7200 : 3600
+        guard heartbeatAge > threshold else { return false }
+        guard let monitorActive = hb.monitorLastActiveAt else { return false }
+        return Date().timeIntervalSince(monitorActive) < 7200
     }
 
     private static func formatDisk(available: Int64, total: Int64?) -> String {

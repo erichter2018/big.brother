@@ -22,6 +22,16 @@ final class AppState {
     /// Parent state (parent devices only).
     private(set) var parentState: ParentState?
 
+    /// Stored NotificationCenter observer tokens for cleanup.
+    private var notificationObservers: [Any] = []
+
+    deinit {
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        stopChildSync()
+    }
+
     // MARK: - Runtime State
 
     /// Whether the parent has authenticated in this session.
@@ -417,7 +427,7 @@ final class AppState {
 
         // Listen for iCloud account changes on child devices.
         if deviceRole == .child {
-            NotificationCenter.default.addObserver(
+            let observer = NotificationCenter.default.addObserver(
                 forName: Notification.Name.CKAccountChanged,
                 object: nil,
                 queue: .main
@@ -428,6 +438,7 @@ final class AppState {
                 print("[BigBrother] CKAccountChanged notification received")
                 #endif
             }
+            notificationObservers.append(observer)
         }
 
         let syncImpl = SyncCoordinatorImpl(
@@ -939,9 +950,11 @@ final class AppState {
     func startUnlockRequestPolling() {
         unlockRequestPollTimer?.invalidate()
         guard let familyID = parentState?.familyID else { return }
-        unlockRequestPollTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        let urTimer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             self?.checkForUnlockRequestNotifications(familyID: familyID)
         }
+        RunLoop.main.add(urTimer, forMode: .common)
+        unlockRequestPollTimer = urTimer
         // Also check immediately on start.
         checkForUnlockRequestNotifications(familyID: familyID)
         #if DEBUG
@@ -1139,6 +1152,83 @@ final class AppState {
         startEventSync()
     }
 
+    /// On child startup, if there's no local policy snapshot (e.g. fresh install
+    /// or app update that cleared storage), recover the intended mode from the
+    /// most recent CloudKit command. Default to dailyMode (locked) if nothing found.
+    func recoverModeIfNeeded() async {
+        guard deviceRole == .child,
+              let enrollment = enrollmentState,
+              let cloudKit,
+              let commandProcessor = commandProcessor as? CommandProcessorImpl,
+              snapshotStore?.loadCurrentSnapshot() == nil else { return }
+
+        #if DEBUG
+        print("[BigBrother] No local snapshot — recovering mode from CloudKit")
+        #endif
+
+        // First, process any pending commands (they take priority).
+        try? await commandProcessor.processIncomingCommands()
+        refreshLocalState()
+
+        // If pending commands gave us a snapshot, we're done.
+        if snapshotStore?.loadCurrentSnapshot() != nil { return }
+
+        // No pending commands — look at recent commands (last 24h) for the
+        // most recent mode command targeting this child/device.
+        do {
+            let since = Date().addingTimeInterval(-86400)
+            let recentCommands = try await cloudKit.fetchRecentCommands(
+                familyID: enrollment.familyID,
+                since: since
+            )
+
+            // Filter to mode commands targeting this child or all devices.
+            let modeCommands = recentCommands.filter { cmd in
+                guard cmd.action.isModeCommand else { return false }
+                switch cmd.target {
+                case .child(let cid): return cid == enrollment.childProfileID
+                case .device(let did): return did == enrollment.deviceID
+                case .allDevices: return true
+                }
+            }
+
+            if let latest = modeCommands.max(by: { $0.issuedAt < $1.issuedAt }) {
+                // Extract the target mode from the command action.
+                let recoveredMode: LockMode
+                switch latest.action {
+                case .setMode(let mode): recoveredMode = mode
+                case .temporaryUnlock(let secs):
+                    // Only recover as unlocked if the unlock hasn't expired yet.
+                    let expiresAt = latest.issuedAt.addingTimeInterval(Double(secs))
+                    recoveredMode = Date() < expiresAt ? .unlocked : .dailyMode
+                case .timedUnlock: recoveredMode = .dailyMode // penalty phase = locked
+                case .lockUntil: recoveredMode = .dailyMode
+                case .returnToSchedule: recoveredMode = .dailyMode
+                default: recoveredMode = .dailyMode
+                }
+                #if DEBUG
+                print("[BigBrother] Recovering from latest command: \(latest.action.displayDescription) → \(recoveredMode.rawValue)")
+                #endif
+                try? commandProcessor.applyModeDirect(recoveredMode, enrollment: enrollment)
+                refreshLocalState()
+            } else {
+                // No commands found at all — apply dailyMode as safe default.
+                #if DEBUG
+                print("[BigBrother] No recent commands found — defaulting to dailyMode (locked)")
+                #endif
+                try? commandProcessor.applyModeDirect(.dailyMode, enrollment: enrollment)
+                refreshLocalState()
+            }
+        } catch {
+            // CloudKit unreachable — apply dailyMode as safe default.
+            #if DEBUG
+            print("[BigBrother] CloudKit unreachable during recovery — defaulting to dailyMode")
+            #endif
+            try? commandProcessor.applyModeDirect(.dailyMode, enrollment: enrollment)
+            refreshLocalState()
+        }
+    }
+
     /// Stop periodic sync.
     func stopChildSync() {
         heartbeatService?.stopHeartbeat()
@@ -1151,9 +1241,11 @@ final class AppState {
     }
 
     /// Poll for commands every 5 seconds for fast response to parent actions.
+    /// Uses RunLoop.main + .common mode so polling continues even while the
+    /// child is actively scrolling / touching the screen.
     private func startCommandPolling() {
         commandPollTimer?.invalidate()
-        commandPollTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task {
                 try? await self.commandProcessor?.processIncomingCommands()
@@ -1162,6 +1254,8 @@ final class AppState {
                 try? await self.heartbeatService?.sendNow(force: true)
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        commandPollTimer = timer
         // Fire immediately.
         Task {
             #if DEBUG
@@ -1177,7 +1271,7 @@ final class AppState {
     /// get notified promptly.
     private func startEventSync() {
         eventSyncTimer?.invalidate()
-        eventSyncTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        let evTimer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task {
                 try? await self.eventLogger?.syncPendingEvents()
@@ -1200,6 +1294,8 @@ final class AppState {
                 #endif
             }
         }
+        RunLoop.main.add(evTimer, forMode: .common)
+        eventSyncTimer = evTimer
         #if DEBUG
         print("[BigBrother] Event sync started (every 5s)")
         #endif
@@ -1263,10 +1359,12 @@ final class AppState {
     /// Check for schedule profile changes every 60 seconds.
     private func startScheduleSync() {
         scheduleSyncTimer?.invalidate()
-        scheduleSyncTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        let schTimer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { await self.syncScheduleProfile() }
         }
+        RunLoop.main.add(schTimer, forMode: .common)
+        scheduleSyncTimer = schTimer
         // Fire immediately on startup.
         Task { await syncScheduleProfile() }
     }
