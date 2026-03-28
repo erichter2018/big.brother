@@ -104,7 +104,7 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol {
                 #endif
                 eventLogger.log(.enrollmentRevoked, details: "Device record deleted by parent — auto-unenrolling")
                 try? enforcement?.clearAllRestrictions()
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onUnenroll?()
                 }
             }

@@ -646,12 +646,24 @@ final class AppState {
         #if DEBUG
         print("[BigBrother] Performing local unenroll — clearing enrollment and resetting role")
         #endif
+        // Clear Keychain (enrollment, role, PIN, familyID, signing keys).
         try? keychain.delete(forKey: StorageKeys.enrollmentState)
         try? keychain.delete(forKey: StorageKeys.deviceRole)
         try? keychain.delete(forKey: StorageKeys.familyID)
+        try? keychain.delete(forKey: StorageKeys.parentPINHash)
+        try? keychain.delete(forKey: StorageKeys.commandSigningPublicKey)
+
         // Clear cached enrollment IDs from App Group.
         try? storage.writeRawData(nil, forKey: StorageKeys.cachedEnrollmentIDs)
+
+        // Clear App Group state files.
+        try? storage.clearTemporaryUnlockState()
+        try? storage.clearPendingUnlockRequests()
+        try? storage.clearUnlockPickerPending()
+
+        // Stop background services.
         heartbeatService?.stopHeartbeat()
+
         deviceRole = .unconfigured
         enrollmentState = nil
     }
@@ -1667,6 +1679,18 @@ final class AppState {
             // Check if we already have this exact version registered.
             let currentProfile = storage.readActiveScheduleProfile()
 
+            // Skip CloudKit fetch if profile ID and version match what we have locally.
+            let localVersionKey = "scheduleProfileVersion.\(enrollment.deviceID.rawValue)"
+            let localVersion = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .object(forKey: localVersionKey) as? Date
+            if let current = currentProfile,
+               current.id == profileID,
+               let deviceVersion = myDevice.scheduleProfileVersion,
+               let cached = localVersion,
+               deviceVersion == cached {
+                return
+            }
+
             // Fetch the full schedule profile.
             let profiles = try await cloudKit.fetchScheduleProfiles(familyID: enrollment.familyID)
             guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
@@ -1681,6 +1705,11 @@ final class AppState {
             if familyControlsAvailable {
                 ScheduleRegistrar.register(profile, storage: storage)
                 scheduleNextScheduleBGTask()
+                // Cache the version so we skip redundant fetches.
+                if let deviceVersion = myDevice.scheduleProfileVersion {
+                    UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                        .set(deviceVersion, forKey: localVersionKey)
+                }
                 #if DEBUG
                 print("[BigBrother] Schedule profile updated: \(profile.name) (\(profile.freeWindows.count) free, \(profile.essentialWindows.count) essential windows)")
                 #endif

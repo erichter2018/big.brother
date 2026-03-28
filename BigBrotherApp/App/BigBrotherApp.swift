@@ -57,7 +57,7 @@ struct BigBrotherApp: App {
         } else {
             _LaunchLog.log("Firebase: GoogleService-Info.plist not found, skipping")
         }
-        self._appState = State(initialValue: AppState())
+        self._appState = State(initialValue: MainActor.assumeIsolated { AppState() })
         _LaunchLog.log("AppState created, role=\(self._appState.wrappedValue.deviceRole)")
     }
 
@@ -167,35 +167,40 @@ struct BigBrotherApp: App {
             _LaunchLog.log("Setting up for role: \(role)")
             switch role {
             case .child:
-                let enrollment = await MainActor.run { appState.enrollmentState }
+                let (enrollment, childCloudKit) = await MainActor.run {
+                    (appState.enrollmentState, appState.cloudKit)
+                }
                 if let enrollment {
                     await Self.setupSubscriptionsWithRetry(
-                        cloudKit: appState.cloudKit,
+                        cloudKit: childCloudKit,
                         familyID: enrollment.familyID,
                         deviceID: enrollment.deviceID
                     )
                 }
                 await MainActor.run { appState.startChildSync() }
-                await appState.recoverModeIfNeeded()
-                try? await appState.syncCoordinator?.performFullSync()
+                await MainActor.run { await appState.recoverModeIfNeeded() }
+                let syncCoordinator = await MainActor.run { appState.syncCoordinator }
+                try? await syncCoordinator?.performFullSync()
 
                 // Schedule BGTask for periodic heartbeat when app is suspended.
                 await MainActor.run { appDelegate.scheduleHeartbeatRefresh() }
 
             case .parent:
                 _LaunchLog.log("Parent: setting up subscriptions")
-                let familyID = await MainActor.run { appState.parentState?.familyID }
+                let (familyID, parentCloudKit) = await MainActor.run {
+                    (appState.parentState?.familyID, appState.cloudKit)
+                }
                 if let familyID {
                     _LaunchLog.log("Parent: familyID=\(familyID)")
                     await Self.setupSubscriptionsWithRetry(
-                        cloudKit: appState.cloudKit,
+                        cloudKit: parentCloudKit,
                         familyID: familyID,
                         deviceID: nil
                     )
                     _LaunchLog.log("Parent: subscriptions done")
                 }
                 _LaunchLog.log("Parent: refreshing dashboard")
-                try? await appState.refreshDashboard()
+                try? await MainActor.run { await appState.refreshDashboard() }
                 _LaunchLog.log("Parent: dashboard refreshed")
 
                 // Start monitoring child device heartbeats for offline alerts.

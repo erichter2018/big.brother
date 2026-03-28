@@ -101,8 +101,7 @@ struct StatusProvider: TimelineProvider {
         } else {
             selfUnlocksUsed = 0
         }
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let selfUnlockBudget = defaults?.integer(forKey: "selfUnlockBudget") ?? 0
+        let selfUnlockBudget = selfUnlockState?.budget ?? 0
 
         return StatusEntry(
             date: now,

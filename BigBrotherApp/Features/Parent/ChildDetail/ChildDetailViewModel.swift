@@ -130,8 +130,18 @@ final class ChildDetailViewModel: CommandSendable {
         budgetDebounceTask = Task {
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
-            await saveSelfUnlockBudgetToCloudKit(budget)
-            UserDefaults.standard.set(budget, forKey: lastSentKey)
+            do {
+                try await appState.sendCommand(
+                    target: .child(child.id),
+                    action: .setSelfUnlockBudget(count: budget)
+                )
+                // Only mark as sent after successful delivery.
+                UserDefaults.standard.set(budget, forKey: lastSentKey)
+            } catch {
+                #if DEBUG
+                print("[BigBrother] Self-unlock budget sync failed: \(error.localizedDescription)")
+                #endif
+            }
         }
     }
 

@@ -26,6 +26,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private let storage = AppGroupStorage()
     private let store = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
     private let baseStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
+    private lazy var keychain = KeychainManager()
 
     /// Prefix used by ScheduleRegistrar for free-window activities.
     private let scheduleProfilePrefix = "bigbrother.scheduleprofile."
@@ -1065,7 +1066,6 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private func logEvent(_ type: EventType, details: String?) {
         // Read enrollment state to get deviceID and familyID.
         // If unavailable, skip logging (device may not be enrolled).
-        let keychain = KeychainManager()
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self,
             forKey: StorageKeys.enrollmentState

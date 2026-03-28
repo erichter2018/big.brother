@@ -294,6 +294,9 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         // Don't overwrite a newer heartbeat with a stale one (clock skew / restart race).
         if let existingTimestamp = existing[CKFieldName.timestamp] as? Date,
            existingTimestamp > heartbeat.timestamp {
+            #if DEBUG
+            print("[CloudKit] Skipped heartbeat: existing \(existingTimestamp) > sent \(heartbeat.timestamp)")
+            #endif
             return
         }
         CKRecordConversion.updateCKRecord(existing, from: heartbeat)
@@ -730,8 +733,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 var cursor: CKQueryOperation.Cursor?
                 let (firstResults, firstCursor) = try await database.records(matching: query, resultsLimit: 200)
                 for (_, result) in firstResults {
-                    if case .success(let record) = result {
+                    switch result {
+                    case .success(let record):
                         allRecords.append(record)
+                    case .failure(let error):
+                        #if DEBUG
+                        print("[CloudKit] Dropped record in query: \(error.localizedDescription)")
+                        #endif
                     }
                 }
                 cursor = firstCursor
@@ -739,8 +747,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 while let activeCursor = cursor {
                     let (moreResults, nextCursor) = try await database.records(continuingMatchFrom: activeCursor, resultsLimit: 200)
                     for (_, result) in moreResults {
-                        if case .success(let record) = result {
+                        switch result {
+                        case .success(let record):
                             allRecords.append(record)
+                        case .failure(let error):
+                            #if DEBUG
+                            print("[CloudKit] Dropped record in pagination: \(error.localizedDescription)")
+                            #endif
                         }
                     }
                     cursor = nextCursor

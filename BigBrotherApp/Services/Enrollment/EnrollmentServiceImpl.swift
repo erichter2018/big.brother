@@ -75,11 +75,13 @@ final class EnrollmentServiceImpl: EnrollmentServiceProtocol {
             modelIdentifier: modelIdentifier,
             osVersion: osVersion
         )
-        try await cloudKit.saveDevice(device)
-
-        // Mark the invite as used (best-effort — child can't modify parent-created
-        // records in CloudKit public database due to ownership restrictions).
+        // Mark the invite as used BEFORE creating the device to prevent race conditions
+        // where two devices could enroll with the same code simultaneously.
+        // Best-effort because child can't modify parent-created records in CloudKit
+        // public database due to ownership restrictions.
         try? await cloudKit.markInviteUsed(code: invite.code, deviceID: deviceID)
+
+        try await cloudKit.saveDevice(device)
 
         // Persist enrollment state to Keychain.
         let enrollment = ChildEnrollmentState(

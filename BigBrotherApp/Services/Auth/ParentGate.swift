@@ -14,20 +14,32 @@ struct ParentGate<Content: View>: View {
     @State private var showPINEntry = false
     @State private var authError: String?
     @State private var isAuthenticating = false
+    @State private var cachedAuthEnabled = true
+    @State private var cachedPINConfigured = false
 
     private let timeoutSeconds: TimeInterval = 300
 
     @Environment(\.scenePhase) private var scenePhase
 
-    private var authEnabled: Bool {
-        // Read from Keychain (tamper-resistant) instead of UserDefaults.
-        // Default to true if never set (backward compatible).
-        guard let data = try? appState.keychain.getData(forKey: StorageKeys.parentAuthEnabled),
-              let value = String(data: data, encoding: .utf8) else { return true }
-        return value == "1"
+    private var authEnabled: Bool { cachedAuthEnabled }
+
+    private func refreshCachedAuth() {
+        if let data = try? appState.keychain.getData(forKey: StorageKeys.parentAuthEnabled),
+           let value = String(data: data, encoding: .utf8) {
+            cachedAuthEnabled = value == "1"
+        } else {
+            cachedAuthEnabled = true
+        }
+        cachedPINConfigured = (try? appState.keychain.getData(forKey: StorageKeys.parentPINHash)) != nil
     }
 
     var body: some View {
+        bodyContent
+            .onAppear { refreshCachedAuth() }
+    }
+
+    @ViewBuilder
+    private var bodyContent: some View {
         if !isPINConfigured || !authEnabled {
             // No PIN set or auth disabled — skip authentication.
             content()
@@ -122,9 +134,7 @@ struct ParentGate<Content: View>: View {
         }
     }
 
-    private var isPINConfigured: Bool {
-        (try? appState.keychain.getData(forKey: StorageKeys.parentPINHash)) != nil
-    }
+    private var isPINConfigured: Bool { cachedPINConfigured }
 
     private func attemptBiometric() {
         guard let auth = appState.auth else { return }

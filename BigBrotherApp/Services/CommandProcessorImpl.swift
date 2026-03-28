@@ -157,10 +157,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         let skippedMode = modeCommands.count - effectiveModeCommands.count
 
         // For config commands, only process the LATEST of each type — older duplicates
-        // are stale and just waste time. Group by action description as a key.
+        // are stale and just waste time. Group by stable deduplication key.
         var latestConfig: [String: RemoteCommand] = [:]
         for cmd in configCommands {
-            let key = cmd.action.displayDescription
+            let key = cmd.action.deduplicationKey
             if let existing = latestConfig[key] {
                 // Keep the newer one, mark the older as processed to skip next time.
                 if cmd.issuedAt > existing.issuedAt {

@@ -294,11 +294,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     updatedAt: updatedAt
                 )
 
-                // Compare with local
+                // Compare with local — check all fields, not just windows
                 let local = storage.readActiveScheduleProfile()
-                if local?.essentialWindows != profile.essentialWindows ||
-                   local?.freeWindows != profile.freeWindows ||
-                   local?.id != profile.id {
+                if local != profile {
                     try? storage.writeActiveScheduleProfile(profile)
                     NSLog("[Tunnel] Schedule profile synced: \(name) (\(essentialWindows.count) essential, \(freeWindows.count) free windows)")
                 }
@@ -336,14 +334,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 guard let record = try? result.get() else { continue }
                 let actionJSON = record["actionJSON"] as? String ?? ""
                 let commandID = record.recordID.recordName
-                let target = record["target"] as? String ?? ""
+                let targetType = record["targetType"] as? String ?? ""
+                let targetID = record["targetID"] as? String ?? ""
 
                 // Check if this command targets our device
                 let deviceIDStr = enrollment.deviceID.rawValue
                 let childIDStr = enrollment.childProfileID.rawValue
-                guard target.contains(deviceIDStr) || target.contains(childIDStr) || target == "allDevices" else {
-                    continue
+                let isTargeted: Bool
+                switch targetType {
+                case "device":  isTargeted = targetID == deviceIDStr
+                case "child":   isTargeted = targetID == childIDStr
+                case "all":     isTargeted = true
+                default:        isTargeted = false
                 }
+                guard isTargeted else { continue }
 
                 // Handle simple commands from the tunnel
                 if actionJSON.contains("requestHeartbeat") {
@@ -453,7 +457,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         record["familyID"] = enrollment.familyID.rawValue
         record["timestamp"] = Date() as NSDate
         record["hbAppBuildNumber"] = AppConstants.appBuildNumber as NSNumber
-        record["heartbeatSource"] = "vpnExtension" // Signal that this came from the tunnel
+        record["hbSource"] = "vpnExtension" // Signal that this came from the tunnel
+        record["hbTunnel"] = 1 as NSNumber
 
         // Report actual enforcement state from App Group.
         // The tunnel cannot read ManagedSettingsStore, so use the best available

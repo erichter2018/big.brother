@@ -129,6 +129,48 @@ public enum CommandAction: Codable, Sendable, Equatable {
 
     // Thread-safe date formatting via Date.FormatStyle (replaces non-thread-safe static DateFormatter)
 
+    /// Stable key for command deduplication. Unlike `displayDescription`, this is based
+    /// on the enum case name and doesn't vary with parameter values, so two commands of
+    /// the same type always collapse correctly.
+    public var deduplicationKey: String {
+        switch self {
+        case .setMode: return "setMode"
+        case .temporaryUnlock: return "temporaryUnlock"
+        case .requestHeartbeat: return "requestHeartbeat"
+        case .requestAppConfiguration: return "requestAppConfiguration"
+        case .unenroll: return "unenroll"
+        case .allowApp(let id): return "allowApp.\(id)"
+        case .allowManagedApp(let name): return "allowManagedApp.\(name)"
+        case .revokeApp(let id): return "revokeApp.\(id)"
+        case .blockManagedApp(let name): return "blockManagedApp.\(name)"
+        case .temporaryUnlockApp(let id, _): return "temporaryUnlockApp.\(id)"
+        case .nameApp(let fp, _): return "nameApp.\(fp)"
+        case .setRestrictions: return "setRestrictions"
+        case .revokeAllApps: return "revokeAllApps"
+        case .requestAlwaysAllowedSetup: return "requestAlwaysAllowedSetup"
+        case .timedUnlock: return "timedUnlock"
+        case .returnToSchedule: return "returnToSchedule"
+        case .lockUntil: return "lockUntil"
+        case .syncPINHash: return "syncPINHash"
+        case .setScheduleProfile: return "setScheduleProfile"
+        case .clearScheduleProfile: return "clearScheduleProfile"
+        case .setSelfUnlockBudget: return "setSelfUnlockBudget"
+        case .setPenaltyTimer: return "setPenaltyTimer"
+        case .setHeartbeatProfile: return "setHeartbeatProfile"
+        case .setAllowedWebDomains: return "setAllowedWebDomains"
+        case .addTrustedSigningKey: return "addTrustedSigningKey"
+        case .sendMessage: return "sendMessage"
+        case .setLocationMode: return "setLocationMode"
+        case .requestLocation: return "requestLocation"
+        case .requestPermissions: return "requestPermissions"
+        case .setHomeLocation: return "setHomeLocation"
+        case .syncNamedPlaces: return "syncNamedPlaces"
+        case .requestDiagnostics: return "requestDiagnostics"
+        case .setSafeSearch: return "setSafeSearch"
+        case .setDrivingSettings: return "setDrivingSettings"
+        }
+    }
+
     /// Whether this action changes the device-wide lock mode.
     /// Mode commands supersede each other — only the latest pending one matters.
     /// Per-app commands (allowApp, blockManagedApp, etc.) are NOT mode commands.

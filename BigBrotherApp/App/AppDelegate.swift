@@ -502,17 +502,19 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 // Navigate to child detail.
                 navigateToChild(result.childProfileID, deviceID: result.deviceID, appState: appState)
             case .allowAlways:
-                await sendCommand(
+                let success = await sendCommand(
                     .allowApp(requestID: result.requestID),
                     target: .device(result.deviceID),
                     appState: appState
                 )
-                // Track on parent side.
-                appState.addApprovedApp(ApprovedApp(
-                    id: result.requestID,
-                    appName: result.appName,
-                    deviceID: result.deviceID
-                ))
+                // Only track on parent side if command was delivered successfully.
+                if success {
+                    appState.addApprovedApp(ApprovedApp(
+                        id: result.requestID,
+                        appName: result.appName,
+                        deviceID: result.deviceID
+                    ))
+                }
                 // Navigate to child detail.
                 navigateToChild(result.childProfileID, deviceID: result.deviceID, appState: appState)
             case .openApp:
@@ -535,14 +537,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    /// Send a command via CloudKit from notification action context.
+    /// Send a command via CloudKit from notification action context. Returns true on success.
+    @discardableResult
     private func sendCommand(
         _ action: CommandAction,
         target: CommandTarget,
         appState: AppState
-    ) async {
+    ) async -> Bool {
         guard let cloudKit = appState.cloudKit,
-              let familyID = appState.parentState?.familyID else { return }
+              let familyID = appState.parentState?.familyID else { return false }
 
         let command = RemoteCommand(
             familyID: familyID,
@@ -556,10 +559,12 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             #if DEBUG
             print("[BigBrother] Notification action: sent \(action.displayDescription)")
             #endif
+            return true
         } catch {
             #if DEBUG
             print("[BigBrother] Notification action failed: \(error.localizedDescription)")
             #endif
+            return false
         }
     }
 
