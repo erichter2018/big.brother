@@ -161,14 +161,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
            let domains = try? JSONDecoder().decode([String].self, from: data),
            !domains.isEmpty {
-            // Block all web categories but exempt the parent-allowed domains.
-            let allowedSet = Set(domains.map { WebDomain(domain: $0) })
+            // Block all web categories. Per-domain exceptions require WebDomainTokens
+            // (picker-selected), so domain allowlist is enforced at the VPN/DNS layer.
             for store in [baseStore, scheduleStore] {
                 store.shield.webDomainCategories = .all()
-                store.shield.webDomains = .all(except: allowedSet)
             }
             #if DEBUG
-            print("[BigBrother] Web blocking: all domains blocked except \(domains.count) allowed")
+            print("[BigBrother] Web blocking: all domains blocked (allowlist enforced via VPN/DNS)")
             #endif
         } else {
             // Block on all stores to ensure coverage after schedule transitions.

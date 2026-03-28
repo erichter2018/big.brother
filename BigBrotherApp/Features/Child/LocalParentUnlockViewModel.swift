@@ -1,6 +1,6 @@
 import Foundation
 import UIKit
-import UserNotifications
+@preconcurrency import UserNotifications
 import Observation
 import BigBrotherCore
 

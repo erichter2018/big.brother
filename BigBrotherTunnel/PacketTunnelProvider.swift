@@ -353,12 +353,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 if actionJSON.contains("requestHeartbeat") {
                     await sendHeartbeatFromTunnel(reason: "command")
                     record["status"] = "applied"
-                    try? await db.save(record)
+                    _ = try? await db.save(record)
                     NSLog("[Tunnel] Processed requestHeartbeat command: \(commandID)")
                 } else if actionJSON.contains("requestDiagnostics") {
                     await collectAndUploadDiagnostics(enrollment: enrollment)
                     record["status"] = "applied"
-                    try? await db.save(record)
+                    _ = try? await db.save(record)
                     NSLog("[Tunnel] Processed requestDiagnostics command: \(commandID)")
                 }
                 // Other commands are left for the main app
@@ -414,7 +414,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
            let str = String(data: json, encoding: .utf8) {
             ckRecord["diagJSON"] = str
         }
-        try? await db.save(ckRecord)
+        _ = try? await db.save(ckRecord)
         NSLog("[Tunnel] Diagnostic report uploaded (\(recentLogs.count) log entries)")
     }
 

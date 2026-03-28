@@ -218,10 +218,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     s.shield.applicationCategories = .all(except: allowedTokens)
                     if shouldBlockWeb {
                         s.shield.webDomainCategories = .all()
-                        if !allowedWebDomains.isEmpty {
-                            let allowedSet = Set(allowedWebDomains.map { WebDomain(domain: $0) })
-                            s.shield.webDomains = .all(except: allowedSet)
-                        }
+                        // Domain allowlist enforced at VPN/DNS layer, not ManagedSettings.
                     } else {
                         s.shield.webDomainCategories = nil
                     }
@@ -237,10 +234,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     }
                     if shouldBlockWeb {
                         s.shield.webDomainCategories = .all()
-                        if !allowedWebDomains.isEmpty {
-                            let allowedSet = Set(allowedWebDomains.map { WebDomain(domain: $0) })
-                            s.shield.webDomains = .all(except: allowedSet)
-                        }
+                        // Domain allowlist enforced at VPN/DNS layer, not ManagedSettings.
                     } else {
                         s.shield.webDomainCategories = nil
                     }

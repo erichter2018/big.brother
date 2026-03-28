@@ -715,10 +715,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     s.shield.applicationCategories = .all(except: allowedTokens)
                     if shouldBlockWeb {
                         s.shield.webDomainCategories = .all()
-                        if !allowedWebDomains.isEmpty {
-                            let allowedSet = Set(allowedWebDomains.map { WebDomain(domain: $0) })
-                            s.shield.webDomains = .all(except: allowedSet)
-                        }
+                        // Note: per-domain exceptions require WebDomainTokens (picker-selected),
+                        // not WebDomain strings. Domain allowlist is enforced at the VPN/DNS layer.
                     } else {
                         s.shield.webDomainCategories = nil
                     }
@@ -734,10 +732,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     }
                     if shouldBlockWeb {
                         s.shield.webDomainCategories = .all()
-                        if !allowedWebDomains.isEmpty {
-                            let allowedSet = Set(allowedWebDomains.map { WebDomain(domain: $0) })
-                            s.shield.webDomains = .all(except: allowedSet)
-                        }
+                        // Note: per-domain exceptions require WebDomainTokens (picker-selected),
+                        // not WebDomain strings. Domain allowlist is enforced at the VPN/DNS layer.
                     } else {
                         s.shield.webDomainCategories = nil
                     }
@@ -794,10 +790,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }()
             if restrictions.denyWebWhenLocked {
                 store.shield.webDomainCategories = .all()
-                if !legacyAllowedWebDomains.isEmpty {
-                    let allowedSet = Set(legacyAllowedWebDomains.map { WebDomain(domain: $0) })
-                    store.shield.webDomains = .all(except: allowedSet)
-                }
+                // Note: per-domain exceptions require WebDomainTokens (picker-selected).
+                // Domain allowlist is enforced at the VPN/DNS layer.
             } else {
                 store.shield.webDomainCategories = nil
             }

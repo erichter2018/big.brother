@@ -27,7 +27,7 @@ private actor ProcessingGate {
 ///
 /// Uses `ProcessingGate` to prevent concurrent execution of `processIncomingCommands()`
 /// (which can happen when poll timer and push notification fire simultaneously).
-final class CommandProcessorImpl: CommandProcessorProtocol {
+final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable {
 
     private let cloudKit: any CloudKitServiceProtocol
     private let storage: any SharedStorageProtocol
@@ -1286,14 +1286,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
     private func handleNameApp(fingerprint: String, name: String) -> CommandProcessingResult {
         // Find all cached tokens whose fingerprint matches and update their names.
         let cache = storage.readAllCachedAppNames()
-        var updated = false
         for (tokenBase64, _) in cache {
             // Compute fingerprint for this token
             if let data = Data(base64Encoded: tokenBase64) {
                 let fp = Self.tokenFingerprint(for: data)
                 if fp.hasPrefix(fingerprint) || fingerprint.hasPrefix(fp.prefix(fingerprint.count).description) {
                     storage.cacheAppName(name, forTokenKey: tokenBase64)
-                    updated = true
                 }
             }
         }

@@ -611,11 +611,13 @@ final class AppState {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                guard let self else { return }
-                self.eventLogger?.log(.familyControlsAuthChanged, details: "iCloud account changed (CKAccountChanged)")
-                #if DEBUG
-                print("[BigBrother] CKAccountChanged notification received")
-                #endif
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.eventLogger?.log(.familyControlsAuthChanged, details: "iCloud account changed (CKAccountChanged)")
+                    #if DEBUG
+                    print("[BigBrother] CKAccountChanged notification received")
+                    #endif
+                }
             }
             notificationObservers.append(observer)
         }
@@ -658,7 +660,7 @@ final class AppState {
 
         // Clear App Group state files.
         try? storage.clearTemporaryUnlockState()
-        try? storage.clearPendingUnlockRequests()
+        try? storage.writeRawData(nil, forKey: StorageKeys.pendingUnlockRequests)
         try? storage.clearUnlockPickerPending()
 
         // Stop background services.
@@ -851,7 +853,7 @@ final class AppState {
 
             // User denied — lock to essential mode after 5 minutes of denials,
             // then keep retrying every 60 seconds.
-            var denialStart = Date()
+            let denialStart = Date()
             var essentialApplied = false
 
             while !(await vpn.isConfigured()) {
@@ -1257,7 +1259,9 @@ final class AppState {
         unlockRequestPollTimer?.invalidate()
         guard let familyID = parentState?.familyID else { return }
         let urTimer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
-            self?.checkForUnlockRequestNotifications(familyID: familyID)
+            MainActor.assumeIsolated {
+                self?.checkForUnlockRequestNotifications(familyID: familyID)
+            }
         }
         RunLoop.main.add(urTimer, forMode: .common)
         unlockRequestPollTimer = urTimer
@@ -1621,7 +1625,8 @@ final class AppState {
         eventSyncTimer?.invalidate()
         let evTimer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             guard let self else { return }
-            Task {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
                 try? await self.eventLogger?.syncPendingEvents()
                 #if DEBUG
                 // Dump only newly appended extension diagnostics so stale entries

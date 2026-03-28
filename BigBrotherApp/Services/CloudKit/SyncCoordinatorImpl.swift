@@ -9,7 +9,7 @@ import BigBrotherCore
 /// Policy sync routes through the canonical snapshot pipeline
 /// (PolicyPipelineCoordinator → PolicySnapshotStore) to ensure
 /// consistent versioning and staleness rejection.
-final class SyncCoordinatorImpl: SyncCoordinatorProtocol {
+final class SyncCoordinatorImpl: SyncCoordinatorProtocol, @unchecked Sendable {
 
     private let cloudKit: any CloudKitServiceProtocol
     private let commandProcessor: any CommandProcessorProtocol
