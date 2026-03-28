@@ -90,7 +90,12 @@ public final class PolicySnapshotStore: @unchecked Sendable {
         // Update extension shared state — but don't overwrite if the Monitor extension
         // wrote a more recent schedule-aware state (e.g., free window unlock).
         let existingExt = storage.readExtensionSharedState()
-        let monitorOwnsState = existingExt != nil && existingExt!.writtenAt > snapshot.createdAt
+        let monitorOwnsState: Bool
+        if let ext = existingExt {
+            monitorOwnsState = ext.writtenAt > snapshot.createdAt
+        } else {
+            monitorOwnsState = false
+        }
         if !monitorOwnsState {
             let extState = ExtensionSharedState(
                 currentMode: snapshot.effectivePolicy.resolvedMode,

@@ -94,4 +94,12 @@ public enum EventType: String, Codable, Sendable, Equatable {
     case temporaryUnlockStarted
     case enforcementDegraded
     case unlockRequested
+    // Driving safety events
+    case speedingDetected
+    case phoneWhileDriving
+    case hardBrakingDetected
+    case namedPlaceArrival
+    case namedPlaceDeparture
+    case tripCompleted
+    case sosAlert
 }

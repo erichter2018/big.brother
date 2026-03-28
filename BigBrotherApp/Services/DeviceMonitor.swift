@@ -3,20 +3,14 @@ import UserNotifications
 import BigBrotherCore
 
 /// Monitors child device heartbeats on the parent device and fires local
-/// notifications when a device goes offline (stops sending heartbeats) or
-/// when a previously-offline device comes back online.
+/// notifications for tampering signals: FamilyControls revocation, VPN usage,
+/// location disabled, and time zone changes.
 ///
 /// **Runs only on the parent device.**
 ///
-/// Uses an **escalating probe** strategy to avoid false alarms from sleeping
-/// iOS devices:
-///   1. Heartbeat gap exceeded → send ping #1, no alert.
-///   2. Still no response next cycle → ping #2.
-///   3. Still nothing → ping #3 (final attempt).
-///   4. Still nothing → fire offline notification.
-///
-/// Smart patience: if last heartbeat showed low battery, skip probing and
-/// just note "likely dead." FamilyControls revocation alerts immediately.
+/// Offline detection (device stopped heartbeating) is NOT handled here.
+/// Force-close is caught by the Monitor extension, which blocks all apps
+/// and internet until the child reopens Big Brother.
 @MainActor
 final class DeviceMonitor {
 
@@ -28,30 +22,25 @@ final class DeviceMonitor {
     /// How often to auto-refresh dashboard data (seconds).
     private static let dashboardRefreshIntervalSeconds: TimeInterval = 120
 
-    /// Fallback max heartbeat gap when no profile exists (2 hours).
-    private static let fallbackMaxGap: TimeInterval = 7200
-
-    /// Number of pings to send before declaring a device truly offline.
-    private static let maxPingAttempts = 3
-
     // MARK: - State
 
     private let appState: AppState
 
-    /// Timer that fires the heartbeat-freshness check.
+    /// Timer that fires the tampering-signal check.
     private var checkTimer: Timer?
 
     /// Timer that periodically refreshes dashboard data from CloudKit.
     private var refreshTimer: Timer?
 
-    /// Tracks devices that currently have an active offline notification.
-    /// Prevents re-nagging — one notification per offline transition.
-    private var notifiedOfflineDevices: Set<String> = []
+    /// Tracks devices that have an active FamilyControls revocation alert.
+    private var notifiedTamperDevices: Set<String> = []
 
-    /// Tracks how many pings have been sent to each device while it appears
-    /// offline. Once this reaches `maxPingAttempts`, the device is declared
-    /// truly offline. Reset when a heartbeat arrives.
-    private var pingCounts: [String: Int] = [:]
+    /// Tracks the last-known time zone per device for change detection.
+    private var lastKnownTimeZones: [DeviceID: String] = [:]
+
+    /// Tracks the last time a throttled notification was sent, keyed by
+    /// notification identifier.
+    private var lastNotificationTimes: [String: Date] = [:]
 
     // MARK: - Init
 
@@ -64,7 +53,7 @@ final class DeviceMonitor {
     func startMonitoring() {
         requestNotificationPermission()
 
-        // Periodic heartbeat-freshness check.
+        // Periodic tampering-signal check.
         let chkTimer = Timer(timeInterval: Self.checkIntervalSeconds, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.checkDeviceStatus()
@@ -105,8 +94,7 @@ final class DeviceMonitor {
         checkTimer = nil
         refreshTimer?.invalidate()
         refreshTimer = nil
-        notifiedOfflineDevices.removeAll()
-        pingCounts.removeAll()
+        notifiedTamperDevices.removeAll()
 
         #if DEBUG
         print("[DeviceMonitor] Stopped monitoring")
@@ -116,167 +104,102 @@ final class DeviceMonitor {
     // MARK: - Core Logic
 
     private func checkDeviceStatus() {
-        let now = Date()
-
         let knownChildIDs = Set(appState.childProfiles.map(\.id))
         for device in appState.childDevices {
-            // Skip orphaned devices that don't belong to any known child profile.
             guard knownChildIDs.contains(device.childProfileID) else { continue }
 
             let key = device.id.rawValue
             let heartbeat = appState.latestHeartbeats.first { $0.deviceID == device.id }
-            let profile = resolveProfile(for: device)
 
-            // ALWAYS alert immediately for FamilyControls revocation.
+            // --- FamilyControls Revocation (tampering) ---
             if let hb = heartbeat, !hb.familyControlsAuthorized {
-                if !notifiedOfflineDevices.contains(key) {
-                    notifiedOfflineDevices.insert(key)
-                    pingCounts.removeValue(forKey: key)
-                    sendOfflineNotification(device: device, heartbeat: heartbeat)
+                if !notifiedTamperDevices.contains(key) {
+                    notifiedTamperDevices.insert(key)
+                    sendTamperNotification(device: device, heartbeat: hb)
                 }
-                continue
-            }
-
-            // Determine if we're in an active monitoring window.
-            let inActiveWindow: Bool
-            if let profile {
-                inActiveWindow = profile.isInActiveWindow(at: now)
-            } else {
-                inActiveWindow = true
-            }
-
-            // Determine if the device is overdue based on check mode.
-            let isOverdue: Bool
-            let checkMode = profile?.effectiveCheckMode(at: now) ?? .gap(Self.fallbackMaxGap)
-
-            switch checkMode {
-            case .gap(let maxGap):
-                let threshold = now.addingTimeInterval(-maxGap)
-                isOverdue = heartbeat == nil || heartbeat!.timestamp < threshold
-
-            case .oncePerDay:
-                if let windowStart = profile?.windowStart(at: now) {
-                    isOverdue = heartbeat == nil || heartbeat!.timestamp < windowStart
-                } else {
-                    let threshold = now.addingTimeInterval(-Self.fallbackMaxGap)
-                    isOverdue = heartbeat == nil || heartbeat!.timestamp < threshold
-                }
-            }
-
-            if isOverdue && inActiveWindow {
-                handleOverdueDevice(
-                    device: device,
-                    heartbeat: heartbeat,
-                    checkMode: checkMode,
-                    key: key
-                )
-            } else if !isOverdue {
-                // Device checked in — clear all probe/offline state.
-                if pingCounts[key] != nil {
-                    pingCounts.removeValue(forKey: key)
-                    #if DEBUG
-                    print("[DeviceMonitor] \(device.displayName) responded to ping — clearing probe state")
-                    #endif
-                }
-                if notifiedOfflineDevices.contains(key) {
-                    notifiedOfflineDevices.remove(key)
-                    sendOnlineNotification(device: device)
-                    #if DEBUG
-                    print("[DeviceMonitor] \(device.displayName) is back online")
-                    #endif
-                }
-            } else if !inActiveWindow && (notifiedOfflineDevices.contains(key) || pingCounts[key] != nil) {
-                // Left active window — clear everything.
-                pingCounts.removeValue(forKey: key)
-                notifiedOfflineDevices.remove(key)
+            } else if notifiedTamperDevices.contains(key) {
+                // FamilyControls restored — clear the alert.
+                notifiedTamperDevices.remove(key)
                 UNUserNotificationCenter.current().removeDeliveredNotifications(
-                    withIdentifiers: ["offline-\(key)"]
+                    withIdentifiers: ["tamper-\(key)"]
                 )
-                #if DEBUG
-                print("[DeviceMonitor] \(device.displayName) left active window — clearing alert")
-                #endif
             }
-        }
-    }
 
-    /// Handle a device that has exceeded its heartbeat threshold.
-    /// Uses escalating probes and smart patience based on last known state.
-    private func handleOverdueDevice(
-        device: ChildDevice,
-        heartbeat: DeviceHeartbeat?,
-        checkMode: HeartbeatCheckMode,
-        key: String
-    ) {
-        // Already notified — nothing more to do.
-        guard !notifiedOfflineDevices.contains(key) else { return }
-
-        // Smart patience: if battery was very low, skip probing entirely.
-        // The device almost certainly died — alert immediately but non-urgently.
-        if let hb = heartbeat, let battery = hb.batteryLevel, battery < 0.1, hb.isCharging != true {
-            notifiedOfflineDevices.insert(key)
-            pingCounts.removeValue(forKey: key)
-            sendOfflineNotification(device: device, heartbeat: heartbeat)
-            #if DEBUG
-            print("[DeviceMonitor] \(device.displayName) had \(Int(battery * 100))% battery — likely dead, alerting without probing")
-            #endif
-            return
-        }
-
-        let currentPings = pingCounts[key] ?? 0
-
-        if currentPings >= Self.maxPingAttempts {
-            // Exhausted all probe attempts — truly offline.
-            notifiedOfflineDevices.insert(key)
-            pingCounts.removeValue(forKey: key)
-            sendOfflineNotification(device: device, heartbeat: heartbeat)
-
-            #if DEBUG
-            let modeDesc: String = {
-                switch checkMode {
-                case .gap(let g): return "gap > \(Int(g / 60))min"
-                case .oncePerDay: return "no heartbeat today"
+            // --- VPN Detection ---
+            let vpnAckKey = "vpnAcknowledged.\(device.id.rawValue)"
+            if let hb = heartbeat, hb.vpnDetected == true {
+                if !UserDefaults.standard.bool(forKey: vpnAckKey) {
+                    let name = childName(for: device)
+                    sendThrottledNotification(
+                        id: "vpn-\(key)",
+                        title: "VPN Detected",
+                        body: "\(name)'s \(device.displayName) has an active VPN connection. This may block Big Brother.",
+                        throttleHours: 6
+                    )
                 }
-            }()
-            print("[DeviceMonitor] \(device.displayName) is offline after \(Self.maxPingAttempts) pings (\(modeDesc))")
-            #endif
-        } else {
-            // Send another ping and increment counter.
-            pingCounts[key] = currentPings + 1
-            sendPing(device: device)
+            } else {
+                UserDefaults.standard.removeObject(forKey: vpnAckKey)
+            }
 
-            #if DEBUG
-            print("[DeviceMonitor] \(device.displayName) overdue — ping \(currentPings + 1)/\(Self.maxPingAttempts)")
-            #endif
-        }
-    }
+            // --- VPN Tunnel Disconnect Detection ---
+            // Only alert if the child has been on a VPN-capable build (167+) for at least 10 minutes.
+            // This avoids false alerts during first deploy before the VPN has installed.
+            if let hb = heartbeat, hb.tunnelConnected == false,
+               let build = hb.appBuildNumber, build >= 167,
+               Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds {
+                // Give the VPN 10 minutes to install after app launch
+                let lastLaunch = hb.monitorLastActiveAt ?? hb.timestamp
+                if Date().timeIntervalSince(lastLaunch) > 600 {
+                    let name = childName(for: device)
+                    sendThrottledNotification(
+                        id: "tunnel-off-\(key)",
+                        title: "Protection Tunnel Disabled",
+                        body: "\(name)'s \(device.displayName) has the Big Brother tunnel disconnected. Monitoring may be limited.",
+                        throttleHours: 1
+                    )
+                }
+            }
 
-    /// Resolve the HeartbeatProfile for a device:
-    /// 1. Use the device's assigned profile if present.
-    /// 2. Fall back to the family default profile.
-    /// 3. Return nil if neither exists (caller uses hardcoded fallback).
-    private func resolveProfile(for device: ChildDevice) -> HeartbeatProfile? {
-        if let profileID = device.heartbeatProfileID,
-           let profile = appState.heartbeatProfiles.first(where: { $0.id == profileID }) {
-            return profile
-        }
-        return appState.heartbeatProfiles.first(where: { $0.isDefault })
-    }
+            // --- Location Authorization Detection (iPhone only) ---
+            if let hb = heartbeat, device.modelIdentifier.hasPrefix("iPhone") {
+                let childProfileID = device.childProfileID
+                let locMode = UserDefaults.standard.string(forKey: "locationMode.\(childProfileID.rawValue)")
+                let isLocationExpected = locMode != nil && locMode != "off"
+                let isOnline = Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds
+                if isLocationExpected && isOnline {
+                    let locAuth = hb.locationAuthorization
+                    if locAuth == "denied" || locAuth == "restricted" {
+                        let name = childName(for: device)
+                        sendThrottledNotification(
+                            id: "loc-disabled-\(key)",
+                            title: "Location Disabled",
+                            body: "\(name)'s \(device.displayName) has location permission \(locAuth ?? "unknown"). Change to Always in Settings.",
+                            throttleHours: 24
+                        )
+                    } else if locAuth == "whenInUse" {
+                        let name = childName(for: device)
+                        sendThrottledNotification(
+                            id: "loc-downgraded-\(key)",
+                            title: "Location Not Set to Always",
+                            body: "\(name)'s \(device.displayName) has location set to While Using App. Background tracking won't work.",
+                            throttleHours: 24
+                        )
+                    }
+                }
+            }
 
-    // MARK: - Active Probing
-
-    /// Send a requestHeartbeat command to wake a sleeping device via CloudKit
-    /// push notification.
-    private func sendPing(device: ChildDevice) {
-        Task {
-            do {
-                try await appState.sendCommand(
-                    target: .device(device.id),
-                    action: .requestHeartbeat
-                )
-            } catch {
-                #if DEBUG
-                print("[DeviceMonitor] Failed to ping \(device.displayName): \(error.localizedDescription)")
-                #endif
+            // --- Time Zone Change Detection ---
+            if let hb = heartbeat, let tz = hb.timeZoneIdentifier {
+                if let lastTZ = lastKnownTimeZones[device.id], lastTZ != tz {
+                    let name = childName(for: device)
+                    sendThrottledNotification(
+                        id: "tz-\(key)",
+                        title: "Time Zone Changed",
+                        body: "\(name)'s \(device.displayName) changed time zone from \(lastTZ) to \(tz).",
+                        throttleHours: 1
+                    )
+                }
+                lastKnownTimeZones[device.id] = tz
             }
         }
     }
@@ -301,25 +224,18 @@ final class DeviceMonitor {
         appState.childProfiles.first { $0.id == device.childProfileID }?.name ?? "Unknown"
     }
 
-    private func sendOfflineNotification(device: ChildDevice, heartbeat: DeviceHeartbeat?) {
-        let reason = offlineReason(heartbeat: heartbeat)
-
-        // Only notify for suspicious events (tampering, never connected).
-        // Normal offline (battery died, sleeping, etc.) is visible on the dashboard.
-        guard reason.isSuspicious else { return }
-
+    private func sendTamperNotification(device: ChildDevice, heartbeat: DeviceHeartbeat) {
         let content = UNMutableNotificationContent()
         let name = childName(for: device)
 
-        content.title = reason.title
-        content.body = "\(name)'s \(device.displayName) — \(reason.body)"
-
+        content.title = "Possible Tampering"
+        content.body = "\(name)'s \(device.displayName) — Screen Time permissions were revoked."
         content.sound = .defaultCritical
         content.interruptionLevel = .critical
         content.threadIdentifier = "device-monitor"
 
         let request = UNNotificationRequest(
-            identifier: "offline-\(device.id.rawValue)",
+            identifier: "tamper-\(device.id.rawValue)",
             content: content,
             trigger: nil
         )
@@ -327,90 +243,35 @@ final class DeviceMonitor {
         UNUserNotificationCenter.current().add(request) { error in
             #if DEBUG
             if let error {
-                print("[DeviceMonitor] Failed to post offline notification: \(error.localizedDescription)")
+                print("[DeviceMonitor] Failed to post tamper notification: \(error.localizedDescription)")
             }
             #endif
         }
     }
 
-    private func sendOnlineNotification(device: ChildDevice) {
-        // Remove the offline notification from Notification Center.
-        // No "back online" notification — the dashboard shows status,
-        // and these just flood the notification center with 8 devices.
-        UNUserNotificationCenter.current().removeDeliveredNotifications(
-            withIdentifiers: ["offline-\(device.id.rawValue)"]
-        )
-    }
-
-    // MARK: - Offline Reason Analysis
-
-    private struct OfflineReason {
-        let title: String
-        let body: String
-        let isSuspicious: Bool
-    }
-
-    /// Analyze the last known heartbeat to determine the most likely reason
-    /// the device went offline.
-    private func offlineReason(heartbeat: DeviceHeartbeat?) -> OfflineReason {
-        guard let hb = heartbeat else {
-            return OfflineReason(
-                title: "Device Never Connected",
-                body: "Has never checked in. The app may not be installed or running.",
-                isSuspicious: true
-            )
+    /// Send a local notification, but only if at least `throttleHours` have
+    /// elapsed since the last notification with the same `id`.
+    private func sendThrottledNotification(id: String, title: String, body: String, throttleHours: Int) {
+        let now = Date()
+        if let last = lastNotificationTimes[id],
+           now.timeIntervalSince(last) < Double(throttleHours) * 3600 {
+            return
         }
+        lastNotificationTimes[id] = now
 
-        let ago = formattedTimeSince(hb.timestamp)
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.threadIdentifier = "device-monitor"
 
-        // Low battery — likely died
-        if let battery = hb.batteryLevel, battery < 0.1, hb.isCharging != true {
-            return OfflineReason(
-                title: "Device Likely Out of Battery",
-                body: "Last seen \(ago) ago with \(Int(battery * 100))% battery. Probably powered off.",
-                isSuspicious: false
-            )
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            #if DEBUG
+            if let error {
+                print("[DeviceMonitor] Failed to post \(id) notification: \(error.localizedDescription)")
+            }
+            #endif
         }
-
-        // FamilyControls was revoked in last heartbeat — settings tampering
-        if hb.familyControlsAuthorized == false {
-            return OfflineReason(
-                title: "Possible Tampering",
-                body: "Last seen \(ago) ago. Screen Time permissions were revoked before going offline.",
-                isSuspicious: true
-            )
-        }
-
-        // Good battery, authorized, just vanished — suspicious (app deleted?)
-        if let battery = hb.batteryLevel, battery > 0.2 {
-            return OfflineReason(
-                title: "Device Went Silent",
-                body: "Last seen \(ago) ago with \(Int(battery * 100))% battery. Did not respond to \(Self.maxPingAttempts) wake attempts.",
-                isSuspicious: true
-            )
-        }
-
-        // Default — can't determine cause
-        return OfflineReason(
-            title: "Device Offline",
-            body: "Last seen \(ago) ago. Did not respond to \(Self.maxPingAttempts) wake attempts.",
-            isSuspicious: false
-        )
-    }
-
-    // MARK: - Helpers
-
-    private func formattedTimeSince(_ date: Date) -> String {
-        let interval = Date().timeIntervalSince(date)
-        let minutes = Int(interval / 60)
-        if minutes < 60 {
-            return "\(minutes) minute\(minutes == 1 ? "" : "s")"
-        }
-        let hours = minutes / 60
-        let remainingMinutes = minutes % 60
-        if remainingMinutes == 0 {
-            return "\(hours) hour\(hours == 1 ? "" : "s")"
-        }
-        return "\(hours)h \(remainingMinutes)m"
     }
 }

@@ -35,14 +35,14 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
     }
 
     var isChildAuthorization: Bool {
-        UserDefaults.standard.string(forKey: Self.authTypeKey) == "child"
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)!.string(forKey: Self.authTypeKey) == "child"
     }
 
     func requestAuthorization() async throws {
         // Try .child first (stronger — parent must authenticate, child can't revoke).
         do {
             try await AuthorizationCenter.shared.requestAuthorization(for: .child)
-            UserDefaults.standard.set("child", forKey: Self.authTypeKey)
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)!.set("child", forKey: Self.authTypeKey)
             #if DEBUG
             print("[BigBrother] FamilyControls authorized as .child")
             #endif
@@ -55,7 +55,7 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
 
         // Fall back to .individual (self-regulation — user can revoke).
         try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
-        UserDefaults.standard.set("individual", forKey: Self.authTypeKey)
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)!.set("individual", forKey: Self.authTypeKey)
         #if DEBUG
         print("[BigBrother] FamilyControls authorized as .individual")
         #endif

@@ -3,6 +3,7 @@ import Observation
 import BigBrotherCore
 
 @Observable
+@MainActor
 final class ScheduleProfileListViewModel {
     let appState: AppState
 

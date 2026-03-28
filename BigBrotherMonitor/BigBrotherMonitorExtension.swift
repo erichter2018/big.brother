@@ -47,11 +47,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private let lockUntilPrefix = "bigbrother.lockuntil."
 
     override func intervalDidStart(for activity: DeviceActivityName) {
+        // Record that the Monitor is alive (used by parent to detect force-close).
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+
         // Check if the main app needs to be launched after an update.
         checkAppLaunchNeeded()
 
-        // Reconciliation schedule — verify enforcement matches snapshot.
-        if activity.rawValue == "bigbrother.reconciliation" {
+        // Reconciliation schedule (fires every 15 min) — verify enforcement matches snapshot.
+        if activity.rawValue.hasPrefix("bigbrother.reconciliation") {
             reconcile()
             return
         }
@@ -103,7 +107,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     }
 
     override func intervalDidEnd(for activity: DeviceActivityName) {
-        if activity.rawValue == "bigbrother.reconciliation" { return }
+        if activity.rawValue.hasPrefix("bigbrother.reconciliation") { return }
 
         // Schedule profile free window ended — re-lock.
         if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
@@ -152,11 +156,65 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         logEvent(.scheduleEnded, details: "Schedule ended: \(activity.rawValue)")
     }
 
+    override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name, activity: DeviceActivityName) {
+        // Only handle usage tracking events.
+        guard activity.rawValue.hasPrefix("bigbrother.usagetracking"),
+              event.rawValue.hasPrefix("usage.") else { return }
+
+        // Parse the milestone minutes from the event name (e.g., "usage.120" -> 120).
+        let minuteString = String(event.rawValue.dropFirst("usage.".count))
+        guard let minutes = Int(minuteString) else { return }
+
+        // Write the highest milestone reached to App Group so the heartbeat can relay it.
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let today = Self.todayDateString()
+        let dateKey = "screenTimeDate"
+        let minutesKey = "screenTimeMinutes"
+
+        let existingDate = defaults?.string(forKey: dateKey)
+        let existingMinutes = defaults?.integer(forKey: minutesKey) ?? 0
+
+        // Only update if today's date matches and the new milestone is higher.
+        if existingDate == today {
+            if minutes > existingMinutes {
+                defaults?.set(minutes, forKey: minutesKey)
+            }
+        } else {
+            // New day — reset.
+            defaults?.set(today, forKey: dateKey)
+            defaults?.set(minutes, forKey: minutesKey)
+        }
+
+        // Record Monitor activity timestamp.
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+
+        #if DEBUG
+        print("[BigBrother] Usage milestone: \(minutes) minutes")
+        #endif
+    }
+
     // MARK: - Schedule Profile Handling
 
     /// Free window started: check if today is a valid day, then unlock.
     private func handleFreeWindowStart(_ activity: DeviceActivityName) {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("freeWindowStart", forKey: "lastShieldChangeReason")
+
+        // Manual mode override — skip schedule-driven changes.
+        let freeStartDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let freeStartScheduleDriven = freeStartDefaults?.object(forKey: "scheduleDrivenMode") == nil
+            || (freeStartDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+        if !freeStartScheduleDriven { return }
+
         guard let profile = storage.readActiveScheduleProfile() else { return }
+
+        // Exception date — schedule suspended, ensure device stays unlocked.
+        if profile.isExceptionDate(Date()) {
+            clearAllShieldStores()
+            updateSharedState(mode: .unlocked)
+            return
+        }
 
         let windowID = extractWindowID(from: activity, prefix: scheduleProfilePrefix)
         guard let window = profile.freeWindows.first(where: { $0.id.uuidString == windowID }) else {
@@ -167,6 +225,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Uses ActiveWindow.contains() which correctly handles cross-midnight
         // windows and yesterday's day-of-week for the morning portion.
         guard window.contains(Date()) else { return }
+
+        // Block scheduled unlocks if the main app was force-closed.
+        if shouldTreatMainAppAsUnavailable() {
+            sendForceCloseNag()
+            logEvent(.scheduleTriggered, details: "Free window blocked — app force-closed: \(activity.rawValue)")
+            return
+        }
 
         // Unlock: clear ALL shield stores (base + schedule + default).
         // ManagedSettings merges across stores with OR logic — clearing only
@@ -182,7 +247,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Free window ended: re-apply the profile's locked mode.
     private func handleFreeWindowEnd(_ activity: DeviceActivityName) {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("freeWindowEnd", forKey: "lastShieldChangeReason")
+
+        // Manual mode override — skip schedule-driven changes.
+        let freeEndDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let freeEndScheduleDriven = freeEndDefaults?.object(forKey: "scheduleDrivenMode") == nil
+            || (freeEndDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+        if !freeEndScheduleDriven { return }
+
         guard let profile = storage.readActiveScheduleProfile() else { return }
+
+        // Exception date — don't re-lock.
+        if profile.isExceptionDate(Date()) { return }
 
         // Check if we're currently inside another free window.
         // If so, don't lock — the device should stay free.
@@ -199,6 +276,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             applyShieldingToAllStores(mode: mode, policy: policy)
         }
         updateSharedState(mode: mode)
+        if mode != .unlocked {
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
+        }
 
         logEvent(.scheduleEnded, details: "Free window ended, mode \(mode.rawValue)")
         sendModeNotification(
@@ -211,7 +292,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Essential window started: apply essential-only mode if today matches.
     private func handleEssentialWindowStart(_ activity: DeviceActivityName) {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("essentialStart", forKey: "lastShieldChangeReason")
+
+        // Manual mode override — skip schedule-driven changes.
+        let essStartDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let essStartScheduleDriven = essStartDefaults?.object(forKey: "scheduleDrivenMode") == nil
+            || (essStartDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+        if !essStartScheduleDriven { return }
+
         guard let profile = storage.readActiveScheduleProfile() else { return }
+
+        // Exception date — schedule suspended, ensure device stays unlocked.
+        if profile.isExceptionDate(Date()) {
+            clearAllShieldStores()
+            updateSharedState(mode: .unlocked)
+            return
+        }
 
         let windowID = extractWindowID(from: activity, prefix: essentialWindowPrefix)
         guard let window = profile.essentialWindows.first(where: { $0.id.uuidString == windowID }) else {
@@ -225,6 +322,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if profile.isInFreeWindow(at: Date()) { return }
 
         // Apply essential-only mode on ALL stores.
+        // Never block tightening restrictions — essential mode should ALWAYS apply,
+        // even if the main app is force-closed/suspended.
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
         updateSharedState(mode: .essentialOnly)
@@ -234,7 +333,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Essential window ended: return to the profile's locked mode.
     private func handleEssentialWindowEnd(_ activity: DeviceActivityName) {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("essentialEnd", forKey: "lastShieldChangeReason")
+
+        // Manual mode override — skip schedule-driven changes.
+        let essEndDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let essEndScheduleDriven = essEndDefaults?.object(forKey: "scheduleDrivenMode") == nil
+            || (essEndDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+        if !essEndScheduleDriven { return }
+
         guard let profile = storage.readActiveScheduleProfile() else { return }
+
+        // Exception date — don't re-lock.
+        if profile.isExceptionDate(Date()) { return }
 
         // If in a free window, don't re-lock.
         if profile.isInFreeWindow(at: Date()) { return }
@@ -277,6 +388,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
         updateSharedState(mode: mode)
         try? storage.clearTimedUnlockInfo()
+        if mode != .unlocked {
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
+        }
         logEvent(.scheduleEnded, details: "Timed unlock ended, mode \(mode.rawValue)")
         sendModeNotification(title: "Free Time Ended", body: mode == .unlocked ? "Free window — all apps accessible." : "Device locked — \(mode.displayName) mode active.")
     }
@@ -305,6 +420,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         applyShieldingToAllStores(mode: mode, policy: policy)
         updateSharedState(mode: mode)
         try? storage.clearTemporaryUnlockState()
+        // Record when the device naturally re-locked so force-close detection
+        // gives extra grace time (the app may be suspended from a game).
+        defaults?.set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
         logEvent(.temporaryUnlockExpired, details: "Temp unlock expired, locked to \(mode.rawValue)")
         sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
     }
@@ -313,6 +431,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Lock-until timer expired — return to schedule-driven mode.
     private func handleLockUntilExpired(_ activity: DeviceActivityName) {
+        // Manual mode override — skip schedule-driven changes.
+        let lockUntilDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let lockUntilScheduleDriven = lockUntilDefaults?.object(forKey: "scheduleDrivenMode") == nil
+            || (lockUntilDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+        if !lockUntilScheduleDriven { return }
+
         let mode: LockMode
         if let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
@@ -341,6 +465,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Must work even if the main app was force-killed before writing ExtensionSharedState.
     /// Falls back to PolicySnapshot + ScheduleProfile when ExtensionSharedState is nil.
     private func reconcile() {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("reconcile", forKey: "lastShieldChangeReason")
         let extState = storage.readExtensionSharedState()
 
         // --- Temporary unlock checks (only if ExtensionSharedState exists) ---
@@ -447,23 +573,60 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        // --- Schedule profile window check (free > essential > lockedMode) ---
+        // --- Check if parent overrode the schedule with a manual mode command ---
 
-        if let profile = storage.readActiveScheduleProfile() {
+        let reconcileDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let isScheduleDriven = reconcileDefaults?.object(forKey: "scheduleDrivenMode") == nil
+            || (reconcileDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+
+        // --- Schedule profile window check (free > essential > lockedMode) ---
+        // Only apply schedule-driven modes if scheduleDrivenMode is true.
+        // When a parent sends a manual setMode command, scheduleDrivenMode is set to false
+        // and the manual mode should persist until the parent sends returnToSchedule.
+
+        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
             let scheduleMode = profile.resolvedMode(at: Date())
-            if scheduleMode == .unlocked {
-                clearAllShieldStores()
-                updateSharedState(mode: .unlocked)
-                logEvent(.policyReconciled, details: "Reconciliation: in free window, stores cleared")
-                return
-            } else if scheduleMode == .essentialOnly {
-                let policy = storage.readPolicySnapshot()?.effectivePolicy
-                applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
-                updateSharedState(mode: .essentialOnly)
-                logEvent(.policyReconciled, details: "Reconciliation: in essential window, essential mode applied")
-                return
+            if scheduleMode == .unlocked || scheduleMode == .essentialOnly {
+                // Block scheduled UNLOCKS if the main app was force-closed (security).
+                // But NEVER block essential mode — tightening restrictions is always safe
+                // and should happen regardless of app state.
+                if scheduleMode == .unlocked && shouldTreatMainAppAsUnavailable() {
+                    sendForceCloseNag()
+                    logEvent(.policyReconciled, details: "Reconciliation: unlock blocked — app dead, essential mode")
+                    return
+                } else if scheduleMode == .unlocked {
+                    clearAllShieldStores()
+                    updateSharedState(mode: .unlocked)
+                    logEvent(.policyReconciled, details: "Reconciliation: in free window, stores cleared")
+                    return
+                } else {
+                    let policy = storage.readPolicySnapshot()?.effectivePolicy
+                    applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
+                    updateSharedState(mode: .essentialOnly)
+                    logEvent(.policyReconciled, details: "Reconciliation: in essential window, essential mode applied")
+                    return
+                }
             }
             // lockedMode falls through to default enforcement below
+        }
+
+        // --- Force-close check (regardless of schedule profile) ---
+
+        if shouldTreatMainAppAsUnavailable() {
+            sendForceCloseNag()
+            logEvent(.policyReconciled, details: "Reconciliation: app dead — essential mode until BB reopened")
+            return
+        }
+
+        // --- Final temp unlock safety check ---
+        // If a temp unlock is active in storage, always clear shields regardless of
+        // what the snapshot or shared state says. This catches cases where the snapshot
+        // was overwritten by a non-unlock command but the unlock is still active.
+        if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
+            clearAllShieldStores()
+            updateSharedState(mode: .unlocked, isTemporaryUnlock: true, temporaryUnlockExpiresAt: tempState.expiresAt)
+            logEvent(.policyReconciled, details: "Reconciliation: temp unlock active, shields cleared")
+            return
         }
 
         // --- Default: apply the current mode from ExtensionSharedState or PolicySnapshot ---
@@ -583,13 +746,21 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     // MARK: - Single-Store Shielding (legacy fallback)
 
     private func applyShielding(mode: LockMode, policy: EffectivePolicy?) {
+        // Prefer the multi-store path when possible — the legacy single-store path
+        // doesn't handle essential mode correctly. Resolve schedule profile mode first.
+        if let profile = storage.readActiveScheduleProfile() {
+            let resolvedMode = profile.resolvedMode(at: Date())
+            applyShieldingToAllStores(mode: resolvedMode, policy: policy)
+            return
+        }
+
         switch mode {
         case .unlocked:
             store.clearAllSettings()
 
         case .dailyMode, .essentialOnly:
-            // Read allowed tokens from App Group (same source as main app).
-            let allowedTokens = collectAllowedTokens()
+            let allowExemptions = mode == .dailyMode
+            let allowedTokens = allowExemptions ? collectAllowedTokens() : []
             if allowedTokens.isEmpty {
                 store.shield.applicationCategories = .all()
             } else {
@@ -652,6 +823,17 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// The main app checks this every 30 seconds and sends a forced heartbeat if set.
     private func requestHeartbeat() {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
+        let ackToken = defaults?.string(forKey: "extensionHeartbeatAcknowledgedToken")
+
+        // Keep a single unresolved liveness request outstanding until the main
+        // app positively acknowledges it. Rewriting the timestamp every
+        // reconciliation cycle prevents the request from ever going stale.
+        if let requestToken, !requestToken.isEmpty, ackToken != requestToken {
+            return
+        }
+
+        defaults?.set(UUID().uuidString, forKey: "extensionHeartbeatRequestToken")
         defaults?.set(Date().timeIntervalSince1970, forKey: "extensionHeartbeatRequestedAt")
     }
 
@@ -660,7 +842,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private func updateSharedState(mode: LockMode, isTemporaryUnlock: Bool = false, temporaryUnlockExpiresAt: Date? = nil) {
         let snapshot = storage.readPolicySnapshot()
         let authHealth = storage.readAuthorizationHealth()
-        let shieldConfig = try? storage.readShieldConfiguration()
+        let shieldConfig = storage.readShieldConfiguration()
         let state = ExtensionSharedState(
             currentMode: mode,
             isTemporaryUnlock: isTemporaryUnlock,
@@ -674,8 +856,137 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         requestHeartbeat()
     }
 
+    /// Detect if the main app was force-closed by the user (not just suspended by iOS).
+    ///
+    /// Two-signal detection to distinguish force-close from iOS suspension:
+    /// 1. extensionHeartbeatRequestedAt flag is stale (>16 min) — means the main app
+    ///    never cleared it, so the app process is not running
+    /// 2. Heartbeat age exceeds threshold (20 min locked / 45 min unlocked)
+    ///
+    /// If BOTH signals are present, the app is force-closed.
+    /// If only heartbeat is stale but the flag was cleared, the app is alive but
+    /// having CloudKit issues — do NOT treat as force-close.
+    private func isAppForceClosed() -> Bool {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+
+        // Signal 0: Build mismatch — the app was updated but hasn't launched yet.
+        // After an update, the ack token still matches the request token (from the
+        // old binary), so the normal flag-based detection fails. Treat this as
+        // equivalent to force-close once heartbeats are stale.
+        let mainAppBuild = defaults?.integer(forKey: "mainAppLastLaunchedBuild") ?? 0
+        let buildMismatch = mainAppBuild > 0 && mainAppBuild < AppConstants.appBuildNumber
+
+        // Signal 1: Check if the extension heartbeat request flag is stale.
+        // The main app must explicitly acknowledge the current request token.
+        // If the outstanding request ages past one reconciliation cycle, the
+        // process is no longer servicing extension liveness checks.
+        let flagIsStale: Bool
+        let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
+        let ackToken = defaults?.string(forKey: "extensionHeartbeatAcknowledgedToken")
+        let requestedAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt") ?? 0
+        if let requestToken, !requestToken.isEmpty, requestToken != ackToken, requestedAt > 0 {
+            let flagAge = Date().timeIntervalSince1970 - requestedAt
+            flagIsStale = flagAge > AppConstants.forceCloseFlagStaleness
+        } else {
+            // No unresolved request — can't confirm force-close via this signal.
+            flagIsStale = false
+        }
+
+        // Signal 2: Check heartbeat staleness.
+        let lastHeartbeatAt = defaults?.double(forKey: "lastHeartbeatSentAt") ?? 0
+        guard lastHeartbeatAt > 0 else {
+            // No heartbeat ever sent — app may not have finished initial setup.
+            return false
+        }
+        let heartbeatAge = Date().timeIntervalSince1970 - lastHeartbeatAt
+
+        let currentMode = storage.readExtensionSharedState()?.currentMode ?? .dailyMode
+        let threshold = currentMode == .unlocked
+            ? AppConstants.forceCloseThresholdUnlocked
+            : AppConstants.forceCloseThresholdLocked
+
+        let heartbeatIsStale = heartbeatAge > threshold
+
+        // Build mismatch + stale heartbeat = app updated but never re-launched.
+        // Flag + stale heartbeat = app was force-closed or killed.
+        // Either combination is sufficient for force-close detection.
+        return heartbeatIsStale && (flagIsStale || buildMismatch)
+    }
+
+    /// Once fail-safe mode is active, keep it latched until the main app
+    /// explicitly clears it after proving liveness.
+    /// Exception: during a parent-sanctioned temporary unlock, the app being
+    /// killed is expected (games use memory) — don't lock the device.
+    private func shouldTreatMainAppAsUnavailable() -> Bool {
+        // During an active temp unlock, the kid is supposed to be using the device.
+        // iOS may kill the main app due to memory pressure from games — that's fine.
+        if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
+            return false
+        }
+        // Also check timed unlock (penalty-offset unlocks)
+        if let timedInfo = storage.readTimedUnlockInfo() {
+            let now = Date()
+            if now >= timedInfo.unlockAt && now < timedInfo.lockAt {
+                return false  // In the free phase of a timed unlock
+            }
+        }
+
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if defaults?.bool(forKey: "forceCloseWebBlocked") == true {
+            // But clear the latch if a temp unlock started AFTER the latch was set
+            if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
+                defaults?.removeObject(forKey: "forceCloseWebBlocked")
+                return false
+            }
+            return true
+        }
+        return isAppForceClosed()
+    }
+
+    /// Apply essential-only mode and nag the kid to open Big Brother.
+    /// Essential mode blocks most apps but allows phone, messages, and other
+    /// essentials — less aggressive than blocking everything, but still enforced.
+    /// When the main app launches, it clears the forceCloseWebBlocked flag and
+    /// re-applies normal enforcement with proper exemptions via performRestoration().
+    private func sendForceCloseNag() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        defaults?.set("appClosed", forKey: "lastShieldChangeReason")
+
+        // Apply essential-only mode on all stores — no exemptions.
+        if defaults?.bool(forKey: "forceCloseWebBlocked") != true {
+            defaults?.set(true, forKey: "forceCloseWebBlocked")
+            let policy = storage.readPolicySnapshot()?.effectivePolicy
+            applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
+        }
+        updateSharedState(mode: .essentialOnly)
+
+        // Throttle notification: don't nag more than once per 15 minutes.
+        // Every reconciliation cycle re-triggers this, so throttle prevents spam.
+        let lastNagAt = defaults?.double(forKey: "forceCloseLastNagAt") ?? 0
+        let nagAge = Date().timeIntervalSince1970 - lastNagAt
+        guard nagAge > 900 else { return }  // 15 minutes
+        defaults?.set(Date().timeIntervalSince1970, forKey: "forceCloseLastNagAt")
+
+        let content = UNMutableNotificationContent()
+        content.title = "Essential Mode"
+        content.body = "Open Big Brother to restore your full app access."
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+
+        let request = UNNotificationRequest(
+            identifier: "force-close-nag",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
     /// Check if the main app has been launched since the last update.
-    /// If not, post a one-time notification to prompt the kid to open it.
+    /// If not, apply enforcement immediately and notify the kid to open the app.
+    ///
+    /// After an app update the main app doesn't auto-launch, and DeviceActivity
+    /// schedule registrations may be lost. Without this, the device can stay
+    /// unlocked indefinitely until someone manually opens the app.
     private func checkAppLaunchNeeded() {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let mainAppBuild = defaults?.integer(forKey: "mainAppLastLaunchedBuild") ?? 0
@@ -683,6 +994,25 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Main app has launched with this build — nothing to do.
         guard mainAppBuild < extensionBuild else { return }
+
+        // Don't lock during an active temp unlock — the kid is supposed to be using the device.
+        if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
+            logEvent(.policyReconciled, details: "Post-update: skipping essential mode — temp unlock active")
+            return
+        }
+
+        // Apply essential-only mode immediately — the app isn't running so we
+        // can't trust the full enforcement pipeline.
+        defaults?.set("appClosed", forKey: "lastShieldChangeReason")
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
+        updateSharedState(mode: .essentialOnly)
+        logEvent(.policyReconciled, details: "Post-update essential mode (main app build \(mainAppBuild) < extension build \(extensionBuild))")
+
+        // Re-register reconciliation schedule — DeviceActivity registrations
+        // may have been lost during the update. This ensures the Monitor keeps
+        // firing even if the main app is never opened.
+        reregisterReconciliationSchedule()
 
         // Only notify once per build.
         let lastNotifiedBuild = defaults?.integer(forKey: "extensionLaunchNotifiedBuild") ?? 0
@@ -693,6 +1023,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         content.title = "Big Brother Updated"
         content.body = "Tap to finish setup and enable full monitoring."
         content.sound = .default
+        content.interruptionLevel = .timeSensitive
 
         let request = UNNotificationRequest(
             identifier: "app-launch-needed",
@@ -700,6 +1031,35 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Re-register the 15-minute reconciliation schedule from the Monitor extension.
+    /// Called after an app update to ensure the Monitor keeps firing.
+    private func reregisterReconciliationSchedule() {
+        let center = DeviceActivityCenter()
+        let quarters: [(name: String, minute: Int)] = [
+            ("bigbrother.reconciliation", 0),
+            ("bigbrother.reconciliation.q2", 15),
+            ("bigbrother.reconciliation.q3", 30),
+            ("bigbrother.reconciliation.q4", 45),
+        ]
+        for q in quarters {
+            let activityName = DeviceActivityName(rawValue: q.name)
+            let start = DateComponents(minute: q.minute)
+            let end = DateComponents(minute: q.minute + 1)
+            let schedule = DeviceActivitySchedule(
+                intervalStart: start,
+                intervalEnd: end,
+                repeats: true
+            )
+            try? center.startMonitoring(activityName, during: schedule)
+        }
+    }
+
+    private static func todayDateString() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
     }
 
     private func logEvent(_ type: EventType, details: String?) {

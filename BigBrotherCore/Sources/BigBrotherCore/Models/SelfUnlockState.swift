@@ -6,6 +6,9 @@ import Foundation
 /// even when offline. The `date` field enables automatic midnight reset
 /// without requiring a timer — when the local date changes, `usedCount`
 /// is treated as 0.
+///
+/// Time zone manipulation is prevented by `requireAutomaticDateAndTime`
+/// (enforced via ManagedSettings on the default store, persists during unlocks).
 public struct SelfUnlockState: Codable, Sendable, Equatable {
     /// Calendar date string ("yyyy-MM-dd") this state applies to.
     /// When the current local date differs, the counter resets.
@@ -51,7 +54,8 @@ public struct SelfUnlockState: Codable, Sendable, Equatable {
     }
 
     /// Format today's date as "yyyy-MM-dd" in the device's local calendar.
-    /// Uses Calendar directly instead of DateFormatter for thread safety.
+    /// Uses local time so the budget resets at local midnight.
+    /// Time zone manipulation is blocked by requireAutomaticDateAndTime.
     public static func todayDateString() -> String {
         let comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
         return String(format: "%04d-%02d-%02d", comps.year ?? 0, comps.month ?? 0, comps.day ?? 0)

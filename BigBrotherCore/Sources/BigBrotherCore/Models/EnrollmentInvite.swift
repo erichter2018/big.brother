@@ -16,6 +16,9 @@ public struct EnrollmentInvite: Codable, Sendable, Equatable {
     public var used: Bool
     public var usedByDeviceID: DeviceID?
     public var revoked: Bool
+    /// Parent's ED25519 public key (base64) for command signature verification.
+    /// Delivered to child during enrollment so it can verify parent commands.
+    public let commandSigningPublicKeyBase64: String?
 
     public var isExpired: Bool {
         Date() > expiresAt
@@ -38,7 +41,8 @@ public struct EnrollmentInvite: Codable, Sendable, Equatable {
         expiresAt: Date? = nil,
         used: Bool = false,
         usedByDeviceID: DeviceID? = nil,
-        revoked: Bool = false
+        revoked: Bool = false,
+        commandSigningPublicKeyBase64: String? = nil
     ) {
         self.code = code
         self.familyID = familyID
@@ -48,5 +52,6 @@ public struct EnrollmentInvite: Codable, Sendable, Equatable {
         self.used = used
         self.usedByDeviceID = usedByDeviceID
         self.revoked = revoked
+        self.commandSigningPublicKeyBase64 = commandSigningPublicKeyBase64
     }
 }

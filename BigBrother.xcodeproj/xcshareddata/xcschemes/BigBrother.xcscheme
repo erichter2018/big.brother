@@ -85,6 +85,20 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "B99F0F7ED02D78E31DACA459"
+               BuildableName = "BigBrotherTunnel.appex"
+               BlueprintName = "BigBrotherTunnel"
+               ReferencedContainer = "container:BigBrother.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "5FD4A56BC4865664985066C4"
                BuildableName = "BigBrotherWidget.appex"
                BlueprintName = "BigBrotherWidget"
@@ -133,6 +147,9 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
       </CommandLineArguments>
+      <StoreKitConfigurationFileReference
+         identifier = "../../BigBrotherStore.storekit">
+      </StoreKitConfigurationFileReference>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"

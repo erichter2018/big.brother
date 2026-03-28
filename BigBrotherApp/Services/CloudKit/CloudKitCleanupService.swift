@@ -1,6 +1,9 @@
 import Foundation
 import CloudKit
+import os.log
 import BigBrotherCore
+
+private let cleanupLogger = Logger(subsystem: "fr.bigbrother.app", category: "CloudKitCleanup")
 
 /// Periodically prunes stale CloudKit records to prevent unbounded growth.
 ///
@@ -35,7 +38,7 @@ enum CloudKitCleanupService {
 
         // 1. Old commands (applied, failed, or expired).
         let commandCutoff = Date().addingTimeInterval(-commandRetention)
-        for status in ["applied", "failed", "expired", "pending"] {
+        for status in ["applied", "failed", "expired"] {
             let predicate = NSPredicate(
                 format: "%K == %@ AND %K == %@ AND %K < %@",
                 CKFieldName.familyID, familyID.rawValue,
@@ -54,9 +57,7 @@ enum CloudKitCleanupService {
                 }
                 #endif
             } catch {
-                #if DEBUG
-                print("[Cleanup] Failed to clean \(status) commands: \(error.localizedDescription)")
-                #endif
+                cleanupLogger.warning("Failed to clean \(status) commands: \(error.localizedDescription)")
             }
         }
 
@@ -78,9 +79,7 @@ enum CloudKitCleanupService {
             }
             #endif
         } catch {
-            #if DEBUG
-            print("[Cleanup] Failed to clean receipts: \(error.localizedDescription)")
-            #endif
+            cleanupLogger.warning("Failed to clean receipts: \(error.localizedDescription)")
         }
 
         // 3. Old event logs.
@@ -102,9 +101,29 @@ enum CloudKitCleanupService {
             }
             #endif
         } catch {
+            cleanupLogger.warning("Failed to clean event logs: \(error.localizedDescription)")
+        }
+
+        // 4. Old location breadcrumbs (older than 30 days).
+        let locationCutoff = Date().addingTimeInterval(-30 * 86400)
+        let locationPredicate = NSPredicate(
+            format: "%K == %@ AND %K < %@",
+            CKFieldName.familyID, familyID.rawValue,
+            CKFieldName.locTimestamp, locationCutoff as NSDate
+        )
+        do {
+            let count = try await cloudKit.deleteRecords(
+                type: CKRecordType.deviceLocation,
+                predicate: locationPredicate
+            )
+            total += count
             #if DEBUG
-            print("[Cleanup] Failed to clean event logs: \(error.localizedDescription)")
+            if count > 0 {
+                print("[Cleanup] Deleted \(count) old location breadcrumbs")
+            }
             #endif
+        } catch {
+            cleanupLogger.warning("Failed to clean location breadcrumbs: \(error.localizedDescription)")
         }
 
         #if DEBUG

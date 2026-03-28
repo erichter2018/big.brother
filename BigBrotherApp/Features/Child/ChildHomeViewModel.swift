@@ -1,5 +1,7 @@
 import Foundation
 import Observation
+import CoreLocation
+import UIKit
 import BigBrotherCore
 
 @Observable @MainActor
@@ -24,6 +26,26 @@ final class ChildHomeViewModel {
     /// Whether the current snapshot's policy is driven by a schedule (vs a parent command).
     /// Stored property refreshed by the 1s timer so UI reacts to command changes.
     var isScheduleDriving = false
+
+    // MARK: - Parent Messages
+
+    /// Undismissed messages from parents, newest first. Cached to avoid disk reads on every body eval.
+    var undismissedMessages: [ParentMessage] = []
+
+    func refreshMessages() {
+        undismissedMessages = appState.storage.readParentMessages()
+            .filter { !$0.dismissed }
+            .sorted { $0.sentAt > $1.sentAt }
+    }
+
+    /// Dismiss a parent message by marking it as dismissed in storage.
+    func dismissMessage(_ id: UUID) {
+        var messages = appState.storage.readParentMessages()
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[index].dismissed = true
+        try? appState.storage.writeParentMessages(messages)
+        refreshMessages()
+    }
 
     var currentMode: LockMode {
         appState.currentEffectivePolicy?.resolvedMode ?? .unlocked
@@ -125,6 +147,32 @@ final class ChildHomeViewModel {
 
     var needsReauthorization: Bool {
         appState.familyControlsAvailable && appState.enforcement?.authorizationStatus != .authorized
+    }
+
+    // MARK: - Location Authorization
+
+    /// Cached location authorization status, refreshed on timer tick.
+    var cachedLocationAuthStatus: CLAuthorizationStatus = CLLocationManager.authorizationStatus()
+
+    /// True when location tracking is enabled but permission is denied or restricted.
+    var needsLocationPermission: Bool {
+        guard let locService = appState.locationService, locService.mode != .off else { return false }
+        return cachedLocationAuthStatus == .denied || cachedLocationAuthStatus == .restricted
+    }
+
+    /// True when location permission hasn't been requested yet.
+    var locationNotDetermined: Bool {
+        cachedLocationAuthStatus == .notDetermined
+    }
+
+    func openAppSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
+    }
+
+    func requestLocationPermission() {
+        appState.locationService?.setMode(appState.locationService?.mode ?? .onDemand)
     }
 
     // MARK: - Self Unlock
@@ -431,7 +479,8 @@ final class ChildHomeViewModel {
     }
 
     func refreshScheduleDriving() {
-        isScheduleDriving = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.bool(forKey: "scheduleDrivenMode") ?? false
+        isScheduleDriving = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.bool(forKey: "scheduleDrivenMode") ?? true
+        cachedLocationAuthStatus = CLLocationManager.authorizationStatus()
     }
 
     /// Tracks which timed unlock phase we last saw, to detect transitions.
@@ -442,6 +491,7 @@ final class ChildHomeViewModel {
     func startTimer() {
         refreshPINConfigured()
         refreshScheduleDriving()
+        refreshMessages()
         // Initialize phase without triggering transition actions.
         let startNow = Date()
         if let info = timedUnlockInfo {
@@ -458,9 +508,10 @@ final class ChildHomeViewModel {
                 self.now = Date()
                 self.checkTimedUnlockPhases()
                 self.refreshScheduleDriving()
-                // Check schedule transitions every 10s (not every 1s — disk reads).
+                // Refresh messages every 10s (not every 1s — disk reads).
                 self.scheduleCheckCounter += 1
                 if self.scheduleCheckCounter >= 10 {
+                    self.refreshMessages()
                     self.scheduleCheckCounter = 0
                     self.appState.enforceScheduleTransition()
                 }

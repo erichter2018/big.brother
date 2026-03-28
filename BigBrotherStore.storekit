@@ -1,0 +1,74 @@
+{
+  "identifier" : "BigBrotherStore",
+  "type" : "Configuration",
+  "version" : 3,
+  "subscriptionGroups" : [
+    {
+      "id" : "group.bigbrother.family",
+      "localizations" : [
+        {
+          "description" : "Big Brother Family Plan",
+          "displayName" : "Big Brother Family",
+          "locale" : "en_US"
+        }
+      ],
+      "name" : "Big Brother Family",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [],
+          "codeOffers" : [],
+          "displayPrice" : "49.99",
+          "familyShareable" : true,
+          "groupNumber" : 1,
+          "internalID" : "annual001",
+          "introductoryOffer" : {
+            "displayPrice" : "0",
+            "internalID" : "annual_trial",
+            "numberOfPeriods" : 1,
+            "paymentMode" : "free",
+            "subscriptionPeriod" : "P2W"
+          },
+          "localizations" : [
+            {
+              "description" : "Full access to Big Brother — save 40% vs monthly",
+              "displayName" : "Annual",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "fr.bigbrother.app.annual",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Annual",
+          "subscriptionGroupID" : "group.bigbrother.family",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [],
+          "codeOffers" : [],
+          "displayPrice" : "6.99",
+          "familyShareable" : true,
+          "groupNumber" : 2,
+          "internalID" : "monthly001",
+          "introductoryOffer" : {
+            "displayPrice" : "0",
+            "internalID" : "monthly_trial",
+            "numberOfPeriods" : 1,
+            "paymentMode" : "free",
+            "subscriptionPeriod" : "P2W"
+          },
+          "localizations" : [
+            {
+              "description" : "Full access to Big Brother parental controls",
+              "displayName" : "Monthly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "fr.bigbrother.app.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Monthly",
+          "subscriptionGroupID" : "group.bigbrother.family",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ]
+}

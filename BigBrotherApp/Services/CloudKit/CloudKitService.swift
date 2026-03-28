@@ -52,7 +52,9 @@ protocol CloudKitServiceProtocol: Sendable {
 
     // MARK: - Events
 
-    func syncEventLogs(_ entries: [EventLogEntry]) async throws
+    /// Upload event log entries. Returns the set of event IDs that succeeded.
+    @discardableResult
+    func syncEventLogs(_ entries: [EventLogEntry]) async throws -> Set<UUID>
     func fetchEventLogs(familyID: FamilyID, since: Date) async throws -> [EventLogEntry]
     func deleteEventLog(_ id: UUID) async throws
 
@@ -79,6 +81,23 @@ protocol CloudKitServiceProtocol: Sendable {
     func fetchScheduleProfiles(familyID: FamilyID) async throws -> [ScheduleProfile]
     func saveScheduleProfile(_ profile: ScheduleProfile) async throws
     func deleteScheduleProfile(_ id: UUID) async throws
+
+    // MARK: - Location
+
+    func saveLocationBreadcrumb(_ location: DeviceLocation) async throws
+    func fetchLocationBreadcrumbs(deviceID: DeviceID, since: Date) async throws -> [DeviceLocation]
+    func purgeLocationBreadcrumbs(deviceID: DeviceID, olderThan: Date) async throws
+
+    // MARK: - Named Places
+
+    func fetchNamedPlaces(familyID: FamilyID) async throws -> [NamedPlace]
+    func saveNamedPlace(_ place: NamedPlace) async throws
+    func deleteNamedPlace(_ id: UUID) async throws
+
+    // MARK: - Diagnostic Reports
+
+    func saveDiagnosticReport(_ report: DiagnosticReport) async throws
+    func fetchDiagnosticReports(deviceID: DeviceID) async throws -> [DiagnosticReport]
 
     // MARK: - Cleanup
 

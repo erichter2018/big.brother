@@ -59,6 +59,8 @@ struct GlobalActionsBar: View {
                     Task { await viewModel.unlockAll(seconds: 15 * 60) }
                 }
             }
+            .accessibilityLabel("Unlock All Devices")
+            .accessibilityHint("Unlocks all children's devices. Long press for more options.")
 
             // Lock All (tap = until midnight, menu = duration options)
             Menu {
@@ -70,7 +72,7 @@ struct GlobalActionsBar: View {
                     Label("Until Midnight", systemImage: "moon.fill")
                 }
                 Button { Task { await viewModel.lockAll(duration: .indefinite) } } label: {
-                    Label("Indefinite", systemImage: "lock.fill")
+                    Label("Until I unlock", systemImage: "lock.fill")
                 }
                 Divider()
                 Button { Task { await viewModel.lockAll(duration: .hours(1)) } } label: {
@@ -87,6 +89,8 @@ struct GlobalActionsBar: View {
             } primaryAction: {
                 Task { await viewModel.lockAll(duration: .untilMidnight) }
             }
+            .accessibilityLabel("Lock All Devices")
+            .accessibilityHint("Locks all children's devices. Long press for more options.")
 
             // Schedule All
             Button {
@@ -94,6 +98,7 @@ struct GlobalActionsBar: View {
             } label: {
                 chipLabel("Schedule", icon: "calendar.badge.clock", color: Color(.systemOrange).opacity(0.7))
             }
+            .accessibilityLabel("Return All Devices to Schedule")
         }
         .disabled(viewModel.isSendingCommand)
         .opacity(viewModel.isSendingCommand ? 0.6 : 1)

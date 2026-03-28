@@ -9,6 +9,7 @@ struct EnrollmentCodeView: View {
     @State private var invite: EnrollmentInvite?
     @State private var isGenerating = false
     @State private var errorMessage: String?
+    @State private var copied = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -36,6 +37,22 @@ struct EnrollmentCodeView: View {
                         .padding()
                         .background(.blue.opacity(0.1))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .accessibilityLabel("Enrollment code: \(invite.code)")
+
+                    Button {
+                        UIPasteboard.general.string = invite.code
+                        copied = true
+                        Task {
+                            try? await Task.sleep(for: .seconds(2))
+                            withAnimation { copied = false }
+                        }
+                    } label: {
+                        Label(copied ? "Copied!" : "Copy to Clipboard",
+                              systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(copied ? .green : .blue)
+                    .animation(.easeInOut, value: copied)
 
                     Text("Code expires in 30 minutes")
                         .font(.caption)
@@ -75,7 +92,11 @@ struct EnrollmentCodeView: View {
 
     private func generateCode() {
         guard let enrollment = appState.enrollment,
-              let familyID = appState.parentState?.familyID else { return }
+              let familyID = appState.parentState?.familyID else {
+            errorMessage = "Unable to generate code — parent state not available."
+            isGenerating = false
+            return
+        }
 
         isGenerating = true
         errorMessage = nil
@@ -87,7 +108,7 @@ struct EnrollmentCodeView: View {
                     familyID: familyID
                 )
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = CloudKitErrorHelper.userMessage(for: error)
             }
             isGenerating = false
         }

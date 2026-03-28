@@ -108,7 +108,7 @@ struct EnrollmentPermissionsView: View {
         // Skip the permission step and proceed with enrollment.
         guard let enforcement = appState.enforcement else {
             permissionGranted = true
-            errorMessage = "Screen Time management unavailable — FamilyControls entitlement pending. Enrollment will continue without enforcement."
+            errorMessage = "Screen Time permissions are being set up. This may take a moment."
             return
         }
 

@@ -3,6 +3,7 @@ import Observation
 import BigBrotherCore
 
 @Observable
+@MainActor
 final class DiagnosticsViewModel {
     let appState: AppState
 

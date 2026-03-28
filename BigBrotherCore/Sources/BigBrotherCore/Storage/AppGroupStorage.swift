@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Concrete implementation of SharedStorageProtocol using App Group container.
@@ -36,6 +37,7 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         static let unlockPickerPending = "unlock_picker_pending.json"
         static let timedUnlockInfo = "timed_unlock_info.json"
         static let selfUnlockState = "self_unlock_state.json"
+        static let parentMessages = "parent_messages.json"
     }
 
     public init(appGroupIdentifier: String = AppConstants.appGroupIdentifier) {
@@ -63,6 +65,9 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
 
     // MARK: - Policy Snapshot
 
+    // NOTE: Policy snapshot and temporary unlock state are NOT encrypted because
+    // the Monitor extension needs to read them and cannot reliably access Keychain.
+    // They are protected by the OS-level App Group container sandbox instead.
     public func readPolicySnapshot() -> PolicySnapshot? {
         read(FileName.policySnapshot)
     }
@@ -176,12 +181,16 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     }
 
     public func cachedAppName(forTokenKey key: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
         let cache: [String: String]? = read(FileName.shieldedAppNameCache)
         return cache?[key]
     }
 
     public func readAllCachedAppNames() -> [String: String] {
-        (read(FileName.shieldedAppNameCache) as [String: String]?) ?? [:]
+        lock.lock()
+        defer { lock.unlock() }
+        return (read(FileName.shieldedAppNameCache) as [String: String]?) ?? [:]
     }
 
     public func writeCachedAppNames(_ cache: [String: String]) throws {
@@ -266,6 +275,7 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
             (FileName.extensionSharedState, "{}"),
             (FileName.shieldConfig, "{}"),
             (FileName.policySnapshot, "{}"),
+            (FileName.parentMessages, "[]"),
         ]
 
         for (name, emptyContent) in allExtensionFiles {
@@ -479,6 +489,16 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         try writeAtomically(state, to: FileName.selfUnlockState)
     }
 
+    // MARK: - Parent Messages
+
+    public func readParentMessages() -> [ParentMessage] {
+        (read(FileName.parentMessages) as [ParentMessage]?) ?? []
+    }
+
+    public func writeParentMessages(_ messages: [ParentMessage]) throws {
+        try writeAtomically(messages, to: FileName.parentMessages)
+    }
+
     // MARK: - Device Restrictions
 
     public func readDeviceRestrictions() -> DeviceRestrictions? {
@@ -511,18 +531,78 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         return try? Data(contentsOf: url)
     }
 
+    // MARK: - Encrypted Storage
+
+    /// Write an Encodable value encrypted with the App Group encryption key.
+    /// Falls back to unencrypted write if Keychain is unavailable (extension context).
+    private func writeEncrypted<T: Encodable>(_ value: T, to fileName: String) throws {
+        let plaintext: Data
+        do {
+            plaintext = try encoder.encode(value)
+        } catch {
+            throw StorageError.encodingFailed(fileName: fileName)
+        }
+
+        let keychain = KeychainManager()
+        if let encrypted = try? AppGroupEncryption.encrypt(plaintext, keychain: keychain) {
+            try writeRawData(encrypted, toFile: fileName)
+        } else {
+            // Fallback: write unencrypted (extension may not have Keychain access)
+            try writeRawData(plaintext, toFile: fileName)
+        }
+    }
+
+    /// Read an encrypted Decodable value. Falls back to unencrypted if decryption fails
+    /// (backward compatibility for files written before encryption was enabled).
+    private func readEncrypted<T: Decodable>(_ fileName: String) -> T? {
+        guard let data = readRawFile(fileName) else { return nil }
+
+        // Try decrypting first (new encrypted format)
+        let keychain = KeychainManager()
+        if let decrypted = AppGroupEncryption.decrypt(data, keychain: keychain),
+           let value = try? decoder.decode(T.self, from: decrypted) {
+            return value
+        }
+
+        // Fall back to plain JSON (pre-encryption data or extension-written)
+        return try? decoder.decode(T.self, from: data)
+    }
+
     // MARK: - Private Helpers
+
+    /// Write raw Data atomically with no file protection.
+    private func writeRawData(_ data: Data, toFile fileName: String) throws {
+        let targetURL = fileURL(for: fileName)
+        do {
+            try data.write(to: targetURL, options: [.atomic, .noFileProtection])
+        } catch {
+            throw StorageError.writeFailed(fileName: fileName)
+        }
+    }
+
+    /// Read raw Data from a file. Returns nil if the file does not exist.
+    private func readRawFile(_ fileName: String) -> Data? {
+        let url = fileURL(for: fileName)
+        return try? Data(contentsOf: url)
+    }
 
     private func fileURL(for name: String) -> URL {
         containerURL.appendingPathComponent(name)
     }
 
-    /// Read and decode a JSON file. Returns nil if the file does not exist
-    /// or if decoding fails (corrupted data is treated as missing).
+    /// Read and decode a JSON file. Returns nil if the file does not exist.
+    /// Logs a warning if the file exists but decoding fails (corruption).
     private func read<T: Decodable>(_ fileName: String) -> T? {
         let url = fileURL(for: fileName)
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? decoder.decode(T.self, from: data)
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            #if DEBUG
+            print("[BigBrother] WARNING: Corrupted file \(fileName) (\(data.count) bytes): \(error.localizedDescription)")
+            #endif
+            return nil
+        }
     }
 
     /// Read with typed error reporting. Distinguishes missing file from corruption.

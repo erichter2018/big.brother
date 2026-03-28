@@ -20,10 +20,11 @@ struct ParentGate<Content: View>: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private var authEnabled: Bool {
-        // Default to true if key has never been set (backward compatible).
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
-        if defaults.object(forKey: StorageKeys.parentAuthEnabled) == nil { return true }
-        return defaults.bool(forKey: StorageKeys.parentAuthEnabled)
+        // Read from Keychain (tamper-resistant) instead of UserDefaults.
+        // Default to true if never set (backward compatible).
+        guard let data = try? appState.keychain.getData(forKey: StorageKeys.parentAuthEnabled),
+              let value = String(data: data, encoding: .utf8) else { return true }
+        return value == "1"
     }
 
     var body: some View {

@@ -141,11 +141,9 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
             diag(storage, "No token — picker-only flow (no event created)")
         }
 
-        // Brief wait for disk flush before closing.
-        // Keep this short — shield extensions have limited execution time.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            completionHandler(.close)
-        }
+        // Call completion synchronously — extensions have very limited execution time
+        // and async delays risk the extension being killed before the handler fires.
+        completionHandler(.close)
     }
 
     // MARK: - Create Unlock Request

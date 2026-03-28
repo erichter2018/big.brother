@@ -47,15 +47,17 @@ public struct PINHasher: Sendable {
 
     public init() {}
 
-    /// Hash a PIN with a random salt.
-    public func hash(pin: String) -> PINHash {
+    /// Hash a PIN with a random salt. Returns nil for empty PINs.
+    public func hash(pin: String) -> PINHash? {
+        guard !pin.isEmpty else { return nil }
         let salt = randomSalt()
         let derivedKey = deriveKey(pin: pin, salt: salt)
         return PINHash(salt: salt, derivedKey: derivedKey)
     }
 
-    /// Verify a PIN against a stored hash.
+    /// Verify a PIN against a stored hash. Returns false for empty PINs.
     public func verify(pin: String, against stored: PINHash) -> Bool {
+        guard !pin.isEmpty else { return false }
         let derived = deriveKey(pin: pin, salt: stored.salt)
         // Constant-time comparison to prevent timing attacks.
         return constantTimeEqual(derived, stored.derivedKey)

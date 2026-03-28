@@ -1,6 +1,9 @@
 import Foundation
 import CloudKit
+import CoreLocation
+import UIKit
 import Observation
+import UserNotifications
 import BigBrotherCore
 
 /// Root application state, observable by SwiftUI views.
@@ -9,6 +12,7 @@ import BigBrotherCore
 /// to all core services. Initialized on app launch by reading from Keychain.
 /// Services are created after role detection because some depend on enrollment state.
 @Observable
+@MainActor
 final class AppState {
 
     // MARK: - Role & Identity
@@ -25,11 +29,10 @@ final class AppState {
     /// Stored NotificationCenter observer tokens for cleanup.
     private var notificationObservers: [Any] = []
 
-    deinit {
-        for observer in notificationObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        stopChildSync()
+    nonisolated deinit {
+        // Timer cleanup is handled by invalidation; observers are weak references.
+        // Cannot call @MainActor methods from deinit, but NotificationCenter
+        // removeObserver is thread-safe.
     }
 
     // MARK: - Runtime State
@@ -109,6 +112,27 @@ final class AppState {
     /// Set by notification tap to deep-link into a specific child's detail view.
     var pendingChildNavigation: ChildProfileID?
 
+    // MARK: - Debug Mode
+
+    /// Developer mode — shows build numbers, Insights tab, diagnostics.
+    /// Persists across app restarts via UserDefaults.
+    /// Always false in release/App Store builds.
+    #if DEBUG
+    var debugMode: Bool = UserDefaults.standard.bool(forKey: "fr.bigbrother.debugMode") {
+        didSet { UserDefaults.standard.set(debugMode, forKey: "fr.bigbrother.debugMode") }
+    }
+    #else
+    let debugMode: Bool = false
+    #endif
+
+    // MARK: - Network
+
+    let networkMonitor = NetworkMonitor()
+
+    // MARK: - Subscription
+
+    let subscriptionManager = SubscriptionManager()
+
     // MARK: - Services
 
     private(set) var cloudKit: (any CloudKitServiceProtocol)?
@@ -119,6 +143,15 @@ final class AppState {
     private(set) var heartbeatService: (any HeartbeatServiceProtocol)?
     private(set) var eventLogger: (any EventLoggerProtocol)?
     private(set) var syncCoordinator: (any SyncCoordinatorProtocol)?
+
+    /// Location tracking service (child mode only).
+    private(set) var locationService: LocationService?
+
+    /// VPN tunnel manager (child mode only).
+    private(set) var vpnManager: VPNManagerService?
+
+    /// Driving safety monitor (child mode only).
+    private(set) var drivingMonitor: DrivingMonitor?
 
     /// AllowanceTracker timer integration (parent mode only).
     private(set) var timerService: TimerIntegrationService?
@@ -374,8 +407,9 @@ final class AppState {
             familyControlsAvailable = true
 
             fcManager.observeAuthorizationChanges { [weak self] newStatus in
-                guard let self else { return }
-                self.handleAuthorizationChange(newStatus)
+                Task { @MainActor [weak self] in
+                    self?.handleAuthorizationChange(newStatus)
+                }
             }
         } else {
             enforcementImpl = nil
@@ -414,6 +448,146 @@ final class AppState {
         )
         self.heartbeatService = hbService
 
+        // Set up location service on child devices.
+        if deviceRole == .child {
+            let locService = LocationService(cloudKit: ck, keychain: keychain)
+            // Ensure child devices always run in continuous mode.
+            // The persisted mode may be stale (e.g., onDemand from an old command).
+            if locService.mode != .continuous {
+                locService.setMode(.continuous)
+            }
+            self.locationService = locService
+            hbService.locationService = locService
+            locService.onRequestImmediateHeartbeat = { [weak hbService] in
+                Task { try? await hbService?.sendNow(force: true) }
+            }
+            locService.eventLogger = eventLogger
+
+            // Set up driving safety monitor.
+            guard let evLogger = eventLogger else {
+                #if DEBUG
+                print("[BigBrother] WARNING: EventLogger not configured before DrivingMonitor — skipping driving monitor setup")
+                #endif
+                return
+            }
+            let driveMon = DrivingMonitor(
+                eventLogger: evLogger,
+                cloudKit: ck,
+                storage: storage,
+                keychain: keychain
+            )
+            locService.drivingMonitor = driveMon
+            self.drivingMonitor = driveMon
+            DeviceLockMonitor.shared.onLockStateChanged = { [weak driveMon] isLocked in
+                driveMon?.onScreenLockStateChanged(isLocked: isLocked)
+            }
+
+            // Set up VPN tunnel for persistent background execution.
+            let vpn = VPNManagerService()
+            hbService.vpnManager = vpn
+            self.vpnManager = vpn
+            ensureVPNInstalled(vpn)
+
+            cmdProcessor.onLocationModeChanged = { [weak locService] mode in
+                locService?.setMode(mode)
+            }
+            cmdProcessor.onRequestLocation = { [weak locService] in
+                Task { let _ = await locService?.requestCurrentLocation() }
+            }
+            cmdProcessor.onSyncNamedPlaces = { [weak self, weak locService] in
+                Task {
+                    guard let self, let familyID = (try? self.keychain.get(
+                        ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
+                    ))?.familyID else { return }
+                    if let places = try? await ck.fetchNamedPlaces(familyID: familyID) {
+                        await MainActor.run { locService?.registerNamedPlaces(places) }
+                    }
+                }
+            }
+            cmdProcessor.onRestartVPNTunnel = { [weak vpn] in
+                Task {
+                    try? await vpn?.installAndStart()
+                }
+            }
+            cmdProcessor.onRequestDiagnostics = { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    let report = await DiagnosticCollector.collect(appState: self)
+                    Task {
+                        try? await ck.saveDiagnosticReport(report)
+                        #if DEBUG
+                        print("[BigBrother] Diagnostic report uploaded (\(report.recentLogs.count) log entries)")
+                        #endif
+                    }
+                }
+            }
+            cmdProcessor.onRequestPermissions = { [weak self, weak locService] in
+                Task { @MainActor in
+                    // Re-request FamilyControls authorization
+                    try? await self?.enforcement?.requestAuthorization()
+
+                    // Ensure location service is at least onDemand so it's ready
+                    if locService?.mode == .off {
+                        locService?.setMode(.onDemand)
+                    }
+
+                    // Always open Settings — the parent is holding the device and
+                    // needs to verify/set location to "Always". No guessing.
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        await UIApplication.shared.open(url)
+                    }
+                }
+            }
+        }
+
+        // Debug mode: run driving detection on the parent device for testing.
+        // Logs CoreMotion transitions, speed, braking, phone-while-driving to console + diagnostics.
+        #if DEBUG
+        if deviceRole == .parent {
+            // Write a temporary enrollment so LocationService can save breadcrumbs
+            let debugDeviceID = DeviceID(rawValue: "PARENT-DEBUG-\(UIDevice.current.identifierForVendor?.uuidString.prefix(8) ?? "0")")
+            let debugFamilyID = parentState?.familyID ?? FamilyID(rawValue: "debug")
+            let debugEnrollment = ChildEnrollmentState(deviceID: debugDeviceID, childProfileID: ChildProfileID(rawValue: "parent-debug"), familyID: debugFamilyID)
+            try? keychain.set(debugEnrollment, forKey: StorageKeys.enrollmentState)
+
+            // Copy home coordinates to App Group so LocationService can register geofence.
+            // Parent stores per-device, but LocationService reads from App Group (child convention).
+            let debugDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            for (key, value) in UserDefaults.standard.dictionaryRepresentation() {
+                if key.hasPrefix("homeLatitude."), let lat = value as? Double {
+                    let suffix = String(key.dropFirst("homeLatitude.".count))
+                    if let lon = UserDefaults.standard.object(forKey: "homeLongitude.\(suffix)") as? Double {
+                        debugDefaults?.set(lat, forKey: "homeLatitude")
+                        debugDefaults?.set(lon, forKey: "homeLongitude")
+                        break // Use first found
+                    }
+                }
+            }
+
+            let locService = LocationService(cloudKit: ck, keychain: keychain)
+            self.locationService = locService
+            locService.setMode(.continuous)
+
+            let driveMon = DrivingMonitor(
+                eventLogger: eventLogger ?? EventLoggerImpl(cloudKit: ck, storage: storage, keychain: keychain),
+                cloudKit: ck,
+                storage: storage,
+                keychain: keychain
+            )
+            locService.drivingMonitor = driveMon
+            self.drivingMonitor = driveMon
+            locService.eventLogger = eventLogger
+            DeviceLockMonitor.shared.onLockStateChanged = { [weak driveMon] isLocked in
+                driveMon?.onScreenLockStateChanged(isLocked: isLocked)
+            }
+            // Save breadcrumbs with a debug device ID so the map can show them
+            locService.onRequestImmediateHeartbeat = { [weak hbService] in
+                Task { try? await hbService?.sendNow(force: true) }
+            }
+            print("[BigBrother] DEBUG: Driving detection active on parent device for testing")
+        }
+        #endif
+
         // Wire up heartbeat request: when the parent pings, send a heartbeat immediately.
         cmdProcessor.onRequestHeartbeat = { [weak hbService] in
             Task { try? await hbService?.sendNow(force: true) }
@@ -423,6 +597,11 @@ final class AppState {
         // enough to send a heartbeat, it should also process pending commands.
         hbService.onHeartbeatSent = { [weak cmdProcessor] in
             Task { try? await cmdProcessor?.processIncomingCommands() }
+        }
+        hbService.onLivenessConfirmed = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.handleMainAppResponsive(reapplyEnforcement: true)
+            }
         }
 
         // Listen for iCloud account changes on child devices.
@@ -586,6 +765,9 @@ final class AppState {
         if familyControlsAvailable {
             let scheduleManager = ScheduleManagerImpl()
             try? scheduleManager.registerReconciliationSchedule()
+
+            // Register usage tracking milestones for screen time reporting.
+            ScheduleRegistrar.registerUsageTracking()
         }
 
         // Update runtime state from restored snapshot.
@@ -595,6 +777,140 @@ final class AppState {
         }
 
         isRestored = true
+    }
+
+    /// Called when the child app proves it is running again after fail-safe mode.
+    /// Clears the latched force-close flag and, when needed, restores the
+    /// parent-chosen enforcement immediately instead of waiting for the next
+    /// reconciliation cycle.
+    func handleMainAppResponsive(reapplyEnforcement: Bool) {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken"),
+           !requestToken.isEmpty {
+            defaults?.set(requestToken, forKey: "extensionHeartbeatAcknowledgedToken")
+            defaults?.set(Date().timeIntervalSince1970, forKey: "extensionHeartbeatAcknowledgedAt")
+        }
+        let hadFailSafe = defaults?.bool(forKey: "forceCloseWebBlocked") == true
+        if hadFailSafe {
+            defaults?.removeObject(forKey: "forceCloseWebBlocked")
+            defaults?.removeObject(forKey: "forceCloseLastNagAt")
+        }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["force-close-nag"])
+
+        guard reapplyEnforcement, hadFailSafe, deviceRole == .child else { return }
+        performRestoration()
+        refreshLocalState()
+    }
+
+    // MARK: - VPN Tunnel Management
+
+    /// Install the VPN tunnel, retrying on failure.
+    /// If the user denies the VPN permission dialog, retries every 60 seconds
+    /// until the VPN is configured. Also retries on each app launch.
+    private func ensureVPNInstalled(_ vpn: VPNManagerService) {
+        Task {
+            // Check if already configured — no prompt needed
+            if await vpn.isConfigured() {
+                do {
+                    try await vpn.installAndStart()
+                    #if DEBUG
+                    print("[BigBrother] VPN tunnel verified and running")
+                    #endif
+                } catch {
+                    #if DEBUG
+                    print("[BigBrother] VPN tunnel start failed: \(error.localizedDescription)")
+                    #endif
+                }
+                return
+            }
+
+            // Not configured — try to install (will show system VPN permission dialog)
+            do {
+                try await vpn.installAndStart()
+                #if DEBUG
+                print("[BigBrother] VPN tunnel installed and started")
+                #endif
+                return
+            } catch {
+                #if DEBUG
+                print("[BigBrother] VPN tunnel install denied or failed: \(error.localizedDescription)")
+                #endif
+            }
+
+            // User denied — lock to essential mode after 5 minutes of denials,
+            // then keep retrying every 60 seconds.
+            var denialStart = Date()
+            var essentialApplied = false
+
+            while !(await vpn.isConfigured()) {
+                guard !Task.isCancelled else { return }
+                // After 5 minutes of denial, lock to essential mode
+                if !essentialApplied && Date().timeIntervalSince(denialStart) > 300 {
+                    essentialApplied = true
+                    await MainActor.run {
+                        if let enforcement = self.enforcement {
+                            try? enforcement.applyEssentialOnly()
+                            #if DEBUG
+                            print("[BigBrother] VPN denied for 5+ min — essential mode applied")
+                            #endif
+                        }
+                    }
+                }
+
+                try? await Task.sleep(for: .seconds(60))
+                guard deviceRole == .child else { return }
+                do {
+                    try await vpn.installAndStart()
+                    // VPN accepted — restore normal enforcement
+                    if essentialApplied {
+                        await MainActor.run { self.performRestoration() }
+                    }
+                    #if DEBUG
+                    print("[BigBrother] VPN tunnel installed on retry")
+                    #endif
+                    return
+                } catch {
+                    #if DEBUG
+                    print("[BigBrother] VPN tunnel retry failed: \(error.localizedDescription)")
+                    #endif
+                }
+            }
+        }
+    }
+
+    /// Whether the VPN tunnel is currently connected (for parent dashboard diagnostics).
+    // MARK: - Debug Driving
+
+    #if DEBUG
+    /// Debug device ID for parent driving test (matches the enrollment written in configureServices).
+    var debugDeviceID: DeviceID {
+        DeviceID(rawValue: "PARENT-DEBUG-\(UIDevice.current.identifierForVendor?.uuidString.prefix(8) ?? "0")")
+    }
+
+    /// Debug ChildDevice for use in LocationMapView on parent device.
+    var debugChildDevice: ChildDevice? {
+        guard deviceRole == .parent, locationService != nil else { return nil }
+        let familyID = parentState?.familyID ?? FamilyID(rawValue: "debug")
+        return ChildDevice(
+            id: debugDeviceID,
+            childProfileID: ChildProfileID(rawValue: "parent-debug"),
+            familyID: familyID,
+            displayName: "My Phone",
+            modelIdentifier: UIDevice.current.model,
+            osVersion: UIDevice.current.systemVersion
+        )
+    }
+
+    /// Debug ChildProfile for use in LocationMapView on parent device.
+    var debugChildProfile: ChildProfile? {
+        guard deviceRole == .parent, locationService != nil else { return nil }
+        let familyID = parentState?.familyID ?? FamilyID(rawValue: "debug")
+        return ChildProfile(id: ChildProfileID(rawValue: "parent-debug"), familyID: familyID, name: "My Driving")
+    }
+    #endif
+
+    var isVPNConnected: Bool {
+        vpnManager?.isConnected ?? false
     }
 
     // MARK: - Authorization Change Handling
@@ -835,44 +1151,22 @@ final class AppState {
             }
         }
 
-        // One-time nuke: delete ALL pending config commands to clear the backlog.
-        let nukeKey = "fr.bigbrother.commandNukeComplete_v3"
-        if !UserDefaults.standard.bool(forKey: nukeKey) {
-            UserDefaults.standard.set(true, forKey: nukeKey) // Mark done immediately to prevent re-runs
+        // Full CloudKit cleanup (old applied/expired commands, receipts, events) —
+        // throttled to once per day.
+        let fullCleanupKey = "fr.bigbrother.lastFullCleanupAt"
+        let lastFullCleanup = UserDefaults.standard.double(forKey: fullCleanupKey)
+        if Date().timeIntervalSince1970 - lastFullCleanup > 86400 {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: fullCleanupKey)
             Task.detached { [cloudKit, familyID] in
-                do {
-                    let since = Date().addingTimeInterval(-86400 * 30)
-                    let all = try await cloudKit.fetchRecentCommands(familyID: familyID, since: since)
-                    let configPending = all.filter { cmd in
-                        guard cmd.status == .pending else { return false }
-                        switch cmd.action {
-                        case .setSelfUnlockBudget, .setRestrictions, .nameApp, .syncPINHash,
-                             .setScheduleProfile, .clearScheduleProfile, .setHeartbeatProfile,
-                             .setPenaltyTimer, .requestHeartbeat, .requestAppConfiguration,
-                             .setAllowedWebDomains:
-                            return true
-                        default:
-                            return false
-                        }
-                    }
-                    if !configPending.isEmpty {
-                        #if DEBUG
-                        print("[BigBrother] NUKE: Deleting \(configPending.count) stale config commands")
-                        #endif
-                        for cmd in configPending {
-                            try? await cloudKit.deleteCommand(cmd.id)
-                        }
-                        #if DEBUG
-                        print("[BigBrother] NUKE: Done — deleted \(configPending.count)")
-                        #endif
-                    }
-                } catch {
-                    #if DEBUG
-                    print("[BigBrother] NUKE failed: \(error.localizedDescription)")
-                    #endif
-                }
+                await CloudKitCleanupService.performCleanup(
+                    cloudKit: cloudKit,
+                    familyID: familyID
+                )
             }
         }
+
+        // NOTE: One-time command nuke removed (was nukeKey v3).
+        // Stale config commands are handled by cleanupStaleCommands() above.
     }
 
     /// Mark old pending commands as expired. Runs on the parent because only the record
@@ -1115,27 +1409,70 @@ final class AppState {
             }
         }
 
-        let command = RemoteCommand(
+        var command = RemoteCommand(
             familyID: familyID,
             target: target,
             action: action,
             issuedBy: "Parent"
         )
+
+        // Sign mode commands with parent's ED25519 private key.
+        if action.isModeCommand,
+           let privateKeyData = try? keychain.getData(forKey: StorageKeys.commandSigningPrivateKey) {
+            command.signatureBase64 = try? CommandSigner.sign(command: command, privateKeyData: privateKeyData)
+        }
+
         try await cloudKit.pushCommand(command)
     }
 
     /// Push the parent PIN hash to all child devices via remote command.
-    private var lastSyncedPINBase64: String?
+    /// Tracks the raw (pre-encryption) PIN hash that was last synced.
+    /// Persisted so we don't re-sync on every app launch.
+    private var lastSyncedPINBase64: String? {
+        get { UserDefaults.standard.string(forKey: "lastSyncedPINBase64") }
+        set { UserDefaults.standard.set(newValue, forKey: "lastSyncedPINBase64") }
+    }
 
     func syncPINToChildDevices() async {
         // Don't sync if there are no children.
         guard !childProfiles.isEmpty else { return }
         guard let hashData = try? keychain.getData(forKey: StorageKeys.parentPINHash) else { return }
-        let base64 = hashData.base64EncodedString()
-        // Only send if the PIN hash changed since last sync.
-        guard base64 != lastSyncedPINBase64 else { return }
-        lastSyncedPINBase64 = base64
-        try? await sendCommand(target: .allDevices, action: .syncPINHash(base64: base64))
+
+        // Encrypt the PIN hash before sending over CloudKit public database.
+        // Use the first parent's raw public key as enrollment secret.
+        // Parent stores raw key bytes; this is consistent with child-side decryption.
+        let enrollmentSecret: Data? = {
+            guard let stored = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey) else { return nil }
+            // Try JSON array format first (shouldn't happen on parent, but defensive)
+            if let keys = try? JSONDecoder().decode([String].self, from: stored),
+               let first = keys.first,
+               let raw = Data(base64Encoded: first) {
+                return raw
+            }
+            return stored
+        }()
+        // Compare raw hash (pre-encryption) to avoid re-syncing when encryption
+        // produces different ciphertext for the same plaintext (random nonce).
+        let rawBase64 = hashData.base64EncodedString()
+        guard rawBase64 != lastSyncedPINBase64 else { return }
+
+        let dataToSend: String
+        if let familyID = parentState?.familyID,
+           let encrypted = try? FamilyDerivedKey.encrypt(hashData, familyID: familyID, enrollmentSecret: enrollmentSecret, purpose: "pin-sync") {
+            dataToSend = encrypted.base64EncodedString()
+        } else {
+            dataToSend = rawBase64
+        }
+
+        do {
+            try await sendCommand(target: .allDevices, action: .syncPINHash(base64: dataToSend))
+            // Only mark as synced after successful send.
+            lastSyncedPINBase64 = rawBase64
+        } catch {
+            #if DEBUG
+            print("[BigBrother] PIN sync command failed: \(error.localizedDescription)")
+            #endif
+        }
     }
 
     // MARK: - Child Actions
@@ -1150,6 +1487,7 @@ final class AppState {
         startCommandPolling()
         startScheduleSync()
         startEventSync()
+        DeviceLockMonitor.shared.startMonitoring()
     }
 
     /// On child startup, if there's no local policy snapshot (e.g. fresh install
@@ -1250,8 +1588,6 @@ final class AppState {
             Task {
                 try? await self.commandProcessor?.processIncomingCommands()
                 await MainActor.run { self.refreshLocalState() }
-                // Send heartbeat immediately so parent sees updated mode.
-                try? await self.heartbeatService?.sendNow(force: true)
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -1335,10 +1671,10 @@ final class AppState {
             let profiles = try await cloudKit.fetchScheduleProfiles(familyID: enrollment.familyID)
             guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
 
-            // Skip if already registered with the same version.
-            if let current = currentProfile,
-               current.id == profileID,
-               current.updatedAt == profile.updatedAt {
+            // Skip if local profile matches CloudKit profile.
+            // Re-registering DeviceActivity schedules triggers intervalDidStart callbacks,
+            // which causes cascading events — only re-register when content actually changed.
+            if let current = currentProfile, current == profile {
                 return
             }
 
@@ -1346,7 +1682,7 @@ final class AppState {
                 ScheduleRegistrar.register(profile, storage: storage)
                 scheduleNextScheduleBGTask()
                 #if DEBUG
-                print("[BigBrother] Schedule profile registered: \(profile.name) (\(profile.freeWindows.count) windows)")
+                print("[BigBrother] Schedule profile updated: \(profile.name) (\(profile.freeWindows.count) free, \(profile.essentialWindows.count) essential windows)")
                 #endif
             }
         } catch {

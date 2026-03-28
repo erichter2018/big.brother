@@ -25,11 +25,20 @@ public enum AppConstants {
     /// ShieldAction extension bundle identifier.
     public static let shieldActionBundleID = "fr.bigbrother.app.shield-action"
 
+    /// VPN Packet Tunnel extension bundle identifier.
+    public static let tunnelBundleID = "fr.bigbrother.app.tunnel"
+
+    /// Interval between VPN extension heartbeat sends when main app is dead (5 minutes).
+    public static let vpnHeartbeatIntervalSeconds: TimeInterval = 300
+
+    /// How long without main app activity before tunnel considers the app dead (10 minutes).
+    public static let appDeathThresholdSeconds: TimeInterval = 600
+
     // MARK: - Build Tracking
 
     /// Manual build number — bump each time you deploy new code during development.
     /// Both parent and child read this constant; matching numbers = same code.
-    public static let appBuildNumber = 133
+    public static let appBuildNumber = 184
 
     // MARK: - Enrollment
 
@@ -47,8 +56,19 @@ public enum AppConstants {
     /// Threshold for considering a device "online" (10 minutes).
     public static let onlineThresholdSeconds: TimeInterval = 600
 
-    /// Threshold for showing a warning about offline devices (30 minutes).
-    public static let offlineWarningThresholdSeconds: TimeInterval = 1800
+    // MARK: - Force-Close Detection
+
+    /// Heartbeat age threshold for force-close when device is locked (20 min).
+    /// Shorter than unlocked because a locked device has no reason to suspend the app.
+    public static let forceCloseThresholdLocked: TimeInterval = 1200
+
+    /// Heartbeat age threshold for force-close when device is unlocked (45 min).
+    /// Longer to avoid false positives from resource-intensive games suspending the app.
+    public static let forceCloseThresholdUnlocked: TimeInterval = 2700
+
+    /// How old the extensionHeartbeatRequestedAt flag must be to confirm
+    /// the main app never cleared it (reconciliation interval + buffer).
+    public static let forceCloseFlagStaleness: TimeInterval = 960
 
     // MARK: - Commands
 

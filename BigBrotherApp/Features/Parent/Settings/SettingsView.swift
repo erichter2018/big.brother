@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import CloudKit
 import BigBrotherCore
 
@@ -7,7 +8,11 @@ struct SettingsView: View {
     @State private var showNukeConfirm = false
     @State private var nukeStatus: String?
     @State private var isNuking = false
+    @State private var showPaywall = false
     @State private var expectedChildCount: Int
+    @State private var isExporting = false
+    @State private var exportedFileURL: URL?
+    @State private var exportError: String?
 
     init(appState: AppState) {
         self.appState = appState
@@ -26,7 +31,7 @@ struct SettingsView: View {
 
             Section("Family") {
                 HStack {
-                    Text("Family ID")
+                    Text("Family Code")
                     Spacer()
                     Text(appState.parentState?.familyID.rawValue.prefix(8) ?? "—")
                         .font(.caption.monospaced())
@@ -101,9 +106,22 @@ struct SettingsView: View {
 
             Section("System") {
                 Button {
+                    Task { await exportData() }
+                } label: {
+                    Label(isExporting ? "Exporting..." : "Export Family Data", systemImage: "square.and.arrow.up")
+                }
+                .disabled(isExporting)
+
+                if let exportError {
+                    Text(exportError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                Button {
                     showNukeConfirm = true
                 } label: {
-                    Label("Purge All CloudKit Data", systemImage: "trash.circle")
+                    Label("Delete All Data & Reset", systemImage: "trash.circle")
                         .foregroundStyle(.red)
                 }
 
@@ -113,18 +131,117 @@ struct SettingsView: View {
                         .foregroundStyle(nukeStatus.contains("Error") ? .red : .green)
                 }
 
-                NavigationLink {
-                    DiagnosticsView(viewModel: DiagnosticsViewModel(appState: appState))
-                } label: {
-                    Label("Diagnostics", systemImage: "stethoscope")
-                }
+                if appState.debugMode {
+                    NavigationLink {
+                        DiagnosticsView(viewModel: DiagnosticsViewModel(appState: appState))
+                    } label: {
+                        Label("Diagnostics", systemImage: "stethoscope")
+                    }
 
-                NavigationLink {
-                    cloudKitStatusView
-                } label: {
-                    Label("CloudKit Status", systemImage: "icloud")
+                    NavigationLink {
+                        cloudKitStatusView
+                    } label: {
+                        Label("CloudKit Status", systemImage: "icloud")
+                    }
                 }
             }
+
+            Section("Subscription") {
+                HStack {
+                    Label("Status", systemImage: "creditcard")
+                    Spacer()
+                    Text(appState.subscriptionManager.statusDisplayText)
+                        .foregroundStyle(subscriptionStatusColor)
+                }
+                if let expires = appState.subscriptionManager.expirationDate {
+                    HStack {
+                        Text(appState.subscriptionManager.subscriptionStatus == .trial ? "Trial ends" : "Renews")
+                        Spacer()
+                        Text(expires, style: .date)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if appState.subscriptionManager.subscriptionStatus == .grace {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("We're retrying your payment. Check Apple ID settings if this persists.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Button {
+                    showPaywall = true
+                } label: {
+                    Label("Manage Subscription", systemImage: "star.circle")
+                }
+                #if DEBUG
+                Button {
+                    appState.subscriptionManager.debugOverride =
+                        appState.subscriptionManager.isSubscribed ? .expired : .subscribed
+                } label: {
+                    Label(
+                        appState.subscriptionManager.isSubscribed ? "Debug: Force Expire" : "Debug: Force Subscribe",
+                        systemImage: "ant"
+                    )
+                }
+                .foregroundStyle(.orange)
+                #endif
+            }
+
+            #if DEBUG
+            Section("My Driving (Debug)") {
+                if let profile = appState.debugChildProfile,
+                   let device = appState.debugChildDevice {
+                    NavigationLink {
+                        LocationMapView(
+                            child: profile,
+                            devices: [device],
+                            heartbeats: [],
+                            cloudKit: appState.cloudKit,
+                            onLocate: {
+                                let _ = await appState.locationService?.requestCurrentLocation()
+                            }
+                        )
+                    } label: {
+                        Label("Map & Trips", systemImage: "map")
+                    }
+                }
+
+                HStack {
+                    Text("CoreMotion")
+                    Spacer()
+                    Text(appState.locationService?.motionMonitoringActive == true ? "Active" : "Inactive")
+                        .foregroundStyle(appState.locationService?.motionMonitoringActive == true ? .green : .secondary)
+                }
+                HStack {
+                    Text("Moving")
+                    Spacer()
+                    Text(appState.locationService?.isMoving == true ? "Yes" : "No")
+                        .foregroundStyle(appState.locationService?.isMoving == true ? .green : .secondary)
+                }
+                HStack {
+                    Text("Driving")
+                    Spacer()
+                    Text(appState.drivingMonitor?.isDriving == true ? "Yes" : "No")
+                        .foregroundStyle(appState.drivingMonitor?.isDriving == true ? .orange : .secondary)
+                }
+                if let speed = appState.locationService?.lastLocation?.speed, speed >= 0 {
+                    HStack {
+                        Text("Speed")
+                        Spacer()
+                        Text("\(Int(speed * 2.237)) mph")
+                            .foregroundStyle(.primary)
+                    }
+                }
+                HStack {
+                    Text("Tracking")
+                    Spacer()
+                    Text(appState.locationService?.activeTrackingStartedAt != nil ? "High-frequency" : "Passive")
+                        .foregroundStyle(appState.locationService?.activeTrackingStartedAt != nil ? .blue : .secondary)
+                }
+            }
+            #endif
 
             Section("About") {
                 HStack {
@@ -140,9 +257,31 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            Section {
+                Toggle("Developer Mode", isOn: Binding(
+                    get: { appState.debugMode },
+                    set: { appState.debugMode = $0 }
+                ))
+            } footer: {
+                Text("Shows build numbers, diagnostics, and the Insights tab.")
+            }
         }
         .navigationTitle("Settings")
         .disabled(isNuking)
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(subscriptionManager: appState.subscriptionManager) {
+                showPaywall = false
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { exportedFileURL != nil },
+            set: { if !$0 { exportedFileURL = nil } }
+        )) {
+            if let url = exportedFileURL {
+                ShareSheet(items: [url])
+            }
+        }
         .alert("Purge All CloudKit Data?", isPresented: $showNukeConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Purge Everything", role: .destructive) {
@@ -200,6 +339,35 @@ struct SettingsView: View {
         isNuking = false
     }
 
+    private func exportData() async {
+        guard let cloudKit = appState.cloudKit,
+              let familyID = appState.parentState?.familyID else {
+            exportError = "CloudKit unavailable"
+            return
+        }
+        isExporting = true
+        exportError = nil
+        do {
+            let data = try await FamilyDataExporter.exportAllData(cloudKit: cloudKit, familyID: familyID)
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("BigBrother-Export-\(Date().ISO8601Format()).json")
+            try data.write(to: url)
+            exportedFileURL = url
+        } catch {
+            exportError = CloudKitErrorHelper.userMessage(for: error)
+        }
+        isExporting = false
+    }
+
+    private var subscriptionStatusColor: Color {
+        switch appState.subscriptionManager.subscriptionStatus {
+        case .subscribed: return .green
+        case .trial: return appState.subscriptionManager.isTrialEndingSoon ? .orange : .blue
+        case .grace: return .orange
+        case .expired, .revoked: return .red
+        case .unknown: return .secondary
+        }
+    }
+
     @ViewBuilder
     private var cloudKitStatusView: some View {
         List {
@@ -250,4 +418,16 @@ struct SettingsView: View {
         }
         .navigationTitle("CloudKit Status")
     }
+}
+
+// MARK: - Share Sheet
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

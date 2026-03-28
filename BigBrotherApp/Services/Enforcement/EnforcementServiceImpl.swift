@@ -47,6 +47,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     // MARK: - EnforcementServiceProtocol
 
     func apply(_ policy: EffectivePolicy) throws {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("apply", forKey: "lastShieldChangeReason")
+
         // Device restrictions apply ALWAYS, regardless of lock/unlock state.
         applyRestrictions()
 
@@ -115,18 +118,21 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             }
             baseStore.shield.applications = perAppTokens
             baseStore.shield.applicationCategories = .all(except: allowedTokens)
+            recordShieldedAppCount(perAppTokens.count)
             #if DEBUG
             let overflow = tokensToBlock.count - perAppTokens.count
             print("[BigBrother] Shield applied — \(perAppTokens.count) apps via shield.applications\(overflow > 0 ? " (\(overflow) overflow to category)" : ""), category catch-all active")
             #endif
         } else {
             // No picker selection or essentialOnly — block everything.
-            baseStore.shield.applications = allowExemptions ? nil : pickerTokens.isEmpty ? nil : pickerTokens
+            let explicitApps: Set<ApplicationToken>? = allowExemptions ? nil : pickerTokens.isEmpty ? nil : pickerTokens
+            baseStore.shield.applications = explicitApps
             if allowedTokens.isEmpty {
                 baseStore.shield.applicationCategories = .all()
             } else {
                 baseStore.shield.applicationCategories = .all(except: allowedTokens)
             }
+            recordShieldedAppCount(explicitApps?.count ?? 0)
             #if DEBUG
             print("[BigBrother] Shield applied — \(allowExemptions ? "category-only" : "essential") block with \(allowedTokens.count) exemptions")
             #endif
@@ -239,12 +245,49 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     }
 
     func clearAllRestrictions() throws {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("clearAll", forKey: "lastShieldChangeReason")
         clearAllShieldStores()
+        recordShieldedAppCount(0)
         tempUnlockStore.clearAllSettings()
     }
 
     func clearTemporaryUnlock() throws {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("tempUnlockClear", forKey: "lastShieldChangeReason")
         tempUnlockStore.clearAllSettings()
+    }
+
+    func applyEssentialOnly() throws {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("vpnDenied", forKey: "lastShieldChangeReason")
+        applyRestrictions()
+        applyShield(allowExemptions: false)
+    }
+
+    // MARK: - Shield Diagnostic
+
+    /// Track shielded app count ourselves because ManagedSettingsStore.shield.applications
+    /// doesn't reliably return the tokens that were written to it.
+    private func recordShieldedAppCount(_ count: Int) {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(count, forKey: "shieldedAppCount")
+    }
+
+    func shieldDiagnostic() -> ShieldDiagnostic {
+        let baseCat = baseStore.shield.applicationCategories
+        let schedCat = scheduleStore.shield.applicationCategories
+
+        let appCount = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .integer(forKey: "shieldedAppCount") ?? 0
+        let categoryActive = baseCat != nil || schedCat != nil
+        let shieldsActive = appCount > 0 || categoryActive
+
+        return ShieldDiagnostic(
+            shieldsActive: shieldsActive,
+            appCount: appCount,
+            categoryActive: categoryActive
+        )
     }
 
     var authorizationStatus: FCAuthorizationStatus {

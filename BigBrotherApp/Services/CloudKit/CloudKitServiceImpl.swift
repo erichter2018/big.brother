@@ -72,10 +72,12 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 try await save(existing)
                 return // success
             } catch {
-                let ckError = error as? CloudKitError
+                // Check for serverRecordChanged both wrapped (CloudKitError) and unwrapped (CKError).
                 let isConflict: Bool
-                if case .serverError(let underlying) = ckError,
-                   (underlying as NSError).code == CKError.serverRecordChanged.rawValue {
+                if let ckErr = error as? CKError, ckErr.code == .serverRecordChanged {
+                    isConflict = true
+                } else if case .serverError(let underlying) = error as? CloudKitError,
+                          let ckErr = underlying as? CKError, ckErr.code == .serverRecordChanged {
                     isConflict = true
                 } else {
                     isConflict = false
@@ -109,16 +111,18 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         switch target {
         case .child(let cid):
             predicate = NSPredicate(
-                format: "%K == %@ AND %K == %@ AND %K == %@",
+                format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@",
                 CKFieldName.targetType, "child",
                 CKFieldName.targetID, cid.rawValue,
+                CKFieldName.familyID, familyID.rawValue,
                 CKFieldName.status, CommandStatus.pending.rawValue
             )
         case .device(let did):
             predicate = NSPredicate(
-                format: "%K == %@ AND %K == %@ AND %K == %@",
+                format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@",
                 CKFieldName.targetType, "device",
                 CKFieldName.targetID, did.rawValue,
+                CKFieldName.familyID, familyID.rawValue,
                 CKFieldName.status, CommandStatus.pending.rawValue
             )
         case .allDevices:
@@ -140,32 +144,39 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         familyID: FamilyID
     ) async throws -> [RemoteCommand] {
         // Fetch commands targeting this device, this child, or all devices.
-        // Three queries combined:
+        // Only fetch commands from the last 24 hours to avoid re-fetching
+        // hundreds of already-processed commands on every 5-second poll.
+        let cutoff = Date().addingTimeInterval(-24 * 3600) as NSDate
 
-        // 1. Device-specific commands
+        // 1. Device-specific commands (familyID validated to prevent cross-family injection)
         let devicePred = NSPredicate(
-            format: "%K == %@ AND %K == %@ AND %K == %@",
+            format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
             CKFieldName.targetType, "device",
             CKFieldName.targetID, deviceID.rawValue,
-            CKFieldName.status, CommandStatus.pending.rawValue
+            CKFieldName.familyID, familyID.rawValue,
+            CKFieldName.status, CommandStatus.pending.rawValue,
+            CKFieldName.issuedAt, cutoff
         )
         let deviceCmds = try await query(CKRecordType.remoteCommand, predicate: devicePred)
 
-        // 2. Child-profile commands
+        // 2. Child-profile commands (familyID validated to prevent cross-family injection)
         let childPred = NSPredicate(
-            format: "%K == %@ AND %K == %@ AND %K == %@",
+            format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
             CKFieldName.targetType, "child",
             CKFieldName.targetID, childProfileID.rawValue,
-            CKFieldName.status, CommandStatus.pending.rawValue
+            CKFieldName.familyID, familyID.rawValue,
+            CKFieldName.status, CommandStatus.pending.rawValue,
+            CKFieldName.issuedAt, cutoff
         )
         let childCmds = try await query(CKRecordType.remoteCommand, predicate: childPred)
 
         // 3. Global commands
         let globalPred = NSPredicate(
-            format: "%K == %@ AND %K == %@ AND %K == %@",
+            format: "%K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
             CKFieldName.targetType, "all",
             CKFieldName.familyID, familyID.rawValue,
-            CKFieldName.status, CommandStatus.pending.rawValue
+            CKFieldName.status, CommandStatus.pending.rawValue,
+            CKFieldName.issuedAt, cutoff
         )
         let globalCmds = try await query(CKRecordType.remoteCommand, predicate: globalPred)
 
@@ -175,8 +186,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     func updateCommandStatus(_ commandID: UUID, status: CommandStatus) async throws {
         let recordID = CKRecordConversion.recordID(commandID.uuidString, type: CKRecordType.remoteCommand)
-        guard let existing = try? await database.record(for: recordID) else {
+        let existing: CKRecord
+        do {
+            existing = try await database.record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
             throw CloudKitError.recordNotFound
+        } catch {
+            throw CloudKitError.serverError(error)
         }
         existing[CKFieldName.status] = status.rawValue
         try await save(existing)
@@ -227,8 +243,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     func markInviteUsed(code: String, deviceID: DeviceID) async throws {
         let recordID = CKRecordConversion.recordID(code, type: CKRecordType.enrollmentInvite)
-        guard let existing = try? await database.record(for: recordID) else {
+        let existing: CKRecord
+        do {
+            existing = try await database.record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
             throw CloudKitError.recordNotFound
+        } catch {
+            throw CloudKitError.serverError(error)
         }
         existing[CKFieldName.used] = 1 as NSNumber
         existing[CKFieldName.usedByDeviceID] = deviceID.rawValue
@@ -247,8 +268,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     func revokeInvite(code: String) async throws {
         let recordID = CKRecordConversion.recordID(code, type: CKRecordType.enrollmentInvite)
-        guard let existing = try? await database.record(for: recordID) else {
+        let existing: CKRecord
+        do {
+            existing = try await database.record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
             throw CloudKitError.recordNotFound
+        } catch {
+            throw CloudKitError.serverError(error)
         }
         existing[CKFieldName.revoked] = 1 as NSNumber
         try await save(existing)
@@ -265,6 +291,11 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         } catch {
             existing = CKRecord(recordType: CKRecordType.heartbeat, recordID: recordID)
         }
+        // Don't overwrite a newer heartbeat with a stale one (clock skew / restart race).
+        if let existingTimestamp = existing[CKFieldName.timestamp] as? Date,
+           existingTimestamp > heartbeat.timestamp {
+            return
+        }
         CKRecordConversion.updateCKRecord(existing, from: heartbeat)
         try await save(existing)
     }
@@ -277,9 +308,16 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     // MARK: - Events
 
-    func syncEventLogs(_ entries: [EventLogEntry]) async throws {
+    @discardableResult
+    func syncEventLogs(_ entries: [EventLogEntry]) async throws -> Set<UUID> {
         let records = entries.map(CKRecordConversion.toCKRecord)
-        try await saveMultiple(records)
+        let succeededNames = try await saveMultiple(records)
+        // Map record names back to event UUIDs.
+        let prefix = "\(CKRecordType.eventLog)_"
+        return Set(succeededNames.compactMap { name in
+            guard name.hasPrefix(prefix) else { return nil }
+            return UUID(uuidString: String(name.dropFirst(prefix.count)))
+        })
     }
 
     func deleteEventLog(_ id: UUID) async throws {
@@ -314,8 +352,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     func fetchPolicy(deviceID: DeviceID) async throws -> Policy? {
         let recordID = CKRecordConversion.recordID(deviceID.rawValue, type: CKRecordType.policy)
-        guard let record = try? await database.record(for: recordID) else {
+        let record: CKRecord
+        do {
+            record = try await database.record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
             return nil
+        } catch {
+            throw CloudKitError.serverError(error)
         }
         return CKRecordConversion.policy(from: record)
     }
@@ -380,6 +423,71 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await delete(recordID)
     }
 
+    // MARK: - Location
+
+    func saveLocationBreadcrumb(_ location: DeviceLocation) async throws {
+        let record = CKRecordConversion.toCKRecord(location)
+        try await save(record)
+    }
+
+    func fetchLocationBreadcrumbs(deviceID: DeviceID, since: Date) async throws -> [DeviceLocation] {
+        let predicate = NSPredicate(
+            format: "%K == %@ AND %K > %@",
+            CKFieldName.deviceID, deviceID.rawValue,
+            CKFieldName.locTimestamp, since as NSDate
+        )
+        return try await query(CKRecordType.deviceLocation, predicate: predicate)
+            .compactMap(CKRecordConversion.deviceLocation)
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    func purgeLocationBreadcrumbs(deviceID: DeviceID, olderThan: Date) async throws {
+        let predicate = NSPredicate(
+            format: "%K == %@ AND %K < %@",
+            CKFieldName.deviceID, deviceID.rawValue,
+            CKFieldName.locTimestamp, olderThan as NSDate
+        )
+        _ = try await deleteRecords(type: CKRecordType.deviceLocation, predicate: predicate)
+    }
+
+    // MARK: - Named Places
+
+    func fetchNamedPlaces(familyID: FamilyID) async throws -> [NamedPlace] {
+        let predicate = NSPredicate(
+            format: "%K == %@",
+            CKFieldName.familyID, familyID.rawValue
+        )
+        return try await query(CKRecordType.namedPlace, predicate: predicate)
+            .compactMap(CKRecordConversion.namedPlace)
+    }
+
+    func saveNamedPlace(_ place: NamedPlace) async throws {
+        let record = CKRecordConversion.toCKRecord(place)
+        try await save(record)
+    }
+
+    func deleteNamedPlace(_ id: UUID) async throws {
+        let recordID = CKRecordConversion.recordID(id.uuidString, type: CKRecordType.namedPlace)
+        try await delete(recordID)
+    }
+
+    // MARK: - Diagnostic Reports
+
+    func saveDiagnosticReport(_ report: DiagnosticReport) async throws {
+        let record = CKRecordConversion.toCKRecord(report)
+        try await save(record)
+    }
+
+    func fetchDiagnosticReports(deviceID: DeviceID) async throws -> [DiagnosticReport] {
+        let predicate = NSPredicate(
+            format: "%K == %@",
+            CKFieldName.deviceID, deviceID.rawValue
+        )
+        return try await query(CKRecordType.diagnosticReport, predicate: predicate)
+            .compactMap(CKRecordConversion.diagnosticReport)
+            .sorted { $0.timestamp > $1.timestamp }
+    }
+
     // MARK: - Subscriptions
 
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws {
@@ -431,6 +539,26 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
             #if DEBUG
             print("[BigBrother] 🔔 Setting up CloudKit subscription: unlock-requests-\(familyID.rawValue)")
+            #endif
+
+            // Also subscribe to safety events (speeding, phone-while-driving, geofence, etc.)
+            let safetyPredicate = NSPredicate(
+                format: "%K == %@",
+                CKFieldName.familyID, familyID.rawValue
+            )
+            let safetySub = CKQuerySubscription(
+                recordType: CKRecordType.eventLog,
+                predicate: safetyPredicate,
+                subscriptionID: "all-events-v1-\(familyID.rawValue)",
+                options: [.firesOnRecordCreation]
+            )
+            let safetyNotifInfo = CKSubscription.NotificationInfo()
+            safetyNotifInfo.shouldSendContentAvailable = true
+            safetySub.notificationInfo = safetyNotifInfo
+            subscriptionsToSave.append(safetySub)
+
+            #if DEBUG
+            print("[BigBrother] 🔔 Setting up CloudKit subscription: all-events-\(familyID.rawValue)")
             #endif
         }
 
@@ -531,18 +659,25 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         }
     }
 
-    private func saveMultiple(_ records: [CKRecord]) async throws {
-        guard !records.isEmpty else { return }
+    /// Save multiple records, returning the set of record names that succeeded.
+    /// Uses non-atomic mode so partial success is possible.
+    @discardableResult
+    private func saveMultiple(_ records: [CKRecord]) async throws -> Set<String> {
+        guard !records.isEmpty else { return [] }
 
         let op = CKModifyRecordsOperation(recordsToSave: records)
         op.savePolicy = .changedKeys
         op.isAtomic = false // allow partial success
         op.qualityOfService = .userInitiated
 
+        // Thread-safe collection of succeeded record names.
+        let succeeded = LockedSet<String>()
+
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             op.perRecordSaveBlock = { recordID, result in
                 switch result {
                 case .success:
+                    succeeded.insert(recordID.recordName)
                     #if DEBUG
                     print("[BigBrother] CloudKit saved record: \(recordID.recordName)")
                     #endif
@@ -563,6 +698,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             }
             database.add(op)
         }
+        return succeeded.values
     }
 
     private func delete(_ recordID: CKRecord.ID) async throws {
@@ -624,6 +760,14 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 }
 
 // MARK: - Error Type
+
+/// Simple thread-safe Set wrapper for CloudKit callback contexts.
+private final class LockedSet<T: Hashable>: @unchecked Sendable {
+    private var storage = Set<T>()
+    private let lock = NSLock()
+    func insert(_ value: T) { lock.lock(); storage.insert(value); lock.unlock() }
+    var values: Set<T> { lock.lock(); defer { lock.unlock() }; return storage }
+}
 
 enum CloudKitError: Error, LocalizedError {
     case recordNotFound

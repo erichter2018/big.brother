@@ -38,11 +38,19 @@
 	<string>1</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Big Brother uses Face ID to protect parent settings.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Big Brother uses your location to help your parents know where you are and that you're safe.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Big Brother uses your location to help your parents know where you are.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Big Brother uses motion data to detect when you're traveling for accurate trip tracking.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
 		<string>remote-notification</string>
 		<string>processing</string>
+		<string>location</string>
+		<string>network-extension</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>

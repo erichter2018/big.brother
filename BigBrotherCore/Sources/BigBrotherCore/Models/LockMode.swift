@@ -17,8 +17,18 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
     public var displayName: String {
         switch self {
         case .unlocked: "Unlocked"
-        case .dailyMode: "Locked"
+        case .dailyMode: "Restricted"
         case .essentialOnly: "Essential Only"
+        }
+    }
+
+    /// How restrictive this mode is (higher = more restrictive).
+    /// Used to determine if a mismatch is a problem (less restrictive than expected = bad).
+    public var restrictionLevel: Int {
+        switch self {
+        case .unlocked: 0
+        case .dailyMode: 1
+        case .essentialOnly: 2
         }
     }
 }

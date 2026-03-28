@@ -21,11 +21,14 @@ struct SecuritySettingsView: View {
 
     init(appState: AppState) {
         self.appState = appState
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
-        // Default to true if never set.
-        let enabled = defaults.object(forKey: StorageKeys.parentAuthEnabled) == nil
-            ? true
-            : defaults.bool(forKey: StorageKeys.parentAuthEnabled)
+        // Read from Keychain (tamper-resistant).
+        let enabled: Bool
+        if let data = try? appState.keychain.getData(forKey: StorageKeys.parentAuthEnabled),
+           let value = String(data: data, encoding: .utf8) {
+            enabled = value == "1"
+        } else {
+            enabled = true // Default to enabled
+        }
         self._authEnabled = State(initialValue: enabled)
     }
 
@@ -38,14 +41,16 @@ struct SecuritySettingsView: View {
             Section(footer: Text("When off, the app relies on device-level protection (Face ID / passcode) instead.")) {
                 Toggle("Require Authentication", isOn: $authEnabled)
                     .onChange(of: authEnabled) { _, newValue in
+                        // Skip if this change came from completing a PIN challenge.
+                        guard pendingAction == nil else { return }
                         if !newValue && hasPIN {
                             // Turning off auth requires PIN verification first.
                             authEnabled = true // revert toggle
                             pendingAction = .disableAuth
                             showPINChallenge = true
                         } else {
-                            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
-                            defaults.set(newValue, forKey: StorageKeys.parentAuthEnabled)
+                            let keyData = Data((newValue ? "1" : "0").utf8)
+                            try? appState.keychain.setData(keyData, forKey: StorageKeys.parentAuthEnabled)
                         }
                     }
             }
@@ -123,8 +128,7 @@ struct SecuritySettingsView: View {
                 feedback = "PIN removed. App relies on device lock for security."
             case .disableAuth:
                 authEnabled = false
-                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
-                defaults.set(false, forKey: StorageKeys.parentAuthEnabled)
+                try? appState.keychain.setData(Data("0".utf8), forKey: StorageKeys.parentAuthEnabled)
                 feedback = "Authentication disabled."
             case .none:
                 break
@@ -134,8 +138,11 @@ struct SecuritySettingsView: View {
             challengeError = remaining > 0
                 ? "Incorrect PIN (\(remaining) attempts remaining)"
                 : "Too many attempts."
-            // Re-show the challenge
-            showPINChallenge = true
+            // Re-show the challenge after a brief delay so SwiftUI re-presents the alert
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(300))
+                showPINChallenge = true
+            }
         case .lockedOut(let until):
             let formatter = RelativeDateTimeFormatter()
             challengeError = "Locked out. Try again \(formatter.localizedString(for: until, relativeTo: Date()))."

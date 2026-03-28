@@ -113,22 +113,34 @@ public struct PolicyResolver {
     // MARK: - Schedule Evaluation
 
     /// Determine whether a schedule is active at the given time.
+    /// Supports both same-day (08:00–15:00) and cross-midnight (22:00–06:00) schedules.
     static func isScheduleActive(_ schedule: Schedule, at date: Date) -> Bool {
         let calendar = Calendar.current
         let weekday = calendar.component(.weekday, from: date)
-
-        guard let dayOfWeek = DayOfWeek(rawValue: weekday),
-              schedule.daysOfWeek.contains(dayOfWeek) else {
-            return false
-        }
-
         let hour = calendar.component(.hour, from: date)
         let minute = calendar.component(.minute, from: date)
-        let currentDayTime = DayTime(hour: hour, minute: minute)
+        let now = DayTime(hour: hour, minute: minute)
 
-        // Handle same-day schedules (e.g., 08:00–15:00).
-        // Overnight schedules (e.g., 22:00–06:00) are not supported in Phase 1.
-        return currentDayTime >= schedule.startTime && currentDayTime < schedule.endTime
+        if schedule.startTime < schedule.endTime {
+            // Same-day schedule (e.g., 08:00–15:00)
+            guard let day = DayOfWeek(rawValue: weekday),
+                  schedule.daysOfWeek.contains(day) else { return false }
+            return now >= schedule.startTime && now < schedule.endTime
+        } else {
+            // Cross-midnight schedule (e.g., 22:00–06:00)
+            guard let today = DayOfWeek(rawValue: weekday) else { return false }
+            // Evening portion: check today's day
+            if now >= schedule.startTime && schedule.daysOfWeek.contains(today) {
+                return true
+            }
+            // Morning portion: check yesterday's day
+            if now < schedule.endTime {
+                guard let previousDate = calendar.date(byAdding: .day, value: -1, to: date),
+                      let prevDay = DayOfWeek(rawValue: calendar.component(.weekday, from: previousDate)) else { return false }
+                return schedule.daysOfWeek.contains(prevDay)
+            }
+            return false
+        }
     }
 }
 

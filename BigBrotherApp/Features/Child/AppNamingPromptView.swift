@@ -131,6 +131,7 @@ struct AppNamingPromptView: View {
         try? appState.storage.clearUnlockPickerPending()
 
         feedback = "Sent request to your parent"
+        isSending = false
 
         // Trigger immediate sync.
         Task {

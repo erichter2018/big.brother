@@ -73,16 +73,9 @@ struct BigBrotherApp: App {
     private func setupOnLaunch() async {
         _LaunchLog.log("setupOnLaunch started")
 
-        // Clear badge and force-close nag notifications on launch.
+        // Clear badge and stale launch-needed notifications on launch.
         try? await UNUserNotificationCenter.current().setBadgeCount(0)
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["force-close-nag", "app-launch-needed"])
-
-        // Clear force-close web block — the app is running now.
-        let appGroupDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if appGroupDefaults?.bool(forKey: "forceCloseWebBlocked") == true {
-            appGroupDefaults?.removeObject(forKey: "forceCloseWebBlocked")
-            appGroupDefaults?.removeObject(forKey: "forceCloseLastNagAt")
-        }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["app-launch-needed"])
 
         // Wire AppState into the AppDelegate for push notification handling.
         appDelegate.appState = appState
@@ -107,6 +100,7 @@ struct BigBrotherApp: App {
         _LaunchLog.log("performRestoration starting")
         appState.performRestoration()
         _LaunchLog.log("performRestoration complete")
+        appState.handleMainAppResponsive(reapplyEnforcement: false)
 
         // Safety net: re-apply enforcement after a short delay.
         // On Xcode reinstall, the OS may clear ManagedSettingsStore slightly after
@@ -175,7 +169,8 @@ struct BigBrotherApp: App {
             case .child:
                 let enrollment = await MainActor.run { appState.enrollmentState }
                 if let enrollment {
-                    try? await appState.cloudKit?.setupSubscriptions(
+                    await Self.setupSubscriptionsWithRetry(
+                        cloudKit: appState.cloudKit,
                         familyID: enrollment.familyID,
                         deviceID: enrollment.deviceID
                     )
@@ -192,7 +187,8 @@ struct BigBrotherApp: App {
                 let familyID = await MainActor.run { appState.parentState?.familyID }
                 if let familyID {
                     _LaunchLog.log("Parent: familyID=\(familyID)")
-                    try? await appState.cloudKit?.setupSubscriptions(
+                    await Self.setupSubscriptionsWithRetry(
+                        cloudKit: appState.cloudKit,
                         familyID: familyID,
                         deviceID: nil
                     )
@@ -228,6 +224,28 @@ struct BigBrotherApp: App {
                 break
             }
             _LaunchLog.log("Background setup complete")
+        }
+    }
+
+    /// Retries CloudKit subscription setup up to 3 times with backoff.
+    /// Critical for command delivery — silent failure means no push notifications.
+    private static func setupSubscriptionsWithRetry(
+        cloudKit: (any CloudKitServiceProtocol)?,
+        familyID: FamilyID,
+        deviceID: DeviceID?,
+        maxAttempts: Int = 3
+    ) async {
+        for attempt in 1...maxAttempts {
+            do {
+                try await cloudKit?.setupSubscriptions(familyID: familyID, deviceID: deviceID)
+                _LaunchLog.log("Subscriptions setup succeeded (attempt \(attempt))")
+                return
+            } catch {
+                _LaunchLog.log("Subscriptions setup failed (attempt \(attempt)/\(maxAttempts)): \(error)")
+                if attempt < maxAttempts {
+                    try? await Task.sleep(for: .seconds(Double(attempt) * 2))
+                }
+            }
         }
     }
 }

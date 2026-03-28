@@ -19,6 +19,9 @@ enum CKRecordType {
     static let schedule = "BBSchedule"
     static let heartbeatProfile = "BBHeartbeatProfile"
     static let scheduleProfile = "BBScheduleProfile"
+    static let deviceLocation = "BBDeviceLocation"
+    static let namedPlace = "BBNamedPlace"
+    static let diagnosticReport = "BBDiagnosticReport"
 }
 
 /// Field names used in CloudKit records.
@@ -115,6 +118,7 @@ enum CKFieldName {
     // BBScheduleProfile
     static let freeWindowsJSON = "freeWindowsJSON"
     static let essentialWindowsJSON = "essentialWindowsJSON"
+    static let exceptionDatesJSON = "exceptionDatesJSON"
     static let lockedMode = "lockedMode"
 
     // BBChildDevice (profile links)
@@ -138,4 +142,64 @@ enum CKFieldName {
     static let hbEnforcementError = "hbEnforcementError"
     static let hbActiveScheduleWindow = "hbActiveScheduleWindow"
     static let hbLastCommandProcessedAt = "hbLastCmdAt"
+    static let hbMonitorLastActiveAt = "hbMonitorActiveAt"
+
+    // BBHeartbeat (location)
+    static let hbLatitude = "hbLat"
+    static let hbLongitude = "hbLon"
+    static let hbLocationTimestamp = "hbLocAt"
+    static let hbLocationAddress = "hbLocAddr"
+    static let hbLocationAccuracy = "hbLocAcc"
+    static let hbLocationAuthorization = "hbLocAuth"
+
+    // BBHeartbeat (shield diagnostics)
+    static let hbShieldsActive = "hbShieldsOK"
+    static let hbScheduleResolvedMode = "hbSchedMode"
+    static let hbLastShieldChangeReason = "hbShieldWhy"
+    static let hbShieldedAppCount = "hbShieldApps"
+    static let hbShieldCategoryActive = "hbShieldCat"
+
+    // BBHeartbeat (security)
+    static let hbVPNDetected = "hbVPNDetected"
+    static let hbTimeZoneID = "hbTimeZoneID"
+    static let hbTimeZoneOffset = "hbTimeZoneOffset"
+    static let hbScreenTimeMinutes = "hbScreenTimeMins"
+    static let hbJailbreakDetected = "hbJailbreak"
+    static let hbJailbreakReason = "hbJailbreakReason"
+    static let hbIsDriving = "hbDriving"
+    static let hbCurrentSpeed = "hbSpeed"
+    static let hbHeartbeatSource = "hbSource"
+    static let hbTunnelConnected = "hbTunnel"
+    static let hbMotionAuthorized = "hbMotionAuth"
+    static let hbNotificationsAuthorized = "hbNotifAuth"
+    static let hbDeviceLocked = "hbLocked"
+
+    // BBDeviceLocation (speed)
+    static let locSpeed = "locSpeed"
+    static let locCourse = "locCourse"
+
+    // BBNamedPlace
+    static let placeName = "placeName"
+    static let placeLatitude = "placeLat"
+    static let placeLongitude = "placeLon"
+    static let placeRadius = "placeRadius"
+    static let placeChildProfileIDs = "placeChildIDs"
+    static let placeCreatedBy = "placeCreatedBy"
+
+    // BBDiagnosticReport
+    static let diagReportJSON = "diagJSON"
+
+    // BBRemoteCommand (signing)
+    static let signatureBase64 = "signatureBase64"
+
+    // BBEnrollmentInvite (signing)
+    static let commandSigningPubKey = "commandSigningPubKey"
+    static let commandSigningPrivKey = "commandSigningPrivKey"
+
+    // BBDeviceLocation
+    static let locLatitude = "latitude"
+    static let locLongitude = "longitude"
+    static let locAccuracy = "accuracy"
+    static let locTimestamp = "locTimestamp"
+    static let locAddress = "address"
 }

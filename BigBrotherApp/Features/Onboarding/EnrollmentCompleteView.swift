@@ -104,7 +104,7 @@ struct EnrollmentCompleteView: View {
 
                 enrollmentDone = true
             } catch {
-                errorMessage = "Enrollment failed: \(error.localizedDescription)"
+                errorMessage = "Enrollment failed: \(CloudKitErrorHelper.userMessage(for: error))"
             }
             isEnrolling = false
         }

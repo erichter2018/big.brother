@@ -75,6 +75,13 @@ struct ParentSetupView: View {
                 try appState.setRole(.parent)
                 try appState.setParentState(parentState)
 
+                // Generate ED25519 keypair for command signing.
+                if (try? appState.keychain.getData(forKey: StorageKeys.commandSigningPrivateKey)) == nil {
+                    let (privateKey, publicKey) = CommandSigner.generateKeyPair()
+                    try? appState.keychain.setData(privateKey, forKey: StorageKeys.commandSigningPrivateKey)
+                    try? appState.keychain.setData(publicKey, forKey: StorageKeys.commandSigningPublicKey)
+                }
+
                 // Configure services now that role is set.
                 appState.configureServices()
 
@@ -85,7 +92,7 @@ struct ParentSetupView: View {
                 // Prompt PIN setup.
                 showPINSetup = true
             } catch {
-                errorMessage = "Setup failed: \(error.localizedDescription)"
+                errorMessage = "Setup failed: \(CloudKitErrorHelper.userMessage(for: error))"
             }
             isSettingUp = false
         }

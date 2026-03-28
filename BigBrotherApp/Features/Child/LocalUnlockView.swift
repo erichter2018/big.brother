@@ -196,7 +196,7 @@ struct LocalUnlockView: View {
         let appState = viewModel.appState
 
         // Clear Keychain (enrollment, role, PIN, familyID).
-        let keychain = KeychainManager()
+        let keychain = appState.keychain
         try? keychain.delete(forKey: StorageKeys.enrollmentState)
         try? keychain.delete(forKey: StorageKeys.deviceRole)
         try? keychain.delete(forKey: StorageKeys.familyID)
@@ -206,11 +206,11 @@ struct LocalUnlockView: View {
         // Clear enforcement (shields + restrictions).
         try? appState.enforcement?.clearAllRestrictions()
 
-        // Clear App Group storage.
-        let storage = AppGroupStorage()
+        // Clear App Group storage using appState's storage instance.
+        let storage = appState.storage
         try? storage.writeDeviceRestrictions(DeviceRestrictions())
-        try? storage.writeRawData(nil, forKey: "policy_snapshot.json")
-        try? storage.writeRawData(nil, forKey: "processed_commands.json")
+        try? storage.clearTemporaryUnlockState()
+        try? storage.clearUnlockPickerPending()
 
         // Reset app state to unconfigured.
         try? appState.setRole(.unconfigured)

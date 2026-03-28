@@ -32,6 +32,20 @@ protocol EnforcementServiceProtocol {
     /// Reconcile: verify that ManagedSettingsStore matches the current
     /// PolicySnapshot. Reapply if mismatched. Called on app launch.
     func reconcile(with snapshot: PolicySnapshot) throws
+
+    /// Apply essential-only mode (block all apps, no exemptions).
+    /// Used when the child denies required permissions (VPN, FamilyControls).
+    func applyEssentialOnly() throws
+
+    /// Read current shield state from ManagedSettingsStore for diagnostic reporting.
+    func shieldDiagnostic() -> ShieldDiagnostic
+}
+
+/// Snapshot of the current ManagedSettingsStore shield state for heartbeat diagnostics.
+struct ShieldDiagnostic {
+    let shieldsActive: Bool
+    let appCount: Int
+    let categoryActive: Bool
 }
 
 /// Simplified authorization status (avoids exposing FamilyControls types

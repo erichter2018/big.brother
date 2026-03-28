@@ -1,6 +1,9 @@
 import Foundation
 import CloudKit
+import os.log
 import BigBrotherCore
+
+private let ckLogger = Logger(subsystem: "fr.bigbrother.app", category: "CKRecordConversion")
 
 /// Bidirectional mapping between BigBrotherCore domain models and CKRecord.
 ///
@@ -27,8 +30,11 @@ enum CKRecordConversion {
         record[CKFieldName.familyID] = profile.familyID.rawValue
         record[CKFieldName.name] = profile.name
         record[CKFieldName.avatarName] = profile.avatarName
-        if let cats = try? JSONEncoder().encode(profile.alwaysAllowedCategories) {
+        do {
+            let cats = try JSONEncoder().encode(profile.alwaysAllowedCategories)
             record[CKFieldName.alwaysAllowedCategoriesJSON] = String(data: cats, encoding: .utf8)
+        } catch {
+            ckLogger.error("Failed to encode alwaysAllowedCategories for profile \(profile.id.rawValue): \(error.localizedDescription)")
         }
         record[CKFieldName.createdAt] = profile.createdAt as NSDate
         record[CKFieldName.updatedAt] = profile.updatedAt as NSDate
@@ -42,7 +48,10 @@ enum CKRecordConversion {
               let name = record[CKFieldName.name] as? String,
               let createdAt = record[CKFieldName.createdAt] as? Date,
               let updatedAt = record[CKFieldName.updatedAt] as? Date
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize ChildProfile from record \(record.recordID.recordName) — missing required fields")
+            return nil
+        }
 
         var categories: Set<String> = []
         if let json = record[CKFieldName.alwaysAllowedCategoriesJSON] as? String,
@@ -99,7 +108,10 @@ enum CKRecordConversion {
               let modelID = record[CKFieldName.modelIdentifier] as? String,
               let osVer = record[CKFieldName.osVersion] as? String,
               let enrolledAt = record[CKFieldName.enrolledAt] as? Date
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize ChildDevice from record \(record.recordID.recordName) — missing required fields")
+            return nil
+        }
 
         let fcOK = (record[CKFieldName.familyControlsOK] as? Int64 ?? 0) != 0
 
@@ -162,7 +174,10 @@ enum CKRecordConversion {
               let mode = LockMode(rawValue: modeRaw),
               let version = record[CKFieldName.version] as? Int64,
               let updatedAt = record[CKFieldName.updatedAt] as? Date
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize Policy from record \(record.recordID.recordName) — missing required fields")
+            return nil
+        }
 
         var scheduleID: UUID?
         if let sid = record[CKFieldName.scheduleID] as? String {
@@ -199,15 +214,18 @@ enum CKRecordConversion {
             record[CKFieldName.targetID] = nil
         }
 
-        if let actionData = try? JSONEncoder().encode(command.action),
-           let actionStr = String(data: actionData, encoding: .utf8) {
-            record[CKFieldName.actionJSON] = actionStr
+        do {
+            let actionData = try JSONEncoder().encode(command.action)
+            record[CKFieldName.actionJSON] = String(data: actionData, encoding: .utf8)
+        } catch {
+            ckLogger.error("Failed to encode command action for \(command.id.uuidString): \(error.localizedDescription)")
         }
 
         record[CKFieldName.issuedBy] = command.issuedBy
         record[CKFieldName.issuedAt] = command.issuedAt as NSDate
         record[CKFieldName.expiresAt] = command.expiresAt as NSDate?
         record[CKFieldName.status] = command.status.rawValue
+        record[CKFieldName.signatureBase64] = command.signatureBase64
         return record
     }
 
@@ -224,7 +242,10 @@ enum CKRecordConversion {
               let issuedAt = record[CKFieldName.issuedAt] as? Date,
               let statusRaw = record[CKFieldName.status] as? String,
               let status = CommandStatus(rawValue: statusRaw)
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize RemoteCommand from record \(record.recordID.recordName) — missing or invalid fields")
+            return nil
+        }
 
         let target: CommandTarget
         let targetID = record[CKFieldName.targetID] as? String
@@ -249,7 +270,8 @@ enum CKRecordConversion {
             issuedBy: issuedBy,
             issuedAt: issuedAt,
             expiresAt: record[CKFieldName.expiresAt] as? Date,
-            status: status
+            status: status,
+            signatureBase64: record[CKFieldName.signatureBase64] as? String
         )
     }
 
@@ -276,7 +298,10 @@ enum CKRecordConversion {
               let familyID = record[CKFieldName.familyID] as? String,
               let statusRaw = record[CKFieldName.status] as? String,
               let status = CommandStatus(rawValue: statusRaw)
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize CommandReceipt from record \(record.recordID.recordName)")
+            return nil
+        }
 
         return CommandReceipt(
             commandID: cmdID,
@@ -330,6 +355,31 @@ enum CKRecordConversion {
         record[CKFieldName.hbEnforcementError] = hb.enforcementError
         record[CKFieldName.hbActiveScheduleWindow] = hb.activeScheduleWindowName
         record[CKFieldName.hbLastCommandProcessedAt] = hb.lastCommandProcessedAt.map { $0 as NSDate }
+        record[CKFieldName.hbMonitorLastActiveAt] = hb.monitorLastActiveAt.map { $0 as NSDate }
+        record[CKFieldName.hbVPNDetected] = hb.vpnDetected.map { NSNumber(value: $0) }
+        record[CKFieldName.hbTimeZoneID] = hb.timeZoneIdentifier
+        record[CKFieldName.hbTimeZoneOffset] = hb.timeZoneOffsetSeconds.map { NSNumber(value: $0) }
+        record[CKFieldName.hbScreenTimeMinutes] = hb.screenTimeMinutes.map { $0 as NSNumber }
+        record[CKFieldName.hbJailbreakDetected] = hb.jailbreakDetected.map { NSNumber(value: $0) }
+        record[CKFieldName.hbJailbreakReason] = hb.jailbreakReason
+        record[CKFieldName.hbIsDriving] = hb.isDriving.map { NSNumber(value: $0) }
+        record[CKFieldName.hbCurrentSpeed] = hb.currentSpeed.map { $0 as NSNumber }
+        record[CKFieldName.hbHeartbeatSource] = hb.heartbeatSource
+        record[CKFieldName.hbTunnelConnected] = hb.tunnelConnected.map { NSNumber(value: $0) }
+        record[CKFieldName.hbMotionAuthorized] = hb.motionAuthorized.map { NSNumber(value: $0) }
+        record[CKFieldName.hbNotificationsAuthorized] = hb.notificationsAuthorized.map { NSNumber(value: $0) }
+        record[CKFieldName.hbDeviceLocked] = hb.isDeviceLocked.map { NSNumber(value: $0) }
+        record[CKFieldName.hbShieldsActive] = hb.shieldsActive.map { NSNumber(value: $0) }
+        record[CKFieldName.hbScheduleResolvedMode] = hb.scheduleResolvedMode
+        record[CKFieldName.hbLastShieldChangeReason] = hb.lastShieldChangeReason
+        record[CKFieldName.hbShieldedAppCount] = hb.shieldedAppCount.map { $0 as NSNumber }
+        record[CKFieldName.hbShieldCategoryActive] = hb.shieldCategoryActive.map { NSNumber(value: $0) }
+        record[CKFieldName.hbLatitude] = hb.latitude.map { $0 as NSNumber }
+        record[CKFieldName.hbLongitude] = hb.longitude.map { $0 as NSNumber }
+        record[CKFieldName.hbLocationTimestamp] = hb.locationTimestamp.map { $0 as NSDate }
+        record[CKFieldName.hbLocationAddress] = hb.locationAddress
+        record[CKFieldName.hbLocationAccuracy] = hb.locationAccuracy.map { $0 as NSNumber }
+        record[CKFieldName.hbLocationAuthorization] = hb.locationAuthorization
     }
 
     static func deviceHeartbeat(from record: CKRecord) -> DeviceHeartbeat? {
@@ -341,7 +391,10 @@ enum CKRecordConversion {
               let mode = LockMode(rawValue: modeRaw),
               let pv = record[CKFieldName.policyVersion] as? Int64,
               let fc = record[CKFieldName.fcAuthorized] as? Int64
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize DeviceHeartbeat from record \(record.recordID.recordName)")
+            return nil
+        }
 
         var installID: UUID?
         if let str = record[CKFieldName.installID] as? String {
@@ -379,7 +432,32 @@ enum CKRecordConversion {
             appBuildNumber: (record[CKFieldName.hbAppBuildNumber] as? Int64).map { Int($0) },
             enforcementError: record[CKFieldName.hbEnforcementError] as? String,
             activeScheduleWindowName: record[CKFieldName.hbActiveScheduleWindow] as? String,
-            lastCommandProcessedAt: record[CKFieldName.hbLastCommandProcessedAt] as? Date
+            lastCommandProcessedAt: record[CKFieldName.hbLastCommandProcessedAt] as? Date,
+            monitorLastActiveAt: record[CKFieldName.hbMonitorLastActiveAt] as? Date,
+            vpnDetected: (record[CKFieldName.hbVPNDetected] as? Int64).map { $0 != 0 },
+            timeZoneIdentifier: record[CKFieldName.hbTimeZoneID] as? String,
+            timeZoneOffsetSeconds: (record[CKFieldName.hbTimeZoneOffset] as? Int64).map { Int($0) },
+            screenTimeMinutes: (record[CKFieldName.hbScreenTimeMinutes] as? Int64).map { Int($0) },
+            jailbreakDetected: (record[CKFieldName.hbJailbreakDetected] as? Int64).map { $0 != 0 },
+            jailbreakReason: record[CKFieldName.hbJailbreakReason] as? String,
+            isDriving: (record[CKFieldName.hbIsDriving] as? Int64).map { $0 != 0 },
+            currentSpeed: record[CKFieldName.hbCurrentSpeed] as? Double,
+            heartbeatSource: record[CKFieldName.hbHeartbeatSource] as? String,
+            tunnelConnected: (record[CKFieldName.hbTunnelConnected] as? Int64).map { $0 != 0 },
+            motionAuthorized: (record[CKFieldName.hbMotionAuthorized] as? Int64).map { $0 != 0 },
+            notificationsAuthorized: (record[CKFieldName.hbNotificationsAuthorized] as? Int64).map { $0 != 0 },
+            isDeviceLocked: (record[CKFieldName.hbDeviceLocked] as? Int64).map { $0 != 0 },
+            shieldsActive: (record[CKFieldName.hbShieldsActive] as? Int64).map { $0 != 0 },
+            scheduleResolvedMode: record[CKFieldName.hbScheduleResolvedMode] as? String,
+            lastShieldChangeReason: record[CKFieldName.hbLastShieldChangeReason] as? String,
+            shieldedAppCount: (record[CKFieldName.hbShieldedAppCount] as? Int64).map { Int($0) },
+            shieldCategoryActive: (record[CKFieldName.hbShieldCategoryActive] as? Int64).map { $0 != 0 },
+            latitude: record[CKFieldName.hbLatitude] as? Double,
+            longitude: record[CKFieldName.hbLongitude] as? Double,
+            locationTimestamp: record[CKFieldName.hbLocationTimestamp] as? Date,
+            locationAddress: record[CKFieldName.hbLocationAddress] as? String,
+            locationAccuracy: record[CKFieldName.hbLocationAccuracy] as? Double,
+            locationAuthorization: record[CKFieldName.hbLocationAuthorization] as? String
         )
     }
 
@@ -406,7 +484,10 @@ enum CKRecordConversion {
               let typeRaw = record[CKFieldName.eventType] as? String,
               let eventType = EventType(rawValue: typeRaw),
               let timestamp = record[CKFieldName.timestamp] as? Date
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize EventLogEntry from record \(record.recordID.recordName)")
+            return nil
+        }
 
         return EventLogEntry(
             id: id,
@@ -432,6 +513,8 @@ enum CKRecordConversion {
         record[CKFieldName.used] = (invite.used ? 1 : 0) as NSNumber
         record[CKFieldName.usedByDeviceID] = invite.usedByDeviceID?.rawValue
         record[CKFieldName.revoked] = (invite.revoked ? 1 : 0) as NSNumber
+        record[CKFieldName.commandSigningPubKey] = invite.commandSigningPublicKeyBase64
+        // SECURITY: Private key is never stored in CloudKit.
         return record
     }
 
@@ -443,7 +526,10 @@ enum CKRecordConversion {
               let createdAt = record[CKFieldName.createdAt] as? Date,
               let expiresAt = record[CKFieldName.expiresAt] as? Date,
               let usedInt = record[CKFieldName.used] as? Int64
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize EnrollmentInvite from record \(record.recordID.recordName)")
+            return nil
+        }
 
         var usedByDevice: DeviceID?
         if let ubdStr = record[CKFieldName.usedByDeviceID] as? String {
@@ -460,7 +546,8 @@ enum CKRecordConversion {
             expiresAt: expiresAt,
             used: usedInt != 0,
             usedByDeviceID: usedByDevice,
-            revoked: revokedInt != 0
+            revoked: revokedInt != 0,
+            commandSigningPublicKeyBase64: record[CKFieldName.commandSigningPubKey] as? String
         )
     }
 
@@ -480,9 +567,11 @@ enum CKRecordConversion {
         record[CKFieldName.endMinute] = schedule.endTime.minute as NSNumber
         record[CKFieldName.updatedAt] = schedule.updatedAt as NSDate
 
-        if let daysData = try? JSONEncoder().encode(schedule.daysOfWeek),
-           let daysStr = String(data: daysData, encoding: .utf8) {
-            record[CKFieldName.daysOfWeekJSON] = daysStr
+        do {
+            let daysData = try JSONEncoder().encode(schedule.daysOfWeek)
+            record[CKFieldName.daysOfWeekJSON] = String(data: daysData, encoding: .utf8)
+        } catch {
+            ckLogger.error("Failed to encode daysOfWeek for schedule \(schedule.id.uuidString): \(error.localizedDescription)")
         }
 
         return record
@@ -501,7 +590,10 @@ enum CKRecordConversion {
               let endM = record[CKFieldName.endMinute] as? Int64,
               let activeInt = record[CKFieldName.isActive] as? Int64,
               let updatedAt = record[CKFieldName.updatedAt] as? Date
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize Schedule from record \(record.recordID.recordName)")
+            return nil
+        }
 
         var days: Set<DayOfWeek> = []
         if let daysJSON = record[CKFieldName.daysOfWeekJSON] as? String,
@@ -513,7 +605,10 @@ enum CKRecordConversion {
         // Extract UUID from record name (format: "BBSchedule_<uuid>")
         let recordName = record.recordID.recordName
         let uuidStr = recordName.replacingOccurrences(of: "\(CKRecordType.schedule)_", with: "")
-        guard let scheduleID = UUID(uuidString: uuidStr) else { return nil }
+        guard let scheduleID = UUID(uuidString: uuidStr) else {
+            ckLogger.error("Invalid UUID in Schedule record name: \(recordName)")
+            return nil
+        }
 
         return Schedule(
             id: scheduleID,
@@ -540,9 +635,11 @@ enum CKRecordConversion {
         record[CKFieldName.isDefault] = (profile.isDefault ? 1 : 0) as NSNumber
         record[CKFieldName.updatedAt] = profile.updatedAt as NSDate
 
-        if let windowsData = try? JSONEncoder().encode(profile.activeWindows),
-           let windowsStr = String(data: windowsData, encoding: .utf8) {
-            record[CKFieldName.activeWindowsJSON] = windowsStr
+        do {
+            let windowsData = try JSONEncoder().encode(profile.activeWindows)
+            record[CKFieldName.activeWindowsJSON] = String(data: windowsData, encoding: .utf8)
+        } catch {
+            ckLogger.error("Failed to encode activeWindows for heartbeat profile \(profile.id.uuidString): \(error.localizedDescription)")
         }
 
         return record
@@ -555,12 +652,18 @@ enum CKRecordConversion {
               let maxGap = record[CKFieldName.maxHeartbeatGap] as? Double,
               let isDefaultInt = record[CKFieldName.isDefault] as? Int64,
               let updatedAt = record[CKFieldName.updatedAt] as? Date
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize HeartbeatProfile from record \(record.recordID.recordName)")
+            return nil
+        }
 
         // Extract UUID from record name (format: "BBHeartbeatProfile_<uuid>")
         let recordName = record.recordID.recordName
         let uuidStr = recordName.replacingOccurrences(of: "\(CKRecordType.heartbeatProfile)_", with: "")
-        guard let profileID = UUID(uuidString: uuidStr) else { return nil }
+        guard let profileID = UUID(uuidString: uuidStr) else {
+            ckLogger.error("Invalid UUID in HeartbeatProfile record name: \(recordName)")
+            return nil
+        }
 
         var windows: [ActiveWindow] = []
         if let json = record[CKFieldName.activeWindowsJSON] as? String,
@@ -591,14 +694,27 @@ enum CKRecordConversion {
         record[CKFieldName.isDefault] = (profile.isDefault ? 1 : 0) as NSNumber
         record[CKFieldName.updatedAt] = profile.updatedAt as NSDate
 
-        if let windowsData = try? JSONEncoder().encode(profile.freeWindows),
-           let windowsStr = String(data: windowsData, encoding: .utf8) {
-            record[CKFieldName.freeWindowsJSON] = windowsStr
+        do {
+            let windowsData = try JSONEncoder().encode(profile.freeWindows)
+            record[CKFieldName.freeWindowsJSON] = String(data: windowsData, encoding: .utf8)
+        } catch {
+            ckLogger.error("Failed to encode freeWindows for schedule profile \(profile.id.uuidString): \(error.localizedDescription)")
         }
 
-        if let essentialData = try? JSONEncoder().encode(profile.essentialWindows),
-           let essentialStr = String(data: essentialData, encoding: .utf8) {
-            record[CKFieldName.essentialWindowsJSON] = essentialStr
+        do {
+            let essentialData = try JSONEncoder().encode(profile.essentialWindows)
+            record[CKFieldName.essentialWindowsJSON] = String(data: essentialData, encoding: .utf8)
+        } catch {
+            ckLogger.error("Failed to encode essentialWindows for schedule profile \(profile.id.uuidString): \(error.localizedDescription)")
+        }
+
+        if !profile.exceptionDates.isEmpty {
+            do {
+                let exceptionData = try JSONEncoder().encode(profile.exceptionDates)
+                record[CKFieldName.exceptionDatesJSON] = String(data: exceptionData, encoding: .utf8)
+            } catch {
+                ckLogger.error("Failed to encode exceptionDates for schedule profile \(profile.id.uuidString): \(error.localizedDescription)")
+            }
         }
 
         return record
@@ -612,11 +728,17 @@ enum CKRecordConversion {
               let lockedMode = LockMode(rawValue: lockedModeRaw),
               let isDefaultInt = record[CKFieldName.isDefault] as? Int64,
               let updatedAt = record[CKFieldName.updatedAt] as? Date
-        else { return nil }
+        else {
+            ckLogger.error("Failed to deserialize ScheduleProfile from record \(record.recordID.recordName)")
+            return nil
+        }
 
         let recordName = record.recordID.recordName
         let uuidStr = recordName.replacingOccurrences(of: "\(CKRecordType.scheduleProfile)_", with: "")
-        guard let profileID = UUID(uuidString: uuidStr) else { return nil }
+        guard let profileID = UUID(uuidString: uuidStr) else {
+            ckLogger.error("Invalid UUID in ScheduleProfile record name: \(recordName)")
+            return nil
+        }
 
         var windows: [ActiveWindow] = []
         if let json = record[CKFieldName.freeWindowsJSON] as? String,
@@ -632,6 +754,13 @@ enum CKRecordConversion {
             essentialWindows = decoded
         }
 
+        var exceptionDates: [Date] = []
+        if let json = record[CKFieldName.exceptionDatesJSON] as? String,
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([Date].self, from: data) {
+            exceptionDates = decoded
+        }
+
         return ScheduleProfile(
             id: profileID,
             familyID: FamilyID(rawValue: familyID),
@@ -639,8 +768,122 @@ enum CKRecordConversion {
             freeWindows: windows,
             essentialWindows: essentialWindows,
             lockedMode: lockedMode,
+            exceptionDates: exceptionDates,
             isDefault: isDefaultInt != 0,
             updatedAt: updatedAt
+        )
+    }
+
+    // MARK: - DeviceLocation
+
+    static func toCKRecord(_ loc: DeviceLocation) -> CKRecord {
+        let id = recordID(loc.id.uuidString, type: CKRecordType.deviceLocation)
+        let record = CKRecord(recordType: CKRecordType.deviceLocation, recordID: id)
+        record[CKFieldName.deviceID] = loc.deviceID.rawValue
+        record[CKFieldName.familyID] = loc.familyID.rawValue
+        record[CKFieldName.locLatitude] = loc.latitude as NSNumber
+        record[CKFieldName.locLongitude] = loc.longitude as NSNumber
+        record[CKFieldName.locAccuracy] = loc.horizontalAccuracy as NSNumber
+        record[CKFieldName.locTimestamp] = loc.timestamp as NSDate
+        record[CKFieldName.locAddress] = loc.address
+        record[CKFieldName.locSpeed] = loc.speed.map { $0 as NSNumber }
+        record[CKFieldName.locCourse] = loc.course.map { $0 as NSNumber }
+        return record
+    }
+
+    static func deviceLocation(from record: CKRecord) -> DeviceLocation? {
+        guard record.recordType == CKRecordType.deviceLocation,
+              let deviceID = record[CKFieldName.deviceID] as? String,
+              let familyID = record[CKFieldName.familyID] as? String,
+              let lat = record[CKFieldName.locLatitude] as? Double,
+              let lon = record[CKFieldName.locLongitude] as? Double,
+              let acc = record[CKFieldName.locAccuracy] as? Double,
+              let ts = record[CKFieldName.locTimestamp] as? Date
+        else { return nil }
+
+        let recordName = record.recordID.recordName
+        let uuidStr = recordName.replacingOccurrences(of: "\(CKRecordType.deviceLocation)_", with: "")
+
+        return DeviceLocation(
+            id: UUID(uuidString: uuidStr) ?? UUID(),
+            deviceID: DeviceID(rawValue: deviceID),
+            familyID: FamilyID(rawValue: familyID),
+            latitude: lat,
+            longitude: lon,
+            horizontalAccuracy: acc,
+            timestamp: ts,
+            address: record[CKFieldName.locAddress] as? String,
+            speed: record[CKFieldName.locSpeed] as? Double,
+            course: record[CKFieldName.locCourse] as? Double
+        )
+    }
+
+    // MARK: - Diagnostic Report
+
+    static func toCKRecord(_ report: DiagnosticReport) -> CKRecord {
+        let id = recordID(report.id.uuidString, type: CKRecordType.diagnosticReport)
+        let record = CKRecord(recordType: CKRecordType.diagnosticReport, recordID: id)
+        record[CKFieldName.deviceID] = report.deviceID.rawValue
+        record[CKFieldName.familyID] = report.familyID.rawValue
+        record[CKFieldName.timestamp] = report.timestamp as NSDate
+        if let json = try? JSONEncoder().encode(report),
+           let str = String(data: json, encoding: .utf8) {
+            record[CKFieldName.diagReportJSON] = str
+        }
+        return record
+    }
+
+    static func diagnosticReport(from record: CKRecord) -> DiagnosticReport? {
+        guard record.recordType == CKRecordType.diagnosticReport,
+              let jsonStr = record[CKFieldName.diagReportJSON] as? String,
+              let data = jsonStr.data(using: .utf8),
+              let report = try? JSONDecoder().decode(DiagnosticReport.self, from: data)
+        else { return nil }
+        return report
+    }
+
+    // MARK: - Named Place
+
+    static func toCKRecord(_ place: NamedPlace) -> CKRecord {
+        let id = recordID(place.id.uuidString, type: CKRecordType.namedPlace)
+        let record = CKRecord(recordType: CKRecordType.namedPlace, recordID: id)
+        record[CKFieldName.familyID] = place.familyID.rawValue
+        record[CKFieldName.placeName] = place.name
+        record[CKFieldName.placeLatitude] = place.latitude as NSNumber
+        record[CKFieldName.placeLongitude] = place.longitude as NSNumber
+        record[CKFieldName.placeRadius] = place.radiusMeters as NSNumber
+        record[CKFieldName.timestamp] = place.createdAt as NSDate
+        record[CKFieldName.placeCreatedBy] = place.createdBy
+        let childIDs = place.childProfileIDs.map(\.rawValue)
+        record[CKFieldName.placeChildProfileIDs] = childIDs as [NSString]
+        return record
+    }
+
+    static func namedPlace(from record: CKRecord) -> NamedPlace? {
+        guard record.recordType == CKRecordType.namedPlace,
+              let familyID = record[CKFieldName.familyID] as? String,
+              let name = record[CKFieldName.placeName] as? String,
+              let lat = record[CKFieldName.placeLatitude] as? Double,
+              let lon = record[CKFieldName.placeLongitude] as? Double
+        else { return nil }
+
+        let recordName = record.recordID.recordName
+        let uuidStr = recordName.replacingOccurrences(of: "\(CKRecordType.namedPlace)_", with: "")
+        let radius = record[CKFieldName.placeRadius] as? Double ?? 150
+        let createdAt = record[CKFieldName.timestamp] as? Date ?? Date()
+        let createdBy = record[CKFieldName.placeCreatedBy] as? String ?? "Parent"
+        let childIDStrings = record[CKFieldName.placeChildProfileIDs] as? [String] ?? []
+
+        return NamedPlace(
+            id: UUID(uuidString: uuidStr) ?? UUID(),
+            familyID: FamilyID(rawValue: familyID),
+            name: name,
+            latitude: lat,
+            longitude: lon,
+            radiusMeters: radius,
+            createdAt: createdAt,
+            createdBy: createdBy,
+            childProfileIDs: childIDStrings.map { ChildProfileID(rawValue: $0) }
         )
     }
 }

@@ -3,6 +3,7 @@ import Observation
 import BigBrotherCore
 
 @Observable
+@MainActor
 final class InsightsViewModel {
     let appState: AppState
 
@@ -76,7 +77,7 @@ final class InsightsViewModel {
         let scheduleTransitionRecords: [ScheduleTransitionRecord]
     }
 
-    static func processInsights(
+    nonisolated static func processInsights(
         commands: [RemoteCommand],
         receipts: [CommandReceipt],
         events: [EventLogEntry],

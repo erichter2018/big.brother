@@ -28,19 +28,26 @@ public enum StorageKeys {
     /// fail from extension processes.
     public static let lastShieldedAppKeychain = "fr.bigbrother.keychain.lastShieldedApp"
 
+    /// ED25519 private key for signing commands (parent only).
+    public static let commandSigningPrivateKey = "fr.bigbrother.keychain.commandSigningPrivateKey"
+
+    /// ED25519 public key for verifying command signatures (child only).
+    public static let commandSigningPublicKey = "fr.bigbrother.keychain.commandSigningPublicKey"
+
+    /// AES-256 key for encrypting sensitive App Group files.
+    public static let appGroupEncryptionKey = "fr.bigbrother.keychain.appGroupEncryptionKey"
+
+    /// PIN lockout state (Codable struct in Keychain, not UserDefaults).
+    public static let pinLockoutState = "fr.bigbrother.keychain.pinLockoutState"
+
+    /// Whether parent app requires PIN/biometric authentication.
+    /// Stored in Keychain (not UserDefaults) to prevent child tampering.
+    public static let parentAuthEnabled = "fr.bigbrother.keychain.parentAuthEnabled"
+
     // MARK: - UserDefaults Keys (App Group)
 
     /// Whether onboarding has been completed.
     public static let onboardingCompleted = "fr.bigbrother.onboardingCompleted"
-
-    /// The number of consecutive failed PIN attempts.
-    public static let failedPINAttempts = "fr.bigbrother.failedPINAttempts"
-
-    /// Timestamp of the last PIN lockout.
-    public static let pinLockoutUntil = "fr.bigbrother.pinLockoutUntil"
-
-    /// Number of consecutive lockouts (escalating: 5m → 15m → 1h → 4h).
-    public static let pinLockoutStreak = "fr.bigbrother.pinLockoutStreak"
 
     /// The lock mode that was last confirmed applied to ManagedSettingsStore.
     public static let lastAppliedMode = "fr.bigbrother.lastAppliedMode"
@@ -50,10 +57,6 @@ public enum StorageKeys {
 
     /// Whether a fail-safe mode was applied during the last recovery.
     public static let failSafeApplied = "fr.bigbrother.failSafeApplied"
-
-    /// Whether parent app requires PIN/biometric authentication.
-    /// When false, ParentGate is bypassed even if a PIN is configured.
-    public static let parentAuthEnabled = "fr.bigbrother.parentAuthEnabled"
 
     // MARK: - App Blocking
 
@@ -89,4 +92,9 @@ public enum StorageKeys {
     /// JSON-encoded [String] of allowed web domains (e.g. ["google.com", "khan.org"]).
     /// Empty or missing = block all web. Used by enforcement to build shield.webDomains.
     public static let allowedWebDomains = "allowedWebDomains"
+
+    // MARK: - Parent Messages
+
+    /// JSON-encoded [ParentMessage] of messages sent from parent to child.
+    public static let parentMessages = "parentMessages"
 }

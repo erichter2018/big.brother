@@ -5,6 +5,7 @@ import Observation
 import BigBrotherCore
 
 @Observable
+@MainActor
 final class LocalParentUnlockViewModel {
     let appState: AppState
 
@@ -93,7 +94,9 @@ final class LocalParentUnlockViewModel {
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .essentialOnly
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
-        let duration = selectedDuration.map(TimeInterval.init) ?? AppConstants.defaultTemporaryUnlockSeconds
+        let maxDuration: TimeInterval = 24 * 3600 // 24 hours max
+        let rawDuration = selectedDuration.map(TimeInterval.init) ?? AppConstants.defaultTemporaryUnlockSeconds
+        let duration = min(rawDuration, maxDuration)
         let expiresAt = Date().addingTimeInterval(duration)
 
         // Create durable temp unlock state.

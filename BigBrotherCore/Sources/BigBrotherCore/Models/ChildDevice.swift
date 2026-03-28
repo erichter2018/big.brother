@@ -117,7 +117,7 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         lastHeartbeat = try container.decodeIfPresent(Date.self, forKey: .lastHeartbeat)
         confirmedMode = try container.decodeIfPresent(LockMode.self, forKey: .confirmedMode)
         confirmedPolicyVersion = try container.decodeIfPresent(Int64.self, forKey: .confirmedPolicyVersion)
-        familyControlsAuthorized = try container.decode(Bool.self, forKey: .familyControlsAuthorized)
+        familyControlsAuthorized = try container.decodeIfPresent(Bool.self, forKey: .familyControlsAuthorized) ?? false
         heartbeatProfileID = try container.decodeIfPresent(UUID.self, forKey: .heartbeatProfileID)
         scheduleProfileID = try container.decodeIfPresent(UUID.self, forKey: .scheduleProfileID)
         penaltySeconds = try container.decodeIfPresent(Int.self, forKey: .penaltySeconds)

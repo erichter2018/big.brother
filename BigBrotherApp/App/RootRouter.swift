@@ -21,7 +21,9 @@ struct RootRouter: View {
                     revokedParentView
                 } else {
                     ParentGate(appState: appState) {
-                        ParentTabView(appState: appState)
+                        SubscriptionGate(subscriptionManager: appState.subscriptionManager, debugMode: appState.debugMode) {
+                            ParentTabView(appState: appState)
+                        }
                     }
                 }
 
@@ -54,12 +56,14 @@ struct RootRouter: View {
 struct ParentTabView: View {
     let appState: AppState
     @State private var dashboardViewModel: ParentDashboardViewModel
+    @State private var activityViewModel: ActivityFeedViewModel
     @State private var navigationPath = NavigationPath()
     @Environment(\.scenePhase) private var scenePhase
 
     init(appState: AppState) {
         self.appState = appState
         self._dashboardViewModel = State(initialValue: ParentDashboardViewModel(appState: appState))
+        self._activityViewModel = State(initialValue: ActivityFeedViewModel(appState: appState))
     }
 
     var body: some View {
@@ -97,11 +101,22 @@ struct ParentTabView: View {
             }
 
             NavigationStack {
-                InsightsView(viewModel: InsightsViewModel(appState: appState))
+                ActivityFeedView(viewModel: activityViewModel)
             }
             .tabItem {
-                Label("Insights", systemImage: "chart.bar.xaxis")
+                Label("Activity", systemImage: "bell.badge")
             }
+
+            #if DEBUG
+            if appState.locationService != nil {
+                NavigationStack {
+                    MyDrivingDebugView(appState: appState)
+                }
+                .tabItem {
+                    Label("My Driving", systemImage: "car.fill")
+                }
+            }
+            #endif
 
             NavigationStack {
                 SettingsView(appState: appState)

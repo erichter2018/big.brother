@@ -5,6 +5,7 @@ import BigBrotherCore
 ///
 /// Provides a default `performCommand` implementation that manages
 /// loading state and feedback. Conforming types just need the stored properties.
+@MainActor
 protocol CommandSendable: AnyObject {
     var appState: AppState { get }
     var isSendingCommand: Bool { get set }

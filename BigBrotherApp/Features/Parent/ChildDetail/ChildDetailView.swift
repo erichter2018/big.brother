@@ -4,15 +4,24 @@ import BigBrotherCore
 /// Detail view for a child profile — devices, mode controls, approved apps.
 struct ChildDetailView: View {
     @Bindable var viewModel: ChildDetailViewModel
-    /// The dominant mode as computed by the parent dashboard (single source of truth).
     var dominantMode: LockMode?
+
+    @State private var locationMode: LocationTrackingMode = .off
     @State private var showRevokeAllConfirmation = false
     @State private var deviceToRevokeAll: ChildDevice?
+    @State private var deviceToUnenroll: ChildDevice?
+    @State private var showMessageComposer = false
+    @State private var messageText = ""
+    @State private var showSettings = false
+    @State private var showApprovedApps = false
+    @State private var showDiagnostics = false
+    @State private var showNamedPlaceEditor = false
+    @State private var permissionsFeedback: String?
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
-                // Mode action buttons
+            VStack(spacing: 20) {
+                // 1. Mode controls (most used — always at top)
                 ModeActionButtons(
                     onSetMode: { mode in Task { await viewModel.setMode(mode) } },
                     onTemporaryUnlock: { seconds in Task { await viewModel.temporaryUnlock(seconds: seconds) } },
@@ -21,24 +30,25 @@ struct ChildDetailView: View {
                     remainingSeconds: viewModel.remainingUnlockSeconds
                 )
 
-                // Configure apps on child devices
-                devicesConfigSection
+                // 2. Devices — status focused, actions in menus
+                devicesSection
 
-                // Temporarily unlocked apps (from heartbeat)
+                // 3. Location — show if mode is set OR any heartbeat has location data
+                if locationMode != .off || viewModel.heartbeats.contains(where: { $0.latitude != nil }) {
+                    locationCard
+                }
+
+                // 4. Self-unlock + apps — compact
+                selfUnlockRow
+
                 if !viewModel.temporaryAllowedAppsForChild.isEmpty {
-                    temporaryAllowedAppsSection
+                    temporaryAppsRow
                 }
 
-                // Approved Apps
-                if !viewModel.approvedAppsForChild.isEmpty {
-                    approvedAppsSection
-                }
+                appsRow
 
-                // Self-Unlock Budget
-                selfUnlockBudgetSection
-
-                // Device Restrictions (works with both .individual and .child auth — confirmed on device)
-                restrictionsSection
+                // 5. Bottom: settings + message
+                bottomActions
 
                 // Feedback
                 if let feedback = viewModel.commandFeedback {
@@ -55,76 +65,94 @@ struct ChildDetailView: View {
         .navigationTitle(viewModel.child.name)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                NavigationLink {
-                    EnrollmentCodeView(
-                        appState: viewModel.appState,
-                        childProfile: viewModel.child
-                    )
+                Menu {
+                    Button { showMessageComposer = true } label: {
+                        Label("Send Message", systemImage: "envelope")
+                    }
+                    NavigationLink {
+                        EnrollmentCodeView(appState: viewModel.appState, childProfile: viewModel.child)
+                    } label: {
+                        Label("Enroll New Device", systemImage: "plus.circle")
+                    }
+                    Button { showDiagnostics = true } label: {
+                        Label("Diagnostics", systemImage: "stethoscope")
+                    }
                 } label: {
-                    Image(systemName: "plus.circle")
+                    Image(systemName: "ellipsis.circle")
+                }
+                Button { showSettings = true } label: {
+                    Image(systemName: "gear")
                 }
             }
         }
+        // Alerts
         .alert("Revoke All Allowed Apps", isPresented: $showRevokeAllConfirmation) {
-            Button("Revoke All", role: .destructive) {
-                Task { await viewModel.revokeAllApps() }
-            }
+            Button("Revoke All", role: .destructive) { Task { await viewModel.revokeAllApps() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will block all currently allowed apps on all of \(viewModel.child.name)'s devices. This cannot be undone.")
+            Text("This will block all currently allowed apps on all of \(viewModel.child.name)'s devices.")
         }
-        .alert(
-            "Revoke All on Device",
-            isPresented: Binding(
-                get: { deviceToRevokeAll != nil },
-                set: { if !$0 { deviceToRevokeAll = nil } }
-            )
-        ) {
+        .alert("Revoke All on Device", isPresented: Binding(
+            get: { deviceToRevokeAll != nil },
+            set: { if !$0 { deviceToRevokeAll = nil } }
+        )) {
             Button("Revoke All", role: .destructive) {
-                if let device = deviceToRevokeAll {
-                    Task { await viewModel.revokeAllApps(for: device) }
-                }
+                if let d = deviceToRevokeAll { Task { await viewModel.revokeAllApps(for: d) } }
                 deviceToRevokeAll = nil
             }
             Button("Cancel", role: .cancel) { deviceToRevokeAll = nil }
         } message: {
-            Text("This will block all currently allowed apps on \(deviceToRevokeAll?.displayName ?? "this device"). This cannot be undone.")
+            Text("This will block all currently allowed apps on \(deviceToRevokeAll?.displayName ?? "this device").")
         }
-        .alert(
-            "Unenroll Device",
-            isPresented: Binding(
-                get: { deviceToUnenroll != nil },
-                set: { if !$0 { deviceToUnenroll = nil } }
-            )
-        ) {
+        .alert("Unenroll Device", isPresented: Binding(
+            get: { deviceToUnenroll != nil },
+            set: { if !$0 { deviceToUnenroll = nil } }
+        )) {
             Button("Unenroll & Delete", role: .destructive) {
-                if let device = deviceToUnenroll {
-                    Task { await viewModel.unenrollDevice(device) }
-                }
+                if let d = deviceToUnenroll { Task { await viewModel.unenrollDevice(d) } }
                 deviceToUnenroll = nil
             }
             Button("Cancel", role: .cancel) { deviceToUnenroll = nil }
         } message: {
-            Text("This will unenroll \(deviceToUnenroll?.displayName ?? "this device") and delete it. You'll need to re-enroll it with a new code.")
+            Text("This will unenroll \(deviceToUnenroll?.displayName ?? "this device"). You'll need to re-enroll it.")
         }
-        .refreshable {
-            await viewModel.refresh()
+        // Sheets
+        .sheet(isPresented: $showMessageComposer) { messageSheet }
+        .sheet(isPresented: $showSettings) { settingsSheet }
+        .navigationDestination(isPresented: $showDiagnostics) {
+            RemoteDiagnosticsView(
+                appState: viewModel.appState,
+                child: viewModel.child,
+                devices: viewModel.devices
+            )
         }
+        .refreshable { await viewModel.refresh() }
         .task {
+            await viewModel.loadNamedPlaces()
+            if let raw = UserDefaults.standard.string(forKey: "locationMode.\(viewModel.child.id.rawValue)"),
+               let mode = LocationTrackingMode(rawValue: raw) {
+                locationMode = mode
+            } else if viewModel.heartbeats.contains(where: { $0.latitude != nil }) {
+                // Child is sending location but parent never set the mode — infer it
+                locationMode = .continuous
+                UserDefaults.standard.set("continuous", forKey: "locationMode.\(viewModel.child.id.rawValue)")
+            }
             await viewModel.loadEvents()
             viewModel.startAutoRefresh()
         }
-        .onDisappear {
-            viewModel.stopAutoRefresh()
-        }
+        .onDisappear { viewModel.stopAutoRefresh() }
     }
 
+    // MARK: - 2. Devices
+
     @ViewBuilder
-    private var devicesConfigSection: some View {
+    private var devicesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Devices")
-                .font(.subheadline)
+                .font(.caption)
                 .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
 
             if viewModel.devices.isEmpty {
                 Text("No devices enrolled.")
@@ -132,102 +160,537 @@ struct ChildDetailView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(viewModel.devices) { device in
-                    let hb = viewModel.heartbeat(for: device)
-                    VStack(alignment: .leading, spacing: 6) {
+                    deviceCard(device)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func deviceCard(_ device: ChildDevice) -> some View {
+        let hb = viewModel.heartbeat(for: device)
+        VStack(alignment: .leading, spacing: 8) {
+            // Row 1: Device name + mode + status
+            HStack {
+                DeviceIcon(modelIdentifier: device.modelIdentifier, size: .title3)
+                Text(DeviceIcon.displayName(for: device.modelIdentifier))
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Spacer()
+                if let mode = dominantMode ?? device.confirmedMode {
+                    ModeBadge(mode: mode)
+                }
+                deviceStatusBadge(device: device, heartbeat: hb)
+            }
+
+            // Row 2: Device stats
+            HStack(spacing: 8) {
+                Text("iOS \(device.osVersion)")
+                if let battery = hb?.batteryLevel {
+                    HStack(spacing: 2) {
+                        Image(systemName: hb?.isCharging == true ? "battery.100.bolt" : "battery.50")
+                        Text("\(Int(battery * 100))%")
+                    }
+                    .foregroundStyle(battery < 0.2 ? .red : .secondary)
+                }
+                if let disk = hb?.availableDiskSpace {
+                    HStack(spacing: 2) {
+                        Image(systemName: "internaldrive")
+                        Text(Self.formatDisk(available: disk, total: hb?.totalDiskSpace))
+                    }
+                    .foregroundStyle(disk < 1_000_000_000 ? .red : .secondary)
+                }
+                Spacer()
+                if let count = hb?.allowedAppCount ?? hb?.allowedAppNames?.count, count > 0 {
+                    Text("\(count) apps allowed")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
+            // Row 3: Screen time + heartbeat + build
+            HStack(spacing: 8) {
+                if let minutes = hb?.screenTimeMinutes {
+                    let h = minutes / 60, m = minutes % 60
+                    HStack(spacing: 2) {
+                        Image(systemName: "hourglass")
+                        Text(h > 0 ? "\(h)h \(m)m" : "\(m)m")
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                if let ts = hb?.timestamp {
+                    HStack(spacing: 2) {
+                        Image(systemName: "heart.fill").font(.system(size: 7))
+                        Text(ts, style: .relative) + Text(" ago")
+                    }
+                    .foregroundStyle(.pink.opacity(0.6))
+                }
+                buildBadge(childBuild: hb?.appBuildNumber)
+            }
+            .font(.caption2)
+
+            // Row 4: Shield diagnostics (compact)
+            if let hb {
+                shieldDiagnosticRow(hb)
+            }
+
+            // Row 5: VPN warning (if active)
+            if hb?.vpnDetected == true {
+                HStack(spacing: 6) {
+                    Image(systemName: "network.badge.shield.half.filled")
+                        .foregroundStyle(.orange)
+                    Text("VPN active")
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button {
+                        UserDefaults.standard.set(true, forKey: "vpnAcknowledged.\(device.id.rawValue)")
+                    } label: {
+                        Text("Dismiss")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption2)
+            }
+
+            // Row 6: Permissions status (collapsible)
+            DisclosureGroup {
+                PermissionsStatusView(
+                    device: device,
+                    heartbeat: hb,
+                    onRequestPermissions: { await viewModel.requestPermissions(for: device) }
+                )
+            } label: {
+                HStack(spacing: 6) {
+                    Text("Permissions")
+                    if let hb, hasPermissionIssue(hb) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .font(.caption)
+        }
+        .padding(10)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    // MARK: - 3. Location Card
+
+    @ViewBuilder
+    private var locationCard: some View {
+        let hasLocation = viewModel.heartbeats.contains { $0.latitude != nil }
+        let address = viewModel.heartbeats.compactMap(\.locationAddress).first
+        let locTime = viewModel.heartbeats.compactMap(\.locationTimestamp).first
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "location.fill")
+                    .foregroundStyle(.blue)
+                    .font(.caption)
+                if let address, let locTime {
+                    Text(address)
+                        .font(.caption)
+                    Spacer()
+                    Text(locTime, style: .relative)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    + Text(" ago")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Waiting for location...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+
+            if let locAuth = viewModel.heartbeats.compactMap(\.locationAuthorization).first,
+               locAuth != "always" && locationMode != .off {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("Location set to \"\(locAuth.localizedLocationLabel)\" — must be \"Always\" for background tracking.")
+                        .foregroundStyle(.orange)
+                }
+                .font(.caption2)
+            } else if !hasLocation && locationMode != .off {
+                Text("Permission may be denied. Use Settings to re-request on the child device.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+
+            HStack(spacing: 8) {
+                NavigationLink {
+                    LocationMapView(
+                        child: viewModel.child,
+                        devices: viewModel.devices,
+                        heartbeats: viewModel.heartbeats,
+                        cloudKit: viewModel.appState.cloudKit,
+                        onLocate: { await viewModel.requestLocation() }
+                    )
+                } label: {
+                    Label("Map & Trail", systemImage: "map")
+                        .font(.caption)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                NavigationLink {
+                    LocationMapView(
+                        child: viewModel.child,
+                        devices: viewModel.devices,
+                        heartbeats: viewModel.heartbeats,
+                        cloudKit: viewModel.appState.cloudKit,
+                        onLocate: { await viewModel.requestLocation() },
+                        autoLocate: true
+                    )
+                } label: {
+                    Label("Locate Now", systemImage: "location.circle")
+                        .font(.caption)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .tint(.blue)
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .background(.blue.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    // MARK: - 4. Self-Unlock Row
+
+    @ViewBuilder
+    private var selfUnlockRow: some View {
+        HStack {
+            Image(systemName: "lock.open.rotation")
+                .foregroundStyle(.teal)
+                .frame(width: 20)
+            Text("Self-unlocks")
+                .font(.caption)
+            if let used = viewModel.selfUnlocksUsedToday, viewModel.selfUnlockBudget > 0 {
+                Text("\(used)/\(viewModel.selfUnlockBudget) used")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Stepper(
+                "\(viewModel.selfUnlockBudget)/day",
+                value: Binding(
+                    get: { viewModel.selfUnlockBudget },
+                    set: { viewModel.selfUnlockBudget = $0 }
+                ),
+                in: 0...10
+            )
+            .font(.caption)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    // MARK: - Temporary Apps Row
+
+    @ViewBuilder
+    private var temporaryAppsRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.badge.checkmark")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+                Text("Temporarily Unlocked")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.orange)
+            }
+            FlowLayout(spacing: 6) {
+                ForEach(viewModel.temporaryAllowedAppsForChild, id: \.self) { name in
+                    Text(name)
+                        .font(.caption2)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.orange.opacity(0.1))
+                        .clipShape(Capsule())
+                }
+            }
+        }
+        .padding(12)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    // MARK: - Apps Row (Expandable)
+
+    @ViewBuilder
+    private var appsRow: some View {
+        if !viewModel.approvedAppsForChild.isEmpty {
+            DisclosureGroup(isExpanded: $showApprovedApps) {
+                VStack(spacing: 4) {
+                    ForEach(viewModel.approvedAppsForChild) { app in
                         HStack {
-                            DeviceIcon(modelIdentifier: device.modelIdentifier, size: .title3)
-                            VStack(alignment: .leading, spacing: 3) {
-                                // Line 1: Model name (e.g. "iPhone 12 mini")
-                                Text(DeviceIcon.displayName(for: device.modelIdentifier))
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-
-                                // Line 2: iOS version, battery, space
-                                HStack(spacing: 8) {
-                                    Text("iOS \(device.osVersion)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    if let battery = hb?.batteryLevel {
-                                        HStack(spacing: 2) {
-                                            Image(systemName: hb?.isCharging == true ? "battery.100.bolt" : "battery.50")
-                                                .font(.caption2)
-                                            Text("\(Int(battery * 100))%")
-                                                .font(.caption2)
-                                        }
-                                        .foregroundStyle(battery < 0.2 ? .red : .secondary)
-                                    }
-                                    if let disk = hb?.availableDiskSpace {
-                                        HStack(spacing: 2) {
-                                            Image(systemName: "internaldrive")
-                                                .font(.caption2)
-                                            Text(Self.formatDisk(available: disk, total: hb?.totalDiskSpace))
-                                                .font(.caption2)
-                                        }
-                                        .foregroundStyle(disk < 1_000_000_000 ? .red : .secondary)
-                                    }
-                                }
-
-                                // Line 3: Build, apps allowed
-                                HStack(spacing: 8) {
-                                    buildBadge(childBuild: hb?.appBuildNumber)
-                                    let appCount = hb?.allowedAppCount ?? hb?.allowedAppNames?.count ?? 0
-                                    if appCount > 0 {
-                                        Text("\(appCount) apps allowed")
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
-                                    }
-                                }
-
-                                // Line 4: Heartbeat
-                                if let ts = hb?.timestamp {
-                                    HStack(spacing: 2) {
-                                        Image(systemName: "heart.fill")
-                                            .font(.system(size: 8))
-                                        Text(ts, style: .relative)
-                                            .font(.caption2)
-                                        + Text(" ago")
-                                            .font(.caption2)
-                                    }
-                                    .foregroundStyle(.pink.opacity(0.6))
-                                }
-                            }
+                            Text(app.appName)
+                                .font(.caption)
                             Spacer()
-                            VStack(alignment: .trailing, spacing: 2) {
-                                if let mode = dominantMode ?? device.confirmedMode {
-                                    ModeBadge(mode: mode)
-                                }
-                                deviceStatusBadge(device: device, heartbeat: hb)
+                            Button {
+                                Task { await viewModel.revokeApp(app) }
+                            } label: {
+                                Image(systemName: "xmark.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(.red.opacity(0.6))
                             }
                         }
-                        HStack(spacing: 8) {
-                            Button {
-                                Task { await viewModel.requestAlwaysAllowedSetup(for: device) }
-                            } label: {
-                                Label("Always Allowed", systemImage: "checkmark.circle")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.green)
-                            .controlSize(.small)
+                        .padding(.vertical, 2)
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.shield")
+                        .foregroundStyle(.green)
+                        .font(.caption)
+                    Text("\(viewModel.approvedAppsForChild.count) Allowed Apps")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                    Spacer()
+                    Button {
+                        showRevokeAllConfirmation = true
+                    } label: {
+                        Text("Revoke All")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .padding(12)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
 
-                            Button {
-                                deviceToRevokeAll = device
-                            } label: {
-                                Label("Revoke All", systemImage: "xmark.circle")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.red)
-                            .controlSize(.small)
+    // MARK: - 5. Bottom Actions
+
+    @ViewBuilder
+    private var bottomActions: some View {
+        Button {
+            showSettings = true
+        } label: {
+            HStack {
+                Label("Restrictions, Web Filter & Permissions", systemImage: "gear")
+                    .font(.subheadline)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Message Sheet
+
+    @ViewBuilder
+    private var messageSheet: some View {
+        NavigationStack {
+            Form {
+                TextField("Message to \(viewModel.child.name)", text: $messageText, axis: .vertical)
+                    .lineLimit(3...6)
+            }
+            .navigationTitle("Send Message")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showMessageComposer = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Send") {
+                        let text = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty else { return }
+                        Task { await viewModel.performCommand(.sendMessage(text: text), target: .child(viewModel.child.id)) }
+                        messageText = ""
+                        showMessageComposer = false
+                    }
+                    .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    // MARK: - Settings Sheet (Restrictions + Web Filter + Location Mode + Permissions)
+
+    @ViewBuilder
+    private var settingsSheet: some View {
+        NavigationStack {
+            List {
+                // Location Mode
+                Section("Location Tracking") {
+                    Picker("Mode", selection: $locationMode) {
+                        Text("Off").tag(LocationTrackingMode.off)
+                        Text("On Demand").tag(LocationTrackingMode.onDemand)
+                        Text("Continuous").tag(LocationTrackingMode.continuous)
+                    }
+                    .onChange(of: locationMode) { _, newMode in
+                        UserDefaults.standard.set(newMode.rawValue, forKey: "locationMode.\(viewModel.child.id.rawValue)")
+                        Task { await viewModel.sendLocationMode(newMode) }
+                    }
+
+                    // Home geofence — uses child's current location as home.
+                    // Geofence triggers app relaunch if child force-closes near home.
+                    if let hb = viewModel.heartbeats.first(where: { $0.latitude != nil }),
+                       let lat = hb.latitude, let lon = hb.longitude {
+                        Button {
+                            Task { await viewModel.setHomeLocation(latitude: lat, longitude: lon) }
+                        } label: {
+                            Label("Set Current Location as Home", systemImage: "house.fill")
+                        }
+                        if let addr = hb.locationAddress {
+                            Text("Current: \(addr)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .padding(10)
-                    .background(.regularMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .contextMenu {
+
+                    if viewModel.hasHomeGeofence {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("Home geofence active")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.caption)
+                    }
+                }
+
+                // Restrictions
+                Section("Device Restrictions") {
+                    restrictionToggle("Prevent App Deletion", icon: "trash.slash",
+                                      isOn: viewModel.restrictions.denyAppRemoval,
+                                      toggle: { viewModel.toggleRestriction(\.denyAppRemoval) })
+                    restrictionToggle("Block Explicit Content", icon: "eye.slash",
+                                      isOn: viewModel.restrictions.denyExplicitContent,
+                                      toggle: { viewModel.toggleRestriction(\.denyExplicitContent) })
+                    restrictionToggle("Lock Accounts", icon: "person.crop.circle.badge.xmark",
+                                      isOn: viewModel.restrictions.lockAccounts,
+                                      toggle: { viewModel.toggleRestriction(\.lockAccounts) })
+                    restrictionToggle("Auto Date & Time", icon: "clock.arrow.circlepath",
+                                      isOn: viewModel.restrictions.requireAutomaticDateAndTime,
+                                      toggle: { viewModel.toggleRestriction(\.requireAutomaticDateAndTime) })
+                    restrictionToggle("Block Web When Locked", icon: "globe.badge.chevron.backward",
+                                      isOn: viewModel.restrictions.denyWebWhenLocked,
+                                      toggle: { viewModel.toggleRestriction(\.denyWebWhenLocked) })
+                }
+
+                // Safe Search (DNS-based via VPN tunnel)
+                Section("Safe Search") {
+                    Toggle(isOn: $viewModel.safeSearchEnabled) {
+                        Label("Force Safe Search", systemImage: "magnifyingglass.circle")
+                    }
+                    .onChange(of: viewModel.safeSearchEnabled) { _, enabled in
+                        Task { await viewModel.sendSafeSearch(enabled: enabled) }
+                    }
+                    Text("Enforces safe search on Google, Bing, YouTube, and blocks adult content at the DNS level via CleanBrowsing Family Filter.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                // Web Filter
+                Section("Web Content Filter") {
+                    NavigationLink {
+                        WebFilterConfigView(child: viewModel.child) { domains in
+                            await viewModel.sendWebFilterDomains(domains)
+                        }
+                    } label: {
+                        Label("Configure Categories", systemImage: "globe.badge.chevron.backward")
+                    }
+                }
+
+                // Driving Safety
+                Section("Driving Safety") {
+                    HStack {
+                        Label("Speed Limit", systemImage: "gauge.with.dots.needle.67percent")
+                        Spacer()
+                        Text("\(Int(viewModel.drivingSettings.speedThresholdMPH)) mph")
+                            .foregroundStyle(.secondary)
+                        Stepper("", value: $viewModel.drivingSettings.speedThresholdMPH, in: 40...100, step: 5)
+                            .labelsHidden()
+                            .frame(width: 94)
+                    }
+                    Toggle(isOn: $viewModel.drivingSettings.speedAlertEnabled) {
+                        Label("Speed Alerts", systemImage: "exclamationmark.triangle")
+                    }
+                    Toggle(isOn: $viewModel.drivingSettings.phoneUsageDetectionEnabled) {
+                        Label("Phone While Driving", systemImage: "iphone.gen3.radiowaves.left.and.right")
+                    }
+                    Toggle(isOn: $viewModel.drivingSettings.hardBrakingDetectionEnabled) {
+                        Label("Hard Braking", systemImage: "exclamationmark.octagon")
+                    }
+                    Button("Save Driving Settings") {
+                        Task { await viewModel.sendDrivingSettings() }
+                    }
+                    .disabled(viewModel.isSendingCommand)
+                }
+
+                // Named Places
+                Section("Named Places") {
+                    Button {
+                        showNamedPlaceEditor = true
+                    } label: {
+                        Label("Add Place", systemImage: "plus.circle")
+                    }
+                    if viewModel.namedPlaces.isEmpty {
+                        Text("No places configured. Add school, friends' houses, etc.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(viewModel.namedPlaces) { place in
+                        HStack {
+                            Image(systemName: "mappin.circle.fill")
+                                .foregroundStyle(.red)
+                            VStack(alignment: .leading) {
+                                Text(place.name).font(.subheadline)
+                                Text("\(Int(place.radiusMeters))m radius")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                    }
+                    .onDelete { indexSet in
+                        Task { await viewModel.deleteNamedPlace(at: indexSet) }
+                    }
+                }
+
+                // Per-device app configuration (requires child device in hand)
+                ForEach(viewModel.devices) { device in
+                    Section("\(DeviceIcon.displayName(for: device.modelIdentifier)) — Apps") {
+                        Button {
+                            Task { await viewModel.requestAlwaysAllowedSetup(for: device) }
+                        } label: {
+                            Label("Set Always-Allowed Apps", systemImage: "checkmark.circle")
+                        }
+
+                        Button {
+                            Task { await viewModel.requestAppConfiguration(for: device) }
+                        } label: {
+                            Label("Configure App Blocking", systemImage: "shield")
+                        }
+
+                        Button(role: .destructive) {
+                            deviceToRevokeAll = device
+                        } label: {
+                            Label("Revoke All Allowed Apps", systemImage: "xmark.circle")
+                        }
+
                         Button(role: .destructive) {
                             deviceToUnenroll = device
                         } label: {
@@ -235,179 +698,39 @@ struct ChildDetailView: View {
                         }
                     }
                 }
-            }
-        }
-    }
 
-    @State private var deviceToUnenroll: ChildDevice?
-
-    @ViewBuilder
-    private var temporaryAllowedAppsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Temporarily Unlocked", systemImage: "clock.badge.checkmark")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-                .foregroundStyle(.orange)
-
-            ForEach(viewModel.temporaryAllowedAppsForChild, id: \.self) { appName in
-                HStack {
-                    Image(systemName: "clock")
-                        .foregroundStyle(.orange)
-                    Text(appName)
-                        .font(.caption)
-                    Spacer()
-                }
-                .padding(8)
-                .background(Color.orange.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var selfUnlockBudgetSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Self Unlocks", systemImage: "lock.open.rotation")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-
-            HStack {
-                Text("Daily budget")
-                    .font(.caption)
-                Spacer()
-                Stepper(
-                    "\(viewModel.selfUnlockBudget)",
-                    value: Binding(
-                        get: { viewModel.selfUnlockBudget },
-                        set: { viewModel.selfUnlockBudget = $0 }
-                    ),
-                    in: 0...10,
-                    step: 1
-                )
-                .font(.caption)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            if let used = viewModel.selfUnlocksUsedToday, viewModel.selfUnlockBudget > 0 {
-                Text("Used today: \(used) of \(viewModel.selfUnlockBudget)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text("Each self-unlock gives 15 minutes. Resets at midnight.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    @ViewBuilder
-    private var restrictionsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Device Restrictions", systemImage: "lock.shield")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-
-            restrictionToggle(
-                "Prevent App Deletion",
-                icon: "trash.slash",
-                isOn: viewModel.restrictions.denyAppRemoval,
-                toggle: { viewModel.toggleRestriction(\.denyAppRemoval) }
-            )
-            restrictionToggle(
-                "Block Explicit Content",
-                icon: "eye.slash",
-                isOn: viewModel.restrictions.denyExplicitContent,
-                toggle: { viewModel.toggleRestriction(\.denyExplicitContent) }
-            )
-            restrictionToggle(
-                "Lock Accounts",
-                icon: "person.crop.circle.badge.xmark",
-                isOn: viewModel.restrictions.lockAccounts,
-                toggle: { viewModel.toggleRestriction(\.lockAccounts) }
-            )
-            restrictionToggle(
-                "Force Automatic Date & Time",
-                icon: "clock.arrow.circlepath",
-                isOn: viewModel.restrictions.requireAutomaticDateAndTime,
-                toggle: { viewModel.toggleRestriction(\.requireAutomaticDateAndTime) }
-            )
-            restrictionToggle(
-                "Block Websites When Locked",
-                icon: "globe.badge.chevron.backward",
-                isOn: viewModel.restrictions.denyWebWhenLocked,
-                toggle: { viewModel.toggleRestriction(\.denyWebWhenLocked) }
-            )
-        }
-    }
-
-    @ViewBuilder
-    private func restrictionToggle(_ title: String, icon: String, isOn: Bool, toggle: @escaping () -> Void) -> some View {
-        HStack {
-            Image(systemName: icon)
-                .foregroundStyle(.secondary)
-                .frame(width: 20)
-            Text(title)
-                .font(.caption)
-            Spacer()
-            Toggle("", isOn: Binding(get: { isOn }, set: { _ in toggle() }))
-                .labelsHidden()
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    @ViewBuilder
-    private var approvedAppsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Allowed Apps", systemImage: "checkmark.shield")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.green)
-                Spacer()
-                Button {
-                    showRevokeAllConfirmation = true
-                } label: {
-                    Text("Revoke All")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .controlSize(.mini)
-            }
-
-            ForEach(viewModel.approvedAppsForChild) { app in
-                HStack {
-                    Image(systemName: "app.badge.checkmark")
-                        .foregroundStyle(.green)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(app.appName)
-                            .font(.caption)
-                        Text("Approved \(app.approvedAt, style: .relative) ago")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
+                // Permissions
+                Section {
                     Button {
-                        Task { await viewModel.revokeApp(app) }
+                        Task {
+                            await viewModel.requestPermissions()
+                            permissionsFeedback = "Command sent — open Big Brother on the child's device and wait ~60 seconds for the prompt"
+                            try? await Task.sleep(for: .seconds(8))
+                            permissionsFeedback = nil
+                        }
                     } label: {
-                        Label("Revoke", systemImage: "xmark.circle")
-                            .font(.caption)
-                            .fontWeight(.medium)
+                        Label("Re-request Permissions", systemImage: "hand.raised")
                     }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-                    .controlSize(.small)
+                    if let permissionsFeedback {
+                        Text(permissionsFeedback)
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                } footer: {
+                    Text("Use when holding the child's device to re-authorize Screen Time and Location.")
                 }
-                .padding(8)
-                .background(Color.green.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showSettings = false }
+                }
+            }
+            .sheet(isPresented: $showNamedPlaceEditor) {
+                NamedPlaceEditorView(appState: viewModel.appState) { place in
+                    await viewModel.saveNamedPlace(place)
+                }
             }
         }
     }
@@ -415,54 +738,196 @@ struct ChildDetailView: View {
     // MARK: - Helpers
 
     @ViewBuilder
+    private func restrictionToggle(_ title: String, icon: String, isOn: Bool, toggle: @escaping () -> Void) -> some View {
+        Toggle(isOn: Binding(get: { isOn }, set: { _ in toggle() })) {
+            Label(title, systemImage: icon)
+        }
+    }
+
+    @ViewBuilder
+    private func shieldDiagnosticRow(_ hb: DeviceHeartbeat) -> some View {
+        let shieldsOK = hb.shieldsActive ?? true
+        let reportedMode = hb.currentMode
+        // Use the CHILD's reported schedule mode to detect if the child has stale data.
+        // If this disagrees with what the parent expects, the child's schedule is wrong.
+        let childScheduleMode: LockMode? = hb.scheduleResolvedMode.flatMap { detail in
+            // Parse mode from enriched string like "essentialOnly (in essential window)"
+            let raw = detail.components(separatedBy: " ").first ?? detail
+            return LockMode(rawValue: raw)
+        }
+        // Use parent's expectation as the canonical "expected" mode
+        let expectedMode = dominantMode
+
+        // Don't flag shields-down during active unlocks
+        let inTempUnlock = (hb.temporaryUnlockExpiresAt != nil && hb.temporaryUnlockExpiresAt! > Date())
+            || dominantMode == .unlocked
+        let shouldBeLocked = expectedMode != nil && expectedMode != .unlocked && !inTempUnlock
+        let mismatch = shouldBeLocked && !shieldsOK
+
+        VStack(alignment: .leading, spacing: 3) {
+            // Row 1: Actual device state
+            HStack(spacing: 4) {
+                Image(systemName: mismatch ? "shield.slash" : shieldsOK ? "shield.checkered" : "shield.slash")
+                    .font(.system(size: 10))
+                    .foregroundStyle(mismatch ? .red : shieldsOK ? .green : .secondary)
+
+                if mismatch {
+                    Text("SHIELDS DOWN")
+                        .fontWeight(.bold)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("Reporting: \(reportedMode.displayName)")
+                        .foregroundStyle(shieldsOK ? .green : .secondary)
+                }
+
+                if hb.heartbeatSource == "vpnExtension" {
+                    Text("(via tunnel)")
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            // Row 2: Expected vs actual (only when device is LESS restrictive than expected)
+            // Strictness order: unlocked < dailyMode < essentialOnly
+            // A device in a stricter mode than expected is fine — only warn when too permissive.
+            if let expected = expectedMode, expected != reportedMode, !inTempUnlock,
+               reportedMode.restrictionLevel < expected.restrictionLevel {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                    Text("Expected: \(expected.displayName)")
+                        .foregroundStyle(.orange)
+                    Text("·")
+                        .foregroundStyle(.tertiary)
+                    Text("Actual: \(reportedMode.displayName)")
+                        .foregroundStyle(.red)
+                    if let reason = hb.lastShieldChangeReason {
+                        Text("(\(friendlyShieldReason(reason)))")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else if let reason = hb.lastShieldChangeReason {
+                // No mismatch — just show last shield change reason
+                HStack(spacing: 4) {
+                    Text("Last change: \(friendlyShieldReason(reason))")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            // Row 2b: Child schedule data mismatch (child's local schedule disagrees with parent)
+            if let childMode = childScheduleMode, let parentMode = expectedMode,
+               childMode != parentMode, !inTempUnlock {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.yellow)
+                    Text("Child schedule says: \(childMode.displayName)")
+                        .foregroundStyle(.yellow)
+                    if let detail = hb.scheduleResolvedMode {
+                        Text("(\(detail))")
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            // Row 3: App counts + lock state
+            HStack(spacing: 8) {
+                if hb.shieldCategoryActive == true {
+                    if reportedMode == .essentialOnly {
+                        // Essential mode: everything blocked, only system essentials allowed
+                        Label("All non-essential apps blocked", systemImage: "shield.lefthalf.filled")
+                            .foregroundStyle(.secondary)
+                    } else if let allowed = hb.allowedAppCount, allowed > 0 {
+                        Label("All apps blocked except \(allowed) allowed", systemImage: "square.grid.2x2")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Label("All apps blocked", systemImage: "square.grid.2x2")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let blocked = hb.shieldedAppCount, blocked > 0 {
+                    Label("\(blocked) apps blocked", systemImage: "xmark.app")
+                        .foregroundStyle(.secondary)
+                } else if !shieldsOK && shouldBeLocked {
+                    Label("No apps blocked", systemImage: "xmark.app")
+                        .foregroundStyle(.red)
+                }
+
+                if let locked = hb.isDeviceLocked {
+                    Image(systemName: locked ? "lock.fill" : "lock.open.fill")
+                        .foregroundColor(locked ? .secondary : .yellow)
+                    Text(locked ? "Screen off" : "Screen on")
+                        .foregroundColor(locked ? .secondary : .yellow)
+                }
+            }
+        }
+        .font(.caption2.monospacedDigit())
+    }
+
+    private func hasPermissionIssue(_ hb: DeviceHeartbeat) -> Bool {
+        if !hb.familyControlsAuthorized { return true }
+        if hb.locationAuthorization != "always" && hb.locationAuthorization != nil { return true }
+        if hb.tunnelConnected == false { return true }
+        if hb.motionAuthorized == false { return true }
+        if hb.notificationsAuthorized == false { return true }
+        return false
+    }
+
+    private func friendlyShieldReason(_ reason: String) -> String {
+        switch reason {
+        case "launchRestore": return "restored on launch"
+        case "apply": return "policy applied"
+        case "command": return "remote command"
+        case "clearAll": return "all cleared"
+        case "tempUnlockClear": return "temp unlock ended"
+        case "forceCloseNag": return "force-close block"
+        case "appClosed": return "app not running"
+        case "backgroundRestore": return "background restore"
+        case "reconcile": return "auto-reconciled"
+        case "freeWindowStart": return "free time started"
+        case "freeWindowEnd": return "free time ended"
+        case "essentialWindowStart": return "essential mode started"
+        case "essentialWindowEnd": return "essential mode ended"
+        default: return reason
+        }
+    }
+
+    @ViewBuilder
     private func buildBadge(childBuild: Int?) -> some View {
-        if let childBuild {
+        if viewModel.appState.debugMode, let childBuild {
             let matches = childBuild == AppConstants.appBuildNumber
             HStack(spacing: 2) {
                 Text("b\(childBuild)")
-                    .font(.caption2)
                 if matches {
                     Image(systemName: "checkmark")
-                        .font(.caption2)
                         .foregroundStyle(.green)
                 }
             }
+            .font(.caption2)
             .foregroundStyle(matches ? Color.secondary : Color.orange)
         }
     }
 
-    /// Per-device status badge: online, app closed, or time since last heartbeat.
     @ViewBuilder
     private func deviceStatusBadge(device: ChildDevice, heartbeat hb: DeviceHeartbeat?) -> some View {
         if device.isOnline {
             HStack(spacing: 4) {
                 Circle().fill(Color.green).frame(width: 6, height: 6)
-                Text("Online")
-                    .font(.caption2)
-                    .foregroundStyle(.green)
+                Text("Online").font(.caption2).foregroundStyle(.green)
             }
         } else if let hb, isDeviceAppClosed(heartbeat: hb) {
             HStack(spacing: 4) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 8))
-                    .foregroundStyle(.orange)
-                Text("App Closed")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8)).foregroundStyle(.orange)
+                Text("App Not Running").font(.caption2).foregroundStyle(.orange)
             }
         } else {
             HStack(spacing: 4) {
                 Circle().fill(Color.red.opacity(0.6)).frame(width: 6, height: 6)
-                Text("Offline")
-                    .font(.caption2)
-                    .foregroundStyle(.red)
+                Text("Offline").font(.caption2).foregroundStyle(.red)
             }
         }
     }
 
-    /// Detect if the main app was force-closed on this device.
-    /// True when heartbeat is stale (>1h locked / >2h unlocked) but the
-    /// DeviceActivityMonitor was active within 2 hours.
     private func isDeviceAppClosed(heartbeat hb: DeviceHeartbeat) -> Bool {
         let heartbeatAge = Date().timeIntervalSince(hb.timestamp)
         let threshold: TimeInterval = (dominantMode == .unlocked) ? 7200 : 3600
@@ -479,5 +944,21 @@ struct ChildDetailView: View {
             return "\(sizeStr) (\(pct)%)"
         }
         return sizeStr
+    }
+}
+
+// FlowLayout is defined in WrappingHStack.swift
+
+private extension String {
+    /// Human-readable label for CLAuthorizationStatus strings from heartbeat.
+    var localizedLocationLabel: String {
+        switch self {
+        case "always": return "Always"
+        case "whenInUse": return "While Using"
+        case "denied": return "Denied"
+        case "restricted": return "Restricted"
+        case "notDetermined": return "Not Determined"
+        default: return self
+        }
     }
 }

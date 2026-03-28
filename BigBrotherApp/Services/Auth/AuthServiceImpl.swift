@@ -2,6 +2,13 @@ import Foundation
 import LocalAuthentication
 import BigBrotherCore
 
+/// PIN lockout state stored in Keychain to prevent tampering via UserDefaults editing.
+private struct PINLockoutState: Codable {
+    var failedAttempts: Int = 0
+    var lockoutStreak: Int = 0
+    var lockoutUntil: Date? = nil
+}
+
 /// Concrete authentication service using LocalAuthentication (Face ID / Touch ID)
 /// and PINHasher for fallback PIN verification.
 final class AuthServiceImpl: AuthServiceProtocol {
@@ -10,21 +17,14 @@ final class AuthServiceImpl: AuthServiceProtocol {
     private let hasher: PINHasher
     private let storage: any SharedStorageProtocol
 
-    /// UserDefaults for lockout state (App Group so child device extensions could read if needed).
-    private let defaults: UserDefaults
-
     init(
         keychain: any KeychainProtocol = KeychainManager(),
         hasher: PINHasher = PINHasher(),
-        storage: any SharedStorageProtocol = AppGroupStorage(),
-        defaults: UserDefaults? = nil
+        storage: any SharedStorageProtocol = AppGroupStorage()
     ) {
         self.keychain = keychain
         self.hasher = hasher
         self.storage = storage
-        self.defaults = defaults ?? UserDefaults(
-            suiteName: AppConstants.appGroupIdentifier
-        ) ?? .standard
     }
 
     // MARK: - AuthServiceProtocol
@@ -54,14 +54,17 @@ final class AuthServiceImpl: AuthServiceProtocol {
     }
 
     func validatePIN(_ pin: String) -> PINValidationResult {
+        var state = loadLockoutState()
+
         // Check lockout
-        if let lockoutUntil = lockoutExpiresAt, lockoutUntil > Date() {
+        if let lockoutUntil = state.lockoutUntil, lockoutUntil > Date() {
             return .lockedOut(until: lockoutUntil)
         }
 
         // Clear expired lockout
-        if lockoutExpiresAt != nil {
-            defaults.removeObject(forKey: StorageKeys.pinLockoutUntil)
+        if state.lockoutUntil != nil {
+            state.lockoutUntil = nil
+            saveLockoutState(state)
         }
 
         // Load stored hash — if none exists, no PIN is configured so validation passes.
@@ -82,8 +85,10 @@ final class AuthServiceImpl: AuthServiceProtocol {
                 let streak = incrementLockoutStreak()
                 let duration = lockoutDuration(forStreak: streak)
                 let lockoutEnd = Date().addingTimeInterval(duration)
-                defaults.set(lockoutEnd.timeIntervalSince1970, forKey: StorageKeys.pinLockoutUntil)
-                defaults.set(0, forKey: StorageKeys.failedPINAttempts)
+                var freshState = loadLockoutState()
+                freshState.failedAttempts = 0
+                freshState.lockoutUntil = lockoutEnd
+                saveLockoutState(freshState)
                 return .lockedOut(until: lockoutEnd)
             }
 
@@ -92,7 +97,7 @@ final class AuthServiceImpl: AuthServiceProtocol {
     }
 
     func setPIN(_ pin: String) throws {
-        let hash = hasher.hash(pin: pin)
+        guard let hash = hasher.hash(pin: pin) else { return }
         try keychain.setData(hash.combined, forKey: StorageKeys.parentPINHash)
     }
 
@@ -108,30 +113,37 @@ final class AuthServiceImpl: AuthServiceProtocol {
     }
 
     var lockoutExpiresAt: Date? {
-        let timestamp = defaults.double(forKey: StorageKeys.pinLockoutUntil)
-        guard timestamp > 0 else { return nil }
-        let date = Date(timeIntervalSince1970: timestamp)
-        return date > Date() ? date : nil
+        let state = loadLockoutState()
+        guard let date = state.lockoutUntil, date > Date() else { return nil }
+        return date
     }
 
     // MARK: - Private Helpers
 
+    private func loadLockoutState() -> PINLockoutState {
+        (try? keychain.get(PINLockoutState.self, forKey: StorageKeys.pinLockoutState)) ?? PINLockoutState()
+    }
+
+    private func saveLockoutState(_ state: PINLockoutState) {
+        try? keychain.set(state, forKey: StorageKeys.pinLockoutState)
+    }
+
     private func incrementFailedAttempts() -> Int {
-        let current = defaults.integer(forKey: StorageKeys.failedPINAttempts) + 1
-        defaults.set(current, forKey: StorageKeys.failedPINAttempts)
-        return current
+        var state = loadLockoutState()
+        state.failedAttempts += 1
+        saveLockoutState(state)
+        return state.failedAttempts
     }
 
     private func resetFailedAttempts() {
-        defaults.set(0, forKey: StorageKeys.failedPINAttempts)
-        defaults.set(0, forKey: StorageKeys.pinLockoutStreak)
-        defaults.removeObject(forKey: StorageKeys.pinLockoutUntil)
+        saveLockoutState(PINLockoutState())
     }
 
     private func incrementLockoutStreak() -> Int {
-        let current = defaults.integer(forKey: StorageKeys.pinLockoutStreak) + 1
-        defaults.set(current, forKey: StorageKeys.pinLockoutStreak)
-        return current
+        var state = loadLockoutState()
+        state.lockoutStreak += 1
+        saveLockoutState(state)
+        return state.lockoutStreak
     }
 
     /// Escalating lockout: 5 min → 15 min → 1 hour → 4 hours (capped).

@@ -3,6 +3,7 @@ import Observation
 import BigBrotherCore
 
 @Observable
+@MainActor
 final class ScheduleOverviewViewModel {
     let appState: AppState
 
@@ -71,7 +72,7 @@ final class ScheduleOverviewViewModel {
             return
         }
         do {
-            let versionDate = profile.updatedAt ?? Date()
+            let versionDate = profile.updatedAt
             try await appState.sendCommand(
                 target: .child(child.id),
                 action: .setScheduleProfile(profileID: profile.id, versionDate: versionDate)

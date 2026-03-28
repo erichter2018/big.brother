@@ -36,6 +36,9 @@ struct AppLaunchRestorer {
 
     /// Run the full restoration flow. Should be called on app launch for child devices.
     func restore() {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("launchRestore", forKey: "lastShieldChangeReason")
+
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self,
             forKey: StorageKeys.enrollmentState
@@ -85,7 +88,11 @@ struct AppLaunchRestorer {
         case .expireTemporaryUnlock(let previousMode):
             // Temp unlock expired while app was not running.
             // TemporaryUnlockState gives us the deterministic previous mode.
-            try? storage.clearTemporaryUnlockState()
+            do {
+                try storage.clearTemporaryUnlockState()
+            } catch {
+                eventLogger.log(.commandFailed, details: "Failed to clear temp unlock state: \(error.localizedDescription)")
+            }
 
             let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
             let policy = Policy(
@@ -112,23 +119,46 @@ struct AppLaunchRestorer {
             eventLogger.log(.temporaryUnlockExpired, details: "Expired during suspension, reverted to \(previousMode.rawValue)")
 
         case .reapplyEnforcement(let reason):
-            if let snapshot = currentSnapshot {
+            if let tempState = temporaryUnlockState, tempState.expiresAt > Date() {
+                do {
+                    try enforcement.clearAllRestrictions()
+                } catch {
+                    eventLogger.log(.commandFailed, details: "Failed to clear restrictions for temp unlock: \(error.localizedDescription)")
+                }
+                eventLogger.log(.policyReconciled, details: "Launch reconciliation: \(reason) — but temp unlock active, shields cleared")
+            } else if let snapshot = currentSnapshot {
                 applyExisting(snapshot, logMessage: "Launch reconciliation: \(reason)")
             }
 
         case .applyDegradedEnforcement(let reason):
-            if let snapshot = currentSnapshot {
+            if let tempState = temporaryUnlockState, tempState.expiresAt > Date() {
+                do { try enforcement.clearAllRestrictions() } catch {
+                    eventLogger.log(.commandFailed, details: "Degraded: failed to clear restrictions: \(error.localizedDescription)")
+                }
+                eventLogger.log(.policyReconciled, details: "Degraded: \(reason) — but temp unlock active, shields cleared")
+            } else if let snapshot = currentSnapshot {
                 applyExisting(snapshot, logMessage: "Degraded enforcement on launch: \(reason)")
                 eventLogger.log(.enforcementDegraded, details: reason)
             }
 
         case .noChangeNeeded:
-            // Still re-apply enforcement — the OS may have cleared ManagedSettingsStore
-            // state during an app update even though our snapshot is unchanged.
-            if let snapshot = currentSnapshot {
-                try? enforcement.apply(snapshot.effectivePolicy)
+            // Check if a temporary unlock is active — if so, DON'T re-apply shields.
+            // A subsequent command (e.g., setPenaltyTimer) may have created a new snapshot
+            // that doesn't have isTemporaryUnlock=true, but the TemporaryUnlockState
+            // in storage still says we should be unlocked.
+            if let tempState = temporaryUnlockState, tempState.expiresAt > Date() {
+                do { try enforcement.clearAllRestrictions() } catch {
+                    eventLogger.log(.commandFailed, details: "Launch: failed to clear restrictions for temp unlock: \(error.localizedDescription)")
+                }
+                eventLogger.log(.policyReconciled, details: "Launch reconciliation: temp unlock active, shields cleared")
+            } else if let snapshot = currentSnapshot {
+                // Re-apply enforcement — the OS may have cleared ManagedSettingsStore
+                // state during an app update even though our snapshot is unchanged.
+                do { try enforcement.apply(snapshot.effectivePolicy) } catch {
+                    eventLogger.log(.commandFailed, details: "Launch: failed to apply enforcement: \(error.localizedDescription)")
+                }
+                eventLogger.log(.policyReconciled, details: "Launch reconciliation: no change needed (restrictions refreshed)")
             }
-            eventLogger.log(.policyReconciled, details: "Launch reconciliation: no change needed (restrictions refreshed)")
         }
 
         // Schedule-aware reconciliation: if a schedule profile is active,
@@ -149,6 +179,15 @@ struct AppLaunchRestorer {
     /// Catches cases where the Monitor extension crashed during a transition.
     private func reconcileScheduleState() {
         guard let profile = storage.readActiveScheduleProfile() else { return }
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("launchRestore", forKey: "lastShieldChangeReason")
+
+        // Don't override manual mode commands (parent sent setMode directly).
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        if defaults.object(forKey: "scheduleDrivenMode") != nil && !defaults.bool(forKey: "scheduleDrivenMode") {
+            return
+        }
+
         let now = Date()
         let scheduleMode = profile.resolvedMode(at: now)
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
@@ -164,12 +203,16 @@ struct AppLaunchRestorer {
         switch scheduleMode {
         case .unlocked:
             // Free window — clear shields but keep device restrictions.
-            try? enforcement.clearAllRestrictions()
+            do { try enforcement.clearAllRestrictions() } catch {
+                eventLogger.log(.commandFailed, details: "Schedule reconciliation: failed to clear restrictions: \(error.localizedDescription)")
+            }
             eventLogger.log(.policyReconciled, details: "Schedule reconciliation: cleared shields for free window")
         case .essentialOnly, .dailyMode:
             // Locked or essential — re-apply enforcement from snapshot.
             if let snapshot = currentSnapshot {
-                try? enforcement.reconcile(with: snapshot)
+                do { try enforcement.reconcile(with: snapshot) } catch {
+                    eventLogger.log(.commandFailed, details: "Schedule reconciliation: failed to apply \(scheduleMode.rawValue): \(error.localizedDescription)")
+                }
             }
             eventLogger.log(.policyReconciled, details: "Schedule reconciliation: applied \(scheduleMode.rawValue)")
         }

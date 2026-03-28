@@ -220,6 +220,14 @@ public protocol SharedStorageProtocol: Sendable {
     /// Write device-level restrictions.
     func writeDeviceRestrictions(_ restrictions: DeviceRestrictions) throws
 
+    // MARK: - Parent Messages
+
+    /// Read all parent messages (includes dismissed; caller should filter).
+    func readParentMessages() -> [ParentMessage]
+
+    /// Write the full parent messages list (replaces existing).
+    func writeParentMessages(_ messages: [ParentMessage]) throws
+
     // MARK: - Raw Data
 
     /// Write raw data for a given key. Pass nil to delete.

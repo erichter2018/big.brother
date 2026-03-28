@@ -13,10 +13,10 @@ public struct TimedUnlockInfo: Codable, Sendable {
     public let lockAt: Date
 
     public init(commandID: UUID, activityName: String, unlockAt: Date, lockAt: Date) {
-        assert(lockAt > unlockAt, "lockAt must be after unlockAt")
         self.commandID = commandID
         self.activityName = activityName
         self.unlockAt = unlockAt
-        self.lockAt = lockAt
+        // Graceful fallback: if lockAt is not after unlockAt, default to 60s after unlock
+        self.lockAt = lockAt > unlockAt ? lockAt : unlockAt.addingTimeInterval(60)
     }
 }

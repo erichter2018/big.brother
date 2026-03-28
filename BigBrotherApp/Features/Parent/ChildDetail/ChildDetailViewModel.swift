@@ -42,7 +42,7 @@ struct TimelineEntry: Identifiable {
     }
 }
 
-@Observable
+@Observable @MainActor
 final class ChildDetailViewModel: CommandSendable {
     let appState: AppState
     let child: ChildProfile
@@ -57,6 +57,34 @@ final class ChildDetailViewModel: CommandSendable {
     var restrictions: DeviceRestrictions {
         get { Self.loadRestrictions(for: child.id) }
         set { Self.saveRestrictions(newValue, for: child.id) }
+    }
+
+    /// Driving safety settings for this child.
+    var drivingSettings: DrivingSettings {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: "drivingSettings.\(child.id.rawValue)"),
+                  let s = try? JSONDecoder().decode(DrivingSettings.self, from: data) else {
+                return .default
+            }
+            return s
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: "drivingSettings.\(child.id.rawValue)")
+            }
+        }
+    }
+
+    /// Named places for this family.
+    var namedPlaces: [NamedPlace] = []
+
+    /// Whether to show the named place editor sheet.
+    var showNamedPlaceEditor = false
+
+    /// Safe search enabled state (persisted per child in UserDefaults).
+    var safeSearchEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "safeSearch.\(child.id.rawValue)") }
+        set { UserDefaults.standard.set(newValue, forKey: "safeSearch.\(child.id.rawValue)") }
     }
 
     /// Whether any of this child's devices use .child FamilyControls authorization.
@@ -363,6 +391,11 @@ final class ChildDetailViewModel: CommandSendable {
         }
     }
 
+    /// Send web filter domain list to all of this child's devices.
+    func sendWebFilterDomains(_ domains: [String]) async {
+        await performCommand(.setAllowedWebDomains(domains: domains), target: .child(child.id))
+    }
+
     /// Deny an unlock request — removes from timeline and deletes from CloudKit.
     func denyUnlockRequest(id: UUID) async {
         await removeUnlockRequest(id: id)
@@ -503,5 +536,124 @@ final class ChildDetailViewModel: CommandSendable {
     func refresh() async {
         try? await appState.refreshDashboard()
         await loadEvents()
+    }
+
+    // MARK: - Location
+
+    /// All heartbeats for this child's devices.
+    var heartbeats: [DeviceHeartbeat] {
+        let deviceIDs = Set(devices.map(\.id))
+        return appState.latestHeartbeats.filter { deviceIDs.contains($0.deviceID) }
+    }
+
+    /// Set the location tracking mode on all of this child's devices.
+    func sendLocationMode(_ mode: LocationTrackingMode) async {
+        await performCommand(.setLocationMode(mode), target: .child(child.id))
+    }
+
+    /// Request the child device to report its current location immediately.
+    func requestLocation() async {
+        await performCommand(.requestLocation, target: .child(child.id))
+    }
+
+    /// Re-request all permissions on the child device (Screen Time + Location).
+    /// Parent should be physically holding the child device when sending this.
+    func requestPermissions() async {
+        await performCommand(.requestPermissions, target: .child(child.id))
+    }
+
+    /// Re-request permissions for a specific device.
+    func requestPermissions(for device: ChildDevice) async {
+        await performCommand(.requestPermissions, target: .device(device.id))
+    }
+
+    // MARK: - Home Geofence
+
+    /// Whether a home geofence is configured for any of this child's devices.
+    var hasHomeGeofence: Bool {
+        for device in devices {
+            let key = "homeLatitude.\(device.id.rawValue)"
+            if UserDefaults.standard.object(forKey: key) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Set the home location for geofence relaunch. Sends to all child devices
+    /// via command so the child's LocationService can register the geofence.
+    func setHomeLocation(latitude: Double, longitude: Double) async {
+        // Persist on parent side for display.
+        for device in devices {
+            UserDefaults.standard.set(latitude, forKey: "homeLatitude.\(device.id.rawValue)")
+            UserDefaults.standard.set(longitude, forKey: "homeLongitude.\(device.id.rawValue)")
+        }
+        // Send to child devices so they store in App Group defaults.
+        await performCommand(
+            .setHomeLocation(latitude: latitude, longitude: longitude),
+            target: .child(child.id)
+        )
+    }
+
+    // MARK: - Safe Search
+
+    func sendSafeSearch(enabled: Bool) async {
+        await performCommand(
+            .setSafeSearch(enabled: enabled),
+            target: .child(child.id)
+        )
+    }
+
+    // MARK: - Driving Safety
+
+    func sendDrivingSettings() async {
+        await performCommand(
+            .setDrivingSettings(drivingSettings),
+            target: .child(child.id)
+        )
+    }
+
+    // MARK: - Named Places
+
+    func loadNamedPlaces() async {
+        guard let cloudKit = appState.cloudKit,
+              let familyID = appState.parentState?.familyID else { return }
+        do {
+            namedPlaces = try await cloudKit.fetchNamedPlaces(familyID: familyID)
+        } catch {
+            #if DEBUG
+            print("[ChildDetail] Failed to load named places: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
+    func saveNamedPlace(_ place: NamedPlace) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        do {
+            try await cloudKit.saveNamedPlace(place)
+            await loadNamedPlaces()
+            // Tell child devices to sync geofences
+            await performCommand(.syncNamedPlaces, target: .child(child.id))
+        } catch {
+            #if DEBUG
+            print("[ChildDetail] Failed to save named place: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
+    func deleteNamedPlace(at indexSet: IndexSet) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        for index in indexSet {
+            let place = namedPlaces[index]
+            do {
+                try await cloudKit.deleteNamedPlace(place.id)
+            } catch {
+                #if DEBUG
+                print("[ChildDetail] Failed to delete named place: \(error.localizedDescription)")
+                #endif
+            }
+        }
+        await loadNamedPlaces()
+        await performCommand(.syncNamedPlaces, target: .child(child.id))
     }
 }

@@ -179,6 +179,7 @@ struct AppBlockingSetupView: View {
                policy.resolvedMode != .unlocked {
                 try? appState.enforcement?.apply(policy)
             }
+            isSaving = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 dismiss()
             }

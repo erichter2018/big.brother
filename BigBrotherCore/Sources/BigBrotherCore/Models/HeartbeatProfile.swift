@@ -121,12 +121,28 @@ public struct HeartbeatProfile: Codable, Sendable, Identifiable, Equatable {
         return .gap(maxHeartbeatGap)
     }
 
-    /// Returns the start of today's active window (if one matches), used for oncePerDay checks.
+    /// Returns the start of the current active window (if one matches), used for oncePerDay checks.
+    /// For cross-midnight windows (e.g., 9:30 PM – 7:00 AM), returns yesterday's date if we're
+    /// in the morning portion (before endTime).
     public func windowStart(at date: Date, calendar: Calendar = .current) -> Date? {
         guard let window = activeWindows.first(where: { $0.contains(date, calendar: calendar) }) else {
             return nil
         }
-        var comps = calendar.dateComponents([.year, .month, .day], from: date)
+        let hour = calendar.component(.hour, from: date)
+        let minute = calendar.component(.minute, from: date)
+        let now = DayTime(hour: hour, minute: minute)
+
+        // Determine if we need to look at yesterday for cross-midnight windows
+        let baseDate: Date
+        if window.startTime >= window.endTime && now < window.endTime {
+            // Morning portion of a cross-midnight window — start was yesterday
+            guard let yesterday = calendar.date(byAdding: .day, value: -1, to: date) else { return nil }
+            baseDate = yesterday
+        } else {
+            baseDate = date
+        }
+
+        var comps = calendar.dateComponents([.year, .month, .day], from: baseDate)
         comps.hour = window.startTime.hour
         comps.minute = window.startTime.minute
         return calendar.date(from: comps)

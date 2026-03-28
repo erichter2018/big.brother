@@ -1,5 +1,7 @@
 import Foundation
 import CloudKit
+import CoreMotion
+import UserNotifications
 import BigBrotherCore
 #if canImport(UIKit)
 import UIKit
@@ -28,9 +30,22 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     /// since the device is clearly online.
     var onHeartbeatSent: (() -> Void)?
 
+    /// Called when the main app positively acknowledges an extension liveness
+    /// request or otherwise proves it is responsive again.
+    var onLivenessConfirmed: (() -> Void)?
+
+    /// Optional location service — reads cached location for heartbeat inclusion.
+    var locationService: LocationService?
+
+    /// VPN manager — ping the tunnel every 30s to prove we're alive.
+    var vpnManager: VPNManagerService?
+
     /// Monotonically increasing sequence number for this app launch.
     /// Persisted across heartbeats within a session; resets on app relaunch.
     private var seqCounter: Int64 = 0
+
+    /// When the last heartbeat was successfully sent (in-memory, for movement-based frequency).
+    private var lastSendAt: Date?
 
     init(
         cloudKit: any CloudKitServiceProtocol,
@@ -52,20 +67,43 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
     // MARK: - HeartbeatServiceProtocol
 
+    /// Heartbeat interval when the device is moving (more frequent for better tracking).
+    private static let movingHeartbeatInterval: TimeInterval = 60
+
     func startHeartbeat() {
         stopHeartbeat()
         let hbTimer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task {
-                try? await self.sendNow(force: self.checkExtensionHeartbeatRequest())
+                try? await self.sendNow(force: self.acknowledgeExtensionHeartbeatRequest())
             }
         }
         RunLoop.main.add(hbTimer, forMode: .common)
         timer = hbTimer
-        // Also check more frequently (every 30s) for extension-requested heartbeats.
+        // Check every 30s for extension-requested heartbeats, movement-based sends,
+        // and ping the VPN tunnel to prove liveness.
         let extTimer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self, self.checkExtensionHeartbeatRequest() else { return }
-            Task { try? await self.sendNow(force: true) }
+            guard let self else { return }
+
+            // Write liveness timestamp for the VPN tunnel to read.
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+
+            // Ping the VPN tunnel (IPC liveness signal).
+            self.vpnManager?.sendPing()
+
+            // Extension heartbeat request.
+            if self.acknowledgeExtensionHeartbeatRequest() {
+                Task { try? await self.sendNow(force: true) }
+                return
+            }
+            // While moving, send heartbeats more frequently (every ~60s).
+            if self.locationService?.isMoving == true {
+                let sinceLastSend = Date().timeIntervalSince(self.lastSendAt ?? .distantPast)
+                if sinceLastSend >= Self.movingHeartbeatInterval {
+                    Task { try? await self.sendNow(force: false) }
+                }
+            }
         }
         RunLoop.main.add(extTimer, forMode: .common)
         extensionCheckTimer = extTimer
@@ -81,28 +119,38 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     }
 
     /// Check if the Monitor extension requested a heartbeat via App Group flag.
-    /// Always clears the flag to prove liveness (prevents false force-close detection).
+    /// Positively acknowledge the current request token to prove liveness.
     /// Returns true only for recent requests (< 5 min) to trigger a forced heartbeat send.
-    private func checkExtensionHeartbeatRequest() -> Bool {
+    private func acknowledgeExtensionHeartbeatRequest() -> Bool {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let requestedAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt")
-        guard let requestedAt, requestedAt > 0 else { return false }
+        let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
+        guard let requestToken, !requestToken.isEmpty else { return false }
+
+        let ackToken = defaults?.string(forKey: "extensionHeartbeatAcknowledgedToken")
+        let requestedAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt") ?? 0
+        let justAcknowledged = ackToken != requestToken
+        if justAcknowledged {
+            defaults?.set(requestToken, forKey: "extensionHeartbeatAcknowledgedToken")
+            defaults?.set(Date().timeIntervalSince1970, forKey: "extensionHeartbeatAcknowledgedAt")
+            onLivenessConfirmed?()
+        }
+
+        guard requestedAt > 0 else { return false }
         let age = Date().timeIntervalSince1970 - requestedAt
-        // ALWAYS clear the flag — this proves the main app is alive and prevents
-        // the Monitor's isAppForceClosed() from triggering a false positive when
-        // the app was merely suspended by iOS (e.g., during a resource-intensive game).
-        defaults?.removeObject(forKey: "extensionHeartbeatRequestedAt")
+
         // Only trigger a forced heartbeat send for recent requests.
         guard age < 300 else {
             #if DEBUG
-            print("[BigBrother] Extension heartbeat flag cleared (stale: \(Int(age))s ago)")
+            if justAcknowledged {
+                print("[BigBrother] Extension heartbeat request acknowledged (stale: \(Int(age))s old)")
+            }
             #endif
             return false
         }
         #if DEBUG
         print("[BigBrother] Extension requested heartbeat \(Int(age))s ago — sending")
         #endif
-        return true
+        return justAcknowledged
     }
 
     func sendNow(force: Bool = false) async throws {
@@ -132,23 +180,53 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         // Determine current mode from multiple sources, in priority order:
         // 1. ExtensionSharedState (Monitor writes this on schedule transitions)
         // 2. PolicySnapshot (ground truth after command processing)
-        // 3. Schedule profile (direct check — catches cases where both are stale)
-        //
-        // Note: PolicySnapshot MUST take priority over schedule profile because
-        // a parent command (e.g., temporaryUnlock) overrides the schedule.
-        // The schedule would report .dailyMode during a locked period even though
-        // the snapshot says .unlocked from the parent's command.
-        let extState = storage.readExtensionSharedState()
+        // Determine currentMode from ACTUAL device state.
+        // The heartbeat must report what the device IS doing, not what it SHOULD be doing.
+        // The ground truth is ManagedSettingsStore — if shields are on, the device is locked.
+        // If shields are off, the device is unlocked, period.
         let currentMode: LockMode
+        #if canImport(ManagedSettings)
+        if let enforcement = enforcement {
+            let diagnostic = enforcement.shieldDiagnostic()
+            if !diagnostic.shieldsActive {
+                // Shields are off — device is actually unlocked
+                currentMode = .unlocked
+            } else {
+                // Shields are on — determine which locked mode.
+                // Prefer ExtensionSharedState (Monitor's last enforcement action),
+                // then PolicySnapshot, as label for which type of lock is active.
+                let extState = storage.readExtensionSharedState()
+                if let ext = extState, ext.currentMode != .unlocked {
+                    currentMode = ext.currentMode
+                } else if let snap = snapshot, snap.effectivePolicy.resolvedMode != .unlocked {
+                    currentMode = snap.effectivePolicy.resolvedMode
+                } else {
+                    // Shields are on but no state says which mode — safe default
+                    currentMode = .dailyMode
+                }
+            }
+        } else {
+            // No enforcement service (shouldn't happen on child) — fall back to state files
+            let extState = storage.readExtensionSharedState()
+            if let ext = extState, ext.writtenAt > (snapshot?.createdAt ?? .distantPast) {
+                currentMode = ext.currentMode
+            } else if let snap = snapshot {
+                currentMode = snap.effectivePolicy.resolvedMode
+            } else {
+                currentMode = .unlocked
+            }
+        }
+        #else
+        // Non-child builds (parent) — use state files
+        let extState = storage.readExtensionSharedState()
         if let ext = extState, ext.writtenAt > (snapshot?.createdAt ?? .distantPast) {
             currentMode = ext.currentMode
         } else if let snap = snapshot {
             currentMode = snap.effectivePolicy.resolvedMode
-        } else if let profile = storage.readActiveScheduleProfile() {
-            currentMode = profile.resolvedMode(at: Date())
         } else {
             currentMode = .unlocked
         }
+        #endif
         let policyVersion = snapshot?.effectivePolicy.policyVersion ?? 0
         let tempUnlockState: TemporaryUnlockState? = {
             // Only report if the device is actually unlocked.
@@ -180,6 +258,63 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
         seqCounter += 1
         let ckStatus = await Self.cloudKitAccountStatus()
+
+        // Refresh location on each heartbeat so data stays reasonably fresh
+        // even if device hasn't moved enough for a significant-change event.
+        locationService?.refreshLocation()
+        let loc = locationService?.lastLocation
+        let locAddress = locationService?.lastAddress
+
+        // Shield diagnostic: read actual ManagedSettingsStore state
+        let shieldsActive: Bool?
+        let shieldedAppCount: Int?
+        let shieldCategoryActive: Bool?
+        #if canImport(ManagedSettings)
+        if let enforcement = enforcement {
+            let diagnostic = enforcement.shieldDiagnostic()
+            shieldsActive = diagnostic.shieldsActive
+            shieldedAppCount = diagnostic.appCount
+            shieldCategoryActive = diagnostic.categoryActive
+        } else {
+            shieldsActive = nil
+            shieldedAppCount = nil
+            shieldCategoryActive = nil
+        }
+        #else
+        shieldsActive = nil
+        shieldedAppCount = nil
+        shieldCategoryActive = nil
+        #endif
+
+        // Schedule diagnostic — report what the child's LOCAL schedule says right now.
+        // If this disagrees with the parent's schedule, the child has stale data.
+        let scheduleResolvedMode: String?
+        if let profile = storage.readActiveScheduleProfile() {
+            let now = Date()
+            let mode = profile.resolvedMode(at: now)
+            let inFree = profile.isInFreeWindow(at: now)
+            let inEssential = profile.isInEssentialWindow(at: now)
+            // Include diagnostic detail: mode + why
+            let detail: String
+            if inFree {
+                detail = "\(mode.rawValue) (in free window)"
+            } else if inEssential {
+                detail = "\(mode.rawValue) (in essential window)"
+            } else {
+                let ewCount = profile.essentialWindows.count
+                let ewDays = profile.essentialWindows.first?.daysOfWeek.map(\.displayName).sorted().joined(separator: ",") ?? "none"
+                let ewStart = profile.essentialWindows.first.map { "\($0.startTime.hour):\(String(format: "%02d", $0.startTime.minute))" } ?? "?"
+                let ewEnd = profile.essentialWindows.first.map { "\($0.endTime.hour):\(String(format: "%02d", $0.endTime.minute))" } ?? "?"
+                detail = "\(mode.rawValue) (ew:\(ewCount) days:\(ewDays) \(ewStart)-\(ewEnd))"
+            }
+            scheduleResolvedMode = detail
+        } else {
+            scheduleResolvedMode = nil
+        }
+
+        // Last shield change reason
+        let lastShieldChangeReason = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .string(forKey: "lastShieldChangeReason")
 
         let heartbeat = DeviceHeartbeat(
             deviceID: enrollment.deviceID,
@@ -214,7 +349,31 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             enforcementError: Self.lastEnforcementError(from: storage),
             activeScheduleWindowName: Self.activeScheduleWindowName(from: storage),
             lastCommandProcessedAt: Self.lastCommandProcessedAt(from: storage),
-            monitorLastActiveAt: Self.monitorLastActiveAt()
+            monitorLastActiveAt: Self.monitorLastActiveAt(),
+            vpnDetected: VPNDetector.isVPNActive(),
+            timeZoneIdentifier: TimeZone.current.identifier,
+            timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
+            screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
+            jailbreakDetected: JailbreakDetector.isJailbroken(),
+            jailbreakReason: JailbreakDetector.detectedReason(),
+            isDriving: locationService?.isMoving == true ? true : nil,
+            currentSpeed: locationService?.lastLocation?.speed,
+            heartbeatSource: "mainApp",
+            tunnelConnected: vpnManager?.isConnected,
+            motionAuthorized: CMMotionActivityManager.authorizationStatus() == .authorized,
+            notificationsAuthorized: Self.notificationsAuthorized(),
+            isDeviceLocked: DeviceLockMonitor.shared.isDeviceLocked,
+            shieldsActive: shieldsActive,
+            scheduleResolvedMode: scheduleResolvedMode,
+            lastShieldChangeReason: lastShieldChangeReason,
+            shieldedAppCount: shieldedAppCount,
+            shieldCategoryActive: shieldCategoryActive,
+            latitude: loc?.coordinate.latitude,
+            longitude: loc?.coordinate.longitude,
+            locationTimestamp: loc?.timestamp,
+            locationAddress: locAddress,
+            locationAccuracy: loc?.horizontalAccuracy,
+            locationAuthorization: locationService?.authorizationStatusString
         )
 
         do {
@@ -225,6 +384,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
             // Record successful heartbeat timestamp so the Monitor can distinguish
             // between a truly force-closed app and one merely suspended by iOS.
+            lastSendAt = Date()
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
                 .set(Date().timeIntervalSince1970, forKey: "lastHeartbeatSentAt")
 
@@ -317,7 +477,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         var systemInfo = utsname()
         uname(&systemInfo)
         return withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+            $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: systemInfo.machine)) {
                 String(validatingUTF8: $0) ?? "unknown"
             }
         }
@@ -468,6 +628,35 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
         let timestamp = defaults.double(forKey: "monitorLastActiveAt")
         return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
+    }
+
+    /// Check notification permission synchronously via cached value.
+    /// Updated each heartbeat cycle.
+    private static let _notifAuthLock = NSLock()
+    private static var _notifAuthBacking: Bool?
+    private static func notificationsAuthorized() -> Bool? {
+        // Async check runs in background, caches result for next heartbeat
+        Task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            _notifAuthLock.lock()
+            _notifAuthBacking = settings.authorizationStatus == .authorized
+            _notifAuthLock.unlock()
+        }
+        _notifAuthLock.lock()
+        defer { _notifAuthLock.unlock() }
+        return _notifAuthBacking
+    }
+
+    private static func currentScreenTimeMinutes(from storage: any SharedStorageProtocol) -> Int? {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let dateKey = "screenTimeDate"
+        let minutesKey = "screenTimeMinutes"
+
+        // Only return if the stored date matches today
+        let today = SelfUnlockState.todayDateString()
+        guard defaults.string(forKey: dateKey) == today else { return nil }
+        let minutes = defaults.integer(forKey: minutesKey)
+        return minutes > 0 ? minutes : nil
     }
 
     private static func isUsefulAppName(_ name: String) -> Bool {

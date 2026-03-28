@@ -13,7 +13,7 @@ struct ManagedAppControl: Identifiable {
     }
 }
 
-@Observable
+@Observable @MainActor
 final class DeviceDetailViewModel: CommandSendable {
     let appState: AppState
     var device: ChildDevice

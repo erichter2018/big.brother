@@ -48,39 +48,39 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol {
     // MARK: - SyncCoordinatorProtocol
 
     func performFullSync() async throws {
-        // 1. Process incoming commands.
+        let syncStartedAt = Date()
+
+        // 1. Process incoming commands (must complete before heartbeat
+        //    so the heartbeat reflects the updated mode).
         do {
             try await commandProcessor.processIncomingCommands()
         } catch {
             eventLogger.log(.commandFailed, details: "Sync: command fetch failed: \(error.localizedDescription)")
         }
+        let commandsProcessed = Self.didProcessCommands(since: syncStartedAt)
 
-        // 2. Send heartbeat.
-        do {
-            try await heartbeat.sendNow(force: false)
-        } catch {
-            // Heartbeat failure is non-fatal.
+        // 2. Heartbeat, event sync, device check, and policy sync can run in parallel
+        //    since they're independent operations.
+        await withTaskGroup(of: Void.self) { group in
+            if !commandsProcessed {
+                group.addTask { try? await self.heartbeat.sendNow(force: false) }
+            }
+            group.addTask { try? await self.eventLogger.syncPendingEvents() }
+            group.addTask { await self.checkDeviceExistence() }
+            group.addTask { await self.syncPolicyFromCloud() }
         }
-
-        // 3. Sync event logs.
-        do {
-            try await eventLogger.syncPendingEvents()
-        } catch {
-            // Event sync failure is non-fatal.
-        }
-
-        // 4. Check if this device still exists in CloudKit.
-        //    If the parent deleted the device record, self-unenroll.
-        await checkDeviceExistence()
-
-        // 5. Fetch latest policy from CloudKit (for child devices).
-        await syncPolicyFromCloud()
     }
 
     func performQuickSync() async throws {
+        let syncStartedAt = Date()
+
         // Lightweight: commands, heartbeat, and event sync.
         try? await commandProcessor.processIncomingCommands()
-        try? await heartbeat.sendNow(force: false)
+        // If command processing changed state, CommandProcessor already requested
+        // an immediate confirmation heartbeat. Otherwise send a normal heartbeat.
+        if !Self.didProcessCommands(since: syncStartedAt) {
+            try? await heartbeat.sendNow(force: false)
+        }
         // Sync pending events so unlock requests reach CloudKit promptly.
         try? await eventLogger.syncPendingEvents()
     }
@@ -166,5 +166,12 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol {
                 details: error.localizedDescription
             ))
         }
+    }
+
+    private static func didProcessCommands(since date: Date) -> Bool {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
+        guard timestamp > 0 else { return false }
+        return Date(timeIntervalSince1970: timestamp) >= date
     }
 }

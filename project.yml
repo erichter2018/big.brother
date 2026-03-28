@@ -17,9 +17,11 @@ schemes:
         BigBrotherShieldAction: all
         BigBrotherActivityReport: all
         BigBrotherWidget: all
+        BigBrotherTunnel: all
     run:
       config: Debug
       executable: BigBrother
+      storeKitConfiguration: BigBrotherStore.storekit
 
 packages:
   BigBrotherCore:
@@ -58,6 +60,7 @@ targets:
       - target: BigBrotherShieldAction
       - target: BigBrotherActivityReport
       - target: BigBrotherWidget
+      - target: BigBrotherTunnel
       - package: firebase-ios-sdk
         product: FirebaseAuth
       - package: firebase-ios-sdk
@@ -70,6 +73,10 @@ targets:
         weak: true
       - sdk: CloudKit.framework
       - sdk: LocalAuthentication.framework
+      - sdk: CoreLocation.framework
+      - sdk: MapKit.framework
+      - sdk: NetworkExtension.framework
+      - sdk: CoreMotion.framework
       - sdk: Combine.framework
     settings:
       base:
@@ -83,6 +90,9 @@ targets:
       properties:
         CFBundleDisplayName: BigBrother
         NSFaceIDUsageDescription: "Big Brother uses Face ID to protect parent settings."
+        NSMotionUsageDescription: "Big Brother uses motion data to detect when you're traveling for accurate trip tracking."
+        NSLocationAlwaysAndWhenInUseUsageDescription: "Big Brother uses your location to help your parents know where you are and that you're safe."
+        NSLocationWhenInUseUsageDescription: "Big Brother uses your location to help your parents know where you are."
         BGTaskSchedulerPermittedIdentifiers:
           - fr.bigbrother.app.heartbeat-refresh
           - fr.bigbrother.app.relock
@@ -90,6 +100,8 @@ targets:
           - fetch
           - remote-notification
           - processing
+          - location
+          - network-extension
         CFBundleURLTypes:
           - CFBundleURLSchemes:
               - bigbrother
@@ -110,6 +122,8 @@ targets:
         com.apple.developer.icloud-services:
           - CloudKit
         com.apple.developer.ubiquity-kvstore-identifier: "$(TeamIdentifierPrefix)fr.bigbrother.app"
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
         com.apple.security.application-groups:
           - "group.fr.bigbrother.shared"
         keychain-access-groups:
@@ -119,6 +133,8 @@ targets:
         com.apple.ApplicationGroups.iOS:
           enabled: 1
         com.apple.Push:
+          enabled: 1
+        com.apple.NetworkExtension:
           enabled: 1
         com.apple.iCloud:
           enabled: 1
@@ -358,4 +374,58 @@ targets:
         com.apple.Keychain:
           enabled: 1
         com.apple.FamilyControls:
+          enabled: 1
+
+  # ============================================================
+  # VPN Packet Tunnel Extension
+  # ============================================================
+  BigBrotherTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: BigBrotherTunnel
+        excludes:
+          - "**/*.entitlements"
+    dependencies:
+      - package: BigBrotherCore
+      - sdk: NetworkExtension.framework
+      - sdk: CloudKit.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fr.bigbrother.app.tunnel
+        CODE_SIGN_ENTITLEMENTS: BigBrotherTunnel/BigBrotherTunnel.entitlements
+        PRODUCT_NAME: BigBrotherTunnel
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_DEBUG_DYLIB: NO
+        MERGED_BINARY_TYPE: none
+    info:
+      path: BigBrotherTunnel/Info.plist
+      properties:
+        CFBundleDisplayName: BigBrotherTunnel
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).PacketTunnelProvider"
+    entitlements:
+      path: BigBrotherTunnel/BigBrotherTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
+        com.apple.developer.icloud-container-identifiers:
+          - "iCloud.fr.bigbrother.app"
+        com.apple.developer.icloud-services:
+          - CloudKit
+        com.apple.security.application-groups:
+          - "group.fr.bigbrother.shared"
+        keychain-access-groups:
+          - "$(AppIdentifierPrefix)fr.bigbrother.shared"
+    attributes:
+      SystemCapabilities:
+        com.apple.ApplicationGroups.iOS:
+          enabled: 1
+        com.apple.Keychain:
+          enabled: 1
+        com.apple.NetworkExtension:
+          enabled: 1
+        com.apple.iCloud:
           enabled: 1

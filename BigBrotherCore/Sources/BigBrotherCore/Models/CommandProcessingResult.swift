@@ -18,10 +18,15 @@ public enum CommandProcessingResult: Sendable, Equatable {
     /// Command passed validation but execution failed.
     case failedExecution(reason: String)
 
+    /// Command rejected due to invalid or missing signature.
+    /// Posts a .failed receipt so the parent knows the command was rejected,
+    /// and marks as processed so it's not retried.
+    case rejectedSignature
+
     /// Whether this result should generate a CloudKit receipt.
     public var shouldPostReceipt: Bool {
         switch self {
-        case .applied, .failedValidation, .failedExecution:
+        case .applied, .failedValidation, .failedExecution, .rejectedSignature:
             return true
         case .ignoredDuplicate, .ignoredExpired:
             return false
@@ -32,7 +37,7 @@ public enum CommandProcessingResult: Sendable, Equatable {
     public var receiptStatus: CommandStatus? {
         switch self {
         case .applied: return .applied
-        case .failedValidation, .failedExecution: return .failed
+        case .failedValidation, .failedExecution, .rejectedSignature: return .failed
         case .ignoredExpired: return .expired
         case .ignoredDuplicate: return nil
         }
@@ -46,6 +51,7 @@ public enum CommandProcessingResult: Sendable, Equatable {
         case .ignoredExpired: return "Ignored: expired"
         case .failedValidation(let reason): return "Validation failed: \(reason)"
         case .failedExecution(let reason): return "Execution failed: \(reason)"
+        case .rejectedSignature: return "Rejected: invalid or missing signature"
         }
     }
 }

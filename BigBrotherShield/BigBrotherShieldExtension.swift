@@ -11,20 +11,33 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
 
     override func configuration(shielding application: Application) -> ShieldConfiguration {
         cacheAppIdentity(application: application)
-        return ShieldConfiguration()
+        return forceCloseShieldConfig ?? ShieldConfiguration()
     }
 
     override func configuration(shielding application: Application, in category: ActivityCategory) -> ShieldConfiguration {
         cacheAppIdentity(application: application)
-        return ShieldConfiguration()
+        return forceCloseShieldConfig ?? ShieldConfiguration()
     }
 
     override func configuration(shielding webDomain: WebDomain) -> ShieldConfiguration {
-        return ShieldConfiguration()
+        return forceCloseShieldConfig ?? ShieldConfiguration()
     }
 
     override func configuration(shielding webDomain: WebDomain, in category: ActivityCategory) -> ShieldConfiguration {
-        return ShieldConfiguration()
+        return forceCloseShieldConfig ?? ShieldConfiguration()
+    }
+
+    /// Custom shield config shown when web is blocked due to force-close.
+    private var forceCloseShieldConfig: ShieldConfiguration? {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard defaults?.bool(forKey: "forceCloseWebBlocked") == true else { return nil }
+        return ShieldConfiguration(
+            backgroundBlurStyle: .systemThickMaterial,
+            title: ShieldConfiguration.Label(text: "Apps Paused", color: .orange),
+            subtitle: ShieldConfiguration.Label(text: "Open Big Brother to restore access.", color: .white),
+            primaryButtonLabel: ShieldConfiguration.Label(text: "OK", color: .white),
+            primaryButtonBackgroundColor: .gray
+        )
     }
 
     /// Cache the app identity to Keychain so ShieldAction can read it.

@@ -58,6 +58,7 @@ struct DeploymentReadinessTests {
             StorageKeys.parentState,
             StorageKeys.parentPINHash,
             StorageKeys.familyID,
+            StorageKeys.pinLockoutState,
         ]
         for key in keychainKeys {
             #expect(key.hasPrefix("fr.bigbrother.keychain."), "Keychain key '\(key)' missing prefix")
@@ -68,8 +69,6 @@ struct DeploymentReadinessTests {
     func userDefaultsKeyPrefixes() {
         let udKeys = [
             StorageKeys.onboardingCompleted,
-            StorageKeys.failedPINAttempts,
-            StorageKeys.pinLockoutUntil,
             StorageKeys.lastAppliedMode,
             StorageKeys.enforcementLastAppliedAt,
             StorageKeys.failSafeApplied,

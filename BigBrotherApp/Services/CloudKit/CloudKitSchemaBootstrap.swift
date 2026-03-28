@@ -70,6 +70,9 @@ enum CloudKitSchemaBootstrap {
             buildSchedule(),
             buildHeartbeatProfile(),
             buildScheduleProfile(),
+            buildNamedPlace(),
+            buildDiagnosticReport(),
+            buildDeviceLocation(),
         ]
     }
 
@@ -205,6 +208,28 @@ enum CloudKitSchemaBootstrap {
         return r
     }
 
+    private static func buildNamedPlace() -> CKRecord {
+        let r = seed(CKRecordType.namedPlace)
+        r[CKFieldName.familyID] = seedFamilyID
+        r[CKFieldName.placeName] = "_seed_"
+        r[CKFieldName.placeLatitude] = 0.0 as NSNumber
+        r[CKFieldName.placeLongitude] = 0.0 as NSNumber
+        r[CKFieldName.placeRadius] = 150.0 as NSNumber
+        r[CKFieldName.timestamp] = Date() as NSDate
+        r[CKFieldName.placeCreatedBy] = "seed"
+        r[CKFieldName.placeChildProfileIDs] = ["_seed_"] as [NSString]
+        return r
+    }
+
+    private static func buildDiagnosticReport() -> CKRecord {
+        let r = seed(CKRecordType.diagnosticReport)
+        r[CKFieldName.deviceID] = seedFamilyID
+        r[CKFieldName.familyID] = seedFamilyID
+        r[CKFieldName.timestamp] = Date() as NSDate
+        r[CKFieldName.diagReportJSON] = "{}"
+        return r
+    }
+
     private static func buildScheduleProfile() -> CKRecord {
         let r = seed(CKRecordType.scheduleProfile)
         r[CKFieldName.familyID] = seedFamilyID
@@ -214,6 +239,18 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.lockedMode] = "dailyMode"
         r[CKFieldName.isDefault] = 0 as NSNumber
         r[CKFieldName.updatedAt] = Date() as NSDate
+        return r
+    }
+
+    private static func buildDeviceLocation() -> CKRecord {
+        let r = seed(CKRecordType.deviceLocation)
+        r[CKFieldName.familyID] = seedFamilyID
+        r[CKFieldName.deviceID] = seedPrefix
+        r[CKFieldName.locLatitude] = 0.0 as NSNumber
+        r[CKFieldName.locLongitude] = 0.0 as NSNumber
+        r[CKFieldName.locAccuracy] = 0.0 as NSNumber
+        r[CKFieldName.locTimestamp] = Date() as NSDate
+        r[CKFieldName.locAddress] = "_seed_"
         return r
     }
 }

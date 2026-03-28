@@ -20,6 +20,8 @@ enum ScheduleRegistrar {
     static let activityPrefix = "bigbrother.scheduleprofile."
     /// Prefix for essential-window schedule activities.
     static let essentialPrefix = "bigbrother.essentialwindow."
+    /// Prefix for the usage tracking schedule.
+    static let usageTrackingPrefix = "bigbrother.usagetracking"
 
     /// Suffix for the evening portion of a cross-midnight window.
     private static let eveningSuffix = ".pm"
@@ -46,6 +48,9 @@ enum ScheduleRegistrar {
         for window in profile.essentialWindows {
             registerWindow(window, prefix: essentialPrefix, label: "essential", center: center)
         }
+
+        // Register usage tracking milestones.
+        registerUsageTracking()
     }
 
     private static func registerWindow(_ window: ActiveWindow, prefix: String, label: String, center: DeviceActivityCenter) {
@@ -102,12 +107,77 @@ enum ScheduleRegistrar {
         try? storage.writeActiveScheduleProfile(nil)
     }
 
-    /// Clear all schedule profile activities from DeviceActivityCenter.
+    /// Clear all schedule profile and usage tracking activities from DeviceActivityCenter.
     private static func clearAll(center: DeviceActivityCenter) {
         for activity in center.activities {
-            if activity.rawValue.hasPrefix(activityPrefix) || activity.rawValue.hasPrefix(essentialPrefix) {
+            if activity.rawValue.hasPrefix(activityPrefix)
+                || activity.rawValue.hasPrefix(essentialPrefix)
+                || activity.rawValue.hasPrefix(usageTrackingPrefix) {
                 center.stopMonitoring([activity])
             }
+        }
+    }
+
+    /// Register a daily usage tracking schedule with milestone events.
+    /// Each milestone fires `eventDidReachThreshold` in the Monitor extension
+    /// when total device screen time reaches that threshold.
+    ///
+    /// Milestones: 15m, 30m, 45m, 1h, then every 30m up to 12h.
+    static func registerUsageTracking() {
+        let center = DeviceActivityCenter()
+
+        // Remove any existing usage tracking schedule.
+        for activity in center.activities {
+            if activity.rawValue.hasPrefix(usageTrackingPrefix) {
+                center.stopMonitoring([activity])
+            }
+        }
+
+        let activityName = DeviceActivityName(rawValue: usageTrackingPrefix)
+
+        // Schedule runs all day, repeating daily.
+        let schedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: 0, minute: 0),
+            intervalEnd: DateComponents(hour: 23, minute: 59),
+            repeats: true
+        )
+
+        // Build milestone events at tiered granularity:
+        //   0–2h:  every 5 minutes  (24 events)
+        //   2–6h:  every 15 minutes (16 events)
+        //   6–12h: every 30 minutes (12 events)
+        // Total: 52 events — well within DeviceActivity limits.
+        // Empty applications/categories = tracks ALL device activity.
+        var milestoneMinutes: [Int] = []
+        for m in stride(from: 5, through: 120, by: 5) { milestoneMinutes.append(m) }      // 5-min steps up to 2h
+        for m in stride(from: 135, through: 360, by: 15) { milestoneMinutes.append(m) }    // 15-min steps 2h–6h
+        for m in stride(from: 390, through: 720, by: 30) { milestoneMinutes.append(m) }    // 30-min steps 6h–12h
+
+        var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
+        for minutes in milestoneMinutes {
+            let eventName = DeviceActivityEvent.Name(rawValue: "usage.\(minutes)")
+            let hours = minutes / 60
+            let mins = minutes % 60
+            var threshold = DateComponents()
+            threshold.hour = hours
+            threshold.minute = mins
+            events[eventName] = DeviceActivityEvent(
+                applications: [],
+                categories: [],
+                webDomains: [],
+                threshold: threshold
+            )
+        }
+
+        do {
+            try center.startMonitoring(activityName, during: schedule, events: events)
+            #if DEBUG
+            print("[BigBrother] Registered usage tracking with \(events.count) milestones")
+            #endif
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Failed to register usage tracking: \(error.localizedDescription)")
+            #endif
         }
     }
 }

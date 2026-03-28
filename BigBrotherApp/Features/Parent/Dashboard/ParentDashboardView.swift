@@ -8,27 +8,56 @@ struct ParentDashboardView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
+                if !viewModel.appState.networkMonitor.isConnected {
+                    HStack(spacing: 8) {
+                        Image(systemName: "wifi.slash")
+                        Text("Offline — showing cached data")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+                    .background(.orange)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .accessibilityLabel("Device is offline. Showing cached data.")
+                }
+
                 GlobalActionsBar(viewModel: viewModel)
 
                 switch viewModel.loadingState {
                 case .idle, .loading:
-                    ProgressView("Loading dashboard...")
-                        .padding(.top, 40)
+                    ForEach(0..<3, id: \.self) { _ in
+                        SkeletonChildCard()
+                    }
 
                 case .loaded:
                     ForEach(viewModel.childProfiles) { child in
                         childCard(child)
                     }
 
-                case .empty(let msg):
-                    ContentUnavailableView {
-                        Label(msg, systemImage: "person.2.slash")
-                    } actions: {
-                        NavigationLink("Add Child") {
+                case .empty:
+                    VStack(spacing: 20) {
+                        ContentUnavailableView {
+                            Label("Welcome!", systemImage: "figure.2.and.child.holdinghands")
+                        } description: {
+                            Text("Get started by adding your first child.")
+                        }
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            stepRow(number: 1, text: "Add a child profile", done: false)
+                            stepRow(number: 2, text: "Generate an enrollment code", done: false)
+                            stepRow(number: 3, text: "Enter the code on the child\u{2019}s device", done: false)
+                            stepRow(number: 4, text: "Set a schedule", done: false)
+                        }
+                        .padding(.horizontal, 32)
+
+                        NavigationLink("Add Your First Child") {
                             AddChildView(appState: viewModel.appState)
                         }
                         .buttonStyle(.borderedProminent)
                     }
+                    .padding(.top, 20)
 
                 case .error(let msg):
                     ContentUnavailableView {
@@ -49,25 +78,35 @@ struct ParentDashboardView: View {
                     )
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.5), value: viewModel.commandFeedback)
+                    .accessibilityLabel(viewModel.isCommandError ? "Error: \(feedback)" : feedback)
                 }
             }
             .padding(.horizontal)
             .padding(.top, 8)
         }
-        .navigationTitle("Big Brother Dashboard")
+        .navigationTitle("Dashboard")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                VStack(spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("Big Brother Dashboard")
-                            .font(.system(size: 24, weight: .semibold))
-                        Text("b\(AppConstants.appBuildNumber)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
+                Button {
+                    Task { await viewModel.pingAllDevices() }
+                } label: {
+                    VStack(spacing: 2) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text("Dashboard")
+                                .font(.system(size: 24, weight: .semibold))
+                                .foregroundStyle(.primary)
+                            if viewModel.appState.debugMode {
+                                Text("b\(AppConstants.appBuildNumber)")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        deviceSummaryLine
                     }
-                    deviceSummaryLine
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dashboard. Tap to ping all devices.")
             }
             if showAddChild {
                 ToolbarItem(placement: .primaryAction) {
@@ -76,6 +115,7 @@ struct ParentDashboardView: View {
                     } label: {
                         Image(systemName: "person.badge.plus")
                     }
+                    .accessibilityLabel("Add Child")
                 }
             }
         }
@@ -111,6 +151,8 @@ struct ParentDashboardView: View {
         Text("\(totalDevices) Devices \u{00B7} \(onlineCount) Online \u{00B7} \(lockedCount) Locked")
             .font(.caption)
             .foregroundStyle(.secondary)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(totalDevices) devices, \(onlineCount) online, \(lockedCount) locked")
     }
 
     @ViewBuilder
@@ -153,9 +195,35 @@ struct ParentDashboardView: View {
                 onUnlockWithTimer: viewModel.appState.timerService != nil
                     ? { seconds in Task { await viewModel.unlockChildWithTimer(child, seconds: seconds) } }
                     : nil,
-                onSchedule: { Task { await viewModel.scheduleChild(child) } }
+                onSchedule: { Task { await viewModel.scheduleChild(child) } },
+                debugMode: viewModel.appState.debugMode
             )
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Step Row
+
+    @ViewBuilder
+    private func stepRow(number: Int, text: String, done: Bool) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(done ? Color.green : Color.blue.opacity(0.15))
+                    .frame(width: 28, height: 28)
+                if done {
+                    Image(systemName: "checkmark")
+                        .font(.caption.bold())
+                        .foregroundStyle(.white)
+                } else {
+                    Text("\(number)")
+                        .font(.caption.bold())
+                        .foregroundStyle(.blue)
+                }
+            }
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(done ? .secondary : .primary)
+        }
     }
 }

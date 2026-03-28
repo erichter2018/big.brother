@@ -110,6 +110,16 @@ struct ParentJoinView: View {
                 let parentState = ParentState(familyID: invite.familyID, inviteCode: invite.code)
                 try appState.setRole(.parent)
                 try appState.setParentState(parentState)
+
+                // Each parent generates their own signing keypair.
+                // Children trust multiple public keys (one per parent device).
+                // SECURITY: Private keys never leave the device — never stored in CloudKit.
+                if (try? appState.keychain.getData(forKey: StorageKeys.commandSigningPrivateKey)) == nil {
+                    let (privateKey, publicKey) = CommandSigner.generateKeyPair()
+                    try? appState.keychain.setData(privateKey, forKey: StorageKeys.commandSigningPrivateKey)
+                    try? appState.keychain.setData(publicKey, forKey: StorageKeys.commandSigningPublicKey)
+                }
+
                 appState.configureServices()
 
                 // Mark the invite as used.
@@ -117,10 +127,20 @@ struct ParentJoinView: View {
                     try? await ck.markInviteUsed(code: invite.code, deviceID: DeviceID(rawValue: "parent"))
                 }
 
+                // Distribute this parent's public key to all children so they
+                // accept commands signed by this device.
+                if let pubKeyData = try? appState.keychain.getData(forKey: StorageKeys.commandSigningPublicKey) {
+                    let pubKeyBase64 = pubKeyData.base64EncodedString()
+                    try? await appState.sendCommand(
+                        target: .allDevices,
+                        action: .addTrustedSigningKey(publicKeyBase64: pubKeyBase64)
+                    )
+                }
+
                 // Prompt PIN setup.
                 showPINSetup = true
             } catch {
-                errorMessage = "Could not join family: \(error.localizedDescription)"
+                errorMessage = "Could not join family: \(CloudKitErrorHelper.userMessage(for: error))"
             }
             isValidating = false
         }

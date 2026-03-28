@@ -4,7 +4,7 @@ import BigBrotherCore
 /// Kid-centric schedule overview. Shows which child has which schedule
 /// template assigned, with a compact summary of free windows.
 struct ScheduleOverviewView: View {
-    @State var viewModel: ScheduleOverviewViewModel
+    var viewModel: ScheduleOverviewViewModel
     @State private var showingAssignSheet = false
     @State private var showingTemplates = false
 
@@ -369,9 +369,10 @@ enum FreeWindowFormatter {
 
         // Check if consecutive
         let rawValues = sorted.map(\.rawValue)
-        let isConsecutive = rawValues.last! - rawValues.first! == rawValues.count - 1
-        if isConsecutive {
-            return "\(sorted.first!.shortName)-\(sorted.last!.shortName)"
+        if let first = rawValues.first, let last = rawValues.last,
+           let firstDay = sorted.first, let lastDay = sorted.last,
+           last - first == rawValues.count - 1 {
+            return "\(firstDay.shortName)-\(lastDay.shortName)"
         }
 
         return sorted.map(\.shortName).joined(separator: ", ")

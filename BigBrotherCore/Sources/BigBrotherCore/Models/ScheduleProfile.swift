@@ -25,6 +25,10 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
     /// The lock mode applied outside free windows and essential windows.
     public var lockedMode: LockMode
 
+    /// Dates on which the schedule is suspended — device stays unlocked all day.
+    /// Stored as start-of-day dates. Old child builds ignore this field (safe default: no exceptions).
+    public var exceptionDates: [Date]
+
     public var isDefault: Bool
     public var updatedAt: Date
 
@@ -35,6 +39,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         freeWindows: [ActiveWindow],
         essentialWindows: [ActiveWindow] = [],
         lockedMode: LockMode = .dailyMode,
+        exceptionDates: [Date] = [],
         isDefault: Bool = false,
         updatedAt: Date = Date()
     ) {
@@ -44,8 +49,33 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         self.freeWindows = freeWindows
         self.essentialWindows = essentialWindows
         self.lockedMode = lockedMode
+        self.exceptionDates = exceptionDates
         self.isDefault = isDefault
         self.updatedAt = updatedAt
+    }
+
+    // Custom Codable to allow backward-compatible decoding (exceptionDates may be absent in older data).
+    enum CodingKeys: String, CodingKey {
+        case id, familyID, name, freeWindows, essentialWindows, lockedMode, exceptionDates, isDefault, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        familyID = try container.decode(FamilyID.self, forKey: .familyID)
+        name = try container.decode(String.self, forKey: .name)
+        freeWindows = try container.decode([ActiveWindow].self, forKey: .freeWindows)
+        essentialWindows = try container.decodeIfPresent([ActiveWindow].self, forKey: .essentialWindows) ?? []
+        lockedMode = try container.decode(LockMode.self, forKey: .lockedMode)
+        exceptionDates = try container.decodeIfPresent([Date].self, forKey: .exceptionDates) ?? []
+        isDefault = try container.decode(Bool.self, forKey: .isDefault)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    /// Returns `true` if the given date falls on a schedule exception date (unlocked all day).
+    public func isExceptionDate(_ date: Date, calendar: Calendar = .current) -> Bool {
+        let dateOnly = calendar.startOfDay(for: date)
+        return exceptionDates.contains { calendar.isDate($0, inSameDayAs: dateOnly) }
     }
 
     /// Returns `true` if any free window contains the given date.
@@ -59,8 +89,9 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
     }
 
     /// Returns the mode that should be active at the given date.
-    /// Priority: free window > essential window > lockedMode.
+    /// Priority: exception date > free window > essential window > lockedMode.
     public func resolvedMode(at date: Date, calendar: Calendar = .current) -> LockMode {
+        if isExceptionDate(date, calendar: calendar) { return .unlocked }
         if isInFreeWindow(at: date, calendar: calendar) { return .unlocked }
         if isInEssentialWindow(at: date, calendar: calendar) { return .essentialOnly }
         return lockedMode
@@ -70,6 +101,12 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
     /// essential windows, and their boundaries. Used for schedule labels like
     /// "Free until 8 PM" / "Locked until 3 PM" / "Essential until 7 AM".
     public func nextTransitionTime(from date: Date, calendar: Calendar = .current) -> Date? {
+        // Exception dates unlock all day — next transition is midnight (start of next day).
+        if isExceptionDate(date, calendar: calendar) {
+            guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: date) else { return nil }
+            return calendar.startOfDay(for: tomorrow)
+        }
+
         let weekday = calendar.component(.weekday, from: date)
         guard let today = DayOfWeek(rawValue: weekday) else { return nil }
         let hour = calendar.component(.hour, from: date)
@@ -121,9 +158,10 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
             return calendar.date(from: comps)
         }
 
-        // Check future days (up to 7 days ahead).
+        // Check future days (up to 7 days ahead), skipping exception dates.
         for dayOffset in 1...7 {
             guard let futureDate = calendar.date(byAdding: .day, value: dayOffset, to: date) else { continue }
+            if isExceptionDate(futureDate, calendar: calendar) { continue }
             let futureWeekday = calendar.component(.weekday, from: futureDate)
             guard let futureDay = DayOfWeek(rawValue: futureWeekday) else { continue }
             let dayStarts = allWindows

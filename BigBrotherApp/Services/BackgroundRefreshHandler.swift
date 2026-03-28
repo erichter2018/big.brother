@@ -64,12 +64,13 @@ enum BackgroundRefreshHandler {
             return .noData
         }
 
-        if appState.parentState != nil {
+        let isParent = await MainActor.run { appState.parentState != nil }
+        if isParent {
             #if DEBUG
             print("[BigBrother] CloudKit push received (parent) — refreshing dashboard...")
             #endif
-            // Short delay for index consistency.
-            try? await Task.sleep(for: .seconds(1.5))
+            // Short delay for CloudKit index consistency.
+            try? await Task.sleep(for: .seconds(0.5))
             do {
                 try await appState.refreshDashboard()
                 #if DEBUG
@@ -96,9 +97,12 @@ enum BackgroundRefreshHandler {
             #if DEBUG
             print("[BigBrother] CloudKit push received (child) — waiting for index consistency...")
             #endif
-            try? await Task.sleep(for: .seconds(1.5))
+            try? await Task.sleep(for: .seconds(0.5))
 
             do {
+                await MainActor.run {
+                    appState.handleMainAppResponsive(reapplyEnforcement: true)
+                }
                 // performQuickSync already includes commands + heartbeat + events.
                 // No need for a separate forced heartbeat — it just doubles CloudKit writes.
                 try await appState.syncCoordinator?.performQuickSync()

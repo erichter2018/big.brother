@@ -20,11 +20,11 @@ struct EnrollmentCodeEntryView: View {
                 .font(.system(size: 48))
                 .foregroundStyle(.blue)
 
-            Text("Enter Enrollment Code")
+            Text("Enter Setup Code")
                 .font(.title2)
                 .fontWeight(.bold)
 
-            Text("Ask a parent to generate an enrollment code from their device.")
+            Text("Enter the code shown on the parent's device.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -64,7 +64,7 @@ struct EnrollmentCodeEntryView: View {
             .padding(.horizontal, 32)
         }
         .padding(.bottom, 40)
-        .navigationTitle("Enroll Device")
+        .navigationTitle("Set Up Device")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(isPresented: $showPermissions) {
             if let invite = validatedInvite {
@@ -98,7 +98,7 @@ struct EnrollmentCodeEntryView: View {
                     errorMessage = "Invalid or expired code. Please try again."
                 }
             } catch {
-                errorMessage = "Could not validate code: \(error.localizedDescription)"
+                errorMessage = "Could not validate code: \(CloudKitErrorHelper.userMessage(for: error))"
             }
             isValidating = false
         }

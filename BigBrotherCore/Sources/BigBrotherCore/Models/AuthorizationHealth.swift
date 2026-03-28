@@ -39,12 +39,12 @@ public struct AuthorizationHealth: Codable, Sendable, Equatable {
         currentState: AuthorizationState,
         lastTransitionAt: Date = Date(),
         previousState: AuthorizationState? = nil,
-        enforcementDegraded: Bool = false
+        enforcementDegraded: Bool? = nil
     ) {
         self.currentState = currentState
         self.lastTransitionAt = lastTransitionAt
         self.previousState = previousState
-        self.enforcementDegraded = currentState != .authorized
+        self.enforcementDegraded = enforcementDegraded ?? (currentState != .authorized)
     }
 
     /// Create a new health record reflecting a transition to a new state.
@@ -59,8 +59,7 @@ public struct AuthorizationHealth: Codable, Sendable, Equatable {
     }
 
     /// Initial health for a device that hasn't checked authorization yet.
-    public static let unknown = AuthorizationHealth(
-        currentState: .unknown,
-        lastTransitionAt: Date()
-    )
+    public static var unknown: AuthorizationHealth {
+        AuthorizationHealth(currentState: .unknown, lastTransitionAt: Date())
+    }
 }

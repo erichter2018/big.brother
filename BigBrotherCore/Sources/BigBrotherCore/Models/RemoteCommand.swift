@@ -13,6 +13,9 @@ public struct RemoteCommand: Codable, Sendable, Identifiable, Equatable {
     /// Commands without explicit expiry default to 24 hours.
     public let expiresAt: Date?
     public var status: CommandStatus
+    /// ED25519 signature (base64) over the canonical command payload.
+    /// Set by the parent when sending mode commands. Verified by the child before applying.
+    public var signatureBase64: String?
 
     public init(
         id: UUID = UUID(),
@@ -22,7 +25,8 @@ public struct RemoteCommand: Codable, Sendable, Identifiable, Equatable {
         issuedBy: String,
         issuedAt: Date = Date(),
         expiresAt: Date? = nil,
-        status: CommandStatus = .pending
+        status: CommandStatus = .pending,
+        signatureBase64: String? = nil
     ) {
         self.id = id
         self.familyID = familyID
@@ -32,8 +36,11 @@ public struct RemoteCommand: Codable, Sendable, Identifiable, Equatable {
         self.issuedAt = issuedAt
         self.expiresAt = expiresAt ?? issuedAt.addingTimeInterval(86400)
         self.status = status
+        self.signatureBase64 = signatureBase64
     }
 }
+
+extension RemoteCommand: SignableCommand {}
 
 /// What the command targets.
 public enum CommandTarget: Codable, Sendable, Equatable {
@@ -97,12 +104,30 @@ public enum CommandAction: Codable, Sendable, Equatable {
     /// Set the list of allowed web domains (child applies via shield.webDomains).
     /// Empty array = block all web. nil domains in the array are ignored.
     case setAllowedWebDomains(domains: [String])
+    /// Add a trusted command signing public key (base64).
+    /// Sent by an existing parent when a new parent joins the family.
+    /// The child appends it to their trusted keys list.
+    case addTrustedSigningKey(publicKeyBase64: String)
+    /// Send a text message from parent to child. Displayed as notification + persistent card.
+    case sendMessage(text: String)
+    /// Set the location tracking mode on this device (off, onDemand, continuous).
+    case setLocationMode(LocationTrackingMode)
+    /// Request the child device to report its current location immediately.
+    case requestLocation
+    /// Re-request all permissions (FamilyControls, Location). Used when parent has physical access to child device.
+    case requestPermissions
+    /// Set the home location for geofence-based app relaunch after force-quit.
+    case setHomeLocation(latitude: Double, longitude: Double)
+    /// Sync named places — child fetches from CloudKit and registers geofences.
+    case syncNamedPlaces
+    /// Request a diagnostic report — child collects state and uploads to CloudKit.
+    case requestDiagnostics
+    /// Enable or disable DNS-based safe search on the VPN tunnel.
+    case setSafeSearch(enabled: Bool)
+    /// Set driving safety settings (speed threshold, braking threshold, detection toggles).
+    case setDrivingSettings(DrivingSettings)
 
-    private static let lockUntilFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "h:mm a"
-        return f
-    }()
+    // Thread-safe date formatting via Date.FormatStyle (replaces non-thread-safe static DateFormatter)
 
     /// Whether this action changes the device-wide lock mode.
     /// Mode commands supersede each other — only the latest pending one matters.
@@ -129,8 +154,10 @@ public enum CommandAction: Codable, Sendable, Equatable {
                 duration = "\(hours)h \(mins)m"
             } else if hours > 0 {
                 duration = "\(hours)h"
-            } else {
+            } else if mins > 0 {
                 duration = "\(mins)m"
+            } else {
+                duration = "\(seconds)s"
             }
             return "Temporary unlock (\(duration))"
         case .requestHeartbeat:
@@ -155,8 +182,10 @@ public enum CommandAction: Codable, Sendable, Equatable {
                 duration = "\(hours)h \(mins)m"
             } else if hours > 0 {
                 duration = "\(hours)h"
-            } else {
+            } else if mins > 0 {
                 duration = "\(mins)m"
+            } else {
+                duration = "\(seconds)s"
             }
             return "Unlock app (\(duration))"
         case .nameApp(_, let name):
@@ -174,7 +203,7 @@ public enum CommandAction: Codable, Sendable, Equatable {
         case .returnToSchedule:
             return "Return to schedule"
         case .lockUntil(let date):
-            return "Lock until \(Self.lockUntilFormatter.string(from: date))"
+            return "Lock until \(date.formatted(.dateTime.hour().minute()))"
         case .syncPINHash:
             return "Sync parent PIN"
         case .setScheduleProfile:
@@ -189,6 +218,27 @@ public enum CommandAction: Codable, Sendable, Equatable {
             return "Set heartbeat profile"
         case .setAllowedWebDomains(let domains):
             return domains.isEmpty ? "Block all web" : "Allow \(domains.count) web domain(s)"
+        case .addTrustedSigningKey:
+            return "Add trusted parent key"
+        case .sendMessage(let text):
+            let preview = String(text.prefix(40))
+            return "Message: \(preview)\(text.count > 40 ? "..." : "")"
+        case .setLocationMode(let mode):
+            return "Set location tracking to \(mode.rawValue)"
+        case .requestLocation:
+            return "Request current location"
+        case .requestPermissions:
+            return "Re-request all permissions"
+        case .setHomeLocation:
+            return "Set home geofence"
+        case .syncNamedPlaces:
+            return "Sync named places"
+        case .setDrivingSettings(let s):
+            return "Set driving safety (speed limit: \(Int(s.speedThresholdMPH)) mph)"
+        case .requestDiagnostics:
+            return "Request diagnostic report"
+        case .setSafeSearch(let enabled):
+            return enabled ? "Enable safe search" : "Disable safe search"
         }
     }
 }

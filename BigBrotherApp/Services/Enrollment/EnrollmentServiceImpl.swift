@@ -31,10 +31,20 @@ final class EnrollmentServiceImpl: EnrollmentServiceProtocol {
         familyID: FamilyID
     ) async throws -> EnrollmentInvite {
         let code = CodeGenerator.generate()
+
+        // Read the parent's command signing public key to deliver to the enrolling device.
+        // SECURITY: Never include the private key in CloudKit records.
+        // Each parent generates their own keypair; children trust multiple public keys.
+        let publicKeyBase64: String? = {
+            guard let pubKeyData = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey) else { return nil }
+            return pubKeyData.base64EncodedString()
+        }()
+
         let invite = EnrollmentInvite(
             code: code,
             familyID: familyID,
-            childProfileID: childProfileID
+            childProfileID: childProfileID,
+            commandSigningPublicKeyBase64: publicKeyBase64
         )
         try await cloudKit.saveEnrollmentInvite(invite)
         return invite
@@ -83,6 +93,22 @@ final class EnrollmentServiceImpl: EnrollmentServiceProtocol {
         // Store familyID for extensions that need it.
         try keychain.set(invite.familyID, forKey: StorageKeys.familyID)
 
+        // Store parent's command signing public key for signature verification.
+        // Stored as a JSON array of base64 keys to support multiple parents.
+        if let pubKeyBase64 = invite.commandSigningPublicKeyBase64 {
+            var existingKeys: [String] = {
+                guard let data = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey),
+                      let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+                return keys
+            }()
+            if !existingKeys.contains(pubKeyBase64) {
+                existingKeys.append(pubKeyBase64)
+            }
+            if let data = try? JSONEncoder().encode(existingKeys) {
+                try? keychain.setData(data, forKey: StorageKeys.commandSigningPublicKey)
+            }
+        }
+
         // Cache enrollment IDs in App Group so extensions can create events
         // without Keychain access (which can fail in extension context).
         let cachedIDs = CachedEnrollmentIDs(deviceID: deviceID, familyID: invite.familyID)
@@ -117,7 +143,7 @@ final class EnrollmentServiceImpl: EnrollmentServiceProtocol {
         var systemInfo = utsname()
         uname(&systemInfo)
         return withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+            $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: systemInfo.machine)) {
                 String(validatingUTF8: $0) ?? "Unknown"
             }
         }

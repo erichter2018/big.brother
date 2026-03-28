@@ -53,6 +53,16 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
     /// enrollment state and reset to unconfigured.
     var onUnenroll: (() -> Void)?
 
+    /// Called when a setLocationMode command is received.
+    var onLocationModeChanged: ((LocationTrackingMode) -> Void)?
+
+    /// Called when a requestLocation command is received (one-shot locate).
+    var onRequestLocation: (() -> Void)?
+    var onRequestPermissions: (() -> Void)?
+    var onSyncNamedPlaces: (() -> Void)?
+    var onRequestDiagnostics: (() -> Void)?
+    var onRestartVPNTunnel: (() -> Void)?
+
     init(
         cloudKit: any CloudKitServiceProtocol,
         storage: any SharedStorageProtocol,
@@ -142,7 +152,6 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                     reason: "Superseded by newer mode command"
                 )
                 try? await cloudKit.saveReceipt(receipt)
-                try? await cloudKit.updateCommandStatus(cmd.id, status: .applied)
             }
         }
         let skippedMode = modeCommands.count - effectiveModeCommands.count
@@ -198,11 +207,6 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                     reason: result == .applied ? nil : result.logReason
                 )
                 try? await cloudKit.saveReceipt(receipt)
-
-                // Also try to update the command record status directly.
-                // May fail in CloudKit public DB (only creator can modify) — that's OK,
-                // the receipt is the authoritative status source for the parent.
-                try? await cloudKit.updateCommandStatus(command.id, status: receiptStatus)
             }
 
             try? storage.markCommandProcessed(command.id)
@@ -264,6 +268,39 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         if let expiresAt = command.expiresAt, expiresAt < Date() {
             eventLogger.log(.commandFailed, details: "Command \(command.id) expired")
             return .ignoredExpired
+        }
+
+        // Verify command signature for mode commands.
+        // Children trust multiple parent public keys (one per parent device).
+        if command.action.isModeCommand {
+            let trustedKeys: [Data] = {
+                guard let data = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey) else { return [] }
+                // Try multi-key format (JSON array of base64 strings) first.
+                if let keys = try? JSONDecoder().decode([String].self, from: data) {
+                    return keys.compactMap { Data(base64Encoded: $0) }
+                }
+                // Fall back to single raw key (pre-multi-key format).
+                return [data]
+            }()
+
+            if !trustedKeys.isEmpty {
+                if let sig = command.signatureBase64 {
+                    let verified = trustedKeys.contains { pubKeyData in
+                        CommandSigner.verify(command: command, signatureBase64: sig, publicKeyData: pubKeyData)
+                    }
+                    guard verified else {
+                        eventLogger.log(.commandFailed, details: "Invalid signature for command \(command.id)")
+                        // Receipt handles status propagation to parent.
+                        return .rejectedSignature
+                    }
+                } else {
+                    // We have trusted keys but the command has no signature — reject
+                    eventLogger.log(.commandFailed, details: "Unsigned mode command rejected: \(command.id)")
+                    try? await cloudKit.updateCommandStatus(command.id, status: .failed)
+                    return .rejectedSignature
+                }
+            }
+            // If no public keys stored (pre-signing enrollment), accept with warning
         }
 
         do {
@@ -388,10 +425,38 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                 return .applied
 
             case .syncPINHash(let base64):
-                guard let data = Data(base64Encoded: base64) else {
+                // Try to decrypt (new encrypted format) then fall back to raw (old format).
+                // Uses the first parent's raw public key as enrollment secret.
+                // Parent stores raw key bytes; child stores JSON array of base64 strings.
+                // Extract the first raw key from whichever format is stored.
+                let enrollmentSecret: Data? = {
+                    guard let stored = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey) else { return nil }
+                    // Try JSON array format (child) first
+                    if let keys = try? JSONDecoder().decode([String].self, from: stored),
+                       let first = keys.first,
+                       let raw = Data(base64Encoded: first) {
+                        return raw
+                    }
+                    // Fall back to raw key bytes (parent or legacy single-key)
+                    return stored
+                }()
+                if let encryptedData = Data(base64Encoded: base64) {
+                    if let decrypted = try? FamilyDerivedKey.decrypt(encryptedData, familyID: enrollment.familyID, enrollmentSecret: enrollmentSecret, purpose: "pin-sync") {
+                        // New encrypted format — validate and store decrypted hash
+                        guard PINHasher.PINHash(combined: decrypted) != nil else {
+                            return .failedExecution(reason: "Invalid decrypted PIN hash format (expected \(64) bytes, got \(decrypted.count))")
+                        }
+                        try keychain.setData(decrypted, forKey: StorageKeys.parentPINHash)
+                    } else {
+                        // Old format (raw hash) — store directly
+                        guard PINHasher.PINHash(combined: encryptedData) != nil else {
+                            return .failedExecution(reason: "Invalid PIN hash format (expected \(64) bytes, got \(encryptedData.count))")
+                        }
+                        try keychain.setData(encryptedData, forKey: StorageKeys.parentPINHash)
+                    }
+                } else {
                     return .failedExecution(reason: "Invalid PIN hash base64")
                 }
-                try keychain.setData(data, forKey: StorageKeys.parentPINHash)
                 eventLogger.log(.commandApplied, details: "Parent PIN synced to device")
                 return .applied
 
@@ -452,6 +517,102 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
                 reapplyCurrentEnforcement()
                 eventLogger.log(.commandApplied, details: "Web domains: \(domains.isEmpty ? "all blocked" : domains.joined(separator: ", "))")
                 return .applied
+
+            case .sendMessage(let text):
+                let msg = ParentMessage(id: command.id, text: text, sentAt: command.issuedAt, sentBy: command.issuedBy)
+                var existing = storage.readParentMessages()
+                existing.append(msg)
+                if existing.count > 20 { existing = Array(existing.suffix(20)) }
+                try storage.writeParentMessages(existing)
+                ModeChangeNotifier.notifyParentMessage(text: text, from: command.issuedBy)
+                eventLogger.log(.commandApplied, details: "Message from \(command.issuedBy): \(String(text.prefix(50)))")
+                return .applied
+
+            case .addTrustedSigningKey(let publicKeyBase64):
+                // Append new parent's public key to the trusted keys list.
+                guard Data(base64Encoded: publicKeyBase64) != nil else {
+                    return .failedValidation(reason: "Invalid base64 public key")
+                }
+                var existingKeys: [String] = {
+                    guard let data = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey),
+                          let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+                    return keys
+                }()
+                if !existingKeys.contains(publicKeyBase64) {
+                    existingKeys.append(publicKeyBase64)
+                    let encoded = try JSONEncoder().encode(existingKeys)
+                    try keychain.setData(encoded, forKey: StorageKeys.commandSigningPublicKey)
+                    eventLogger.log(.commandApplied, details: "Added trusted signing key (\(existingKeys.count) total)")
+                } else {
+                    eventLogger.log(.commandApplied, details: "Signing key already trusted")
+                }
+                return .applied
+
+            case .setLocationMode(let mode):
+                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                    .set(mode.rawValue, forKey: "locationTrackingMode")
+                DispatchQueue.main.async { [weak self] in
+                    self?.onLocationModeChanged?(mode)
+                }
+                eventLogger.log(.commandApplied, details: "Location mode set to \(mode.rawValue)")
+                return .applied
+
+            case .requestLocation:
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRequestLocation?()
+                }
+                eventLogger.log(.commandApplied, details: "Location requested")
+                return .applied
+
+            case .requestPermissions:
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRequestPermissions?()
+                }
+                eventLogger.log(.commandApplied, details: "Permissions re-request triggered")
+                return .applied
+
+            case .setHomeLocation(let latitude, let longitude):
+                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                defaults?.set(latitude, forKey: "homeLatitude")
+                defaults?.set(longitude, forKey: "homeLongitude")
+                // Trigger LocationService to register the geofence immediately.
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRequestLocation?() // Reuses location callback to refresh
+                }
+                eventLogger.log(.commandApplied, details: "Home geofence set at (\(latitude), \(longitude))")
+                return .applied
+
+            case .syncNamedPlaces:
+                DispatchQueue.main.async { [weak self] in
+                    self?.onSyncNamedPlaces?()
+                }
+                eventLogger.log(.commandApplied, details: "Named places sync requested")
+                return .applied
+
+            case .setDrivingSettings(let settings):
+                if let data = try? JSONEncoder().encode(settings) {
+                    UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                        .set(data, forKey: "drivingSettings")
+                }
+                eventLogger.log(.commandApplied, details: "Driving settings updated: speed limit \(Int(settings.speedThresholdMPH)) mph")
+                return .applied
+
+            case .requestDiagnostics:
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRequestDiagnostics?()
+                }
+                eventLogger.log(.commandApplied, details: "Diagnostic report requested")
+                return .applied
+
+            case .setSafeSearch(let enabled):
+                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                    .set(enabled, forKey: "safeSearchEnabled")
+                // Restart the VPN tunnel to pick up the new DNS settings
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRestartVPNTunnel?()
+                }
+                eventLogger.log(.commandApplied, details: "Safe search \(enabled ? "enabled" : "disabled")")
+                return .applied
             }
 
         } catch {
@@ -462,6 +623,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
 
     /// Apply a mode change through the canonical snapshot pipeline.
     private func applyMode(_ mode: LockMode, enrollment: ChildEnrollmentState, commandID: UUID) throws {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("command", forKey: "lastShieldChangeReason")
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
 
@@ -566,7 +729,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
 
             // Register a DeviceActivitySchedule so the monitor extension re-locks
             // when the unlock expires — works even if the main app is terminated.
-            registerTempUnlockExpirySchedule(commandID: commandID, start: now, end: expiresAt)
+            // This MUST succeed — without it, a force-close during unlock = permanent unlock.
+            try registerTempUnlockExpirySchedule(commandID: commandID, start: now, end: expiresAt)
 
             // Also schedule a BGProcessingTask as a second safety net.
             AppDelegate.scheduleRelockTask(at: expiresAt)
@@ -578,7 +742,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
 
     /// Register a one-shot DeviceActivitySchedule that fires `intervalDidEnd`
     /// at the temporary unlock expiry time. The monitor extension handles re-lock.
-    private func registerTempUnlockExpirySchedule(commandID: UUID, start: Date, end: Date) {
+    /// Throws if registration fails — caller must not grant unlock without a re-lock guarantee.
+    private func registerTempUnlockExpirySchedule(commandID: UUID, start: Date, end: Date) throws {
         let cal = Calendar.current
         let startComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: start)
         let endComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: end)
@@ -591,7 +756,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         )
 
         let center = DeviceActivityCenter()
-        try? center.startMonitoring(activityName, during: schedule)
+        try center.startMonitoring(activityName, during: schedule)
 
         #if DEBUG
         print("[BigBrother] Registered temp unlock expiry schedule: \(activityName.rawValue), ends at \(end)")
@@ -676,7 +841,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         if case .committed(let snapshot) = result {
             try enforcement?.apply(snapshot.effectivePolicy)
             try snapshotStore.markApplied()
-            registerTempUnlockExpirySchedule(commandID: unlockID, start: now, end: expiresAt)
+            try registerTempUnlockExpirySchedule(commandID: unlockID, start: now, end: expiresAt)
             eventLogger.log(.temporaryUnlockStarted, details: "Self-unlock for \(ModeChangeNotifier.formatDuration(durationSeconds))")
         }
     }
@@ -696,7 +861,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         let adjustedTotal = max(0, totalSeconds - elapsed)
 
         guard adjustedTotal > 0 else {
-            eventLogger.log(.commandApplied, details: "Timed unlock expired before delivery (elapsed \(elapsed)s)")
+            eventLogger.log(.commandFailed, details: "Timed unlock expired before delivery (elapsed \(elapsed)s)")
+            // Notify parent that the command was dropped.
+            let ck = cloudKit
+            let receipt = CommandReceipt(
+                commandID: commandID,
+                deviceID: enrollment.deviceID,
+                familyID: enrollment.familyID,
+                status: .expired,
+                failureReason: "Expired before delivery (elapsed \(elapsed)s)"
+            )
+            Task.detached { try? await ck.saveReceipt(receipt) }
             return
         }
 
@@ -710,8 +885,15 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
             )
             eventLogger.log(.commandApplied, details: "Timed unlock: no penalty remaining, unlocked for \(ModeChangeNotifier.formatDuration(unlockDuration))")
             ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: unlockDuration)
+        } else if adjustedPenalty >= adjustedTotal {
+            // Penalty exceeds or equals total window — no free time at all.
+            // Device stays locked. Penalty timer (Firebase) ticks independently
+            // and will decrease by adjustedTotal over the window duration.
+            // No schedule needed — the device is already locked.
+            eventLogger.log(.commandApplied, details: "Timed unlock: penalty \(ModeChangeNotifier.formatDuration(adjustedPenalty)) >= total \(ModeChangeNotifier.formatDuration(adjustedTotal)), no free time — penalty consumed")
+            ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedTotal, unlockSeconds: 0)
         } else {
-            // Register a DeviceActivitySchedule: locked now, unlock after penalty, lock after total.
+            // Penalty < total — lock during penalty, then unlock for remainder.
             let now = Date()
             let unlockAt = now.addingTimeInterval(Double(adjustedPenalty))
             let lockAt = now.addingTimeInterval(Double(adjustedTotal))
@@ -820,7 +1002,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         )
 
         let center = DeviceActivityCenter()
-        try? center.startMonitoring(activityName, during: schedule)
+        try center.startMonitoring(activityName, during: schedule)
 
         #if DEBUG
         print("[BigBrother] Registered lockUntil schedule: \(activityName.rawValue), ends at \(date)")
@@ -1257,7 +1439,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol {
         case .setSelfUnlockBudget, .setRestrictions, .nameApp, .syncPINHash,
              .setScheduleProfile, .clearScheduleProfile, .setHeartbeatProfile,
              .setPenaltyTimer, .requestHeartbeat, .requestAppConfiguration,
-             .setAllowedWebDomains:
+             .setAllowedWebDomains, .addTrustedSigningKey, .sendMessage,
+             .setLocationMode, .requestLocation, .requestPermissions, .setHomeLocation,
+             .syncNamedPlaces, .setDrivingSettings, .requestDiagnostics, .setSafeSearch:
             return false
         }
     }

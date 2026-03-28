@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import BigBrotherCore
 
-@Observable
+@Observable @MainActor
 final class ParentDashboardViewModel: CommandSendable {
     let appState: AppState
 
@@ -83,9 +83,8 @@ final class ParentDashboardViewModel: CommandSendable {
         }
     }
 
-    deinit {
-        countdownTimer?.invalidate()
-        confirmationTask?.cancel()
+    nonisolated deinit {
+        // Timer invalidation handled by stopCountdownTimer() when view disappears.
     }
 
     private func persistUnlockExpiries() {
@@ -367,7 +366,9 @@ final class ParentDashboardViewModel: CommandSendable {
     func scheduleStatus(for child: ChildProfile) -> (label: String, isFree: Bool)? {
         guard isScheduleActive(for: child) else { return nil }
         guard let profile = scheduleProfile(for: child) else { return nil }
-        let mode = profile.resolvedMode(at: now)
+        // Use live Date(), not self.now — self.now only updates when the countdown
+        // timer is running (during active unlocks). Schedule status must always be current.
+        let mode = profile.resolvedMode(at: Date())
         let isFree = mode == .unlocked
         let modeLabel: String
         switch mode {
@@ -397,11 +398,7 @@ final class ParentDashboardViewModel: CommandSendable {
         if devs.isEmpty { return (result.mode, result.isTemp, true) }
         let heartbeatAgrees = devs.allSatisfy { dev in
             guard let hb = heartbeat(for: dev) else { return false }
-            if hb.currentMode == result.mode { return true }
-            // A lock intent is confirmed if the device is in ANY locked mode.
-            // e.g., parent sent .dailyMode but schedule drove child to .essentialOnly — both are locked.
-            if result.mode != .unlocked && hb.currentMode != .unlocked { return true }
-            return false
+            return hb.currentMode == result.mode
         }
         return (result.mode, result.isTemp, heartbeatAgrees)
     }
@@ -414,10 +411,7 @@ final class ParentDashboardViewModel: CommandSendable {
             let devs = devices(for: child)
             let confirmed = !devs.isEmpty && devs.allSatisfy { dev in
                 guard let hbMode = heartbeat(for: dev)?.currentMode else { return false }
-                if hbMode == expected.mode { return true }
-                // Accept any locked mode as confirming a lock intent.
-                if expected.mode != .unlocked && hbMode != .unlocked { return true }
-                return false
+                return hbMode == expected.mode
             }
             // Lock commands get a longer timeout — command delivery via heartbeat
             // can take up to 5 minutes. Unlock commands confirm faster (120s).
@@ -515,10 +509,10 @@ final class ParentDashboardViewModel: CommandSendable {
             let devs = childDevices.filter { $0.childProfileID == childID }
             let confirmed = !devs.isEmpty && devs.allSatisfy { dev in
                 guard let hbMode = latestHeartbeats.first(where: { $0.deviceID == dev.id })?.currentMode else { return false }
-                if hbMode == expected.mode { return true }
-                // Accept any locked mode as confirming a lock intent.
-                if expected.mode != .unlocked && hbMode != .unlocked { return true }
-                return false
+                // Only confirm when heartbeat matches the EXACT mode the parent sent.
+                // Don't treat essentialOnly as confirming dailyMode or vice versa —
+                // that causes premature expectedMode removal and UI flicker.
+                return hbMode == expected.mode
             }
             // Lock commands get a longer timeout (600s) to account for up to 5-minute
             // command delivery via heartbeat polling. Unlock commands use 120s.
@@ -644,8 +638,22 @@ final class ParentDashboardViewModel: CommandSendable {
                 #endif
 
                 pendingCommands[childID]?.retryCount += 1
-                // Re-send the command and also request an immediate heartbeat.
-                try? await appState.sendCommand(target: pending.target, action: pending.action)
+                // Re-send the command with adjusted duration for temporary unlocks.
+                // Use remaining time from the original expiry, not the full duration,
+                // so retries don't extend the unlock window.
+                let retryAction: CommandAction
+                switch pending.action {
+                case .temporaryUnlock:
+                    if let expiry = unlockExpiries[childID] {
+                        let remaining = Int(expiry.timeIntervalSinceNow)
+                        retryAction = remaining > 0 ? .temporaryUnlock(durationSeconds: remaining) : pending.action
+                    } else {
+                        retryAction = pending.action
+                    }
+                default:
+                    retryAction = pending.action
+                }
+                try? await appState.sendCommand(target: pending.target, action: retryAction)
                 try? await appState.sendCommand(target: pending.target, action: .requestHeartbeat)
                 retried = true
             }
@@ -735,10 +743,9 @@ final class ParentDashboardViewModel: CommandSendable {
                     }
                 }
 
-                // Auto-stop timer when nothing active to save battery.
-                if self.unlockExpiries.isEmpty && self.timedUnlockPhases.isEmpty {
-                    self.stopCountdownTimer()
-                }
+                // Always keep self.now updated so schedule status stays current.
+                // The timer runs at 1s regardless — the 15s heartbeat refresh
+                // inside the timer handles dashboard data freshness.
             }
         }
         RunLoop.main.add(timer, forMode: .common)

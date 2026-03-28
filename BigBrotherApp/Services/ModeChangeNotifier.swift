@@ -120,6 +120,21 @@ enum ModeChangeNotifier {
         UNUserNotificationCenter.current().add(request)
     }
 
+    /// Notify the child about a parent message.
+    static func notifyParentMessage(text: String, from sender: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Message from \(sender)"
+        content.body = text
+        content.sound = .default
+        content.categoryIdentifier = "PARENT_MESSAGE"
+        let request = UNNotificationRequest(
+            identifier: "parent-msg-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
     /// Notify about a schedule-triggered mode change.
     static func notifyScheduleChange(newMode: LockMode, windowName: String? = nil) {
         let content = UNMutableNotificationContent()

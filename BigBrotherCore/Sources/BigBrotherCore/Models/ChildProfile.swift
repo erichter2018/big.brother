@@ -40,4 +40,24 @@ public struct ChildProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
+
+    // MARK: - Backward-compatible Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case id, familyID, name, avatarName
+        case alwaysAllowedTokensData, alwaysAllowedCategories
+        case createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(ChildProfileID.self, forKey: .id)
+        familyID = try container.decode(FamilyID.self, forKey: .familyID)
+        name = try container.decode(String.self, forKey: .name)
+        avatarName = try container.decodeIfPresent(String.self, forKey: .avatarName)
+        alwaysAllowedTokensData = try container.decodeIfPresent(Data.self, forKey: .alwaysAllowedTokensData)
+        alwaysAllowedCategories = try container.decodeIfPresent(Set<String>.self, forKey: .alwaysAllowedCategories) ?? []
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
 }

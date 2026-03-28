@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 import BigBrotherCore
 
 /// Child device home screen — informational only.
@@ -10,6 +11,8 @@ struct ChildHomeView: View {
     @State private var showAlwaysAllowedSetup = false
     @State private var showPINUnlock = false
     @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
+    @State private var showSOSConfirmation = false
+    @State private var sosSent = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -25,12 +28,22 @@ struct ChildHomeView: View {
                     // Mode icon + status
                     modeHeader
 
+                    // Parent messages
+                    ForEach(viewModel.undismissedMessages) { message in
+                        parentMessageCard(message)
+                    }
+
                     // Info cards
                     infoCards
 
                     // Authorization warning (only when needed)
                     if viewModel.needsReauthorization {
                         authorizationCard
+                    }
+
+                    // Location permission warning
+                    if viewModel.needsLocationPermission {
+                        locationPermissionCard
                     }
 
                     Spacer(minLength: 40)
@@ -47,16 +60,22 @@ struct ChildHomeView: View {
                                     .font(.caption2)
                                     .foregroundStyle(.white.opacity(0.4))
                             }
+                            .accessibilityLabel("Unlock with parent PIN")
                         }
                     }
 
                     // Subtle footer
-                    Text("Managed by Big Brother")
+                    Text("Managed by parent")
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.3))
                 }
                 .padding()
             }
+        }
+        .overlay(alignment: .bottomLeading) {
+            sosButton
+                .padding(.leading, 16)
+                .padding(.bottom, 16)
         }
         .sheet(isPresented: $showPINUnlock, onDismiss: {
             pinUnlockViewModel = nil
@@ -95,6 +114,64 @@ struct ChildHomeView: View {
 
     // MARK: - Mode Header
 
+    // MARK: - SOS Button
+
+    @ViewBuilder
+    private var sosButton: some View {
+        Button {
+            showSOSConfirmation = true
+        } label: {
+            Image(systemName: "sos")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(sosSent ? Color.gray : Color.red.opacity(0.8))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(sosSent)
+        .alert("Send SOS Alert?", isPresented: $showSOSConfirmation) {
+            Button("Send SOS", role: .destructive) {
+                Task { await sendSOS() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will immediately alert your parents with your current location.")
+        }
+    }
+
+    private func sendSOS() async {
+        sosSent = true
+        // Get current location
+        let loc = viewModel.appState.locationService?.lastLocation
+        var details = "SOS triggered"
+        if let loc {
+            let lat = String(format: "%.4f", loc.coordinate.latitude)
+            let lon = String(format: "%.4f", loc.coordinate.longitude)
+            details = "SOS at \(lat), \(lon)"
+            // Reverse geocode for address
+            if let placemarks = try? await CLGeocoder().reverseGeocodeLocation(loc),
+               let pm = placemarks.first {
+                let parts = [pm.thoroughfare, pm.locality].compactMap { $0 }
+                if !parts.isEmpty {
+                    details = "SOS at \(parts.joined(separator: ", "))"
+                }
+            }
+        }
+
+        viewModel.appState.eventLogger?.log(.sosAlert, details: details)
+        try? await viewModel.appState.eventLogger?.syncPendingEvents()
+
+        // Force immediate heartbeat with fresh location
+        viewModel.appState.locationService?.lastBreadcrumbSaveAt = nil
+        try? await viewModel.appState.heartbeatService?.sendNow(force: true)
+
+        // Reset after 60 seconds so they can send again if needed
+        Task {
+            try? await Task.sleep(for: .seconds(60))
+            await MainActor.run { sosSent = false }
+        }
+    }
+
     @ViewBuilder
     private var modeHeader: some View {
         VStack(spacing: 16) {
@@ -102,6 +179,7 @@ struct ChildHomeView: View {
                 .font(.system(size: 64, weight: .light))
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.2), radius: 10)
+                .accessibilityHidden(true)
 
             Text(viewModel.currentMode.displayName)
                 .font(.largeTitle)
@@ -122,6 +200,8 @@ struct ChildHomeView: View {
             }
         }
         .padding(.vertical, 30)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(viewModel.currentMode.displayName): \(modeDescription)")
     }
 
     // MARK: - Info Cards (adaptive layout)
@@ -162,7 +242,7 @@ struct ChildHomeView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "lock.open.rotation")
                         .foregroundStyle(.white.opacity(0.7))
-                    Text("\(state.remaining)/\(state.budget) SU left")
+                    Text("\(state.remaining)/\(state.budget) self-unlocks left")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.7))
                 }
@@ -244,6 +324,7 @@ struct ChildHomeView: View {
             HStack(spacing: 8) {
                 Image(systemName: color == .red ? "hourglass" : "clock")
                     .foregroundStyle(.white.opacity(0.8))
+                    .accessibilityHidden(true)
                 Text(title)
                     .font(.subheadline)
                     .fontWeight(.medium)
@@ -263,6 +344,7 @@ struct ChildHomeView: View {
         .padding(.horizontal, 30)
         .background((color == .white ? Color.white : color).opacity(0.12))
         .clipShape(RoundedRectangle(cornerRadius: 20))
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Banked Penalty Card (static, not counting down)
@@ -275,6 +357,7 @@ struct ChildHomeView: View {
             HStack(spacing: 8) {
                 Image(systemName: "hourglass")
                     .foregroundStyle(.white.opacity(0.8))
+                    .accessibilityHidden(true)
                 Text("Screen Time Penalty")
                     .font(.subheadline)
                     .fontWeight(.medium)
@@ -294,6 +377,7 @@ struct ChildHomeView: View {
         .padding(.horizontal, 30)
         .background(.red.opacity(0.15))
         .clipShape(RoundedRectangle(cornerRadius: 20))
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Self Unlock Card
@@ -304,6 +388,7 @@ struct ChildHomeView: View {
             HStack(spacing: 8) {
                 Image(systemName: "lock.open.rotation")
                     .foregroundStyle(.white.opacity(0.8))
+                    .accessibilityHidden(true)
                 Text("Self Unlocks")
                     .font(.subheadline)
                     .fontWeight(.medium)
@@ -334,6 +419,7 @@ struct ChildHomeView: View {
         .padding(.horizontal, 30)
         .background(.green.opacity(0.12))
         .clipShape(RoundedRectangle(cornerRadius: 20))
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Schedule Card
@@ -346,6 +432,7 @@ struct ChildHomeView: View {
             HStack(spacing: 8) {
                 Image(systemName: "calendar")
                     .foregroundStyle(.white.opacity(active ? 0.8 : 0.3))
+                    .accessibilityHidden(true)
                 Text(profile.name)
                     .font(active ? .subheadline : .caption)
                     .fontWeight(.medium)
@@ -367,7 +454,7 @@ struct ChildHomeView: View {
             let windows = viewModel.todaysFreeWindows
             if !windows.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Today's free windows:")
+                    Text("Today's free time:")
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(active ? 0.5 : 0.2))
                     ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
@@ -382,6 +469,7 @@ struct ChildHomeView: View {
         .padding(.horizontal, active ? 30 : 20)
         .background(Color.orange.opacity(active ? 0.12 : 0.05))
         .clipShape(RoundedRectangle(cornerRadius: 20))
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Authorization Card
@@ -392,6 +480,7 @@ struct ChildHomeView: View {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
+                    .accessibilityHidden(true)
                 Text("Authorization Required")
                     .font(.subheadline)
                     .fontWeight(.semibold)
@@ -423,6 +512,76 @@ struct ChildHomeView: View {
         .padding()
         .background(.white.opacity(0.1))
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Location Permission Card
+
+    @ViewBuilder
+    private var locationPermissionCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "location.slash.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+                Text("Location Permission Needed")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.white)
+            }
+
+            Text("Your parent has enabled location tracking but this device hasn't granted permission. A parent can enable this in Settings.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.7))
+
+            Button {
+                viewModel.openAppSettings()
+            } label: {
+                Text("Open Settings")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.white.opacity(0.2))
+        }
+        .padding()
+        .background(.white.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Parent Message Card
+
+    @ViewBuilder
+    private func parentMessageCard(_ message: ParentMessage) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "envelope.fill")
+                    .foregroundStyle(.white.opacity(0.8))
+                Text("From \(message.sentBy)")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.6))
+                Spacer()
+                Text(message.sentAt, style: .relative)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+            Text(message.text)
+                .font(.body)
+                .foregroundStyle(.white)
+            Button {
+                viewModel.dismissMessage(message.id)
+            } label: {
+                Text("Dismiss")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+        }
+        .padding()
+        .background(.blue.opacity(0.15))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Styling

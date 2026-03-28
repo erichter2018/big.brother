@@ -73,6 +73,26 @@ struct ManageChildrenView: View {
             for device in devices {
                 try? await appState.cloudKit?.deleteDevice(device.id)
             }
+
+            // Clean up associated records by profileID (invites, schedules).
+            let profilePredicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, child.id.rawValue)
+            for type in [CKRecordType.enrollmentInvite, CKRecordType.schedule] {
+                _ = try? await appState.cloudKit?.deleteRecords(type: type, predicate: profilePredicate)
+            }
+
+            // Clean up commands targeting this child profile.
+            let childTargetPredicate = NSPredicate(format: "%K == %@", CKFieldName.targetID, child.id.rawValue)
+            _ = try? await appState.cloudKit?.deleteRecords(type: CKRecordType.remoteCommand, predicate: childTargetPredicate)
+
+            // Clean up per-device records (heartbeats, events, policies, receipts, device-targeted commands).
+            for device in devices {
+                let devicePredicate = NSPredicate(format: "%K == %@", CKFieldName.deviceID, device.id.rawValue)
+                for type in [CKRecordType.heartbeat, CKRecordType.eventLog, CKRecordType.policy, CKRecordType.commandReceipt] {
+                    _ = try? await appState.cloudKit?.deleteRecords(type: type, predicate: devicePredicate)
+                }
+                let deviceTargetPredicate = NSPredicate(format: "%K == %@", CKFieldName.targetID, device.id.rawValue)
+                _ = try? await appState.cloudKit?.deleteRecords(type: CKRecordType.remoteCommand, predicate: deviceTargetPredicate)
+            }
         }
     }
 }

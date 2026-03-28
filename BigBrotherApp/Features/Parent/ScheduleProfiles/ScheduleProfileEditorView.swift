@@ -6,6 +6,7 @@ struct ScheduleProfileEditorView: View {
     @State private var profile: ScheduleProfile
     @Environment(\.dismiss) private var dismiss
     @State private var isSaving = false
+    @State private var newExceptionDate = Date()
 
     private let isNew: Bool
 
@@ -17,6 +18,21 @@ struct ScheduleProfileEditorView: View {
 
     var body: some View {
         Form {
+            if isNew {
+                Section("Start from Template") {
+                    ForEach(ScheduleProfile.presets(familyID: profile.familyID), id: \.name) { preset in
+                        Button {
+                            profile.name = preset.name
+                            profile.freeWindows = preset.freeWindows
+                            profile.essentialWindows = preset.essentialWindows
+                            profile.lockedMode = preset.lockedMode
+                        } label: {
+                            Label(preset.name, systemImage: "doc.on.doc")
+                        }
+                    }
+                }
+            }
+
             Section("Profile Name") {
                 TextField("e.g. School Day", text: $profile.name)
             }
@@ -88,6 +104,34 @@ struct ScheduleProfileEditorView: View {
                     )
                 } label: {
                     Label("Add Essential Window", systemImage: "plus.circle")
+                }
+            }
+
+            Section("Exception Dates") {
+                Text("On these dates the schedule is suspended and the device stays unlocked all day.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                ForEach(profile.exceptionDates.sorted(), id: \.self) { date in
+                    Text(date, style: .date)
+                }
+                .onDelete { indexSet in
+                    let sorted = profile.exceptionDates.sorted()
+                    let toRemove = indexSet.map { sorted[$0] }
+                    profile.exceptionDates.removeAll { d in toRemove.contains(where: { Calendar.current.isDate($0, inSameDayAs: d) }) }
+                }
+
+                HStack {
+                    DatePicker("Date", selection: $newExceptionDate, displayedComponents: .date)
+                        .labelsHidden()
+                    Spacer()
+                    Button {
+                        let startOfDay = Calendar.current.startOfDay(for: newExceptionDate)
+                        guard !profile.exceptionDates.contains(where: { Calendar.current.isDate($0, inSameDayAs: startOfDay) }) else { return }
+                        profile.exceptionDates.append(startOfDay)
+                    } label: {
+                        Label("Add", systemImage: "plus.circle")
+                    }
                 }
             }
         }
@@ -182,6 +226,10 @@ struct ScheduleProfileEditorView: View {
     private func save() async {
         isSaving = true
         defer { isSaving = false }
+
+        // Purge past exception dates (keep today and future).
+        let todayStart = Calendar.current.startOfDay(for: Date())
+        profile.exceptionDates = profile.exceptionDates.filter { $0 >= todayStart }
 
         profile.updatedAt = Date()
         await viewModel.save(profile)

@@ -44,21 +44,29 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
     }
 
     func registerReconciliationSchedule() throws {
-        // Register a repeating schedule that fires every hour to reconcile enforcement state.
-        // Uses a fixed activity name so it can be updated without duplication.
-        let activityName = DeviceActivityName(rawValue: "bigbrother.reconciliation")
+        // Register repeating schedules that fire every 15 minutes to reconcile enforcement state.
+        // More frequent reconciliation ensures force-close detection within ~35 minutes
+        // (15 min cycle + 20 min flag threshold) instead of up to 2 hours with hourly checks.
+        // Uses 4 fixed activity names (one per quarter-hour) so they can be updated without duplication.
+        let quarters: [(name: String, minute: Int)] = [
+            ("bigbrother.reconciliation", 0),
+            ("bigbrother.reconciliation.q2", 15),
+            ("bigbrother.reconciliation.q3", 30),
+            ("bigbrother.reconciliation.q4", 45),
+        ]
 
-        // Hourly repeating schedule: interval from minute 0 to minute 1 of each hour.
-        // DeviceActivityMonitor.intervalDidStart fires at the top of every hour.
-        let start = DateComponents(minute: 0)
-        let end = DateComponents(minute: 1)
+        for q in quarters {
+            let activityName = DeviceActivityName(rawValue: q.name)
+            let start = DateComponents(minute: q.minute)
+            let end = DateComponents(minute: q.minute + 1)
 
-        let schedule = DeviceActivitySchedule(
-            intervalStart: start,
-            intervalEnd: end,
-            repeats: true
-        )
+            let schedule = DeviceActivitySchedule(
+                intervalStart: start,
+                intervalEnd: end,
+                repeats: true
+            )
 
-        try center.startMonitoring(activityName, during: schedule)
+            try center.startMonitoring(activityName, during: schedule)
+        }
     }
 }

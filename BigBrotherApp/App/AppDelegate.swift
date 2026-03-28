@@ -2,6 +2,9 @@ import UIKit
 import CloudKit
 import BackgroundTasks
 import UserNotifications
+import ManagedSettings
+import FamilyControls
+import DeviceActivity
 import BigBrotherCore
 
 /// UIApplicationDelegate for handling push notifications and background tasks.
@@ -32,6 +35,20 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         UnlockRequestNotificationService.registerCategory()
         UnlockRequestNotificationService.requestPermissionIfNeeded()
         UNUserNotificationCenter.current().delegate = self
+
+        // Detect location-based relaunch. iOS kills the app and relaunches it
+        // for significant location changes, geofence transitions, and visits.
+        if launchOptions?[.location] != nil {
+            #if DEBUG
+            print("[BigBrother] App relaunched by location services")
+            #endif
+        }
+
+        // Immediately restore enforcement for child devices. This is critical
+        // for background launches (geofence, push, BGTask) where the SwiftUI
+        // view hierarchy may not appear and the normal .task-based restoration
+        // in BigBrotherApp.setupOnLaunch() won't run.
+        restoreEnforcementIfNeeded()
 
         return true
     }
@@ -84,6 +101,181 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    // MARK: - Background Enforcement Restoration
+
+    /// Lightweight enforcement restoration that runs directly from didFinishLaunching.
+    /// Does NOT depend on AppState or the SwiftUI view hierarchy.
+    ///
+    /// This mirrors the Monitor extension's applyShieldingToAllStores() logic:
+    /// reads policy state from App Group storage and applies shields directly
+    /// to ManagedSettingsStore. Idempotent — safe to run even when the foreground
+    /// .task-based restoration will also run.
+    private func restoreEnforcementIfNeeded() {
+        let keychain = KeychainManager()
+        guard let role = try? keychain.get(DeviceRole.self, forKey: StorageKeys.deviceRole),
+              role == .child else { return }
+
+        let storage = AppGroupStorage()
+
+        // Check for active temporary unlock — device should be unlocked.
+        if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
+            #if DEBUG
+            print("[BigBrother][BgRestore] Temp unlock active — skipping shield restore")
+            #endif
+            return
+        }
+
+        // Determine the current enforcement mode.
+        let snapshotStore = PolicySnapshotStore(storage: storage)
+        let snapshot = snapshotStore.loadCurrentSnapshot()
+        let profile = storage.readActiveScheduleProfile()
+
+        let mode: LockMode
+        if let profile {
+            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            let isScheduleDriven = defaults?.object(forKey: "scheduleDrivenMode") == nil
+                || (defaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+            mode = isScheduleDriven
+                ? profile.resolvedMode(at: Date())
+                : (snapshot?.effectivePolicy.resolvedMode ?? .dailyMode)
+        } else {
+            mode = snapshot?.effectivePolicy.resolvedMode ?? .dailyMode
+        }
+
+        // Apply shields to ManagedSettingsStore.
+        let baseStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
+        let scheduleStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
+        let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
+
+        // Clear temp unlock store (no active temp unlock at this point).
+        tempUnlockStore.shield.applications = nil
+        tempUnlockStore.shield.applicationCategories = nil
+        tempUnlockStore.shield.webDomainCategories = nil
+        tempUnlockStore.shield.webDomains = nil
+
+        switch mode {
+        case .unlocked:
+            // Free window or unlocked — clear all shields.
+            for s in [baseStore, scheduleStore, tempUnlockStore] {
+                s.shield.applications = nil
+                s.shield.applicationCategories = nil
+                s.shield.webDomainCategories = nil
+                s.shield.webDomains = nil
+            }
+            let defaultStore = ManagedSettingsStore()
+            defaultStore.shield.applications = nil
+            defaultStore.shield.applicationCategories = nil
+            defaultStore.shield.webDomainCategories = nil
+            defaultStore.shield.webDomains = nil
+
+        case .dailyMode, .essentialOnly:
+            let allowExemptions = mode == .dailyMode
+            let decoder = JSONDecoder()
+
+            // Collect allowed tokens (parent-approved apps).
+            var allowedTokens = Set<ApplicationToken>()
+            if allowExemptions {
+                if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+                   let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
+                    allowedTokens.formUnion(allowed)
+                }
+                let tempEntries = storage.readTemporaryAllowedApps()
+                for entry in tempEntries where entry.isValid {
+                    if let token = try? decoder.decode(ApplicationToken.self, from: entry.tokenData) {
+                        allowedTokens.insert(token)
+                    }
+                }
+            }
+
+            // Load picker tokens (FamilyActivitySelection).
+            var pickerTokens = Set<ApplicationToken>()
+            if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+               let selection = try? decoder.decode(FamilyActivitySelection.self, from: data) {
+                pickerTokens = selection.applicationTokens
+            }
+
+            // Web blocking.
+            let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+            let hasAllowedWebDomains: Bool = {
+                if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
+                   let domains = try? decoder.decode([String].self, from: data),
+                   !domains.isEmpty { return true }
+                return false
+            }()
+            let blockAllWeb = restrictions.denyWebWhenLocked && !hasAllowedWebDomains
+
+            // Apply hybrid blocking (mirrors Monitor extension logic).
+            if !pickerTokens.isEmpty && allowExemptions {
+                let tokensToBlock = pickerTokens.subtracting(allowedTokens)
+                let perAppTokens: Set<ApplicationToken>
+                if tokensToBlock.count <= 50 {
+                    perAppTokens = tokensToBlock
+                } else {
+                    perAppTokens = Set(tokensToBlock.prefix(50))
+                }
+                for s in [baseStore, scheduleStore] {
+                    s.shield.applications = perAppTokens
+                    s.shield.applicationCategories = .all(except: allowedTokens)
+                    s.shield.webDomainCategories = blockAllWeb ? .all() : nil
+                }
+            } else {
+                let apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
+                for s in [baseStore, scheduleStore] {
+                    s.shield.applications = apps
+                    if allowedTokens.isEmpty {
+                        s.shield.applicationCategories = .all()
+                    } else {
+                        s.shield.applicationCategories = .all(except: allowedTokens)
+                    }
+                    s.shield.webDomainCategories = blockAllWeb ? .all() : nil
+                }
+            }
+        }
+
+        // Apply device restrictions on the default store.
+        let r = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+        let defaultStore = ManagedSettingsStore()
+        defaultStore.application.denyAppRemoval = r.denyAppRemoval ? true : nil
+        defaultStore.media.denyExplicitContent = r.denyExplicitContent ? true : nil
+        defaultStore.account.lockAccounts = r.lockAccounts ? true : nil
+        defaultStore.dateAndTime.requireAutomaticDateAndTime = r.requireAutomaticDateAndTime ? true : nil
+
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("backgroundRestore", forKey: "lastShieldChangeReason")
+
+        // Re-register reconciliation schedules so the Monitor extension keeps firing
+        // even if DeviceActivity registrations were lost during an Xcode deploy or update.
+        reregisterReconciliationSchedule()
+
+        #if DEBUG
+        print("[BigBrother][BgRestore] Enforcement restored: mode=\(mode.rawValue)")
+        #endif
+    }
+
+    /// Re-register the 15-minute reconciliation schedule.
+    /// Mirrors ScheduleManagerImpl.registerReconciliationSchedule() but
+    /// runs from AppDelegate without needing AppState.
+    private func reregisterReconciliationSchedule() {
+        let center = DeviceActivityCenter()
+        let quarters: [(name: String, minute: Int)] = [
+            ("bigbrother.reconciliation", 0),
+            ("bigbrother.reconciliation.q2", 15),
+            ("bigbrother.reconciliation.q3", 30),
+            ("bigbrother.reconciliation.q4", 45),
+        ]
+        for q in quarters {
+            let activityName = DeviceActivityName(rawValue: q.name)
+            let start = DateComponents(minute: q.minute)
+            let end = DateComponents(minute: q.minute + 1)
+            let schedule = DeviceActivitySchedule(
+                intervalStart: start,
+                intervalEnd: end,
+                repeats: true
+            )
+            try? center.startMonitoring(activityName, during: schedule)
+        }
+    }
+
     // MARK: - BGTaskScheduler
 
     private func registerBackgroundTasks() {
@@ -108,14 +300,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     /// Called after each successful refresh and on app launch.
     func scheduleHeartbeatRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: AppConstants.bgTaskHeartbeat)
-        // Ask iOS to wake us in ~15 minutes. iOS may delay this based on
-        // usage patterns and system conditions, but it's the best we can do.
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        // Ask iOS to wake us in ~5 minutes. iOS may delay this based on
+        // usage patterns and system conditions. Shorter interval improves
+        // command delivery latency when the app is backgrounded.
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
 
         do {
             try BGTaskScheduler.shared.submit(request)
             #if DEBUG
-            print("[BGTask] Scheduled heartbeat refresh in ~15 min")
+            print("[BGTask] Scheduled heartbeat refresh in ~5 min")
             #endif
         } catch {
             #if DEBUG
@@ -137,18 +330,23 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
+        let workStartedAt = Date()
         let workTask = Task {
             do {
                 // Check for expired unlocks and re-lock if needed (safety net).
                 await MainActor.run {
+                    appState.handleMainAppResponsive(reapplyEnforcement: true)
                     self.checkAndRelockExpiredUnlocks(appState: appState)
                 }
 
                 // Process any pending commands first.
                 try? await appState.commandProcessor?.processIncomingCommands()
 
-                // Send a heartbeat.
-                try await appState.heartbeatService?.sendNow(force: true)
+                // Send a normal heartbeat if command processing did not already
+                // request an immediate confirmation heartbeat.
+                if !Self.didProcessCommands(since: workStartedAt) {
+                    try await appState.heartbeatService?.sendNow(force: false)
+                }
 
                 // Sync pending events.
                 try? await appState.eventLogger?.syncPendingEvents()
@@ -245,13 +443,17 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
+        let workStartedAt = Date()
         let workTask = Task { @MainActor in
+            appState.handleMainAppResponsive(reapplyEnforcement: true)
             self.checkAndRelockExpiredUnlocks(appState: appState)
 
             // Also process commands, send heartbeat, and sync events
             // since we're awake anyway.
             try? await appState.commandProcessor?.processIncomingCommands()
-            try? await appState.heartbeatService?.sendNow(force: true)
+            if !Self.didProcessCommands(since: workStartedAt) {
+                try? await appState.heartbeatService?.sendNow(force: false)
+            }
             try? await appState.eventLogger?.syncPendingEvents()
 
             #if DEBUG
@@ -359,5 +561,12 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             print("[BigBrother] Notification action failed: \(error.localizedDescription)")
             #endif
         }
+    }
+
+    private static func didProcessCommands(since date: Date) -> Bool {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
+        guard timestamp > 0 else { return false }
+        return Date(timeIntervalSince1970: timestamp) >= date
     }
 }

@@ -23,6 +23,13 @@ extension EventType {
         case .temporaryUnlockStarted: "Temp Unlock Started"
         case .enforcementDegraded: "Enforcement Degraded"
         case .unlockRequested: "Unlock Requested"
+        case .speedingDetected: "Speeding Detected"
+        case .phoneWhileDriving: "Phone While Driving"
+        case .hardBrakingDetected: "Hard Braking"
+        case .namedPlaceArrival: "Arrived"
+        case .namedPlaceDeparture: "Departed"
+        case .tripCompleted: "Trip Completed"
+        case .sosAlert: "SOS Alert"
         }
     }
 }

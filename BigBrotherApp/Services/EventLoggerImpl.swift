@@ -83,23 +83,28 @@ final class EventLoggerImpl: EventLoggerProtocol {
                 // Strip TOKEN payloads before uploading — token data is only
                 // needed locally (in PendingUnlockRequest). No need to bloat CloudKit.
                 let sanitizedBatch = batch.map(Self.stripTokenPayload)
-                try await cloudKit.syncEventLogs(sanitizedBatch)
+                let succeededIDs = try await cloudKit.syncEventLogs(sanitizedBatch)
                 #if DEBUG
-                print("[BigBrother] Event sync: SUCCESS — uploaded \(sanitizedBatch.count) events")
+                print("[BigBrother] Event sync: \(succeededIDs.count)/\(sanitizedBatch.count) events uploaded")
                 #endif
-                // Remove uploaded events from the queue — but keep unlockRequested
-                // events because their token data is needed when the parent approves.
-                // They'll be pruned by the cleanup service after 7 days.
-                let clearableIDs = batchIDs.filter { id in
+                // Only clear events that actually succeeded (partial success safe).
+                // Keep unlockRequested events because their token data is needed
+                // when the parent approves. They'll be pruned after 7 days.
+                let clearableIDs = succeededIDs.filter { id in
                     !batch.contains { $0.id == id && $0.eventType == .unlockRequested }
                 }
                 if !clearableIDs.isEmpty {
                     try storage.clearSyncedEventLogs(ids: Set(clearableIDs))
                 }
-                // Mark unlock requests as uploaded but don't remove them.
-                let unlockIDs = batchIDs.subtracting(clearableIDs)
+                // Mark successfully uploaded unlock requests.
+                let unlockIDs = succeededIDs.subtracting(clearableIDs)
                 if !unlockIDs.isEmpty {
                     try? storage.updateEventUploadState(ids: unlockIDs, state: .uploaded)
+                }
+                // Mark failed events back to pending for retry.
+                let failedIDs = batchIDs.subtracting(succeededIDs)
+                if !failedIDs.isEmpty {
+                    try? storage.updateEventUploadState(ids: failedIDs, state: .pending)
                 }
             } catch {
                 // Mark back as pending so they will be retried on the next sync.
@@ -115,6 +120,23 @@ final class EventLoggerImpl: EventLoggerProtocol {
                     details: "\(batchIDs.count) events, error: \(error.localizedDescription)"
                 ))
             }
+        }
+
+        // Prune old synced events to prevent queue bloat.
+        // Keep: pending events (not yet uploaded), unlock requests (needed for approval),
+        // and anything less than 1 hour old (for diagnostics).
+        let pruneThreshold = Date().addingTimeInterval(-3600)
+        let allAfterSync = storage.readPendingEventLogs()
+        let toPrune = allAfterSync.filter { event in
+            event.uploadState != .pending
+            && event.eventType != .unlockRequested
+            && event.timestamp < pruneThreshold
+        }
+        if !toPrune.isEmpty {
+            try? storage.clearSyncedEventLogs(ids: Set(toPrune.map(\.id)))
+            #if DEBUG
+            print("[BigBrother] Pruned \(toPrune.count) old synced events")
+            #endif
         }
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 import BigBrotherCore
 
 /// Compact child card for the parent dashboard.
@@ -28,6 +29,8 @@ struct ChildSummaryCard: View {
     let onUnlock: (Int) -> Void
     let onUnlockWithTimer: ((Int) -> Void)?
     let onSchedule: () -> Void
+    let debugMode: Bool
+    var namedPlaces: [NamedPlace]?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -36,13 +39,24 @@ struct ChildSummaryCard: View {
 
             // Name + status lines
             VStack(alignment: .leading, spacing: 2) {
-                Text(child.name + (isOnOldBuild ? "…" : ""))
-                    .font(.headline)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    if hasAnyPermissionIssue {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                    }
+                    Text(child.name + (isOnOldBuild ? "…" : ""))
+                        .font(.headline)
+                        .lineLimit(1)
+                }
 
                 statusLine
 
                 tertiaryLine
+
+                usageAndHeartbeatLine
+
+                locationLine
             }
 
             Spacer(minLength: 0)
@@ -69,6 +83,8 @@ struct ChildSummaryCard: View {
                 }
         )
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(cardAccessibilityLabel)
     }
 
     // MARK: - Avatar with Glow
@@ -82,6 +98,7 @@ struct ChildSummaryCard: View {
                     .blur(radius: 14)
                     .scaleEffect(1.25)
             )
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -132,15 +149,20 @@ struct ChildSummaryCard: View {
     private var statusLine: some View {
         if isInPenaltyPhase {
             HStack(spacing: 3) {
-                if !isHeartbeatConfirmed {
-                    Image(systemName: "clock")
-                        .font(.caption2)
-                        .foregroundStyle(.gray)
+                Image(systemName: "hourglass")
+                    .font(.caption2)
+                    .foregroundStyle(Self.mutedOrange)
+                if let timer = penaltyTimer {
+                    Text("Penalty \u{00B7} \(timer)")
+                        .font(.caption)
+                        .foregroundStyle(Self.mutedOrange)
+                } else {
+                    Text("Penalty active")
+                        .font(.caption)
+                        .foregroundStyle(Self.mutedOrange)
                 }
-                Text("Locked \u{00B7} pending timer")
-                    .font(.caption)
-                    .foregroundStyle(Self.mutedBlue)
             }
+            .accessibilityElement(children: .combine)
         } else if let countdown {
             HStack(spacing: 4) {
                 if !isHeartbeatConfirmed {
@@ -160,26 +182,27 @@ struct ChildSummaryCard: View {
                     .font(.caption)
                     .foregroundStyle(Self.mutedGreen)
             }
-        } else if let scheduleLabel, isScheduleActive {
+            .accessibilityElement(children: .combine)
+        } else if isScheduleActive {
             HStack(spacing: 3) {
                 if !isHeartbeatConfirmed {
                     Image(systemName: "clock")
                         .font(.caption2)
                         .foregroundStyle(.gray)
                 }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(scheduleLabel)
+                if let scheduleStatus {
+                    let statusColor = scheduleStatusIsFree ? Self.mutedGreen : scheduleStatus.hasPrefix("Essential") ? Self.mutedPurple : Self.mutedBlue
+                    (Text(scheduleStatus).foregroundColor(statusColor)
+                     + Text(" (by schedule)").foregroundColor(Self.mutedOrange))
+                        .font(.caption)
+                        .lineLimit(1)
+                } else {
+                    Text(dominantMode.displayName)
                         .font(.caption)
                         .foregroundStyle(Self.mutedOrange)
-                        .lineLimit(1)
-                    if let scheduleStatus {
-                        Text(scheduleStatus)
-                            .font(.caption)
-                            .foregroundStyle(scheduleStatusIsFree ? Self.mutedGreen : scheduleStatus.hasPrefix("Essential") ? Self.mutedPurple : Self.mutedBlue)
-                            .lineLimit(1)
-                    }
                 }
             }
+            .accessibilityElement(children: .combine)
         } else {
             HStack(spacing: 3) {
                 if !isHeartbeatConfirmed {
@@ -191,53 +214,222 @@ struct ChildSummaryCard: View {
                     .font(.caption)
                     .foregroundStyle(mutedModeColor)
             }
+            .accessibilityElement(children: .combine)
         }
     }
 
-    // MARK: - Tertiary Line (Line 3)
+    // MARK: - Tertiary Line (Line 3): Penalty + Self-Unlocks + Jailbreak
+
+    /// True when heartbeat says locked but ManagedSettingsStore shields are actually down.
+    /// Excludes active temporary unlocks — shields are supposed to be down during those.
+    /// True if any of this child's devices has a permission that isn't correctly set.
+    private var hasAnyPermissionIssue: Bool {
+        for device in devices {
+            guard let hb = heartbeats.first(where: { $0.deviceID == device.id }) else { continue }
+            if !hb.familyControlsAuthorized { return true }
+            if let loc = hb.locationAuthorization, loc != "always" { return true }
+            if hb.tunnelConnected == false { return true }
+            if hb.motionAuthorized == false { return true }
+            if hb.notificationsAuthorized == false { return true }
+        }
+        return false
+    }
+
+    private var isShieldMismatch: Bool {
+        // If the parent dashboard shows an active unlock countdown, shields are supposed to be down.
+        if countdown != nil || dominantMode == .unlocked {
+            return false
+        }
+        for device in devices {
+            if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
+               hb.currentMode != .unlocked,
+               hb.shieldsActive == false {
+                // Don't flag during active temp unlock (per-device check too)
+                if let expires = hb.temporaryUnlockExpiresAt, expires > Date() {
+                    continue
+                }
+                return true
+            }
+        }
+        return false
+    }
 
     @ViewBuilder
     private var tertiaryLine: some View {
-        HStack(spacing: 4) {
-            if let penaltyTimer {
-                Image(systemName: isPenaltyRunning ? "timer" : "hourglass")
-                    .foregroundStyle(Self.mutedRed)
-                Text(penaltyTimer)
-                    .foregroundStyle(Self.mutedRed)
-            }
+        let hasPenalty = penaltyTimer != nil
+        let hasSelfUnlocks = (selfUnlockBudget ?? 0) > 0
+        let jailbreakReasons = devices.compactMap({ dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakReason })
+        let hasJailbreak = !jailbreakReasons.isEmpty || devices.compactMap({ dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakDetected }).contains(true)
+        let hasShieldMismatch = isShieldMismatch
 
-            if let used = selfUnlocksUsed, let budget = selfUnlockBudget, budget > 0 {
-                let remaining = max(0, budget - used)
-                if penaltyTimer != nil {
-                    Text("\u{00B7}")
+        if hasPenalty || hasSelfUnlocks || hasJailbreak || hasShieldMismatch {
+            HStack(spacing: 4) {
+                if let penaltyTimer {
+                    Image(systemName: isPenaltyRunning ? "timer" : "hourglass")
+                        .foregroundStyle(Self.mutedRed)
+                    Text(penaltyTimer)
+                        .foregroundStyle(Self.mutedRed)
+                }
+
+                if let used = selfUnlocksUsed, let budget = selfUnlockBudget, budget > 0 {
+                    let remaining = max(0, budget - used)
+                    if hasPenalty {
+                        Text("\u{00B7}").foregroundStyle(.secondary)
+                    }
+                    Text("\(remaining) of \(budget) self-unlocks")
+                        .foregroundStyle(Self.mutedTeal)
+                }
+
+                if hasJailbreak {
+                    if hasPenalty || hasSelfUnlocks {
+                        Text("\u{00B7}").foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 2) {
+                        Image(systemName: "exclamationmark.shield.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.red)
+                        Text("jailbreak")
+                            .foregroundStyle(.red)
+                        if let reason = jailbreakReasons.first {
+                            Text("(\(reason))")
+                                .foregroundStyle(.red.opacity(0.7))
+                        }
+                    }
+                    .accessibilityLabel("Warning: jailbreak detected on device")
+                }
+
+                if hasShieldMismatch {
+                    if hasPenalty || hasSelfUnlocks || hasJailbreak {
+                        Text("\u{00B7}").foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 2) {
+                        Image(systemName: "shield.slash")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.red)
+                        Text("SHIELDS DOWN")
+                            .fontWeight(.bold)
+                            .foregroundStyle(.red)
+                    }
+                    .accessibilityLabel("Warning: device reports locked but shields are not active")
+                }
+            }
+            .font(.caption2.monospacedDigit())
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    // MARK: - Usage & Heartbeat Line (Line 4): Screen Time + Online Status
+
+    @ViewBuilder
+    private var usageAndHeartbeatLine: some View {
+        HStack(spacing: 4) {
+            // Screen time
+            if let minutes = screenTimeMinutes {
+                let hours = minutes / 60
+                let mins = minutes % 60
+                let display = hours > 0 ? "\(hours)h \(mins)m" : "\(mins)m"
+                HStack(spacing: 3) {
+                    Image(systemName: "hourglass")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                    Text("screen time \(display)")
                         .foregroundStyle(.secondary)
                 }
-                Text("\(remaining)/\(budget) SU")
-                    .foregroundStyle(Self.mutedTeal)
+                .accessibilityLabel("Total screen time today: \(hours) hours \(mins) minutes")
             }
 
-            // Online indicator from heartbeats
+            // Online/heartbeat indicator
             if let lastSeen = latestHeartbeatAge {
-                if penaltyTimer != nil || (selfUnlocksUsed != nil && selfUnlockBudget != nil) {
-                    Text("\u{00B7}")
-                        .foregroundStyle(.secondary)
+                if screenTimeMinutes != nil {
+                    Text("\u{00B7}").foregroundStyle(.tertiary)
                 }
                 if lastSeen < 30 {
                     HStack(spacing: 2) {
                         Circle().fill(Self.mutedGreen).frame(width: 5, height: 5)
+                            .accessibilityHidden(true)
                         Text("online")
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityLabel("Device online")
+                } else if isAppForceClosed {
+                    HStack(spacing: 2) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(Self.mutedOrange)
+                            .accessibilityHidden(true)
+                        Text("app not running")
+                            .foregroundStyle(Self.mutedOrange)
+                    }
+                    .accessibilityLabel("Warning, app not running on device")
                 } else {
                     HStack(spacing: 2) {
                         Circle().fill(Self.mutedRed).frame(width: 5, height: 5)
+                            .accessibilityHidden(true)
                         Text(formatAge(lastSeen))
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityLabel("Device offline, last seen \(formatAge(lastSeen))")
+                }
+
+                // Lock state — always show when we have data, regardless of online threshold.
+                // Heartbeats come every 5 min; the lock state from the last heartbeat is still valid.
+                if let locked = isDeviceLocked {
+                    Image(systemName: locked ? "lock.fill" : "lock.open.fill")
+                        .font(.system(size: 8))
+                        .foregroundColor(locked ? .secondary : .yellow)
+                        .accessibilityLabel(locked ? "Screen off" : "Screen on")
                 }
             }
         }
         .font(.caption2.monospacedDigit())
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Location Line (Line 5) — iPhone only
+
+    @ViewBuilder
+    private var locationLine: some View {
+        if let loc = locationInfo {
+            HStack(spacing: 4) {
+                Image(systemName: "location.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Self.mutedBlue)
+                Text(loc.address)
+                    .foregroundStyle(.secondary)
+                Text("\u{00B7}")
+                    .foregroundStyle(.tertiary)
+                Text(formatAge(loc.age))
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.caption2)
+            .lineLimit(1)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Location: \(loc.address), \(formatAge(loc.age))")
+        } else if isLocationExpected {
+            HStack(spacing: 4) {
+                Image(systemName: "location.slash.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Self.mutedRed)
+                Text("location disabled")
+                    .foregroundStyle(Self.mutedRed)
+            }
+            .font(.caption2)
+            .accessibilityLabel("Warning: location tracking is disabled on this device")
+        }
+    }
+
+    /// True if location tracking is configured for this child but no location data is arriving from the iPhone.
+    private var isLocationExpected: Bool {
+        guard let iphone = iphoneDevice,
+              let hb = heartbeats.first(where: { $0.deviceID == iphone.id }) else { return false }
+        // If the device is online but has no location, location is likely denied.
+        let isOnline = Date().timeIntervalSince(hb.timestamp) < 120
+        return isOnline && hb.latitude == nil
+    }
+
+    /// The first iPhone device for this child (location tracking is iPhone-only).
+    private var iphoneDevice: ChildDevice? {
+        devices.first { $0.modelIdentifier.hasPrefix("iPhone") }
     }
 
     /// Seconds since latest heartbeat, preferring iPhone over iPad.
@@ -247,6 +439,74 @@ struct ChildSummaryCard: View {
         for device in devices {
             if let hb = heartbeats.first(where: { $0.deviceID == device.id }) {
                 return Date().timeIntervalSince(hb.timestamp)
+            }
+        }
+        return nil
+    }
+
+    /// Latest location data from heartbeats (preferring iPhone).
+    /// Resolves to named place (Home, School, etc.) if the child is near one.
+    private var locationInfo: (address: String, age: TimeInterval)? {
+        guard let iphone = iphoneDevice,
+              let hb = heartbeats.first(where: { $0.deviceID == iphone.id }),
+              let locTime = hb.locationTimestamp else { return nil }
+
+        // Try to resolve to a named place
+        if let lat = hb.latitude, let lon = hb.longitude {
+            if let placeName = resolveNamedPlace(latitude: lat, longitude: lon, device: iphone) {
+                return (placeName, Date().timeIntervalSince(locTime))
+            }
+        }
+
+        guard let address = hb.locationAddress else { return nil }
+        return (address, Date().timeIntervalSince(locTime))
+    }
+
+    /// Check if coordinates are near home or a named place.
+    private func resolveNamedPlace(latitude: Double, longitude: Double, device: ChildDevice) -> String? {
+        let loc = CLLocation(latitude: latitude, longitude: longitude)
+
+        // Check home
+        let latKey = "homeLatitude.\(device.id.rawValue)"
+        let lonKey = "homeLongitude.\(device.id.rawValue)"
+        if let homeLat = UserDefaults.standard.object(forKey: latKey) as? Double,
+           let homeLon = UserDefaults.standard.object(forKey: lonKey) as? Double {
+            let home = CLLocation(latitude: homeLat, longitude: homeLon)
+            if loc.distance(from: home) < 500 {
+                return "Home"
+            }
+        }
+
+        // Check named places (cached in parent state)
+        if let places = namedPlaces {
+            for place in places {
+                let placeLoc = CLLocation(latitude: place.latitude, longitude: place.longitude)
+                if loc.distance(from: placeLoc) < max(place.radiusMeters, 300) {
+                    return place.name
+                }
+            }
+        }
+
+        return nil
+    }
+
+    /// Screen time minutes from the child's heartbeat (preferring iPhone).
+    private var screenTimeMinutes: Int? {
+        for device in devices {
+            if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
+               let minutes = hb.screenTimeMinutes {
+                return minutes
+            }
+        }
+        return nil
+    }
+
+    /// Whether the child's device is currently locked (preferring iPhone).
+    private var isDeviceLocked: Bool? {
+        for device in devices {
+            if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
+               let locked = hb.isDeviceLocked {
+                return locked
             }
         }
         return nil
@@ -281,13 +541,15 @@ struct ChildSummaryCard: View {
                     Label("Lock", systemImage: "lock.fill")
                 }
                 Button { onLock(.returnToSchedule) } label: {
-                    Label("Return to Schedule", systemImage: "calendar.badge.clock")
+                    Label("Back to schedule", systemImage: "calendar.badge.clock")
                 }
             } label: {
                 pillLabel("Lock", icon: "lock.fill")
             } primaryAction: {
                 onLock(.indefinite)
             }
+            .accessibilityLabel("Lock \(child.name)")
+            .accessibilityHint("Tap to lock. Long press for more options.")
         } else {
             // Show "Unlock" button
             Menu {
@@ -311,7 +573,7 @@ struct ChildSummaryCard: View {
                 }
                 Divider()
                 Button { onLock(.returnToSchedule) } label: {
-                    Label("Return to Schedule", systemImage: "calendar.badge.clock")
+                    Label("Back to schedule", systemImage: "calendar.badge.clock")
                 }
             } label: {
                 pillLabel("Unlock", icon: "lock.open.fill")
@@ -322,6 +584,8 @@ struct ChildSummaryCard: View {
                     onUnlock(15 * 60)
                 }
             }
+            .accessibilityLabel("Unlock \(child.name)")
+            .accessibilityHint("Tap to unlock for 15 minutes. Long press for more options.")
         }
     }
 
@@ -341,10 +605,89 @@ struct ChildSummaryCard: View {
         .clipShape(Capsule())
     }
 
+    // MARK: - Accessibility
+
+    private var cardAccessibilityLabel: String {
+        var parts: [String] = [child.name]
+
+        // Mode
+        parts.append(dominantMode.displayName)
+
+        // Countdown / schedule info
+        if isInPenaltyPhase {
+            parts.append("Locked, confirming")
+        } else if let countdown {
+            let origin: String = {
+                switch unlockOrigin {
+                case .selfUnlock: return "Self-unlocked"
+                case .localPINUnlock: return "PIN unlocked"
+                case .remoteCommand: return "Unlocked"
+                case .none: return "Unlocked"
+                }
+            }()
+            parts.append("\(origin), \(countdown) left")
+        } else if let scheduleLabel, isScheduleActive {
+            parts.append(scheduleLabel)
+            if let scheduleStatus {
+                parts.append(scheduleStatus)
+            }
+        }
+
+        // Online status
+        if let lastSeen = latestHeartbeatAge {
+            if lastSeen < 30 {
+                parts.append("Online")
+            } else if isAppForceClosed {
+                parts.append("Warning, app not running")
+            } else {
+                parts.append("Offline, last seen \(formatAge(lastSeen))")
+            }
+        }
+
+        // Penalty timer
+        if let penaltyTimer {
+            parts.append("Penalty: \(penaltyTimer)")
+        }
+
+        // Self-unlocks
+        if let used = selfUnlocksUsed, let budget = selfUnlockBudget, budget > 0 {
+            let remaining = max(0, budget - used)
+            parts.append("\(remaining) of \(budget) self-unlocks remaining")
+        }
+
+        if !isHeartbeatConfirmed {
+            parts.append("Not yet confirmed")
+        }
+
+        return parts.joined(separator: ", ")
+    }
+
     // MARK: - Helpers
 
     private var isUnlocked: Bool {
         dominantMode == .unlocked
+    }
+
+    /// True if the main app was force-closed (or killed by iOS): Monitor is alive but heartbeats stopped.
+    /// Detected when monitorLastActiveAt is recent but heartbeat is stale.
+    /// When unlocked, uses a longer 2-hour threshold to avoid false positives from
+    /// iOS suspending the app during resource-intensive games.
+    private var isAppForceClosed: Bool {
+        let deviceIDs = Set(devices.map(\.id))
+        let childHeartbeats = heartbeats.filter { deviceIDs.contains($0.deviceID) }
+        guard let hb = childHeartbeats.first else { return false }
+        let heartbeatAge = Date().timeIntervalSince(hb.timestamp)
+        // When unlocked, use 2-hour threshold — iOS aggressively suspends the app
+        // during games but BGTask still wakes it within ~30 min. If 2+ hours pass
+        // with no heartbeat while unlocked, the app is truly dead.
+        // When locked, use 1-hour threshold.
+        let threshold: TimeInterval = dominantMode == .unlocked ? 7200 : 3600
+        guard heartbeatAge > threshold else { return false }
+        // Monitor must have been active recently (within 2 hours) to confirm
+        // the device itself is still powered on and running.
+        guard let monitorActive = hb.monitorLastActiveAt else { return false }
+        let monitorAge = Date().timeIntervalSince(monitorActive)
+        return monitorAge < 7200
     }
 
     /// True if ANY of this child's devices is running an older build than current.
@@ -353,9 +696,9 @@ struct ChildSummaryCard: View {
         let builds = heartbeats
             .filter { deviceIDs.contains($0.deviceID) }
             .compactMap(\.appBuildNumber)
-        guard !builds.isEmpty else { return false }
+        guard let minBuild = builds.min() else { return false }
         // Worst case: if any device is old, show the indicator.
-        return builds.min()! < AppConstants.appBuildNumber
+        return minBuild < AppConstants.appBuildNumber
     }
 
     /// Vivid color — used only for avatar glow.
