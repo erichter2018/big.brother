@@ -139,6 +139,11 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         }
     }
 
+    /// Current CLAuthorizationStatus.
+    var authorizationStatus: CLAuthorizationStatus {
+        locationManager.authorizationStatus
+    }
+
     /// Current CLAuthorizationStatus as a heartbeat-friendly string.
     var authorizationStatusString: String {
         switch locationManager.authorizationStatus {

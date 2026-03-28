@@ -152,7 +152,7 @@ final class ChildHomeViewModel {
     // MARK: - Location Authorization
 
     /// Cached location authorization status, refreshed on timer tick.
-    var cachedLocationAuthStatus: CLAuthorizationStatus = CLLocationManager.authorizationStatus()
+    var cachedLocationAuthStatus: CLAuthorizationStatus = .notDetermined
 
     /// True when location tracking is enabled but permission is denied or restricted.
     var needsLocationPermission: Bool {
@@ -480,7 +480,9 @@ final class ChildHomeViewModel {
 
     func refreshScheduleDriving() {
         isScheduleDriving = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.bool(forKey: "scheduleDrivenMode") ?? true
-        cachedLocationAuthStatus = CLLocationManager.authorizationStatus()
+        if let locService = appState.locationService {
+            cachedLocationAuthStatus = locService.authorizationStatus
+        }
     }
 
     /// Tracks which timed unlock phase we last saw, to detect transitions.

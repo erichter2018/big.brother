@@ -196,12 +196,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
             // Web blocking.
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let allowedWebDomains: [String] = {
-                if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
-                   let domains = try? decoder.decode([String].self, from: data),
-                   !domains.isEmpty { return domains }
-                return []
-            }()
             let shouldBlockWeb = restrictions.denyWebWhenLocked
 
             // Apply hybrid blocking (mirrors Monitor extension logic).

@@ -178,7 +178,7 @@ struct BigBrotherApp: App {
                     )
                 }
                 await MainActor.run { appState.startChildSync() }
-                await MainActor.run { await appState.recoverModeIfNeeded() }
+                await appState.recoverModeIfNeeded()
                 let syncCoordinator = await MainActor.run { appState.syncCoordinator }
                 try? await syncCoordinator?.performFullSync()
 
