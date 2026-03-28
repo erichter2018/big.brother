@@ -130,7 +130,7 @@ final class SubscriptionManager {
 
         var foundActive = false
         var latestExpiration: Date?
-        var latestStatus: SubscriptionStatus = .notSubscribed
+        var latestStatus: SubscriptionStatus = .expired
 
         for await result in Transaction.currentEntitlements {
             guard let transaction = try? checkVerified(result) else { continue }

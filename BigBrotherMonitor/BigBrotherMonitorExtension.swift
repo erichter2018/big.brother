@@ -691,14 +691,6 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             // Check if web blocking is enabled in device restrictions,
             // respecting parent-configured allowed web domains.
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let allowedWebDomains: [String] = {
-                if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
-                   let domains = try? JSONDecoder().decode([String].self, from: data),
-                   !domains.isEmpty {
-                    return domains
-                }
-                return []
-            }()
             let shouldBlockWeb = restrictions.denyWebWhenLocked
 
             if !pickerTokens.isEmpty && allowExemptions {
@@ -780,14 +772,6 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 store.shield.applicationCategories = .all(except: allowedTokens)
             }
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let legacyAllowedWebDomains: [String] = {
-                if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
-                   let domains = try? JSONDecoder().decode([String].self, from: data),
-                   !domains.isEmpty {
-                    return domains
-                }
-                return []
-            }()
             if restrictions.denyWebWhenLocked {
                 store.shield.webDomainCategories = .all()
                 // Note: per-domain exceptions require WebDomainTokens (picker-selected).
