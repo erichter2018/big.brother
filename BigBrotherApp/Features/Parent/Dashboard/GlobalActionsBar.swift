@@ -111,13 +111,8 @@ struct GlobalActionsBar: View {
             .fontWeight(.medium)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
-            .background(.ultraThinMaterial)
             .foregroundStyle(color)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule()
-                    .strokeBorder(color.opacity(0.2), lineWidth: 1)
-            )
+            .if_iOS26GlassCapsule(fallbackMaterial: .ultraThinMaterial, borderColor: color)
     }
 
     static var secondsUntilMidnight: Int { Date.secondsUntilMidnight }

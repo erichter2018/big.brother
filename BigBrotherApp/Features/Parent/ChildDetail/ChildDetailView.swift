@@ -216,7 +216,9 @@ struct ChildDetailView: View {
 
             // Row 3: Screen time + heartbeat + build
             HStack(spacing: 8) {
-                if let minutes = hb?.screenTimeMinutes {
+                if let hb, let minutes = hb.screenTimeMinutes,
+                   hb.timestamp >= Calendar.current.startOfDay(for: Date()),
+                   hb.heartbeatSource != "vpnExtension" {
                     let h = minutes / 60, m = minutes % 60
                     HStack(spacing: 2) {
                         Image(systemName: "hourglass")
@@ -278,8 +280,7 @@ struct ChildDetailView: View {
             .font(.caption)
         }
         .padding(10)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     // MARK: - 3. Location Card
@@ -397,8 +398,7 @@ struct ChildDetailView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     // MARK: - Temporary Apps Row
@@ -427,8 +427,7 @@ struct ChildDetailView: View {
             }
         }
         .padding(12)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     // MARK: - Apps Row (Expandable)
@@ -474,8 +473,7 @@ struct ChildDetailView: View {
                 }
             }
             .padding(12)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
         }
     }
 
@@ -496,8 +494,7 @@ struct ChildDetailView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
         }
         .buttonStyle(.plain)
     }

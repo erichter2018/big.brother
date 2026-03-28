@@ -52,9 +52,8 @@ struct ModeActionButtons: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
-                .background(Color.green.opacity(0.12))
                 .foregroundStyle(.green)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .green)
             } primaryAction: {
                 if let remaining = remainingSeconds, remaining > 0 {
                     onTemporaryUnlock(remaining + 15 * 60)
@@ -79,9 +78,8 @@ struct ModeActionButtons: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
-                    .background(Color.blue.opacity(0.12))
                     .foregroundStyle(.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .blue)
                 } primaryAction: {
                     onLockWithDuration(.indefinite)
                 }
@@ -103,9 +101,8 @@ struct ModeActionButtons: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
-            .background(color.opacity(0.12))
             .foregroundStyle(color)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: color)
         }
     }
 

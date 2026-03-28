@@ -33,7 +33,7 @@ struct LocationMapView: View {
     @State private var selectedTrip: Trip?
 
     // Speed limit lookup for scrubbed position
-    @State private var speedLimitService = SpeedLimitService()
+    private var speedLimitService: SpeedLimitService { .shared }
     @State private var scrubbedSpeedLimit: Int?
 
     // MARK: - Trip Model
@@ -196,13 +196,21 @@ struct LocationMapView: View {
         let from = breadcrumbs[lower]
         let to = breadcrumbs[upper]
 
-        // At a real breadcrumb (or very close to one)
-        if fraction < 0.01 || lower == upper {
+        // Snap to nearest breadcrumb if close (within ~half a breadcrumb interval)
+        if fraction < 0.3 || lower == upper {
             let speed = speedAtIndex(lower)
             return ScrubPosition(
                 coord: CLLocationCoordinate2D(latitude: from.latitude, longitude: from.longitude),
                 timestamp: from.timestamp, address: from.address ?? "",
                 isInterpolated: false, speed: speed, breadcrumbIndex: lower
+            )
+        }
+        if fraction > 0.7 {
+            let speed = speedAtIndex(upper)
+            return ScrubPosition(
+                coord: CLLocationCoordinate2D(latitude: to.latitude, longitude: to.longitude),
+                timestamp: to.timestamp, address: to.address ?? "",
+                isInterpolated: false, speed: speed, breadcrumbIndex: upper
             )
         }
 
@@ -510,8 +518,11 @@ struct LocationMapView: View {
         }
         let avgSpeed: Double? = validSpeeds.isEmpty ? nil :
             validSpeeds.reduce(0, +) / Double(validSpeeds.count)
+        // Max speed from GPS breadcrumbs (m/s → mph)
+        let maxSpeedFromBreadcrumbs: Int? = validSpeeds.isEmpty ? nil :
+            Int((validSpeeds.max() ?? 0) * 2.237)
 
-        return Trip(
+        var trip = Trip(
             startIndex: startIdx,
             endIndex: endIdx,
             startLocation: startLoc,
@@ -523,11 +534,15 @@ struct LocationMapView: View {
             isRoundTrip: isRound,
             avgSpeedMPS: avgSpeed
         )
+        trip.maxSpeedMPH = maxSpeedFromBreadcrumbs
+        return trip
     }
 
     /// Pre-fetch speed limits for all trip breadcrumbs so they're cached before scrubbing.
-    /// Samples every 3rd breadcrumb to avoid redundant queries (geohash cache covers nearby points).
+    /// Deduplicates by geohash (150m cells) to avoid redundant queries.
     /// Runs queries concurrently in batches of 5 to respect Overpass rate limits.
+    @State private var speedLimitPrefetchProgress: String?
+
     private func prefetchSpeedLimitsForTrips() async {
         guard !trips.isEmpty else { return }
         var coords: [CLLocationCoordinate2D] = []
@@ -538,8 +553,9 @@ struct LocationMapView: View {
             let end = min(trip.endIndex, breadcrumbs.count - 1)
             guard start <= end else { continue }
 
-            for i in stride(from: start, through: end, by: 3) {
+            for i in start...end {
                 let bc = breadcrumbs[i]
+                // Deduplicate by rounded coordinate (~150m precision, matching geohash)
                 let key = "\(String(format: "%.3f", bc.latitude)),\(String(format: "%.3f", bc.longitude))"
                 guard !seen.contains(key) else { continue }
                 seen.insert(key)
@@ -547,9 +563,14 @@ struct LocationMapView: View {
             }
         }
 
+        let total = coords.count
+        if total > 0 {
+            speedLimitPrefetchProgress = "Loading speed limits (0/\(total))..."
+        }
+
         // Query in batches of 5 concurrently
-        for batch in stride(from: 0, to: coords.count, by: 5) {
-            let end = min(batch + 5, coords.count)
+        for batch in stride(from: 0, to: total, by: 5) {
+            let end = min(batch + 5, total)
             await withTaskGroup(of: Void.self) { group in
                 for i in batch..<end {
                     group.addTask {
@@ -557,7 +578,11 @@ struct LocationMapView: View {
                     }
                 }
             }
+            if (batch + 5) % 20 == 0 || end == total {
+                speedLimitPrefetchProgress = "Loading speed limits (\(end)/\(total))..."
+            }
         }
+        speedLimitPrefetchProgress = nil
     }
 
     /// Correlate tripCompleted/speeding/braking/phone events from CloudKit with detected trips.
@@ -950,8 +975,19 @@ struct LocationMapView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    if let progress = routeProgress {
-                        Text(progress).font(.caption2).foregroundStyle(.secondary)
+                    if routeProgress != nil || speedLimitPrefetchProgress != nil {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                            VStack(alignment: .leading, spacing: 1) {
+                                if let rp = routeProgress {
+                                    Text(rp).font(.caption2).foregroundStyle(.secondary)
+                                }
+                                if let sp = speedLimitPrefetchProgress {
+                                    Text(sp).font(.caption2).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
                     }
 
                     // (Locate button is now on the map overlay)
@@ -1067,7 +1103,7 @@ struct LocationMapView: View {
     private func isNearHome(_ loc: DeviceLocation) -> Bool {
         guard let home = homeCoordinate else { return false }
         let point = CLLocation(latitude: loc.latitude, longitude: loc.longitude)
-        return home.distance(from: point) < 500
+        return home.distance(from: point) < 150
     }
 
     /// Display name for a trip endpoint — uses "Home" if near home, POI name if resolved, or address.
@@ -1141,22 +1177,20 @@ struct LocationMapView: View {
                         if let avg = trip.avgSpeedMPS, avg > 0.5 {
                             Text("\u{00B7}")
                                 .foregroundStyle(.tertiary)
-                            Text("\(Int(avg * 2.237)) mph avg")
+                            Text("\(Int(avg * 2.237)) avg")
                                 .font(.caption2)
                                 .foregroundStyle(.orange)
+                        }
+                        if let maxSpd = trip.maxSpeedMPH, maxSpd > 0 {
+                            Text("\u{00B7}")
+                                .foregroundStyle(.tertiary)
+                            Text("\(maxSpd) max")
+                                .font(.caption2)
+                                .foregroundStyle(maxSpd > 65 ? .red : .orange)
                         }
                     }
                     // Drive report badges
                     HStack(spacing: 6) {
-                        if let speed = trip.maxSpeedMPH, speed > 0 {
-                            HStack(spacing: 2) {
-                                Image(systemName: "gauge.with.dots.needle.67percent")
-                                    .font(.system(size: 8))
-                                Text("\(speed)")
-                                    .font(.caption2)
-                            }
-                            .foregroundStyle(speed > 65 ? .red : .orange)
-                        }
                         if let phone = trip.phoneUsageCount, phone > 0 {
                             HStack(spacing: 2) {
                                 Image(systemName: "iphone.gen3")
@@ -1281,9 +1315,13 @@ struct LocationMapView: View {
                             if followDot {
                                 position = .camera(MapCamera(centerCoordinate: coord, distance: 2000))
                             }
-                            // Query speed limit for scrubbed position
+                            // Try cache first, fall back to live query if cache misses
                             Task {
-                                scrubbedSpeedLimit = await speedLimitService.speedLimit(at: coord)
+                                if let cached = await speedLimitService.cachedSpeedLimit(at: coord) {
+                                    scrubbedSpeedLimit = cached
+                                } else {
+                                    scrubbedSpeedLimit = await speedLimitService.speedLimit(at: coord)
+                                }
                             }
                         }
                         if !isScrubbing {

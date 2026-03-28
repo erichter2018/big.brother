@@ -124,9 +124,25 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Filter out already-processed commands.
         let unprocessed = commands.filter { !processedIDs.contains($0.id) }
 
+        // Safety: skip commands older than 1 hour. Stale pending commands from before
+        // the child got the status-update fix should not be re-processed on first launch.
+        let staleCutoff = Date().addingTimeInterval(-3600)
+        let fresh = unprocessed.filter { $0.issuedAt > staleCutoff }
+        let staleCount = unprocessed.count - fresh.count
+        if staleCount > 0 {
+            #if DEBUG
+            print("[BigBrother] Skipping \(staleCount) commands older than 1 hour")
+            #endif
+            // Mark stale commands as processed so they don't reappear
+            for cmd in unprocessed where cmd.issuedAt <= staleCutoff {
+                try? storage.markCommandProcessed(cmd.id)
+                try? await cloudKit.updateCommandStatus(cmd.id, status: .expired)
+            }
+        }
+
         // Separate enforcement commands (lock/unlock) from config commands (budget, etc.).
-        let enforcementCommands = unprocessed.filter { Self.isEnforcementCommand($0.action) }
-        let configCommands = unprocessed.filter { !Self.isEnforcementCommand($0.action) }
+        let enforcementCommands = fresh.filter { Self.isEnforcementCommand($0.action) }
+        let configCommands = fresh.filter { !Self.isEnforcementCommand($0.action) }
 
         // For mode commands (setMode, temporaryUnlock, timedUnlock, lockUntil, returnToSchedule),
         // only the LATEST one matters — earlier ones are superseded. Per-app enforcement

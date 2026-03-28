@@ -4,6 +4,9 @@ import CoreLocation
 /// Queries OpenStreetMap Overpass API for posted speed limits at a given coordinate.
 /// Results are cached by geohash cell to avoid redundant queries for the same road.
 actor SpeedLimitService {
+    /// Shared instance — speed limits are location-based, not child-specific.
+    /// All children share the same cache since they take similar routes.
+    static let shared = SpeedLimitService()
 
     /// Cached speed limit result.
     struct CachedLimit: Codable, Sendable {
@@ -71,8 +74,9 @@ actor SpeedLimitService {
             saveToDiskThrottled()
             return result.speedMPH
         } catch {
-            // Cache the miss to avoid retrying
-            cache[hash] = CachedLimit(speedMPH: nil, roadName: nil, fetchedAt: Date())
+            // Cache the miss for 5 minutes to avoid hammering, but allow retry after
+            cache[hash] = CachedLimit(speedMPH: nil, roadName: nil,
+                                       fetchedAt: Date().addingTimeInterval(-Self.cacheExpiry + 300))
             return nil
         }
     }
@@ -95,6 +99,26 @@ actor SpeedLimitService {
         }
     }
 
+    /// Cache-only lookup — no API call. Searches exact geohash, then broader neighbors.
+    /// Use this during scrubbing to avoid firing API requests on every slider change.
+    func cachedSpeedLimit(at coordinate: CLLocationCoordinate2D) -> Int? {
+        let hash = geohash(latitude: coordinate.latitude, longitude: coordinate.longitude,
+                           precision: Self.geohashPrecision)
+        // Exact match
+        if let cached = cache[hash], cached.speedMPH != nil {
+            return cached.speedMPH
+        }
+        // Search broader area (precision-1 = ~1km cells)
+        let broader = String(hash.prefix(Self.geohashPrecision - 1))
+        // Find the nearest cached entry with actual data (not a nil miss)
+        for (key, value) in cache where key.hasPrefix(broader) {
+            if let speed = value.speedMPH {
+                return speed
+            }
+        }
+        return nil
+    }
+
     /// Get cached limit details (for diagnostics).
     func cachedLimitDetails(at coordinate: CLLocationCoordinate2D) -> (speedMPH: Int?, roadName: String?)? {
         let hash = geohash(latitude: coordinate.latitude, longitude: coordinate.longitude,
@@ -108,7 +132,7 @@ actor SpeedLimitService {
     private func queryOverpass(latitude: Double, longitude: Double) async throws -> CachedLimit {
         let query = """
         [out:json][timeout:5];
-        way[maxspeed][highway](around:50,\(latitude),\(longitude));
+        way[maxspeed][highway](around:100,\(latitude),\(longitude));
         out tags;
         """
 

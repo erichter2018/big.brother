@@ -461,11 +461,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         record["hbTunnel"] = 1 as NSNumber
 
         // Report actual enforcement state from App Group.
-        // The tunnel cannot read ManagedSettingsStore, so use the best available
-        // actual-state source: ExtensionSharedState (written by Monitor after
-        // each enforcement action), then fall back to PolicySnapshot.
+        // Check temporary unlock first — if active, device is unlocked regardless
+        // of what ExtensionSharedState or PolicySnapshot says.
         let policyVersion = storage.readPolicySnapshot()?.effectivePolicy.policyVersion ?? 0
-        if let extState = storage.readExtensionSharedState() {
+        if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
+            record["currentMode"] = LockMode.unlocked.rawValue
+        } else if let extState = storage.readExtensionSharedState() {
             record["currentMode"] = extState.currentMode.rawValue
         } else if let snap = storage.readPolicySnapshot() {
             record["currentMode"] = snap.effectivePolicy.resolvedMode.rawValue

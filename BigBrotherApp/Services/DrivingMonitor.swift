@@ -52,7 +52,7 @@ final class DrivingMonitor: @unchecked Sendable {
     private var phoneCheckTimer: Timer?
 
     // Speed limit detection
-    let speedLimitService = SpeedLimitService()
+    let speedLimitService = SpeedLimitService.shared
     private var _currentSpeedLimitMPH: Int?
     private(set) var currentSpeedLimitMPH: Int? {
         get { stateQueue.sync { _currentSpeedLimitMPH } }

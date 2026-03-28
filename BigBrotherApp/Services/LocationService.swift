@@ -334,7 +334,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     // MARK: - Home Geofence
 
     private static let homeRegionIdentifier = "bigbrother.home"
-    private static let homeRadiusMeters: CLLocationDistance = 200
+    private static let homeRadiusMeters: CLLocationDistance = 75
 
     /// Registers a geofence around the home location if coordinates are stored in App Group defaults.
     private func registerHomeGeofenceIfConfigured() {

@@ -282,6 +282,27 @@ final class ParentDashboardViewModel: CommandSendable {
             let action: CommandAction = .timedUnlock(totalSeconds: seconds, penaltySeconds: penaltySecs)
             trackPendingCommand(action, target: .child(child.id))
             await performCommand(action, target: .child(child.id))
+
+            // Deduct consumed penalty from the stored total.
+            let remainingPenalty = max(0, penaltySecs - penaltyConsumed)
+            await performCommand(
+                .setPenaltyTimer(seconds: remainingPenalty > 0 ? remainingPenalty : nil, endTime: nil),
+                target: .child(child.id)
+            )
+
+            // Also update Firebase if timer service is available.
+            if let timerService = appState.timerService,
+               let familyID = appState.parentState?.familyID.rawValue,
+               let firestoreKidID = penaltyTimer(for: child)?.firestoreKidID {
+                Task {
+                    if remainingPenalty > 0 {
+                        await timerService.setPenalty(familyID: familyID, kidID: firestoreKidID, seconds: remainingPenalty)
+                    } else {
+                        await timerService.clearTimer(familyID: familyID, kidID: firestoreKidID)
+                    }
+                }
+            }
+
             startConfirmationPolling()
         }
     }

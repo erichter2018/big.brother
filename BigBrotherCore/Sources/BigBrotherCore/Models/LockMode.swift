@@ -17,7 +17,7 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
     public var displayName: String {
         switch self {
         case .unlocked: "Unlocked"
-        case .dailyMode: "Restricted"
+        case .dailyMode: "Locked"
         case .essentialOnly: "Essential Only"
         }
     }

@@ -274,6 +274,22 @@ final class TimerIntegrationService {
         }
     }
 
+    /// Set the penalty to an exact value (stops any running timer first).
+    func setPenalty(familyID: String, kidID: String, seconds: Int) async {
+        let kidRef = db.collection("families").document(familyID)
+            .collection("kids").document(kidID)
+
+        do {
+            try await kidRef.updateData([
+                "timerEndTime": FieldValue.delete(),
+                "penaltySeconds": max(0, seconds),
+                "updatedAt": Timestamp(date: Date())
+            ])
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func clearTimer(familyID: String, kidID: String) async {
         let kidRef = db.collection("families").document(familyID)
             .collection("kids").document(kidID)
