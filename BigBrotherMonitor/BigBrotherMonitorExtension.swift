@@ -691,15 +691,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             // Check if web blocking is enabled in device restrictions,
             // respecting parent-configured allowed web domains.
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let hasAllowedWebDomains: Bool = {
+            let allowedWebDomains: [String] = {
                 if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
                    let domains = try? JSONDecoder().decode([String].self, from: data),
                    !domains.isEmpty {
-                    return true
+                    return domains
                 }
-                return false
+                return []
             }()
-            let blockAllWeb = restrictions.denyWebWhenLocked && !hasAllowedWebDomains
+            let shouldBlockWeb = restrictions.denyWebWhenLocked
 
             if !pickerTokens.isEmpty && allowExemptions {
                 let tokensToBlock = pickerTokens.subtracting(allowedTokens)
@@ -713,7 +713,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 for s in [baseStore, store] {
                     s.shield.applications = perAppTokens
                     s.shield.applicationCategories = .all(except: allowedTokens)
-                    s.shield.webDomainCategories = blockAllWeb ? .all() : nil
+                    if shouldBlockWeb {
+                        s.shield.webDomainCategories = .all()
+                        if !allowedWebDomains.isEmpty {
+                            let allowedSet = Set(allowedWebDomains.map { WebDomain(domain: $0) })
+                            s.shield.webDomains = .all(except: allowedSet)
+                        }
+                    } else {
+                        s.shield.webDomainCategories = nil
+                    }
                 }
             } else {
                 let apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
@@ -724,7 +732,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     } else {
                         s.shield.applicationCategories = .all(except: allowedTokens)
                     }
-                    s.shield.webDomainCategories = blockAllWeb ? .all() : nil
+                    if shouldBlockWeb {
+                        s.shield.webDomainCategories = .all()
+                        if !allowedWebDomains.isEmpty {
+                            let allowedSet = Set(allowedWebDomains.map { WebDomain(domain: $0) })
+                            s.shield.webDomains = .all(except: allowedSet)
+                        }
+                    } else {
+                        s.shield.webDomainCategories = nil
+                    }
                 }
             }
         }
@@ -768,15 +784,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 store.shield.applicationCategories = .all(except: allowedTokens)
             }
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let legacyHasAllowedWebDomains: Bool = {
+            let legacyAllowedWebDomains: [String] = {
                 if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
                    let domains = try? JSONDecoder().decode([String].self, from: data),
                    !domains.isEmpty {
-                    return true
+                    return domains
                 }
-                return false
+                return []
             }()
-            store.shield.webDomainCategories = (restrictions.denyWebWhenLocked && !legacyHasAllowedWebDomains) ? .all() : nil
+            if restrictions.denyWebWhenLocked {
+                store.shield.webDomainCategories = .all()
+                if !legacyAllowedWebDomains.isEmpty {
+                    let allowedSet = Set(legacyAllowedWebDomains.map { WebDomain(domain: $0) })
+                    store.shield.webDomains = .all(except: allowedSet)
+                }
+            } else {
+                store.shield.webDomainCategories = nil
+            }
         }
     }
 

@@ -120,7 +120,5 @@ struct GlobalActionsBar: View {
             )
     }
 
-    static var secondsUntilMidnight: Int {
-        ChildSummaryCard.secondsUntilMidnight
-    }
+    static var secondsUntilMidnight: Int { Date.secondsUntilMidnight }
 }

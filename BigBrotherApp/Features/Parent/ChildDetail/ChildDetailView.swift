@@ -139,6 +139,12 @@ struct ChildDetailView: View {
             }
             await viewModel.loadEvents()
             viewModel.startAutoRefresh()
+            // Ensure timer cleanup on task cancellation (covers navigation-during-transition).
+            await withTaskCancellationHandler {
+                await Task.yield()
+            } onCancel: {
+                Task { @MainActor in viewModel.stopAutoRefresh() }
+            }
         }
         .onDisappear { viewModel.stopAutoRefresh() }
     }

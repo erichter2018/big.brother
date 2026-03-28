@@ -28,11 +28,7 @@ final class LocalParentUnlockViewModel {
         ("24 hours", "clock.badge.checkmark", 24 * 3600),
     ]
 
-    static var secondsUntilMidnight: Int {
-        let now = Date()
-        let midnight = Calendar.current.startOfDay(for: now).addingTimeInterval(86400)
-        return max(60, Int(midnight.timeIntervalSince(now)))
-    }
+    static var secondsUntilMidnight: Int { Date.secondsUntilMidnight }
 
     init(appState: AppState) {
         self.appState = appState

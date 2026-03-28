@@ -219,12 +219,5 @@ enum UnlockRequestNotificationService {
         return String(details.dropFirst("Requesting access to ".count))
     }
 
-    private static func secondsUntilMidnight() -> Int {
-        let cal = Calendar.current
-        let now = Date()
-        guard let tomorrow = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: now)) else {
-            return 3600
-        }
-        return max(Int(tomorrow.timeIntervalSince(now)), 60)
-    }
+    private static func secondsUntilMidnight() -> Int { Date.secondsUntilMidnight }
 }

@@ -196,13 +196,13 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
             // Web blocking.
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let hasAllowedWebDomains: Bool = {
+            let allowedWebDomains: [String] = {
                 if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
                    let domains = try? decoder.decode([String].self, from: data),
-                   !domains.isEmpty { return true }
-                return false
+                   !domains.isEmpty { return domains }
+                return []
             }()
-            let blockAllWeb = restrictions.denyWebWhenLocked && !hasAllowedWebDomains
+            let shouldBlockWeb = restrictions.denyWebWhenLocked
 
             // Apply hybrid blocking (mirrors Monitor extension logic).
             if !pickerTokens.isEmpty && allowExemptions {
@@ -216,7 +216,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 for s in [baseStore, scheduleStore] {
                     s.shield.applications = perAppTokens
                     s.shield.applicationCategories = .all(except: allowedTokens)
-                    s.shield.webDomainCategories = blockAllWeb ? .all() : nil
+                    if shouldBlockWeb {
+                        s.shield.webDomainCategories = .all()
+                        if !allowedWebDomains.isEmpty {
+                            let allowedSet = Set(allowedWebDomains.map { WebDomain(domain: $0) })
+                            s.shield.webDomains = .all(except: allowedSet)
+                        }
+                    } else {
+                        s.shield.webDomainCategories = nil
+                    }
                 }
             } else {
                 let apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
@@ -227,7 +235,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     } else {
                         s.shield.applicationCategories = .all(except: allowedTokens)
                     }
-                    s.shield.webDomainCategories = blockAllWeb ? .all() : nil
+                    if shouldBlockWeb {
+                        s.shield.webDomainCategories = .all()
+                        if !allowedWebDomains.isEmpty {
+                            let allowedSet = Set(allowedWebDomains.map { WebDomain(domain: $0) })
+                            s.shield.webDomains = .all(except: allowedSet)
+                        }
+                    } else {
+                        s.shield.webDomainCategories = nil
+                    }
                 }
             }
         }

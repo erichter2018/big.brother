@@ -209,7 +209,7 @@ final class TimerIntegrationService {
         do {
             let snapshot = try await kidRef.getDocument()
             guard let data = snapshot.data(),
-                  let penaltySeconds = data["penaltySeconds"] as? Int,
+                  let penaltySeconds = (data["penaltySeconds"] as? NSNumber)?.intValue,
                   penaltySeconds > 0,
                   data["timerEndTime"] == nil || data["timerEndTime"] is NSNull
             else { return }
@@ -262,7 +262,7 @@ final class TimerIntegrationService {
                 ])
             } else {
                 // Timer is stopped — add to penaltySeconds
-                let current = data["penaltySeconds"] as? Int ?? 0
+                let current = (data["penaltySeconds"] as? NSNumber)?.intValue ?? 0
                 let newSeconds = max(0, current + minutes * 60)
                 try await kidRef.updateData([
                     "penaltySeconds": newSeconds,

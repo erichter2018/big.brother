@@ -109,9 +109,5 @@ struct ModeActionButtons: View {
         }
     }
 
-    static var secondsUntilMidnight: Int {
-        let now = Date()
-        let midnight = Calendar.current.startOfDay(for: now).addingTimeInterval(86400)
-        return max(60, Int(midnight.timeIntervalSince(now)))
-    }
+    static var secondsUntilMidnight: Int { Date.secondsUntilMidnight }
 }

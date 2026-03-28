@@ -468,20 +468,8 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         return Int64(bytes)
     }
 
-    private static var currentOSVersion: String {
-        let os = ProcessInfo.processInfo.operatingSystemVersion
-        return "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
-    }
-
-    private static var currentModelIdentifier: String {
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        return withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: systemInfo.machine)) {
-                String(validatingUTF8: $0) ?? "unknown"
-            }
-        }
-    }
+    private static var currentOSVersion: String { DeviceInfo.osVersion }
+    private static var currentModelIdentifier: String { DeviceInfo.modelIdentifier }
 
     private static func cloudKitAccountStatus() async -> String {
         do {

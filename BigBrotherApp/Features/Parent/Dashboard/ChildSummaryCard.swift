@@ -32,7 +32,90 @@ struct ChildSummaryCard: View {
     let debugMode: Bool
     var namedPlaces: [NamedPlace]?
 
+    // MARK: - Pre-computed values (computed once per render, not per-property)
+
+    /// Holds values that are expensive to compute and used in multiple places.
+    /// Computed once at the start of `body` to avoid redundant iteration.
+    private var precomputed: PrecomputedValues {
+        let deviceIDs = Set(devices.map(\.id))
+        let childHeartbeats = heartbeats.filter { deviceIDs.contains($0.deviceID) }
+
+        // hasAnyPermissionIssue
+        var permissionIssue = false
+        for device in devices {
+            guard let hb = heartbeats.first(where: { $0.deviceID == device.id }) else { continue }
+            if !hb.familyControlsAuthorized { permissionIssue = true; break }
+            if let loc = hb.locationAuthorization, loc != "always" { permissionIssue = true; break }
+            if hb.tunnelConnected == false { permissionIssue = true; break }
+            if hb.motionAuthorized == false { permissionIssue = true; break }
+            if hb.notificationsAuthorized == false { permissionIssue = true; break }
+        }
+
+        // isOnOldBuild
+        let builds = childHeartbeats.compactMap(\.appBuildNumber)
+        let onOldBuild = (builds.min() ?? AppConstants.appBuildNumber) < AppConstants.appBuildNumber
+
+        // isShieldMismatch
+        var shieldMismatch = false
+        if countdown == nil && dominantMode != .unlocked {
+            for device in devices {
+                if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
+                   hb.currentMode != .unlocked,
+                   hb.shieldsActive == false {
+                    if let expires = hb.temporaryUnlockExpiresAt, expires > Date() { continue }
+                    shieldMismatch = true
+                    break
+                }
+            }
+        }
+
+        // isAppForceClosed
+        var appForceClosed = false
+        if let hb = childHeartbeats.first {
+            let heartbeatAge = Date().timeIntervalSince(hb.timestamp)
+            let threshold: TimeInterval = dominantMode == .unlocked ? 7200 : 3600
+            if heartbeatAge > threshold, let monitorActive = hb.monitorLastActiveAt {
+                appForceClosed = Date().timeIntervalSince(monitorActive) < 7200
+            }
+        }
+
+        // latestHeartbeatAge
+        var heartbeatAge: TimeInterval? = nil
+        for device in devices {
+            if let hb = heartbeats.first(where: { $0.deviceID == device.id }) {
+                heartbeatAge = Date().timeIntervalSince(hb.timestamp)
+                break
+            }
+        }
+
+        // jailbreak info (used in tertiaryLine)
+        let jailbreakReasons = devices.compactMap { dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakReason }
+        let hasJailbreak = !jailbreakReasons.isEmpty || devices.compactMap({ dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakDetected }).contains(true)
+
+        return PrecomputedValues(
+            hasAnyPermissionIssue: permissionIssue,
+            isOnOldBuild: onOldBuild,
+            isShieldMismatch: shieldMismatch,
+            isAppForceClosed: appForceClosed,
+            latestHeartbeatAge: heartbeatAge,
+            jailbreakReasons: jailbreakReasons,
+            hasJailbreak: hasJailbreak
+        )
+    }
+
+    private struct PrecomputedValues {
+        let hasAnyPermissionIssue: Bool
+        let isOnOldBuild: Bool
+        let isShieldMismatch: Bool
+        let isAppForceClosed: Bool
+        let latestHeartbeatAge: TimeInterval?
+        let jailbreakReasons: [String]
+        let hasJailbreak: Bool
+    }
+
     var body: some View {
+        let cached = precomputed
+
         HStack(spacing: 12) {
             // Avatar with mode ring
             avatarWithRing
@@ -40,21 +123,21 @@ struct ChildSummaryCard: View {
             // Name + status lines
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
-                    if hasAnyPermissionIssue {
+                    if cached.hasAnyPermissionIssue {
                         Image(systemName: "exclamationmark.circle.fill")
                             .font(.system(size: 10))
                             .foregroundStyle(.red)
                     }
-                    Text(child.name + (isOnOldBuild ? "…" : ""))
+                    Text(child.name + (cached.isOnOldBuild ? "…" : ""))
                         .font(.headline)
                         .lineLimit(1)
                 }
 
                 statusLine
 
-                tertiaryLine
+                tertiaryLine(cached: cached)
 
-                usageAndHeartbeatLine
+                usageAndHeartbeatLine(cached: cached)
 
                 locationLine
             }
@@ -84,7 +167,7 @@ struct ChildSummaryCard: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(cardAccessibilityLabel)
+        .accessibilityLabel(cardAccessibilityLabel(cached: cached))
     }
 
     // MARK: - Avatar with Glow
@@ -220,47 +303,13 @@ struct ChildSummaryCard: View {
 
     // MARK: - Tertiary Line (Line 3): Penalty + Self-Unlocks + Jailbreak
 
-    /// True when heartbeat says locked but ManagedSettingsStore shields are actually down.
-    /// Excludes active temporary unlocks — shields are supposed to be down during those.
-    /// True if any of this child's devices has a permission that isn't correctly set.
-    private var hasAnyPermissionIssue: Bool {
-        for device in devices {
-            guard let hb = heartbeats.first(where: { $0.deviceID == device.id }) else { continue }
-            if !hb.familyControlsAuthorized { return true }
-            if let loc = hb.locationAuthorization, loc != "always" { return true }
-            if hb.tunnelConnected == false { return true }
-            if hb.motionAuthorized == false { return true }
-            if hb.notificationsAuthorized == false { return true }
-        }
-        return false
-    }
-
-    private var isShieldMismatch: Bool {
-        // If the parent dashboard shows an active unlock countdown, shields are supposed to be down.
-        if countdown != nil || dominantMode == .unlocked {
-            return false
-        }
-        for device in devices {
-            if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
-               hb.currentMode != .unlocked,
-               hb.shieldsActive == false {
-                // Don't flag during active temp unlock (per-device check too)
-                if let expires = hb.temporaryUnlockExpiresAt, expires > Date() {
-                    continue
-                }
-                return true
-            }
-        }
-        return false
-    }
-
     @ViewBuilder
-    private var tertiaryLine: some View {
+    private func tertiaryLine(cached: PrecomputedValues) -> some View {
         let hasPenalty = penaltyTimer != nil
         let hasSelfUnlocks = (selfUnlockBudget ?? 0) > 0
-        let jailbreakReasons = devices.compactMap({ dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakReason })
-        let hasJailbreak = !jailbreakReasons.isEmpty || devices.compactMap({ dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakDetected }).contains(true)
-        let hasShieldMismatch = isShieldMismatch
+        let jailbreakReasons = cached.jailbreakReasons
+        let hasJailbreak = cached.hasJailbreak
+        let hasShieldMismatch = cached.isShieldMismatch
 
         if hasPenalty || hasSelfUnlocks || hasJailbreak || hasShieldMismatch {
             HStack(spacing: 4) {
@@ -321,7 +370,7 @@ struct ChildSummaryCard: View {
     // MARK: - Usage & Heartbeat Line (Line 4): Screen Time + Online Status
 
     @ViewBuilder
-    private var usageAndHeartbeatLine: some View {
+    private func usageAndHeartbeatLine(cached: PrecomputedValues) -> some View {
         HStack(spacing: 4) {
             // Screen time
             if let minutes = screenTimeMinutes {
@@ -339,7 +388,7 @@ struct ChildSummaryCard: View {
             }
 
             // Online/heartbeat indicator
-            if let lastSeen = latestHeartbeatAge {
+            if let lastSeen = cached.latestHeartbeatAge {
                 if screenTimeMinutes != nil {
                     Text("\u{00B7}").foregroundStyle(.tertiary)
                 }
@@ -351,7 +400,7 @@ struct ChildSummaryCard: View {
                             .foregroundStyle(.secondary)
                     }
                     .accessibilityLabel("Device online")
-                } else if isAppForceClosed {
+                } else if cached.isAppForceClosed {
                     HStack(spacing: 2) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 8))
@@ -430,18 +479,6 @@ struct ChildSummaryCard: View {
     /// The first iPhone device for this child (location tracking is iPhone-only).
     private var iphoneDevice: ChildDevice? {
         devices.first { $0.modelIdentifier.hasPrefix("iPhone") }
-    }
-
-    /// Seconds since latest heartbeat, preferring iPhone over iPad.
-    /// The `devices` array is pre-sorted with iPhones first by the view model.
-    private var latestHeartbeatAge: TimeInterval? {
-        // Prefer the first device's (iPhone if available) heartbeat.
-        for device in devices {
-            if let hb = heartbeats.first(where: { $0.deviceID == device.id }) {
-                return Date().timeIntervalSince(hb.timestamp)
-            }
-        }
-        return nil
     }
 
     /// Latest location data from heartbeats (preferring iPhone).
@@ -607,7 +644,7 @@ struct ChildSummaryCard: View {
 
     // MARK: - Accessibility
 
-    private var cardAccessibilityLabel: String {
+    private func cardAccessibilityLabel(cached: PrecomputedValues) -> String {
         var parts: [String] = [child.name]
 
         // Mode
@@ -634,10 +671,10 @@ struct ChildSummaryCard: View {
         }
 
         // Online status
-        if let lastSeen = latestHeartbeatAge {
+        if let lastSeen = cached.latestHeartbeatAge {
             if lastSeen < 30 {
                 parts.append("Online")
-            } else if isAppForceClosed {
+            } else if cached.isAppForceClosed {
                 parts.append("Warning, app not running")
             } else {
                 parts.append("Offline, last seen \(formatAge(lastSeen))")
@@ -668,38 +705,9 @@ struct ChildSummaryCard: View {
         dominantMode == .unlocked
     }
 
-    /// True if the main app was force-closed (or killed by iOS): Monitor is alive but heartbeats stopped.
-    /// Detected when monitorLastActiveAt is recent but heartbeat is stale.
-    /// When unlocked, uses a longer 2-hour threshold to avoid false positives from
-    /// iOS suspending the app during resource-intensive games.
-    private var isAppForceClosed: Bool {
-        let deviceIDs = Set(devices.map(\.id))
-        let childHeartbeats = heartbeats.filter { deviceIDs.contains($0.deviceID) }
-        guard let hb = childHeartbeats.first else { return false }
-        let heartbeatAge = Date().timeIntervalSince(hb.timestamp)
-        // When unlocked, use 2-hour threshold — iOS aggressively suspends the app
-        // during games but BGTask still wakes it within ~30 min. If 2+ hours pass
-        // with no heartbeat while unlocked, the app is truly dead.
-        // When locked, use 1-hour threshold.
-        let threshold: TimeInterval = dominantMode == .unlocked ? 7200 : 3600
-        guard heartbeatAge > threshold else { return false }
-        // Monitor must have been active recently (within 2 hours) to confirm
-        // the device itself is still powered on and running.
-        guard let monitorActive = hb.monitorLastActiveAt else { return false }
-        let monitorAge = Date().timeIntervalSince(monitorActive)
-        return monitorAge < 7200
-    }
-
-    /// True if ANY of this child's devices is running an older build than current.
-    private var isOnOldBuild: Bool {
-        let deviceIDs = Set(devices.map(\.id))
-        let builds = heartbeats
-            .filter { deviceIDs.contains($0.deviceID) }
-            .compactMap(\.appBuildNumber)
-        guard let minBuild = builds.min() else { return false }
-        // Worst case: if any device is old, show the indicator.
-        return minBuild < AppConstants.appBuildNumber
-    }
+    // Note: isAppForceClosed, isOnOldBuild, hasAnyPermissionIssue, isShieldMismatch,
+    // latestHeartbeatAge, and jailbreak checks are now pre-computed once per render
+    // cycle in the `precomputed` property and passed via PrecomputedValues.
 
     /// Vivid color — used only for avatar glow.
     private var modeColor: Color {
@@ -726,11 +734,7 @@ struct ChildSummaryCard: View {
     private static let mutedTeal = Color(.systemTeal).opacity(0.7)
     private static let mutedRed = Color(red: 1.0, green: 0.45, blue: 0.4).opacity(0.8)
 
-    static var secondsUntilMidnight: Int {
-        let now = Date()
-        let midnight = Calendar.current.startOfDay(for: now).addingTimeInterval(86400)
-        return max(60, Int(midnight.timeIntervalSince(now)))
-    }
+    static var secondsUntilMidnight: Int { Date.secondsUntilMidnight }
 }
 
 // MARK: - Color from Hex

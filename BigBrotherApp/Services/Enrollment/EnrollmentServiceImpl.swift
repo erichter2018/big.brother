@@ -141,15 +141,7 @@ final class EnrollmentServiceImpl: EnrollmentServiceProtocol {
     // MARK: - Device Info Helpers
 
     /// Get the current device's model identifier (e.g., "iPhone15,2").
-    static var currentModelIdentifier: String {
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        return withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: systemInfo.machine)) {
-                String(validatingUTF8: $0) ?? "Unknown"
-            }
-        }
-    }
+    static var currentModelIdentifier: String { DeviceInfo.modelIdentifier }
 
     /// Get a display name for this device.
     static var currentDeviceDisplayName: String {

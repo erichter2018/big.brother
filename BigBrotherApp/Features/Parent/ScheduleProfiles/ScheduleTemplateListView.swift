@@ -111,9 +111,4 @@ struct ScheduleTemplateListView: View {
     }
 }
 
-// Safe subscript for arrays.
-private extension Array {
-    subscript(safe index: Index) -> Element? {
-        indices.contains(index) ? self[index] : nil
-    }
-}
+// Safe subscript provided by BigBrotherCore Collection+Safe extension.
