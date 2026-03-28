@@ -594,11 +594,15 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     // MARK: - Cleanup
 
-    func deleteRecords(type: String, predicate: NSPredicate) async throws -> Int {
-        let records = try await query(type, predicate: predicate)
+    func deleteRecords(type: String, predicate: NSPredicate, limit: Int? = nil) async throws -> Int {
+        let allRecords = try await query(type, predicate: predicate)
+        let records = limit.map { Array(allRecords.prefix($0)) } ?? allRecords
         guard !records.isEmpty else { return 0 }
 
         // Delete in batches of 400 (CloudKit limit is 400 per operation).
+        // Track actual per-record success since public DB only allows the
+        // record creator to delete — permission failures are silent at the
+        // operation level.
         var deleted = 0
         for batchStart in stride(from: 0, to: records.count, by: 400) {
             let batchEnd = min(batchStart + 400, records.count)
@@ -607,7 +611,14 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             let op = CKModifyRecordsOperation(recordIDsToDelete: Array(ids))
             op.qualityOfService = .utility
 
+            let batchDeleted = LockedCounter()
+
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                op.perRecordDeleteBlock = { _, result in
+                    if case .success = result {
+                        batchDeleted.increment()
+                    }
+                }
                 op.modifyRecordsResultBlock = { result in
                     switch result {
                     case .success:
@@ -618,9 +629,17 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 }
                 database.add(op)
             }
-            deleted += ids.count
+            deleted += batchDeleted.value
         }
         return deleted
+    }
+
+    /// Thread-safe counter for use in CloudKit operation callbacks.
+    private final class LockedCounter: @unchecked Sendable {
+        private var _value = 0
+        private let lock = NSLock()
+        func increment() { lock.lock(); _value += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return _value }
     }
 
     // MARK: - Private CloudKit Helpers

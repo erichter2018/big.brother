@@ -472,10 +472,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         record["policyVersion"] = policyVersion as NSNumber
 
-        // Battery level
-        #if canImport(UIKit)
-        // UIDevice not available in NE extension — skip battery
-        #endif
+        // Null out fields the tunnel cannot refresh — prevents stale main-app
+        // values from persisting in the upserted CKRecord after app offload.
+        record["hbScreenTimeMins"] = nil
+        record["hbDriving"] = nil
+        record["hbSpeed"] = nil
+        record["hbLocked"] = nil
 
         do {
             try await db.save(record)

@@ -102,10 +102,18 @@ protocol CloudKitServiceProtocol: Sendable {
     // MARK: - Cleanup
 
     /// Delete old records of the given type matching a predicate.
-    func deleteRecords(type: String, predicate: NSPredicate) async throws -> Int
+    /// Pass `limit` to cap the number of deletions per call (prevents quota spikes).
+    func deleteRecords(type: String, predicate: NSPredicate, limit: Int?) async throws -> Int
 
     // MARK: - Subscriptions
 
     /// Set up CKQuerySubscriptions for near-real-time command delivery.
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws
+}
+
+extension CloudKitServiceProtocol {
+    /// Convenience overload without limit (deletes all matching records).
+    func deleteRecords(type: String, predicate: NSPredicate) async throws -> Int {
+        try await deleteRecords(type: type, predicate: predicate, limit: nil)
+    }
 }

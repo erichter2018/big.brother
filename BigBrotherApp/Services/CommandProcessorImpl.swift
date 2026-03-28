@@ -143,7 +143,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 print("[BigBrother] Superseded mode command: \(cmd.action.displayDescription) (id=\(cmd.id))")
                 #endif
                 try? storage.markCommandProcessed(cmd.id)
-                // Post a receipt so the parent sees it was superseded, not stuck pending.
+                // Post a receipt and update status so parent sees it was superseded.
                 let receipt = makeReceipt(
                     commandID: cmd.id,
                     deviceID: enrollment.deviceID,
@@ -152,6 +152,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     reason: "Superseded by newer mode command"
                 )
                 try? await cloudKit.saveReceipt(receipt)
+                try? await cloudKit.updateCommandStatus(cmd.id, status: .applied)
             }
         }
         let skippedMode = modeCommands.count - effectiveModeCommands.count
@@ -165,9 +166,11 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 // Keep the newer one, mark the older as processed to skip next time.
                 if cmd.issuedAt > existing.issuedAt {
                     try? storage.markCommandProcessed(existing.id)
+                    try? await cloudKit.updateCommandStatus(existing.id, status: .applied)
                     latestConfig[key] = cmd
                 } else {
                     try? storage.markCommandProcessed(cmd.id)
+                    try? await cloudKit.updateCommandStatus(cmd.id, status: .applied)
                 }
             } else {
                 latestConfig[key] = cmd
@@ -197,7 +200,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             print("[BigBrother] Command result: \(result.logReason)")
             #endif
 
-            // Post receipt and try to update command record directly.
+            // Post receipt and update the command's CloudKit status so it's no longer
+            // returned by fetchPendingCommands on subsequent polls.
             if result.shouldPostReceipt, let receiptStatus = result.receiptStatus {
                 let receipt = makeReceipt(
                     commandID: command.id,
@@ -207,6 +211,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     reason: result == .applied ? nil : result.logReason
                 )
                 try? await cloudKit.saveReceipt(receipt)
+                try? await cloudKit.updateCommandStatus(command.id, status: receiptStatus)
             }
 
             try? storage.markCommandProcessed(command.id)

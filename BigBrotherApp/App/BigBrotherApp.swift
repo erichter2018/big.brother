@@ -200,7 +200,7 @@ struct BigBrotherApp: App {
                     _LaunchLog.log("Parent: subscriptions done")
                 }
                 _LaunchLog.log("Parent: refreshing dashboard")
-                try? await MainActor.run { await appState.refreshDashboard() }
+                try? await appState.refreshDashboard()
                 _LaunchLog.log("Parent: dashboard refreshed")
 
                 // Start monitoring child device heartbeats for offline alerts.

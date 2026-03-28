@@ -1504,6 +1504,14 @@ final class AppState {
         startScheduleSync()
         startEventSync()
         DeviceLockMonitor.shared.startMonitoring()
+
+        // Child devices clean up their own old records (parent can't delete
+        // child-created records in CloudKit's public database).
+        if let familyID = enrollmentState?.familyID, let ck = cloudKit {
+            Task.detached {
+                await CloudKitCleanupService.performCleanup(cloudKit: ck, familyID: familyID)
+            }
+        }
     }
 
     /// On child startup, if there's no local policy snapshot (e.g. fresh install

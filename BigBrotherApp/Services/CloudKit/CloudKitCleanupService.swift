@@ -20,10 +20,11 @@ enum CloudKitCleanupService {
     // MARK: - Retention Periods
 
     /// Commands and receipts older than this are deleted.
-    private static let commandRetention: TimeInterval = 4 * 3600 // 4 hours
+    private static let commandRetention: TimeInterval = 24 * 3600 // 24 hours
 
     /// Event logs older than this are deleted.
     private static let eventRetention: TimeInterval = 7 * 86400 // 7 days
+
 
     // MARK: - Public API
 
@@ -36,9 +37,11 @@ enum CloudKitCleanupService {
     ) async -> Int {
         var total = 0
 
-        // 1. Old commands (applied, failed, or expired).
+        // 1. Old commands — includes pending as a safety net for commands that were
+        //    never processed (e.g., device was offline for days). The 24-hour retention
+        //    is well past the command expiry window.
         let commandCutoff = Date().addingTimeInterval(-commandRetention)
-        for status in ["applied", "failed", "expired"] {
+        for status in ["applied", "failed", "expired", "pending"] {
             let predicate = NSPredicate(
                 format: "%K == %@ AND %K == %@ AND %K < %@",
                 CKFieldName.familyID, familyID.rawValue,
@@ -48,7 +51,8 @@ enum CloudKitCleanupService {
             do {
                 let count = try await cloudKit.deleteRecords(
                     type: CKRecordType.remoteCommand,
-                    predicate: predicate
+                    predicate: predicate,
+                    limit: nil
                 )
                 total += count
                 #if DEBUG
@@ -70,7 +74,8 @@ enum CloudKitCleanupService {
         do {
             let count = try await cloudKit.deleteRecords(
                 type: CKRecordType.commandReceipt,
-                predicate: receiptPredicate
+                predicate: receiptPredicate,
+                limit: nil
             )
             total += count
             #if DEBUG
@@ -92,7 +97,8 @@ enum CloudKitCleanupService {
         do {
             let count = try await cloudKit.deleteRecords(
                 type: CKRecordType.eventLog,
-                predicate: eventPredicate
+                predicate: eventPredicate,
+                limit: nil
             )
             total += count
             #if DEBUG
@@ -114,7 +120,8 @@ enum CloudKitCleanupService {
         do {
             let count = try await cloudKit.deleteRecords(
                 type: CKRecordType.deviceLocation,
-                predicate: locationPredicate
+                predicate: locationPredicate,
+                limit: nil
             )
             total += count
             #if DEBUG
