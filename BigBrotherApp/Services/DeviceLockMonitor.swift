@@ -20,6 +20,7 @@ final class DeviceLockMonitor {
     private let dateKey = "screenTimeDate"
     private let minutesKey = "screenTimeMinutes"
     private let secondsKey = "screenTimeAccumulatedSeconds"
+    private let unlockCountKey = "screenUnlockCount"
 
     private init() {}
 
@@ -81,7 +82,12 @@ final class DeviceLockMonitor {
                 defaults?.set(today, forKey: dateKey)
                 defaults?.set(0, forKey: secondsKey)
                 defaults?.set(0, forKey: minutesKey)
+                defaults?.set(0, forKey: unlockCountKey)
             }
+
+            // Increment unlock count
+            let count = defaults?.integer(forKey: unlockCountKey) ?? 0
+            defaults?.set(count + 1, forKey: unlockCountKey)
         }
     }
 

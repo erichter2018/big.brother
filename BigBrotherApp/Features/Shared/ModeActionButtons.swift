@@ -3,18 +3,20 @@ import BigBrotherCore
 
 /// Reusable row of mode-change buttons used in child detail and device detail.
 ///
-/// Unlock is a Menu: tap = 24h, long-press shows 1h / 1.5h / 2h / 24h / delayed.
-/// Lock is a Menu: tap = until midnight, long-press shows duration options.
+/// Unlock: tap = +15 min, long-press shows duration options.
+/// Restrict: tap = indefinite, long-press shows duration + schedule options.
+/// Lock: tap = lock, long-press shows lock down options.
 struct ModeActionButtons: View {
     let onSetMode: (LockMode) -> Void
     let onTemporaryUnlock: (Int) -> Void  // duration in seconds
     var onLockWithDuration: ((LockDuration) -> Void)? = nil
+    var onLockDown: ((Int?) -> Void)? = nil
     var disabled: Bool = false
     var remainingSeconds: Int? = nil
 
     var body: some View {
         HStack(spacing: 8) {
-            // Unlock: tap = 24h, long-press = duration menu
+            // Unlock: tap = +15 min, long-press = duration menu
             Menu {
                 if let remaining = remainingSeconds, remaining > 0 {
                     Button { onTemporaryUnlock(remaining + 15 * 60) } label: {
@@ -28,9 +30,6 @@ struct ModeActionButtons: View {
                 Button { onTemporaryUnlock(1 * 3600) } label: {
                     Label("1 hour", systemImage: "clock")
                 }
-                Button { onTemporaryUnlock(5400) } label: {
-                    Label("1.5 hours", systemImage: "clock")
-                }
                 Button { onTemporaryUnlock(2 * 3600) } label: {
                     Label("2 hours", systemImage: "clock")
                 }
@@ -40,10 +39,6 @@ struct ModeActionButtons: View {
                 }
                 Button { onTemporaryUnlock(24 * 3600) } label: {
                     Label("24 hours", systemImage: "clock.badge.checkmark")
-                }
-                Divider()
-                Button { onTemporaryUnlock(7 * 24 * 3600) } label: {
-                    Label("Indefinitely", systemImage: "infinity")
                 }
             } label: {
                 VStack(spacing: 2) {
@@ -62,12 +57,26 @@ struct ModeActionButtons: View {
                 }
             }
 
-            // Lock: tap = until midnight, long-press = duration menu
+            // Restrict: tap = indefinite, long-press = duration + schedule
             if let onLockWithDuration {
                 Menu {
-                    Button { onLockWithDuration(.indefinite) } label: {
-                        Label("Lock", systemImage: "lock.fill")
+                    Button { onLockWithDuration(.untilMidnight) } label: {
+                        Label("Until midnight", systemImage: "moon.fill")
                     }
+                    Button { onLockWithDuration(.indefinite) } label: {
+                        Label("Until I unlock", systemImage: "lock.fill")
+                    }
+                    Divider()
+                    Button { onLockWithDuration(.hours(1)) } label: {
+                        Label("1 hour", systemImage: "clock")
+                    }
+                    Button { onLockWithDuration(.hours(2)) } label: {
+                        Label("2 hours", systemImage: "clock")
+                    }
+                    Button { onLockWithDuration(.hours(4)) } label: {
+                        Label("4 hours", systemImage: "clock")
+                    }
+                    Divider()
                     Button { onLockWithDuration(.returnToSchedule) } label: {
                         Label("Return to Schedule", systemImage: "calendar.badge.clock")
                     }
@@ -86,7 +95,46 @@ struct ModeActionButtons: View {
             } else {
                 modeButton("Restrict", icon: "lock.fill", color: .blue, mode: .restricted)
             }
-            modeButton("Lock", icon: "shield", color: .purple, mode: .locked)
+
+            // Lock: tap = lock, long-press = lock down options
+            if let onLockDown {
+                Menu {
+                    Button { onSetMode(.locked) } label: {
+                        Label("Lock", systemImage: "shield.fill")
+                    }
+                    Divider()
+                    Button { onLockDown(900) } label: {
+                        Label("Lock Down 15 min", systemImage: "wifi.slash")
+                    }
+                    Menu {
+                        Button { onLockDown(1800) } label: {
+                            Label("30 minutes", systemImage: "wifi.slash")
+                        }
+                        Button { onLockDown(3600) } label: {
+                            Label("1 hour", systemImage: "wifi.slash")
+                        }
+                        Divider()
+                        Button { onLockDown(nil) } label: {
+                            Label("Indefinite", systemImage: "wifi.slash")
+                        }
+                    } label: {
+                        Label("Lock Down...", systemImage: "wifi.slash")
+                    }
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: "shield").font(.subheadline)
+                        Text("Lock").font(.caption2).fontWeight(.medium)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(.purple)
+                    .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .purple)
+                } primaryAction: {
+                    onSetMode(.locked)
+                }
+            } else {
+                modeButton("Lock", icon: "shield", color: .purple, mode: .locked)
+            }
         }
         .disabled(disabled)
         .opacity(disabled ? 0.6 : 1)

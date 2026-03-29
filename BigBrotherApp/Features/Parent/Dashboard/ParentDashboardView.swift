@@ -193,16 +193,11 @@ struct ParentDashboardView: View {
             isSending: viewModel.isSendingCommand,
             countdown: viewModel.countdownString(for: child),
             lockDownCountdown: {
-                guard let expiry = viewModel.lockDownExpiries[child.id] else {
-                    print("[BigBrother] VIEW lockDownCountdown nil for \(child.name) — no expiry (dict count=\(viewModel.lockDownExpiries.count))")
-                    return nil
-                }
+                guard let expiry = viewModel.lockDownExpiries[child.id] else { return nil }
                 let secs = max(0, Int(expiry.timeIntervalSince(viewModel.now)))
                 guard secs > 0 else { return nil }
                 let h = secs / 3600; let m = (secs % 3600) / 60; let s = secs % 60
-                let result = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
-                print("[BigBrother] VIEW lockDownCountdown for \(child.name) = \(result)")
-                return result
+                return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
             }(),
             remainingSeconds: viewModel.remainingSeconds(for: child),
             penaltyTimer: viewModel.penaltyTimerString(for: child),

@@ -164,6 +164,7 @@ enum CKFieldName {
     static let hbTimeZoneID = "hbTimeZoneID"
     static let hbTimeZoneOffset = "hbTimeZoneOffset"
     static let hbScreenTimeMinutes = "hbScreenTimeMins"
+    static let hbScreenUnlockCount = "hbUnlockCount"
     static let hbJailbreakDetected = "hbJailbreak"
     static let hbJailbreakReason = "hbJailbreakReason"
     static let hbIsDriving = "hbDriving"

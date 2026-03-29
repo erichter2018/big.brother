@@ -354,6 +354,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             timeZoneIdentifier: TimeZone.current.identifier,
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
+            screenUnlockCount: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "screenUnlockCount"),
             jailbreakDetected: JailbreakDetector.isJailbroken(),
             jailbreakReason: JailbreakDetector.detectedReason(),
             isDriving: locationService?.isMoving == true ? true : nil,

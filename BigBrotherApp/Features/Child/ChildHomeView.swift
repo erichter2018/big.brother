@@ -642,7 +642,7 @@ struct ChildHomeView: View {
         if reason.hasPrefix("Free") { return .green }
         if reason.hasPrefix("Locked Down") { return .red }
         if reason.hasPrefix("Locked") { return .purple }
-        if reason.contains("until") { return .blue }
+        if reason.hasPrefix("Restricted") { return .blue }
         return .white.opacity(0.6)
     }
 

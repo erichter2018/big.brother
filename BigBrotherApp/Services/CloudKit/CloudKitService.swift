@@ -49,6 +49,7 @@ protocol CloudKitServiceProtocol: Sendable {
 
     func sendHeartbeat(_ heartbeat: DeviceHeartbeat) async throws
     func fetchLatestHeartbeats(familyID: FamilyID) async throws -> [DeviceHeartbeat]
+    func fetchHeartbeats(familyID: FamilyID, since: Date) async throws -> [DeviceHeartbeat]
 
     // MARK: - Events
 

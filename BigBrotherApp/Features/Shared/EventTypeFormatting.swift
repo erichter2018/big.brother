@@ -30,6 +30,7 @@ extension EventType {
         case .namedPlaceDeparture: "Departed"
         case .tripCompleted: "Trip Completed"
         case .sosAlert: "SOS Alert"
+        case .selfUnlockUsed: "Self-Unlock Used"
         }
     }
 }

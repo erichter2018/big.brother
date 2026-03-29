@@ -103,26 +103,27 @@ final class ChildHomeViewModel {
                 return "Free time"
             } else if inEssential {
                 if let transition = profile.nextTransitionTime(from: now) {
-                    return "Essential until \(formatter.string(from: transition))"
-                }
-                return "Essential mode"
-            } else {
-                if let transition = profile.nextTransitionTime(from: now) {
                     return "Locked until \(formatter.string(from: transition))"
                 }
-                return "Locked — \(profile.name)"
+                return "Locked"
+            } else {
+                if let transition = profile.nextTransitionTime(from: now) {
+                    return "Restricted until \(formatter.string(from: transition))"
+                }
+                return "Restricted — \(profile.name)"
             }
         }
 
-        // Parent locked indefinitely
-        return "Locked"
+        // Parent command — don't repeat the mode name, it's already the title
+        return nil
     }
 
     /// Human-readable schedule status, e.g. "Free until 8:00 PM" or "Locked until 3:00 PM".
     var scheduleStatusText: String? {
         guard let profile = activeScheduleProfile else { return nil }
         let inFree = profile.isInFreeWindow(at: now)
-        let label = inFree ? "Free" : "Locked"
+        let inEssential = profile.isInEssentialWindow(at: now)
+        let label = inFree ? "Free" : inEssential ? "Locked" : "Restricted"
         if let transition = profile.nextTransitionTime(from: now) {
             let formatter = DateFormatter()
             formatter.dateFormat = "h:mm a"
@@ -233,6 +234,7 @@ final class ChildHomeViewModel {
         let updated = state.consuming(one: today)
         try? appState.storage.writeSelfUnlockState(updated)
         appState.applySelfUnlock()
+        appState.eventLogger?.log(.selfUnlockUsed, details: "Self-unlock used (\(updated.usedCount)/\(updated.budget) today)")
     }
 
     // MARK: - Penalty Timer (relayed from parent via CloudKit)

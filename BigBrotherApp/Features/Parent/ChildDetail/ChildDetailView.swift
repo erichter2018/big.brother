@@ -1,4 +1,6 @@
 import SwiftUI
+import MapKit
+import CoreLocation
 import BigBrotherCore
 
 /// Detail view for a child profile — devices, mode controls, approved apps.
@@ -18,31 +20,58 @@ struct ChildDetailView: View {
     @State private var showNamedPlaceEditor = false
     @State private var permissionsFeedback: String?
 
+    @State private var showFullActivity = false
+
     var body: some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(spacing: 16) {
                 // 1. Mode controls (most used — always at top)
                 ModeActionButtons(
                     onSetMode: { mode in Task { await viewModel.setMode(mode) } },
                     onTemporaryUnlock: { seconds in Task { await viewModel.temporaryUnlock(seconds: seconds) } },
                     onLockWithDuration: { duration in Task { await viewModel.lockWithDuration(duration) } },
+                    onLockDown: { seconds in Task { await viewModel.lockDown(seconds: seconds) } },
                     disabled: viewModel.isSendingCommand,
                     remainingSeconds: viewModel.remainingUnlockSeconds
                 )
 
-                // 2. Devices — status focused, actions in menus
-                devicesSection
+                // 2. Mini map — tap to open full map/trips
+                miniMapSection
 
-                // 3. Location — show if mode is set OR any heartbeat has location data
-                if locationMode != .off || viewModel.heartbeats.contains(where: { $0.latitude != nil }) {
-                    locationCard
+                // 3. Today's summary — screen time, battery, last seen
+                todaySummary
+
+                // 4. Screen time trend (7-day chart)
+                ScreenTimeTrendChart(dailyMinutes: viewModel.weeklyScreenTime)
+
+                // 5. Activity feed (5 most recent)
+                VStack(alignment: .leading, spacing: 0) {
+                    ActivityFeedSection(entries: viewModel.timeline, limit: 5)
+                    if viewModel.timeline.count > 5 {
+                        NavigationLink(destination: fullActivityList) {
+                            HStack {
+                                Spacer()
+                                Text("See All Activity")
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(.blue)
+                                Spacer()
+                            }
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
+                        }
+                    }
                 }
 
+                // 6. Temporary apps (if any)
                 if !viewModel.temporaryAllowedAppsForChild.isEmpty {
                     temporaryAppsRow
                 }
 
-                appsRow
+                // 8. Devices (collapsible)
+                devicesSection
 
                 // Feedback
                 if let feedback = viewModel.commandFeedback {
@@ -134,6 +163,7 @@ struct ChildDetailView: View {
                 UserDefaults.standard.set("continuous", forKey: "locationMode.\(viewModel.child.id.rawValue)")
             }
             await viewModel.loadEvents()
+            await viewModel.loadWeeklyScreenTime()
             viewModel.startAutoRefresh()
             // Ensure timer cleanup on task cancellation (covers navigation-during-transition).
             await withTaskCancellationHandler {
@@ -145,7 +175,160 @@ struct ChildDetailView: View {
         .onDisappear { viewModel.stopAutoRefresh() }
     }
 
-    // MARK: - 2. Devices
+    // MARK: - Mini Map
+
+    @State private var navigateToMap = false
+
+    @ViewBuilder
+    private var miniMapSection: some View {
+        let hbWithLoc = viewModel.heartbeats.first(where: { $0.latitude != nil })
+        if let lat = hbWithLoc?.latitude, let lng = hbWithLoc?.longitude {
+            let homeCoord = homeCoordinate
+            let isHome = isAtHome(lat: lat, lng: lng)
+            NavigationLink {
+                LocationMapView(
+                    child: viewModel.child,
+                    devices: viewModel.devices,
+                    heartbeats: viewModel.heartbeats,
+                    cloudKit: viewModel.appState.cloudKit,
+                    onLocate: { await viewModel.requestLocation() }
+                )
+            } label: {
+                let placeName = resolvedPlaceName(lat: lat, lng: lng, fallback: hbWithLoc?.locationAddress)
+                MiniMapCard(
+                    latitude: lat,
+                    longitude: lng,
+                    address: placeName,
+                    timestamp: hbWithLoc?.locationTimestamp,
+                    isAtHome: isHome,
+                    homeCoordinate: homeCoord,
+                    isDriving: hbWithLoc?.isDriving == true,
+                    speedMph: {
+                        guard let speed = hbWithLoc?.currentSpeed, speed > 0 else { return nil }
+                        return Int(speed * 2.237) // m/s to mph
+                    }()
+                )
+            }
+            .buttonStyle(.plain)
+        } else if locationMode != .off {
+            MiniMapPlaceholder()
+        }
+    }
+
+    private var homeCoordinate: CLLocationCoordinate2D? {
+        let defaults = UserDefaults.standard
+        // Check per-device keys (parent stores as homeLatitude.<deviceID>)
+        for device in viewModel.devices {
+            let latKey = "homeLatitude.\(device.id.rawValue)"
+            let lonKey = "homeLongitude.\(device.id.rawValue)"
+            if let lat = defaults.object(forKey: latKey) as? Double,
+               let lon = defaults.object(forKey: lonKey) as? Double {
+                return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            }
+        }
+        // Fallback: plain keys (child side / App Group)
+        if let lat = defaults.object(forKey: "homeLatitude") as? Double,
+           let lon = defaults.object(forKey: "homeLongitude") as? Double {
+            return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+        }
+        return nil
+    }
+
+    /// Resolve lat/lng to a named place (Home, School, etc.) or fall back to address.
+    private func resolvedPlaceName(lat: Double, lng: Double, fallback: String?) -> String? {
+        let loc = CLLocation(latitude: lat, longitude: lng)
+
+        // Check home first
+        if let home = homeCoordinate {
+            let homeLoc = CLLocation(latitude: home.latitude, longitude: home.longitude)
+            if loc.distance(from: homeLoc) < 150 { return "Home" }
+        }
+
+        // Check named places
+        for place in viewModel.namedPlaces {
+            let placeLoc = CLLocation(latitude: place.latitude, longitude: place.longitude)
+            if loc.distance(from: placeLoc) < Double(place.radiusMeters) {
+                return place.name
+            }
+        }
+
+        return fallback
+    }
+
+    private func isAtHome(lat: Double, lng: Double) -> Bool {
+        guard let home = homeCoordinate else { return false }
+        let childLoc = CLLocation(latitude: lat, longitude: lng)
+        let homeLoc = CLLocation(latitude: home.latitude, longitude: home.longitude)
+        return childLoc.distance(from: homeLoc) < 150
+    }
+
+    // MARK: - Today Summary
+
+    @ViewBuilder
+    private var todaySummary: some View {
+        let hb = viewModel.heartbeats.first
+        let screenMins: Int? = {
+            guard let hb, let mins = hb.screenTimeMinutes,
+                  hb.timestamp >= Calendar.current.startOfDay(for: Date()),
+                  hb.heartbeatSource != "vpnExtension" else { return nil }
+            return mins
+        }()
+
+        // Schedule status
+        let schedStatus: String? = {
+            guard let profile = viewModel.appState.storage.readActiveScheduleProfile() else { return nil }
+            // Check across all child devices
+            for device in viewModel.devices {
+                if let deviceSchedule = viewModel.appState.childDevices.first(where: { $0.id == device.id })?.scheduleProfileID {
+                    let _ = deviceSchedule // schedule is assigned
+                }
+            }
+            let mode = profile.resolvedMode(at: Date())
+            let formatter = DateFormatter()
+            formatter.dateFormat = "h:mm a"
+            if let next = profile.nextTransitionTime(from: Date()) {
+                return "\(profile.name) · \(mode.displayName) until \(formatter.string(from: next))"
+            }
+            return "\(profile.name) · \(mode.displayName)"
+        }()
+
+        TodaySummaryCard(
+            screenTimeMinutes: screenMins,
+            screenUnlockCount: hb?.screenUnlockCount,
+            batteryLevel: hb?.batteryLevel,
+            isCharging: hb?.isCharging ?? false,
+            lastHeartbeat: hb?.timestamp,
+            heartbeatSource: hb?.heartbeatSource,
+            scheduleStatus: schedStatus
+        )
+    }
+
+    // MARK: - Full Activity List
+
+    @ViewBuilder
+    private var fullActivityList: some View {
+        List {
+            ForEach(viewModel.timeline) { entry in
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(entry.isCommand ? Color.purple : .blue)
+                        .frame(width: 6, height: 6)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.label)
+                            .font(.subheadline)
+                        Text(entry.timestamp, style: .relative)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Activity")
+    }
+
+    // MARK: - Devices (Collapsible)
+
+    @State private var expandedDevices: Set<DeviceID> = []
 
     @ViewBuilder
     private var devicesSection: some View {
@@ -162,10 +345,168 @@ struct ChildDetailView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(viewModel.devices) { device in
-                    deviceCard(device)
+                    collapsibleDeviceCard(device)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func collapsibleDeviceCard(_ device: ChildDevice) -> some View {
+        let hb = viewModel.heartbeat(for: device)
+        let isExpanded = expandedDevices.contains(device.id)
+
+        VStack(alignment: .leading, spacing: 0) {
+            // Collapsed header — always visible
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if isExpanded {
+                        expandedDevices.remove(device.id)
+                    } else {
+                        expandedDevices.insert(device.id)
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    // Online indicator
+                    Circle()
+                        .fill(deviceOnlineColor(heartbeat: hb))
+                        .frame(width: 8, height: 8)
+
+                    DeviceIcon(modelIdentifier: device.modelIdentifier, size: .caption)
+                    Text(DeviceIcon.displayName(for: device.modelIdentifier))
+                        .font(.caption)
+                        .fontWeight(.medium)
+
+                    Spacer()
+
+                    if let mode = dominantMode ?? device.confirmedMode {
+                        ModeBadge(mode: mode)
+                    }
+
+                    if let battery = hb?.batteryLevel {
+                        HStack(spacing: 2) {
+                            Image(systemName: hb?.isCharging == true ? "battery.100.bolt" : "battery.50")
+                                .font(.system(size: 10))
+                            Text("\(Int(battery * 100))%")
+                                .font(.caption2)
+                        }
+                        .foregroundStyle(battery < 0.2 ? .red : .secondary)
+                    }
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(10)
+
+            // Expanded details
+            if isExpanded {
+                Divider().padding(.horizontal, 10)
+                deviceExpandedContent(device, hb: hb)
+                    .padding(10)
+            }
+        }
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
+    }
+
+    @ViewBuilder
+    private func deviceExpandedContent(_ device: ChildDevice, hb: DeviceHeartbeat?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Stats row
+            HStack(spacing: 8) {
+                Text("iOS \(device.osVersion)")
+                if let disk = hb?.availableDiskSpace {
+                    HStack(spacing: 2) {
+                        Image(systemName: "internaldrive")
+                        Text(Self.formatDisk(available: disk, total: hb?.totalDiskSpace))
+                    }
+                    .foregroundStyle(disk < 1_000_000_000 ? .red : .secondary)
+                }
+                Spacer()
+                if let count = hb?.allowedAppCount ?? hb?.allowedAppNames?.count, count > 0 {
+                    Text("\(count) apps allowed")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
+            // Screen time + heartbeat
+            HStack(spacing: 8) {
+                if let hb, let minutes = hb.screenTimeMinutes,
+                   hb.timestamp >= Calendar.current.startOfDay(for: Date()),
+                   hb.heartbeatSource != "vpnExtension" {
+                    let h = minutes / 60, m = minutes % 60
+                    HStack(spacing: 2) {
+                        Image(systemName: "hourglass")
+                        Text(h > 0 ? "\(h)h \(m)m" : "\(m)m")
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                if let ts = hb?.timestamp {
+                    HStack(spacing: 2) {
+                        Image(systemName: "heart.fill").font(.system(size: 7))
+                        Text(ts, style: .relative) + Text(" ago")
+                    }
+                    .foregroundStyle(.pink.opacity(0.6))
+                }
+                buildBadge(childBuild: hb?.appBuildNumber)
+            }
+            .font(.caption2)
+
+            // Shield diagnostics
+            if let hb {
+                shieldDiagnosticRow(hb)
+            }
+
+            // VPN warning
+            if hb?.vpnDetected == true {
+                HStack(spacing: 6) {
+                    Image(systemName: "network.badge.shield.half.filled")
+                        .foregroundStyle(.orange)
+                    Text("VPN active")
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button {
+                        UserDefaults.standard.set(true, forKey: "vpnAcknowledged.\(device.id.rawValue)")
+                    } label: {
+                        Text("Dismiss")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption2)
+            }
+
+            // Permissions
+            DisclosureGroup {
+                PermissionsStatusView(
+                    device: device,
+                    heartbeat: hb,
+                    onRequestPermissions: { await viewModel.requestPermissions(for: device) }
+                )
+            } label: {
+                HStack(spacing: 6) {
+                    Text("Permissions")
+                    if let hb, hasPermissionIssue(hb) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .font(.caption)
+        }
+    }
+
+    private func deviceOnlineColor(heartbeat: DeviceHeartbeat?) -> Color {
+        guard let ts = heartbeat?.timestamp else { return .gray }
+        let age = -ts.timeIntervalSinceNow
+        if age < 300 { return .green }  // < 5 min
+        if age < 900 { return .yellow } // < 15 min
+        return .red
     }
 
     @ViewBuilder

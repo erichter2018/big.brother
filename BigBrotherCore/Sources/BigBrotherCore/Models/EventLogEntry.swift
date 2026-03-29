@@ -102,4 +102,5 @@ public enum EventType: String, Codable, Sendable, Equatable {
     case namedPlaceDeparture
     case tripCompleted
     case sosAlert
+    case selfUnlockUsed
 }

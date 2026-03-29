@@ -51,6 +51,8 @@ final class ChildDetailViewModel: CommandSendable {
     var commandFeedback: String?
     var isCommandError = false
     var timeline: [TimelineEntry] = []
+    /// Daily screen time for the last 7 days (date → minutes). Loaded from CloudKit heartbeats.
+    var weeklyScreenTime: [(date: Date, minutes: Int)] = []
     private var refreshTimer: Timer?
 
     /// Parent-side restriction state for this child (persisted in UserDefaults).
@@ -310,6 +312,22 @@ final class ChildDetailViewModel: CommandSendable {
         }
     }
 
+    /// Lock down: essentialOnly shielding + internet block via VPN DNS blackhole.
+    func lockDown(seconds: Int? = nil) async {
+        appState.expectedModes[child.id] = (.lockedDown, Date())
+        let blockDuration = seconds ?? 86400
+        isSendingCommand = true
+        do {
+            try await appState.sendCommand(target: .child(child.id), action: .setMode(.lockedDown))
+            try await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: blockDuration))
+            commandFeedback = "Locked Down sent."
+        } catch {
+            commandFeedback = "Failed: \(error.localizedDescription)"
+            isCommandError = true
+        }
+        isSendingCommand = false
+    }
+
     func temporaryUnlock(seconds: Int = 24 * 3600) async {
         appState.expectedModes[child.id] = (.unlocked, Date())
         await performCommand(.temporaryUnlock(durationSeconds: seconds), target: .child(child.id))
@@ -546,6 +564,48 @@ final class ChildDetailViewModel: CommandSendable {
     func refresh() async {
         try? await appState.refreshDashboard()
         await loadEvents()
+        await loadWeeklyScreenTime()
+    }
+
+    /// Fetch heartbeats from the last 7 days to build daily screen time trend.
+    func loadWeeklyScreenTime() async {
+        guard let cloudKit = appState.cloudKit,
+              let familyID = appState.parentState?.familyID else { return }
+
+        let deviceIDs = Set(devices.map(\.id))
+        guard !deviceIDs.isEmpty else {
+            #if DEBUG
+            print("[BigBrother] loadWeeklyScreenTime: no devices for \(child.name), skipping")
+            #endif
+            return
+        }
+        let today = Calendar.current.startOfDay(for: Date())
+        let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: today) ?? today
+
+        let allHeartbeats = (try? await cloudKit.fetchHeartbeats(familyID: familyID, since: sevenDaysAgo)) ?? []
+
+        // Filter to this child's devices, extract max screen time per day
+        let childHeartbeats = allHeartbeats.filter { deviceIDs.contains($0.deviceID) }
+
+        var dailyMax: [String: Int] = [:]
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+
+        for hb in childHeartbeats {
+            guard let mins = hb.screenTimeMinutes, mins > 0,
+                  hb.heartbeatSource != "vpnExtension" else { continue }
+            let key = fmt.string(from: hb.timestamp)
+            dailyMax[key] = max(dailyMax[key] ?? 0, mins)
+        }
+
+        // Build sorted array for last 7 days
+        var result: [(date: Date, minutes: Int)] = []
+        for dayOffset in (-6...0) {
+            guard let date = Calendar.current.date(byAdding: .day, value: dayOffset, to: today) else { continue }
+            let key = fmt.string(from: date)
+            result.append((date: date, minutes: dailyMax[key] ?? 0))
+        }
+        weeklyScreenTime = result
     }
 
     // MARK: - Location

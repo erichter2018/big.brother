@@ -359,13 +359,10 @@ final class ParentDashboardViewModel: CommandSendable {
         // Track lock-down expiry for countdown display.
         let blockDuration = seconds ?? 86400 // 24h default
         if let seconds, seconds < 86400 {
-            let expiry = Date().addingTimeInterval(Double(seconds))
-            lockDownExpiries[child.id] = expiry
+            lockDownExpiries[child.id] = Date().addingTimeInterval(Double(seconds))
             startCountdownTimer()
-            print("[BigBrother] SET lockDownExpiry for \(child.name): \(expiry), seconds=\(seconds), dict count=\(lockDownExpiries.count)")
         } else {
             lockDownExpiries.removeValue(forKey: child.id)
-            print("[BigBrother] NO lockDownExpiry (seconds=\(String(describing: seconds)))")
         }
         // Send lockedDown mode + internet block as two commands.
         isSendingCommand = true
@@ -955,14 +952,7 @@ final class ParentDashboardViewModel: CommandSendable {
 
     /// Formatted countdown for a timed lock-down (e.g. "14:32").
     func lockDownCountdown(for child: ChildProfile) -> String? {
-        guard let expiry = lockDownExpiries[child.id] else {
-            #if DEBUG
-            if appState.expectedModes[child.id]?.mode == .lockedDown {
-                print("[BigBrother] lockDownCountdown nil for \(child.name) — no expiry in lockDownExpiries (count: \(lockDownExpiries.count))")
-            }
-            #endif
-            return nil
-        }
+        guard let expiry = lockDownExpiries[child.id] else { return nil }
         let secs = max(0, Int(expiry.timeIntervalSince(now)))
         guard secs > 0 else { return nil }
         let h = secs / 3600

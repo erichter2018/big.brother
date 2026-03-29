@@ -309,6 +309,16 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             .compactMap(CKRecordConversion.deviceHeartbeat)
     }
 
+    func fetchHeartbeats(familyID: FamilyID, since: Date) async throws -> [DeviceHeartbeat] {
+        let predicate = NSPredicate(
+            format: "%K == %@ AND %K >= %@",
+            CKFieldName.familyID, familyID.rawValue,
+            CKFieldName.timestamp, since as NSDate
+        )
+        return try await query(CKRecordType.heartbeat, predicate: predicate)
+            .compactMap(CKRecordConversion.deviceHeartbeat)
+    }
+
     // MARK: - Events
 
     @discardableResult
