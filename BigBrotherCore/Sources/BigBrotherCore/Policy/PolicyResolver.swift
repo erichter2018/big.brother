@@ -70,12 +70,12 @@ public struct PolicyResolver {
             shieldedCategoriesData = nil
             allowedAppTokensData = nil
 
-        case .dailyMode:
+        case .restricted:
             // Shield all categories; allowed apps are the exceptions.
             shieldedCategoriesData = Data()
             allowedAppTokensData = alwaysAllowedTokensData
 
-        case .essentialOnly, .lockedDown:
+        case .locked, .lockedDown:
             // Shield all categories; essential + always-allowed are exceptions.
             // The actual essential token resolution happens in the enforcement layer
             // because it requires FamilyControls framework types.

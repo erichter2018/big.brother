@@ -64,11 +64,11 @@ public struct ExtensionSharedState: Codable, Sendable, Equatable {
         let authAvailable = authHealth?.isAuthorized ?? false
 
         return ExtensionSharedState(
-            currentMode: policy?.resolvedMode ?? .dailyMode,
+            currentMode: policy?.resolvedMode ?? .restricted,
             isTemporaryUnlock: policy?.isTemporaryUnlock ?? false,
             temporaryUnlockExpiresAt: policy?.temporaryUnlockExpiresAt,
             authorizationAvailable: authAvailable,
-            enforcementDegraded: !authAvailable && (policy?.resolvedMode ?? .dailyMode) != .unlocked,
+            enforcementDegraded: !authAvailable && (policy?.resolvedMode ?? .restricted) != .unlocked,
             shieldConfig: shieldConfig ?? ShieldConfig(),
             writtenAt: Date(),
             policyVersion: policy?.policyVersion ?? 0

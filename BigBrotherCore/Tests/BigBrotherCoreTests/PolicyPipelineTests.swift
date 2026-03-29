@@ -8,7 +8,7 @@ struct PolicyPipelineTests {
     let deviceID = DeviceID.generate()
 
     private func makePolicy(
-        mode: LockMode = .essentialOnly,
+        mode: LockMode = .locked,
         version: Int64 = 1,
         temporaryUnlockUntil: Date? = nil
     ) -> Policy {
@@ -21,7 +21,7 @@ struct PolicyPipelineTests {
     }
 
     private func makeInputs(
-        mode: LockMode = .essentialOnly,
+        mode: LockMode = .locked,
         version: Int64 = 1,
         source: SnapshotSource = .commandApplied,
         trigger: String? = nil,
@@ -58,7 +58,7 @@ struct PolicyPipelineTests {
 
     @Test("Subsequent snapshot increments generation")
     func incrementsGeneration() {
-        let inputs1 = makeInputs(mode: .essentialOnly, source: .initial)
+        let inputs1 = makeInputs(mode: .locked, source: .initial)
         let output1 = PolicyPipelineCoordinator.generateSnapshot(
             from: inputs1, previousSnapshot: nil
         )
@@ -70,14 +70,14 @@ struct PolicyPipelineTests {
 
         #expect(output2.snapshot.generation == 2)
         #expect(output2.modeChanged)
-        #expect(output2.previousMode == .essentialOnly)
+        #expect(output2.previousMode == .locked)
     }
 
     @Test("Generation always increments from previous")
     func generationAlwaysIncrements() {
         var previous: PolicySnapshot? = nil
         for i in 1...5 {
-            let inputs = makeInputs(mode: .essentialOnly, version: Int64(i), source: .syncUpdate)
+            let inputs = makeInputs(mode: .locked, version: Int64(i), source: .syncUpdate)
             let output = PolicyPipelineCoordinator.generateSnapshot(
                 from: inputs, previousSnapshot: previous
             )
@@ -92,7 +92,7 @@ struct PolicyPipelineTests {
 
     @Test("Same inputs produce same fingerprint")
     func sameFingerprintForSameInputs() {
-        let inputs = makeInputs(mode: .essentialOnly, version: 1, source: .commandApplied)
+        let inputs = makeInputs(mode: .locked, version: 1, source: .commandApplied)
         let output1 = PolicyPipelineCoordinator.generateSnapshot(from: inputs, previousSnapshot: nil)
         let output2 = PolicyPipelineCoordinator.generateSnapshot(from: inputs, previousSnapshot: output1.snapshot)
 
@@ -102,7 +102,7 @@ struct PolicyPipelineTests {
     @Test("Different modes produce different fingerprints")
     func differentFingerprintsForDifferentModes() {
         let output1 = PolicyPipelineCoordinator.generateSnapshot(
-            from: makeInputs(mode: .essentialOnly), previousSnapshot: nil
+            from: makeInputs(mode: .locked), previousSnapshot: nil
         )
         let output2 = PolicyPipelineCoordinator.generateSnapshot(
             from: makeInputs(mode: .unlocked), previousSnapshot: nil
@@ -120,12 +120,12 @@ struct PolicyPipelineTests {
         let expiresAt = Date().addingTimeInterval(1800)
         let unlockState = TemporaryUnlockState(
             origin: .remoteCommand,
-            previousMode: .essentialOnly,
+            previousMode: .locked,
             expiresAt: expiresAt
         )
 
         let inputs = makeInputs(
-            mode: .essentialOnly,
+            mode: .locked,
             source: .temporaryUnlockStarted,
             temporaryUnlockState: unlockState,
             temporaryUnlockUntil: expiresAt
@@ -146,7 +146,7 @@ struct PolicyPipelineTests {
     func authDegradationInSnapshot() {
         let degradedAuth = AuthorizationHealth(currentState: .denied)
         let inputs = makeInputs(
-            mode: .essentialOnly,
+            mode: .locked,
             source: .authorizationChange,
             authorizationHealth: degradedAuth,
             capabilities: DeviceCapabilities(familyControlsAuthorized: false)
@@ -169,7 +169,7 @@ struct PolicyPipelineTests {
             previousState: .denied
         )
         let inputs = makeInputs(
-            mode: .essentialOnly,
+            mode: .locked,
             source: .authorizationChange,
             authorizationHealth: restoredAuth,
             capabilities: DeviceCapabilities(familyControlsAuthorized: true)
@@ -186,23 +186,23 @@ struct PolicyPipelineTests {
 
     @Test("Snapshot carries deviceID and intendedMode")
     func snapshotContextFields() {
-        let inputs = makeInputs(mode: .dailyMode, source: .syncUpdate, trigger: "Policy v3 from CloudKit")
+        let inputs = makeInputs(mode: .restricted, source: .syncUpdate, trigger: "Policy v3 from CloudKit")
         let output = PolicyPipelineCoordinator.generateSnapshot(from: inputs, previousSnapshot: nil)
 
         #expect(output.snapshot.deviceID == deviceID)
-        #expect(output.snapshot.intendedMode == .dailyMode)
+        #expect(output.snapshot.intendedMode == .restricted)
         #expect(output.snapshot.trigger == "Policy v3 from CloudKit")
     }
 
     @Test("modeChanged is false when mode stays the same")
     func modeUnchanged() {
         let prev = PolicyPipelineCoordinator.generateSnapshot(
-            from: makeInputs(mode: .essentialOnly, version: 1, source: .initial),
+            from: makeInputs(mode: .locked, version: 1, source: .initial),
             previousSnapshot: nil
         ).snapshot
 
         let output = PolicyPipelineCoordinator.generateSnapshot(
-            from: makeInputs(mode: .essentialOnly, version: 2, source: .syncUpdate),
+            from: makeInputs(mode: .locked, version: 2, source: .syncUpdate),
             previousSnapshot: prev
         )
 

@@ -853,7 +853,7 @@ struct ChildDetailView: View {
             // Row 3: App counts + lock state
             HStack(spacing: 8) {
                 if hb.shieldCategoryActive == true {
-                    if reportedMode == .essentialOnly {
+                    if reportedMode == .locked {
                         // Essential mode: everything blocked, only system essentials allowed
                         Label("All non-essential apps blocked", systemImage: "shield.lefthalf.filled")
                             .foregroundStyle(.secondary)

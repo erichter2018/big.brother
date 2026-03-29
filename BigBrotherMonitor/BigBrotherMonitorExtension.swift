@@ -326,8 +326,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Never block tightening restrictions — essential mode should ALWAYS apply,
         // even if the main app is force-closed/suspended.
         let policy = storage.readPolicySnapshot()?.effectivePolicy
-        applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
-        updateSharedState(mode: .essentialOnly)
+        applyShieldingToAllStores(mode: .locked, policy: policy)
+        updateSharedState(mode: .locked)
         logEvent(.scheduleTriggered, details: "Essential window started: \(activity.rawValue)")
         sendModeNotification(title: "Essential Mode", body: "Only essential apps are available.")
     }
@@ -379,7 +379,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
         } else {
-            mode = .dailyMode
+            mode = .restricted
         }
         if mode == .unlocked {
             clearAllShieldStores()
@@ -404,7 +404,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// If schedule-driven, use the schedule's current resolved mode.
     private func handleTempUnlockExpired(_ activity: DeviceActivityName) {
         let unlockState = storage.readTemporaryUnlockState()
-        let previousMode = unlockState?.previousMode ?? .dailyMode
+        let previousMode = unlockState?.previousMode ?? .restricted
 
         let mode: LockMode
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
@@ -443,7 +443,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             mode = profile.resolvedMode(at: Date())
         } else {
             // No schedule — stay locked.
-            mode = .dailyMode
+            mode = .restricted
         }
 
         if mode == .unlocked {
@@ -485,7 +485,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             if extState.isTemporaryUnlock,
                let expires = extState.temporaryUnlockExpiresAt, expires <= Date() {
                 let unlockState = storage.readTemporaryUnlockState()
-                let previousMode = unlockState?.previousMode ?? .dailyMode
+                let previousMode = unlockState?.previousMode ?? .restricted
                 let mode: LockMode
                 let reconcileDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
                 let reconcileScheduleDriven = reconcileDefaults?.object(forKey: "scheduleDrivenMode") == nil
@@ -543,7 +543,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             let now = Date()
             if now < timedInfo.unlockAt {
                 // Still in penalty phase — ensure device is locked.
-                let penaltyMode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .dailyMode
+                let penaltyMode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .restricted
                 let policy = storage.readPolicySnapshot()?.effectivePolicy
                 applyShieldingToAllStores(mode: penaltyMode, policy: policy)
                 updateSharedState(mode: penaltyMode)
@@ -559,7 +559,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 if let profile = storage.readActiveScheduleProfile() {
                     mode = profile.resolvedMode(at: Date())
                 } else {
-                    mode = .dailyMode
+                    mode = .restricted
                 }
                 if mode == .unlocked {
                     clearAllShieldStores()
@@ -587,7 +587,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
             let scheduleMode = profile.resolvedMode(at: Date())
-            if scheduleMode == .unlocked || scheduleMode == .essentialOnly {
+            if scheduleMode == .unlocked || scheduleMode == .locked {
                 // Block scheduled UNLOCKS if the main app was force-closed (security).
                 // But NEVER block essential mode — tightening restrictions is always safe
                 // and should happen regardless of app state.
@@ -602,8 +602,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     return
                 } else {
                     let policy = storage.readPolicySnapshot()?.effectivePolicy
-                    applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
-                    updateSharedState(mode: .essentialOnly)
+                    applyShieldingToAllStores(mode: .locked, policy: policy)
+                    updateSharedState(mode: .locked)
                     logEvent(.policyReconciled, details: "Reconciliation: in essential window, essential mode applied")
                     return
                 }
@@ -658,7 +658,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if defaults?.bool(forKey: "allPermissionsGranted") == false {
             // Apply essential-only shielding instead of clearing
             let policy = storage.readPolicySnapshot()?.effectivePolicy
-            applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
+            applyShieldingToAllStores(mode: .locked, policy: policy)
             return
         }
 
@@ -684,8 +684,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Force essential mode if permissions are missing.
         let effectiveMode: LockMode
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if defaults?.bool(forKey: "allPermissionsGranted") == false && mode != .essentialOnly {
-            effectiveMode = .essentialOnly
+        if defaults?.bool(forKey: "allPermissionsGranted") == false && mode != .locked {
+            effectiveMode = .locked
         } else {
             effectiveMode = mode
         }
@@ -701,8 +701,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         case .unlocked:
             clearAllShieldStores()
 
-        case .dailyMode, .essentialOnly, .lockedDown:
-            let allowExemptions = effectiveMode == .dailyMode
+        case .restricted, .locked, .lockedDown:
+            let allowExemptions = effectiveMode == .restricted
             let allowedTokens = allowExemptions ? collectAllowedTokens() : []
             let pickerTokens = loadPickerTokens()
 
@@ -781,8 +781,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         case .unlocked:
             store.clearAllSettings()
 
-        case .dailyMode, .essentialOnly, .lockedDown:
-            let allowExemptions = mode == .dailyMode
+        case .restricted, .locked, .lockedDown:
+            let allowExemptions = mode == .restricted
             let allowedTokens = allowExemptions ? collectAllowedTokens() : []
             if allowedTokens.isEmpty {
                 store.shield.applicationCategories = .all()
@@ -921,7 +921,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
         let heartbeatAge = Date().timeIntervalSince1970 - lastHeartbeatAt
 
-        let currentMode = storage.readExtensionSharedState()?.currentMode ?? .dailyMode
+        let currentMode = storage.readExtensionSharedState()?.currentMode ?? .restricted
         let threshold = currentMode == .unlocked
             ? AppConstants.forceCloseThresholdUnlocked
             : AppConstants.forceCloseThresholdLocked
@@ -977,9 +977,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if defaults?.bool(forKey: "forceCloseWebBlocked") != true {
             defaults?.set(true, forKey: "forceCloseWebBlocked")
             let policy = storage.readPolicySnapshot()?.effectivePolicy
-            applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
+            applyShieldingToAllStores(mode: .locked, policy: policy)
         }
-        updateSharedState(mode: .essentialOnly)
+        updateSharedState(mode: .locked)
 
         // Throttle notification: don't nag more than once per 15 minutes.
         // Every reconciliation cycle re-triggers this, so throttle prevents spam.
@@ -1026,8 +1026,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // can't trust the full enforcement pipeline.
         defaults?.set("appClosed", forKey: "lastShieldChangeReason")
         let policy = storage.readPolicySnapshot()?.effectivePolicy
-        applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
-        updateSharedState(mode: .essentialOnly)
+        applyShieldingToAllStores(mode: .locked, policy: policy)
+        updateSharedState(mode: .locked)
         logEvent(.policyReconciled, details: "Post-update essential mode (main app build \(mainAppBuild) < extension build \(extensionBuild))")
 
         // Re-register reconciliation schedule — DeviceActivity registrations

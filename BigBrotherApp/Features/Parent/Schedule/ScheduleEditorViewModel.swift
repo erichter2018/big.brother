@@ -12,7 +12,7 @@ final class ScheduleEditorViewModel {
     private let existingSchedule: Schedule?
 
     var name: String = ""
-    var mode: LockMode = .dailyMode
+    var mode: LockMode = .restricted
     var daysOfWeek: Set<DayOfWeek> = DayOfWeek.weekdays
     var startHour: Int = 8
     var startMinute: Int = 0

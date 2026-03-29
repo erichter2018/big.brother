@@ -21,11 +21,11 @@ enum ModeChangeNotifier {
             content.title = "Device Unlocked"
             content.body = reason ?? "All apps are now accessible."
             content.sound = .default
-        case .dailyMode:
+        case .restricted:
             content.title = "Device Restricted"
             content.body = reason ?? "Only allowed apps are available."
             content.sound = .default
-        case .essentialOnly:
+        case .locked:
             content.title = "Device Locked"
             content.body = reason ?? "Only essential apps (Phone, Messages) are available."
             content.sound = .default
@@ -148,7 +148,7 @@ enum ModeChangeNotifier {
             content.title = "Free Time Started"
             content.body = windowName.map { "\($0): All apps are now accessible." }
                 ?? "Scheduled free time — all apps accessible."
-        case .dailyMode, .essentialOnly, .lockedDown:
+        case .restricted, .locked, .lockedDown:
             content.title = "Free Time Ended"
             content.body = "Device locked — \(newMode.displayName) mode active."
         }

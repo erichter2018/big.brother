@@ -13,8 +13,8 @@ struct ScheduleEditorView: View {
 
             Section("Mode During Schedule") {
                 Picker("Mode", selection: $viewModel.mode) {
-                    Text("Restricted").tag(LockMode.dailyMode)
-                    Text("Locked").tag(LockMode.essentialOnly)
+                    Text("Restricted").tag(LockMode.restricted)
+                    Text("Locked").tag(LockMode.locked)
                     Text("Unlocked").tag(LockMode.unlocked)
                 }
                 .pickerStyle(.segmented)

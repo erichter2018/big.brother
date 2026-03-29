@@ -1562,11 +1562,11 @@ final class AppState {
                 case .temporaryUnlock(let secs):
                     // Only recover as unlocked if the unlock hasn't expired yet.
                     let expiresAt = latest.issuedAt.addingTimeInterval(Double(secs))
-                    recoveredMode = Date() < expiresAt ? .unlocked : .dailyMode
-                case .timedUnlock: recoveredMode = .dailyMode // penalty phase = locked
-                case .lockUntil: recoveredMode = .dailyMode
-                case .returnToSchedule: recoveredMode = .dailyMode
-                default: recoveredMode = .dailyMode
+                    recoveredMode = Date() < expiresAt ? .unlocked : .restricted
+                case .timedUnlock: recoveredMode = .restricted // penalty phase = locked
+                case .lockUntil: recoveredMode = .restricted
+                case .returnToSchedule: recoveredMode = .restricted
+                default: recoveredMode = .restricted
                 }
                 #if DEBUG
                 print("[BigBrother] Recovering from latest command: \(latest.action.displayDescription) → \(recoveredMode.rawValue)")
@@ -1578,7 +1578,7 @@ final class AppState {
                 #if DEBUG
                 print("[BigBrother] No recent commands found — defaulting to dailyMode (locked)")
                 #endif
-                try? commandProcessor.applyModeDirect(.dailyMode, enrollment: enrollment)
+                try? commandProcessor.applyModeDirect(.restricted, enrollment: enrollment)
                 refreshLocalState()
             }
         } catch {
@@ -1586,7 +1586,7 @@ final class AppState {
             #if DEBUG
             print("[BigBrother] CloudKit unreachable during recovery — defaulting to dailyMode")
             #endif
-            try? commandProcessor.applyModeDirect(.dailyMode, enrollment: enrollment)
+            try? commandProcessor.applyModeDirect(.restricted, enrollment: enrollment)
             refreshLocalState()
         }
     }
@@ -1792,7 +1792,7 @@ final class AppState {
             // Device is unlocked but should be locked during penalty — re-apply.
             // Save timed unlock info before applyModeDirect clears it.
             let savedInfo = storage.readTimedUnlockInfo()
-            let mode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .dailyMode
+            let mode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .restricted
             guard let enrollment = try? keychain.get(
                 ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
             ) else { return }
@@ -1809,7 +1809,7 @@ final class AppState {
     /// Free time window ended — re-lock the device.
     func applyTimedUnlockEnd() {
         // Read previous mode BEFORE clearing state.
-        let previousMode = storage.readTemporaryUnlockState()?.previousMode ?? .dailyMode
+        let previousMode = storage.readTemporaryUnlockState()?.previousMode ?? .restricted
         try? storage.clearTimedUnlockInfo()
         try? storage.clearTemporaryUnlockState()
         guard enforcement != nil else { return }

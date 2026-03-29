@@ -202,7 +202,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                     currentMode = snap.effectivePolicy.resolvedMode
                 } else {
                     // Shields are on but no state says which mode — safe default
-                    currentMode = .dailyMode
+                    currentMode = .restricted
                 }
             }
         } else {

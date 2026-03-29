@@ -16,7 +16,7 @@ struct StatusEntry: TimelineEntry {
 
     static let placeholder = StatusEntry(
         date: Date(),
-        currentMode: .dailyMode,
+        currentMode: .restricted,
         nextTransition: nil,
         nextTransitionLabel: nil,
         selfUnlocksUsed: 0,
@@ -83,9 +83,9 @@ struct StatusProvider: TimelineProvider {
             switch currentMode {
             case .unlocked:
                 return "Free until \(formatter.string(from: next))"
-            case .dailyMode:
+            case .restricted:
                 return "Restricted until \(formatter.string(from: next))"
-            case .essentialOnly:
+            case .locked:
                 return "Locked until \(formatter.string(from: next))"
             case .lockedDown:
                 return "Locked down until \(formatter.string(from: next))"
@@ -134,8 +134,8 @@ struct StatusWidgetView: View {
     private var modeColor: Color {
         switch entry.currentMode {
         case .unlocked: .green
-        case .dailyMode: .blue
-        case .essentialOnly: .purple
+        case .restricted: .blue
+        case .locked: .purple
         case .lockedDown: .red
         }
     }
@@ -143,8 +143,8 @@ struct StatusWidgetView: View {
     private var modeIcon: String {
         switch entry.currentMode {
         case .unlocked: "lock.open.fill"
-        case .dailyMode: "lock.fill"
-        case .essentialOnly: "shield.fill"
+        case .restricted: "lock.fill"
+        case .locked: "shield.fill"
         case .lockedDown: "wifi.slash"
         }
     }
@@ -152,8 +152,8 @@ struct StatusWidgetView: View {
     private var modeLabel: String {
         switch entry.currentMode {
         case .unlocked: "Free"
-        case .dailyMode: "Restricted"
-        case .essentialOnly: "Locked"
+        case .restricted: "Restricted"
+        case .locked: "Locked"
         case .lockedDown: "Locked Down"
         }
     }

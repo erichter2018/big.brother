@@ -142,24 +142,24 @@ final class ParentDashboardViewModel: CommandSendable {
 
     // MARK: - Global Actions
 
-    func lockAll(duration: LockDuration = .indefinite) async {
+    func restrictAll(duration: LockDuration = .indefinite) async {
         isSendingCommand = true
         commandFeedback = nil
         unlockExpiries.removeAll()
         timedUnlockPhases.removeAll()
         scheduleActiveChildren.removeAll()
         for child in childProfiles {
-            await lockChildQuiet(child, duration: duration)
+            await restrictChildQuiet(child, duration: duration)
         }
         commandFeedback = "Lock All sent"
         isSendingCommand = false
-        // Track for retry — use .dailyMode as the representative lock action.
-        trackPendingCommand(.setMode(.dailyMode), target: .allDevices)
+        // Track for retry — use .restricted as the representative lock action.
+        trackPendingCommand(.setMode(.restricted), target: .allDevices)
         startConfirmationPolling()
         autoDismissFeedback()
     }
 
-    func lockAllEssential() async {
+    func lockAll() async {
         isSendingCommand = true
         commandFeedback = nil
         unlockExpiries.removeAll()
@@ -168,11 +168,11 @@ final class ParentDashboardViewModel: CommandSendable {
         lockDownExpiries.removeAll()
         scheduleActiveChildren.removeAll()
         for child in childProfiles {
-            await essentialChild(child)
+            await lockChild(child)
         }
         commandFeedback = "Lock All sent"
         isSendingCommand = false
-        trackPendingCommand(.setMode(.essentialOnly), target: .allDevices)
+        trackPendingCommand(.setMode(.locked), target: .allDevices)
         startConfirmationPolling()
         autoDismissFeedback()
     }
@@ -202,14 +202,14 @@ final class ParentDashboardViewModel: CommandSendable {
 
     // MARK: - Per-Child Actions
 
-    /// Lock a child with UI feedback (for individual lock actions).
-    func lockChild(_ child: ChildProfile, duration: LockDuration = .indefinite) async {
-        await lockChildQuiet(child, duration: duration)
+    /// Restrict a child with UI feedback (for individual restrict actions).
+    func restrictChild(_ child: ChildProfile, duration: LockDuration = .indefinite) async {
+        await restrictChildQuiet(child, duration: duration)
         startConfirmationPolling()
     }
 
     /// Lock a child without setting commandFeedback (for bulk operations).
-    private func lockChildQuiet(_ child: ChildProfile, duration: LockDuration) async {
+    private func restrictChildQuiet(_ child: ChildProfile, duration: LockDuration) async {
         unlockExpiries.removeValue(forKey: child.id)
         timedUnlockPhases.removeValue(forKey: child.id)
         timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
@@ -225,19 +225,19 @@ final class ParentDashboardViewModel: CommandSendable {
             try? await appState.sendCommand(target: .child(child.id), action: commandAction)
 
         case .indefinite:
-            appState.expectedModes[child.id] = (.dailyMode, Date())
-            commandAction = .setMode(.dailyMode)
+            appState.expectedModes[child.id] = (.restricted, Date())
+            commandAction = .setMode(.restricted)
             try? await appState.sendCommand(target: .child(child.id), action: commandAction)
 
         case .untilMidnight:
             let midnight = Calendar.current.startOfDay(for: Date()).addingTimeInterval(86400)
-            appState.expectedModes[child.id] = (.dailyMode, Date())
+            appState.expectedModes[child.id] = (.restricted, Date())
             commandAction = .lockUntil(date: midnight)
             try? await appState.sendCommand(target: .child(child.id), action: commandAction)
 
         case .hours(let h):
             let lockTarget = Date().addingTimeInterval(Double(h) * 3600)
-            appState.expectedModes[child.id] = (.dailyMode, Date())
+            appState.expectedModes[child.id] = (.restricted, Date())
             commandAction = .lockUntil(date: lockTarget)
             try? await appState.sendCommand(target: .child(child.id), action: commandAction)
         }
@@ -332,14 +332,14 @@ final class ParentDashboardViewModel: CommandSendable {
         }
     }
 
-    func essentialChild(_ child: ChildProfile) async {
+    func lockChild(_ child: ChildProfile) async {
         unlockExpiries.removeValue(forKey: child.id)
         timedUnlockPhases.removeValue(forKey: child.id)
         timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
         lockDownExpiries.removeValue(forKey: child.id)
         scheduleActiveChildren.remove(child.id)
-        appState.expectedModes[child.id] = (.essentialOnly, Date())
-        let action: CommandAction = .setMode(.essentialOnly)
+        appState.expectedModes[child.id] = (.locked, Date())
+        let action: CommandAction = .setMode(.locked)
         trackPendingCommand(action, target: .child(child.id))
         await performCommand(action, target: .child(child.id))
         // Restore internet in case device was locked down.
@@ -379,7 +379,7 @@ final class ParentDashboardViewModel: CommandSendable {
             isCommandError = true
         }
         isSendingCommand = false
-        trackPendingCommand(.setMode(.essentialOnly), target: .child(child.id))
+        trackPendingCommand(.setMode(.locked), target: .child(child.id))
         await stopPenaltyTimer(for: child)
         startConfirmationPolling()
         autoDismissFeedback()
@@ -484,8 +484,8 @@ final class ParentDashboardViewModel: CommandSendable {
         let modeLabel: String
         switch mode {
         case .unlocked: modeLabel = "Free"
-        case .dailyMode: modeLabel = "Restricted"
-        case .essentialOnly: modeLabel = "Locked"
+        case .restricted: modeLabel = "Restricted"
+        case .locked: modeLabel = "Locked"
         case .lockedDown: modeLabel = "Locked Down"
         }
 
@@ -565,7 +565,7 @@ final class ParentDashboardViewModel: CommandSendable {
             if let profile = scheduleProfile(for: child) {
                 return (profile.resolvedMode(at: now), false)
             } else {
-                return (.dailyMode, false)
+                return (.restricted, false)
             }
         }
 
@@ -608,9 +608,9 @@ final class ParentDashboardViewModel: CommandSendable {
         // 4. Fall back to heartbeat-reported modes.
         let modes = devs.compactMap(\.confirmedMode)
         // If no heartbeat data at all, assume locked (safer than assuming unlocked).
-        if modes.isEmpty { return (.dailyMode, false) }
-        if modes.contains(.essentialOnly) { return (.essentialOnly, false) }
-        if modes.contains(.dailyMode) { return (.dailyMode, false) }
+        if modes.isEmpty { return (.restricted, false) }
+        if modes.contains(.locked) { return (.locked, false) }
+        if modes.contains(.restricted) { return (.restricted, false) }
         return (.unlocked, false)
     }
 
@@ -623,7 +623,7 @@ final class ParentDashboardViewModel: CommandSendable {
                 return mode
             }
         }
-        return .dailyMode
+        return .restricted
     }
 
     /// Prune confirmed or timed-out expectedModes. Called from timer, NOT during render.
@@ -873,7 +873,7 @@ final class ParentDashboardViewModel: CommandSendable {
                     for (childID, _) in expiredLockDowns {
                         // Internet auto-unblocks in tunnel; revert parent display to Locked.
                         if self.appState.expectedModes[childID]?.mode == .lockedDown {
-                            self.appState.expectedModes[childID] = (.essentialOnly, Date())
+                            self.appState.expectedModes[childID] = (.locked, Date())
                         }
                     }
                 }

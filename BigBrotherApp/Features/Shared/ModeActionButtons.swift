@@ -84,9 +84,9 @@ struct ModeActionButtons: View {
                     onLockWithDuration(.indefinite)
                 }
             } else {
-                modeButton("Restrict", icon: "lock.fill", color: .blue, mode: .dailyMode)
+                modeButton("Restrict", icon: "lock.fill", color: .blue, mode: .restricted)
             }
-            modeButton("Lock", icon: "shield", color: .purple, mode: .essentialOnly)
+            modeButton("Lock", icon: "shield", color: .purple, mode: .locked)
         }
         .disabled(disabled)
         .opacity(disabled ? 0.6 : 1)

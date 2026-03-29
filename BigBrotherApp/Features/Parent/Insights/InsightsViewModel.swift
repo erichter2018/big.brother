@@ -365,7 +365,7 @@ final class InsightsViewModel {
                     displayName: dev.displayName,
                     lastHeartbeat: hb?.timestamp,
                     isOnline: online,
-                    currentMode: hb?.currentMode ?? .dailyMode,
+                    currentMode: hb?.currentMode ?? .restricted,
                     batteryLevel: hb?.batteryLevel,
                     lastCommandProcessedAt: hb?.lastCommandProcessedAt,
                     enforcementError: hb?.enforcementError,

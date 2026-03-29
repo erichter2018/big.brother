@@ -88,7 +88,7 @@ final class LocalParentUnlockViewModel {
         }
 
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
-        let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .essentialOnly
+        let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .locked
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
         let maxDuration: TimeInterval = 24 * 3600 // 24 hours max
         let rawDuration = selectedDuration.map(TimeInterval.init) ?? AppConstants.defaultTemporaryUnlockSeconds

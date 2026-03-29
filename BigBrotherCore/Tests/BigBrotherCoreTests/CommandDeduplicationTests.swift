@@ -10,7 +10,7 @@ struct CommandDeduplicationTests {
     let childID = ChildProfileID.generate()
 
     private func makeCommand(
-        action: CommandAction = .setMode(.essentialOnly),
+        action: CommandAction = .setMode(.locked),
         target: CommandTarget? = nil,
         expiresAt: Date? = nil
     ) -> RemoteCommand {
@@ -54,7 +54,7 @@ struct CommandDeduplicationTests {
         let new = RemoteCommand(
             familyID: familyID,
             target: .device(deviceID),
-            action: .setMode(.essentialOnly),
+            action: .setMode(.locked),
             issuedBy: "Parent",
             issuedAt: Date()
         )
@@ -123,10 +123,10 @@ struct CommandDeduplicationTests {
     @Test("Action types encode/decode correctly")
     func actionCodable() throws {
         let actions: [CommandAction] = [
-            .setMode(.essentialOnly),
+            .setMode(.locked),
             .setMode(.unlocked),
-            .setMode(.dailyMode),
-            .setMode(.essentialOnly),
+            .setMode(.restricted),
+            .setMode(.locked),
             .temporaryUnlock(durationSeconds: 1800),
             .requestHeartbeat,
             .requestAppConfiguration,

@@ -24,8 +24,8 @@ struct ModeBadge: View {
         if isTemporaryUnlock { return "clock.badge.checkmark" }
         switch mode {
         case .unlocked: return "lock.open"
-        case .dailyMode: return "calendar"
-        case .essentialOnly: return "shield"
+        case .restricted: return "calendar"
+        case .locked: return "shield"
         case .lockedDown: return "wifi.slash"
         }
     }
@@ -34,8 +34,8 @@ struct ModeBadge: View {
         if isTemporaryUnlock { return .orange }
         switch mode {
         case .unlocked: return .green
-        case .dailyMode: return .blue
-        case .essentialOnly: return .purple
+        case .restricted: return .blue
+        case .locked: return .purple
         case .lockedDown: return .red
         }
     }

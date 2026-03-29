@@ -39,7 +39,7 @@ public enum Defaults {
     /// Display names for lock modes, for use in shield screens and logs.
     public static let lockModeDescriptions: [LockMode: String] = [
         .unlocked: "Unlocked — all apps accessible",
-        .dailyMode: "Daily Mode — only allowed apps accessible",
-        .essentialOnly: "Essential Only — limited to essential apps",
+        .restricted: "Daily Mode — only allowed apps accessible",
+        .locked: "Essential Only — limited to essential apps",
     ]
 }

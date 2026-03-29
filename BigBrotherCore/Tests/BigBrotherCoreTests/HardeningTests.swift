@@ -156,7 +156,7 @@ struct HardeningTests {
         let storage = try makeStorage()
         let unlock = TemporaryUnlockState(
             origin: .remoteCommand,
-            previousMode: .dailyMode,
+            previousMode: .restricted,
             startedAt: Date().addingTimeInterval(-600),
             expiresAt: Date().addingTimeInterval(-60),
             commandID: UUID()
@@ -167,7 +167,7 @@ struct HardeningTests {
         // Simulate relaunch — new storage pointing at same dir
         let loaded = storage.readTemporaryUnlockState()
         #expect(loaded != nil)
-        #expect(loaded?.previousMode == .dailyMode)
+        #expect(loaded?.previousMode == .restricted)
         #expect(loaded?.origin == .remoteCommand)
         #expect(loaded?.isExpired == true)
 
@@ -182,7 +182,7 @@ struct HardeningTests {
             temporaryUnlockState: loaded,
             trigger: .appLaunch
         )
-        #expect(action == .expireTemporaryUnlock(previousMode: .dailyMode))
+        #expect(action == .expireTemporaryUnlock(previousMode: .restricted))
     }
 
     @Test("Local PIN unlock stores origin correctly")
@@ -190,7 +190,7 @@ struct HardeningTests {
         let storage = try makeStorage()
         let unlock = TemporaryUnlockState(
             origin: .localPINUnlock,
-            previousMode: .essentialOnly,
+            previousMode: .locked,
             expiresAt: Date().addingTimeInterval(1800)
         )
 
@@ -198,7 +198,7 @@ struct HardeningTests {
         let loaded = storage.readTemporaryUnlockState()
 
         #expect(loaded?.origin == .localPINUnlock)
-        #expect(loaded?.previousMode == .essentialOnly)
+        #expect(loaded?.previousMode == .locked)
         #expect(loaded?.isActive == true)
     }
 
@@ -207,7 +207,7 @@ struct HardeningTests {
         let storage = try makeStorage()
         let unlock = TemporaryUnlockState(
             origin: .remoteCommand,
-            previousMode: .dailyMode,
+            previousMode: .restricted,
             expiresAt: Date().addingTimeInterval(1800)
         )
         try storage.writeTemporaryUnlockState(unlock)
@@ -254,11 +254,11 @@ struct HardeningTests {
     @Test("Authorization restoration triggers reapply via reconciler")
     func authRestorationTriggersReconciliation() {
         let snapshot = PolicySnapshot(
-            effectivePolicy: EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 1)
+            effectivePolicy: EffectivePolicy(resolvedMode: .locked, policyVersion: 1)
         )
         let action = PolicyReconciler.evaluate(
             currentSnapshot: snapshot,
-            lastAppliedMode: .essentialOnly,
+            lastAppliedMode: .locked,
             authorizationHealth: AuthorizationHealth(currentState: .authorized),
             temporaryUnlockState: nil,
             trigger: .authorizationRestored
@@ -370,7 +370,7 @@ struct HardeningTests {
     func extensionSharedStateRoundTrip() throws {
         let storage = try makeStorage()
         let state = ExtensionSharedState(
-            currentMode: .essentialOnly,
+            currentMode: .locked,
             isTemporaryUnlock: false,
             authorizationAvailable: true,
             enforcementDegraded: false,
@@ -386,7 +386,7 @@ struct HardeningTests {
         let loaded = storage.readExtensionSharedState()
 
         #expect(loaded == state)
-        #expect(loaded?.currentMode == .essentialOnly)
+        #expect(loaded?.currentMode == .locked)
         #expect(loaded?.shieldConfig.title == "Locked")
         #expect(loaded?.policyVersion == 42)
     }
@@ -395,7 +395,7 @@ struct HardeningTests {
     func extensionStateFromBackend() {
         let snapshot = PolicySnapshot(
             effectivePolicy: EffectivePolicy(
-                resolvedMode: .dailyMode,
+                resolvedMode: .restricted,
                 isTemporaryUnlock: false,
                 policyVersion: 5
             )
@@ -409,7 +409,7 @@ struct HardeningTests {
             shieldConfig: shield
         )
 
-        #expect(state.currentMode == .dailyMode)
+        #expect(state.currentMode == .restricted)
         #expect(state.authorizationAvailable)
         #expect(!state.enforcementDegraded)
         #expect(state.shieldConfig.title == "Daily Mode")
@@ -419,7 +419,7 @@ struct HardeningTests {
     @Test("ExtensionSharedState.from with no auth is degraded")
     func extensionStateDegraded() {
         let snapshot = PolicySnapshot(
-            effectivePolicy: EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 1)
+            effectivePolicy: EffectivePolicy(resolvedMode: .locked, policyVersion: 1)
         )
         let authHealth = AuthorizationHealth(currentState: .denied)
 
@@ -458,7 +458,7 @@ struct HardeningTests {
         // Also persist the temp unlock state
         let unlockState = TemporaryUnlockState(
             origin: .localPINUnlock,
-            previousMode: .essentialOnly,
+            previousMode: .locked,
             expiresAt: Date().addingTimeInterval(1800)
         )
         try storage1.writeTemporaryUnlockState(unlockState)
@@ -473,7 +473,7 @@ struct HardeningTests {
         #expect(events[0].eventType == .localPINUnlock)
         #expect(events[0].uploadState == .pending)
         #expect(tempState?.origin == .localPINUnlock)
-        #expect(tempState?.previousMode == .essentialOnly)
+        #expect(tempState?.previousMode == .locked)
     }
 
     // ==========================================================
@@ -542,7 +542,7 @@ struct HardeningTests {
     func enforcementStatusFromState() {
         let snapshot = PolicySnapshot(
             effectivePolicy: EffectivePolicy(
-                resolvedMode: .essentialOnly,
+                resolvedMode: .locked,
                 warnings: [.someSystemAppsCannotBeBlocked],
                 policyVersion: 3
             )
@@ -557,14 +557,14 @@ struct HardeningTests {
 
         #expect(status.authorizationAvailable)
         #expect(!status.isDegraded)
-        #expect(status.currentMode == .essentialOnly)
+        #expect(status.currentMode == .locked)
         #expect(!status.temporaryUnlockActive)
     }
 
     @Test("EnforcementStatus degraded when auth missing")
     func enforcementStatusDegraded() {
         let snapshot = PolicySnapshot(
-            effectivePolicy: EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 1)
+            effectivePolicy: EffectivePolicy(resolvedMode: .locked, policyVersion: 1)
         )
         let status = EnforcementStatus.from(
             snapshot: snapshot,

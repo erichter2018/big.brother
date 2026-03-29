@@ -137,16 +137,16 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 || (defaults?.bool(forKey: "scheduleDrivenMode") ?? true)
             mode = isScheduleDriven
                 ? profile.resolvedMode(at: Date())
-                : (snapshot?.effectivePolicy.resolvedMode ?? .dailyMode)
+                : (snapshot?.effectivePolicy.resolvedMode ?? .restricted)
         } else {
-            mode = snapshot?.effectivePolicy.resolvedMode ?? .dailyMode
+            mode = snapshot?.effectivePolicy.resolvedMode ?? .restricted
         }
 
         // Force essential mode if permissions are missing.
         let effectiveMode: LockMode
         let permDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if permDefaults?.bool(forKey: "allPermissionsGranted") == false && mode != .essentialOnly {
-            effectiveMode = .essentialOnly
+        if permDefaults?.bool(forKey: "allPermissionsGranted") == false && mode != .locked {
+            effectiveMode = .locked
         } else {
             effectiveMode = mode
         }
@@ -177,8 +177,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             defaultStore.shield.webDomainCategories = nil
             defaultStore.shield.webDomains = nil
 
-        case .dailyMode, .essentialOnly, .lockedDown:
-            let allowExemptions = effectiveMode == .dailyMode
+        case .restricted, .locked, .lockedDown:
+            let allowExemptions = effectiveMode == .restricted
             let decoder = JSONDecoder()
 
             // Collect allowed tokens (parent-approved apps).

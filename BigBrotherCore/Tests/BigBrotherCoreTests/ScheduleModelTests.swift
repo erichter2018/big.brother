@@ -14,7 +14,7 @@ struct ScheduleModelTests {
             childProfileID: childProfileID,
             familyID: familyID,
             name: "Test",
-            mode: .dailyMode,
+            mode: .restricted,
             daysOfWeek: DayOfWeek.weekdays,
             startTime: DayTime(hour: 8, minute: 0),
             endTime: DayTime(hour: 15, minute: 0)
@@ -63,7 +63,7 @@ struct ScheduleModelTests {
             childProfileID: childProfileID,
             familyID: familyID,
             name: "School",
-            mode: .essentialOnly,
+            mode: .locked,
             daysOfWeek: [.monday, .wednesday, .friday],
             startTime: DayTime(hour: 9, minute: 30),
             endTime: DayTime(hour: 14, minute: 45),
@@ -75,7 +75,7 @@ struct ScheduleModelTests {
 
         #expect(decoded.id == schedule.id)
         #expect(decoded.name == "School")
-        #expect(decoded.mode == .essentialOnly)
+        #expect(decoded.mode == .locked)
         #expect(decoded.daysOfWeek == [.monday, .wednesday, .friday])
         #expect(decoded.startTime.hour == 9)
         #expect(decoded.startTime.minute == 30)
@@ -92,7 +92,7 @@ struct ScheduleModelTests {
             childProfileID: childProfileID,
             familyID: familyID,
             name: "Test",
-            mode: .dailyMode,
+            mode: .restricted,
             daysOfWeek: DayOfWeek.weekdays,
             startTime: DayTime(hour: 8, minute: 0),
             endTime: DayTime(hour: 15, minute: 0)
@@ -102,7 +102,7 @@ struct ScheduleModelTests {
             childProfileID: childProfileID,
             familyID: familyID,
             name: "Test",
-            mode: .dailyMode,
+            mode: .restricted,
             daysOfWeek: DayOfWeek.weekdays,
             startTime: DayTime(hour: 8, minute: 0),
             endTime: DayTime(hour: 15, minute: 0),

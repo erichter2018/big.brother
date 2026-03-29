@@ -38,7 +38,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         name: String,
         freeWindows: [ActiveWindow],
         essentialWindows: [ActiveWindow] = [],
-        lockedMode: LockMode = .dailyMode,
+        lockedMode: LockMode = .restricted,
         exceptionDates: [Date] = [],
         isDefault: Bool = false,
         updatedAt: Date = Date()
@@ -93,7 +93,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
     public func resolvedMode(at date: Date, calendar: Calendar = .current) -> LockMode {
         if isExceptionDate(date, calendar: calendar) { return .unlocked }
         if isInFreeWindow(at: date, calendar: calendar) { return .unlocked }
-        if isInEssentialWindow(at: date, calendar: calendar) { return .essentialOnly }
+        if isInEssentialWindow(at: date, calendar: calendar) { return .locked }
         return lockedMode
     }
 
@@ -117,8 +117,8 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
 
         // If in a free or essential window, find its end time.
         let activeWindows: [ActiveWindow] = currentMode == .unlocked ? freeWindows :
-                                             currentMode == .essentialOnly ? essentialWindows : []
-        if currentMode == .unlocked || (currentMode == .essentialOnly && !essentialWindows.isEmpty) {
+                                             currentMode == .locked ? essentialWindows : []
+        if currentMode == .unlocked || (currentMode == .locked && !essentialWindows.isEmpty) {
             for window in activeWindows where window.contains(date, calendar: calendar) {
                 if window.startTime < window.endTime {
                     // Same-day window — end is today
@@ -206,7 +206,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
                         endTime: DayTime(hour: 20, minute: 0)
                     ),
                 ],
-                lockedMode: .dailyMode
+                lockedMode: .restricted
             ),
             ScheduleProfile(
                 familyID: familyID,
@@ -218,7 +218,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
                         endTime: DayTime(hour: 20, minute: 0)
                     ),
                 ],
-                lockedMode: .dailyMode
+                lockedMode: .restricted
             ),
             ScheduleProfile(
                 familyID: familyID,
@@ -230,7 +230,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
                         endTime: DayTime(hour: 21, minute: 0)
                     ),
                 ],
-                lockedMode: .dailyMode
+                lockedMode: .restricted
             ),
         ]
     }

@@ -219,7 +219,7 @@ struct ParentDashboardView: View {
             scheduleLabel: viewModel.scheduleLabel(for: child),
             scheduleStatus: viewModel.scheduleStatus(for: child)?.label,
             scheduleStatusIsFree: viewModel.scheduleStatus(for: child)?.isFree ?? false,
-            onLock: { duration in Task { await viewModel.lockChild(child, duration: duration) } },
+            onLock: { duration in Task { await viewModel.restrictChild(child, duration: duration) } },
             onUnlock: { seconds in Task { await viewModel.unlockChild(child, seconds: seconds) } },
             onUnlockWithTimer: viewModel.appState.timerService != nil
                 ? { seconds in Task { await viewModel.unlockChildWithTimer(child, seconds: seconds) } }
@@ -278,10 +278,10 @@ struct ParentDashboardView: View {
             Label("Unlock...", systemImage: "lock.open")
         }
         Divider()
-        Button { Task { await viewModel.lockChild(child, duration: .indefinite) } } label: {
+        Button { Task { await viewModel.restrictChild(child, duration: .indefinite) } } label: {
             Label("Restrict", systemImage: "lock.fill")
         }
-        Button { Task { await viewModel.essentialChild(child) } } label: {
+        Button { Task { await viewModel.lockChild(child) } } label: {
             Label("Lock", systemImage: "shield.fill")
         }
         Divider()

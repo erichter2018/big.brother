@@ -64,24 +64,24 @@ struct GlobalActionsBar: View {
 
             // Lock All (tap = until midnight, menu = duration options)
             Menu {
-                Button { Task { await viewModel.lockAll(duration: .untilMidnight) } } label: {
+                Button { Task { await viewModel.restrictAll(duration: .untilMidnight) } } label: {
                     Label("Until Midnight", systemImage: "moon.fill")
                 }
-                Button { Task { await viewModel.lockAll(duration: .indefinite) } } label: {
+                Button { Task { await viewModel.restrictAll(duration: .indefinite) } } label: {
                     Label("Until I unlock", systemImage: "lock.fill")
                 }
                 Divider()
-                Button { Task { await viewModel.lockAll(duration: .hours(1)) } } label: {
+                Button { Task { await viewModel.restrictAll(duration: .hours(1)) } } label: {
                     Label("1 hour", systemImage: "clock")
                 }
-                Button { Task { await viewModel.lockAll(duration: .hours(2)) } } label: {
+                Button { Task { await viewModel.restrictAll(duration: .hours(2)) } } label: {
                     Label("2 hours", systemImage: "clock")
                 }
-                Button { Task { await viewModel.lockAll(duration: .hours(4)) } } label: {
+                Button { Task { await viewModel.restrictAll(duration: .hours(4)) } } label: {
                     Label("4 hours", systemImage: "clock")
                 }
                 Divider()
-                Button { Task { await viewModel.lockAllEssential() } } label: {
+                Button { Task { await viewModel.lockAll() } } label: {
                     Label("Lock All", systemImage: "shield.fill")
                 }
                 Divider()
@@ -100,7 +100,7 @@ struct GlobalActionsBar: View {
             } label: {
                 chipLabel("Restrict All", icon: "lock.fill", color: Color(.systemBlue).opacity(0.7))
             } primaryAction: {
-                Task { await viewModel.lockAll(duration: .untilMidnight) }
+                Task { await viewModel.restrictAll(duration: .untilMidnight) }
             }
             .accessibilityLabel("Restrict All Devices")
             .accessibilityHint("Restricts all children's devices. Long press for more options.")

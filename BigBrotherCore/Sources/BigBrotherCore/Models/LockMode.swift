@@ -7,12 +7,12 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
 
     /// Block everything except explicitly allowed apps.
     /// The allowed list is defined per-child and per-device.
-    case dailyMode
+    case restricted
 
     /// Allow only a narrow essential set: Messages, Maps, Phone,
     /// FaceTime, Find My, Camera, Clock, Contacts.
     /// Best-effort — some system apps cannot be blocked regardless.
-    case essentialOnly
+    case locked
 
     /// Essential-only apps AND internet disabled (VPN DNS blackhole).
     /// Most restrictive mode — device is effectively offline.
@@ -21,8 +21,8 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
     public var displayName: String {
         switch self {
         case .unlocked: "Unlocked"
-        case .dailyMode: "Restricted"
-        case .essentialOnly: "Locked"
+        case .restricted: "Restricted"
+        case .locked: "Locked"
         case .lockedDown: "Locked Down"
         }
     }
@@ -32,8 +32,8 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
     public var restrictionLevel: Int {
         switch self {
         case .unlocked: 0
-        case .dailyMode: 1
-        case .essentialOnly: 2
+        case .restricted: 1
+        case .locked: 2
         case .lockedDown: 3
         }
     }

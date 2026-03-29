@@ -649,8 +649,8 @@ struct ChildHomeView: View {
     private var modeIcon: String {
         switch viewModel.currentMode {
         case .unlocked: return "lock.open"
-        case .dailyMode: return "lock"
-        case .essentialOnly: return "shield"
+        case .restricted: return "lock"
+        case .locked: return "shield"
         case .lockedDown: return "wifi.slash"
         }
     }
@@ -658,8 +658,8 @@ struct ChildHomeView: View {
     private var modeDescription: String {
         switch viewModel.currentMode {
         case .unlocked: return "All apps are accessible"
-        case .dailyMode: return "Only allowed apps are available"
-        case .essentialOnly: return "Only essential apps are available"
+        case .restricted: return "Only allowed apps are available"
+        case .locked: return "Only essential apps are available"
         case .lockedDown: return "Only essential apps, no internet"
         }
     }
@@ -671,12 +671,12 @@ struct ChildHomeView: View {
                 colors: [Color(red: 0.1, green: 0.4, blue: 0.3), Color(red: 0.05, green: 0.2, blue: 0.15)],
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
-        case .dailyMode:
+        case .restricted:
             return LinearGradient(
                 colors: [Color(red: 0.1, green: 0.2, blue: 0.45), Color(red: 0.05, green: 0.1, blue: 0.25)],
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
-        case .essentialOnly:
+        case .locked:
             return LinearGradient(
                 colors: [Color(red: 0.3, green: 0.1, blue: 0.35), Color(red: 0.15, green: 0.05, blue: 0.2)],
                 startPoint: .topLeading, endPoint: .bottomTrailing

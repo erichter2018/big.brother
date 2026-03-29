@@ -90,7 +90,7 @@ struct DeploymentReadinessTests {
         let storage = AppGroupStorage(containerURL: tempDir)
 
         // Policy snapshot
-        let policy = EffectivePolicy(resolvedMode: .dailyMode, policyVersion: 1)
+        let policy = EffectivePolicy(resolvedMode: .restricted, policyVersion: 1)
         let snapshot = PolicySnapshot(source: .initial, effectivePolicy: policy)
         try storage.writePolicySnapshot(snapshot)
         #expect(storage.readPolicySnapshot() != nil)
@@ -102,7 +102,7 @@ struct DeploymentReadinessTests {
 
         // Extension shared state
         let extState = ExtensionSharedState(
-            currentMode: .essentialOnly,
+            currentMode: .locked,
             isTemporaryUnlock: false,
             authorizationAvailable: true,
             enforcementDegraded: false,
@@ -110,7 +110,7 @@ struct DeploymentReadinessTests {
             policyVersion: 1
         )
         try storage.writeExtensionSharedState(extState)
-        #expect(storage.readExtensionSharedState()?.currentMode == .essentialOnly)
+        #expect(storage.readExtensionSharedState()?.currentMode == .locked)
 
         // Authorization health
         let auth = AuthorizationHealth.unknown.withTransition(to: .authorized)
@@ -125,11 +125,11 @@ struct DeploymentReadinessTests {
         // Temporary unlock state
         let tempUnlock = TemporaryUnlockState(
             origin: .localPINUnlock,
-            previousMode: .dailyMode,
+            previousMode: .restricted,
             expiresAt: Date().addingTimeInterval(1800)
         )
         try storage.writeTemporaryUnlockState(tempUnlock)
-        #expect(storage.readTemporaryUnlockState()?.previousMode == .dailyMode)
+        #expect(storage.readTemporaryUnlockState()?.previousMode == .restricted)
 
         // Diagnostic entry
         let diag = DiagnosticEntry(category: .enforcement, message: "test")
@@ -149,7 +149,7 @@ struct DeploymentReadinessTests {
         // Simulate app writing
         let appStorage = AppGroupStorage(containerURL: tempDir)
         let extState = ExtensionSharedState(
-            currentMode: .essentialOnly,
+            currentMode: .locked,
             isTemporaryUnlock: false,
             authorizationAvailable: true,
             enforcementDegraded: false,
@@ -162,7 +162,7 @@ struct DeploymentReadinessTests {
         let extensionStorage = AppGroupStorage(containerURL: tempDir)
         let readState = extensionStorage.readExtensionSharedState()
         #expect(readState != nil)
-        #expect(readState?.currentMode == .essentialOnly)
+        #expect(readState?.currentMode == .locked)
         #expect(readState?.policyVersion == 42)
         #expect(readState?.shieldConfig.title == "Shield")
     }

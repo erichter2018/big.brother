@@ -208,7 +208,7 @@ final class ChildHomeViewModel {
     /// Whether the self-unlock card should be visible.
     var canShowSelfUnlock: Bool {
         guard let state = selfUnlockState, state.budget > 0 else { return false }
-        return currentMode == .dailyMode && !isTemporaryUnlock && timedUnlockInfo == nil
+        return currentMode == .restricted && !isTemporaryUnlock && timedUnlockInfo == nil
     }
 
     /// Whether the button should be tappable (has remaining budget).
@@ -229,7 +229,7 @@ final class ChildHomeViewModel {
         guard let raw = appState.storage.readSelfUnlockState() else { return }
         let state = raw.resettingIfNeeded(currentDate: today)
         guard state.budget > 0, state.isAvailable,
-              currentMode == .dailyMode, !isTemporaryUnlock, timedUnlockInfo == nil else { return }
+              currentMode == .restricted, !isTemporaryUnlock, timedUnlockInfo == nil else { return }
         let updated = state.consuming(one: today)
         try? appState.storage.writeSelfUnlockState(updated)
         appState.applySelfUnlock()

@@ -163,9 +163,9 @@ public final class PolicySnapshotStore: @unchecked Sendable {
         switch mode {
         case .unlocked:
             message = "This app should be accessible."
-        case .dailyMode:
+        case .restricted:
             message = "This app is not in your allowed list. Ask a parent to unlock it."
-        case .essentialOnly:
+        case .locked:
             message = "Only essential apps are available right now."
         case .lockedDown:
             message = "Device is locked down. Only essential apps, no internet."

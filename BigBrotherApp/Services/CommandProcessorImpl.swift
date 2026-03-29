@@ -443,7 +443,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 let formatter = DateFormatter()
                 formatter.dateFormat = "h:mm a"
                 eventLogger.log(.commandApplied, details: "Locked until \(formatter.string(from: date))")
-                ModeChangeNotifier.notify(newMode: .dailyMode)
+                ModeChangeNotifier.notify(newMode: .restricted)
                 return .applied
 
             case .syncPINHash(let base64):
@@ -663,8 +663,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     private func applyMode(_ mode: LockMode, enrollment: ChildEnrollmentState, commandID: UUID) throws {
         // If permissions are missing, force essential mode regardless of requested mode.
         let effectiveMode: LockMode
-        if hasPermissionDeficiency() && mode != .essentialOnly {
-            effectiveMode = .essentialOnly
+        if hasPermissionDeficiency() && mode != .locked {
+            effectiveMode = .locked
             eventLogger.log(.enforcementDegraded, details: "Permissions missing — forced essential mode (requested: \(mode.rawValue))")
         } else {
             effectiveMode = mode
@@ -735,7 +735,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
-        let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .essentialOnly
+        let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .locked
 
         // Expiry is anchored to when the parent SENT the command, not when the child processes it.
         // This ensures the unlock window is the same regardless of delivery delay.
@@ -853,7 +853,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
-        let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .dailyMode
+        let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .restricted
 
         // Don't self-unlock if already unlocked.
         guard currentMode != .unlocked else { return }
@@ -990,8 +990,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             // Explicitly enforce locked mode during penalty phase.
             // The device may have been in an ambiguous state; ensure shields are active.
             // NOTE: applyMode() clears timedUnlockInfo, so we must re-write it after.
-            let currentMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .dailyMode
-            let lockedMode = currentMode == .unlocked ? .dailyMode : currentMode
+            let currentMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
+            let lockedMode = currentMode == .unlocked ? .restricted : currentMode
             try applyMode(lockedMode, enrollment: enrollment, commandID: commandID)
             // Re-write timed unlock info because applyMode() clears it.
             try storage.writeTimedUnlockInfo(info)
@@ -1021,7 +1021,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         if let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
         } else {
-            mode = .dailyMode
+            mode = .restricted
         }
 
         try applyMode(mode, enrollment: enrollment, commandID: commandID)
@@ -1045,7 +1045,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// return to schedule at the target date.
     private func applyLockUntil(date: Date, enrollment: ChildEnrollmentState, commandID: UUID) throws {
         // Apply dailyMode lock immediately.
-        try applyMode(.dailyMode, enrollment: enrollment, commandID: commandID)
+        try applyMode(.restricted, enrollment: enrollment, commandID: commandID)
 
         // Register a one-shot DeviceActivitySchedule that fires at the target date.
         // When it fires, the monitor extension will call returnToSchedule.

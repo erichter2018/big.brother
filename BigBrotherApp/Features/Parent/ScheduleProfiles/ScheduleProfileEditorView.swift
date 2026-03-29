@@ -39,8 +39,8 @@ struct ScheduleProfileEditorView: View {
 
             Section("Locked Mode") {
                 Picker("Mode outside free windows", selection: $profile.lockedMode) {
-                    Text("Restricted").tag(LockMode.dailyMode)
-                    Text("Locked").tag(LockMode.essentialOnly)
+                    Text("Restricted").tag(LockMode.restricted)
+                    Text("Locked").tag(LockMode.locked)
                 }
                 .pickerStyle(.segmented)
 

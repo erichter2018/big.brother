@@ -17,7 +17,7 @@ struct TemporaryUnlockTests {
         let future = Date().addingTimeInterval(1800)
         let policy = Policy(
             targetDeviceID: deviceID,
-            mode: .essentialOnly,
+            mode: .locked,
             temporaryUnlockUntil: future
         )
 
@@ -40,7 +40,7 @@ struct TemporaryUnlockTests {
         let past = Date().addingTimeInterval(-60)
         let policy = Policy(
             targetDeviceID: deviceID,
-            mode: .essentialOnly,
+            mode: .locked,
             temporaryUnlockUntil: past
         )
 
@@ -52,7 +52,7 @@ struct TemporaryUnlockTests {
             capabilities: makeCapabilities()
         )
 
-        #expect(effective.resolvedMode == .essentialOnly)
+        #expect(effective.resolvedMode == .locked)
         #expect(!effective.isTemporaryUnlock)
         #expect(effective.temporaryUnlockExpiresAt == nil)
     }
@@ -62,7 +62,7 @@ struct TemporaryUnlockTests {
         let future = Date().addingTimeInterval(1800)
         let policy = Policy(
             targetDeviceID: deviceID,
-            mode: .dailyMode,
+            mode: .restricted,
             temporaryUnlockUntil: future
         )
 
@@ -74,7 +74,7 @@ struct TemporaryUnlockTests {
             childProfileID: ChildProfileID.generate(),
             familyID: familyID,
             name: "Test",
-            mode: .essentialOnly,
+            mode: .locked,
             daysOfWeek: Set(DayOfWeek.allCases),
             startTime: DayTime(hour: max(0, hour - 1), minute: 0),
             endTime: DayTime(hour: min(23, hour + 1), minute: 59)

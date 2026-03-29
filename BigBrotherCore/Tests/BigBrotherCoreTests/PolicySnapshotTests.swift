@@ -8,7 +8,7 @@ struct PolicySnapshotTests {
     @Test("PolicySnapshot serialization roundtrip")
     func roundtrip() throws {
         let effective = EffectivePolicy(
-            resolvedMode: .dailyMode,
+            resolvedMode: .restricted,
             shieldedCategoriesData: Data(),
             allowedAppTokensData: Data([0x01, 0x02]),
             warnings: [.someSystemAppsCannotBeBlocked, .tokensMissingForDevice],
@@ -27,7 +27,7 @@ struct PolicySnapshotTests {
         let data = try JSONEncoder().encode(snapshot)
         let decoded = try JSONDecoder().decode(PolicySnapshot.self, from: data)
 
-        #expect(decoded.effectivePolicy.resolvedMode == .dailyMode)
+        #expect(decoded.effectivePolicy.resolvedMode == .restricted)
         #expect(decoded.effectivePolicy.policyVersion == 7)
         #expect(decoded.effectivePolicy.warnings.count == 2)
         #expect(decoded.childProfile?.name == "Simon")
@@ -44,7 +44,7 @@ struct PolicySnapshotTests {
         let storage = AppGroupStorage(containerURL: tempDir)
 
         let effective = EffectivePolicy(
-            resolvedMode: .essentialOnly,
+            resolvedMode: .locked,
             warnings: [.familyControlsNotAuthorized],
             policyVersion: 3
         )
@@ -54,7 +54,7 @@ struct PolicySnapshotTests {
         let read = storage.readPolicySnapshot()
 
         #expect(read != nil)
-        #expect(read?.effectivePolicy.resolvedMode == .essentialOnly)
+        #expect(read?.effectivePolicy.resolvedMode == .locked)
         #expect(read?.effectivePolicy.policyVersion == 3)
     }
 
@@ -82,14 +82,14 @@ struct PolicySnapshotTests {
             effectivePolicy: EffectivePolicy(resolvedMode: .unlocked, policyVersion: 1)
         )
         let snap2 = PolicySnapshot(
-            effectivePolicy: EffectivePolicy(resolvedMode: .essentialOnly, policyVersion: 2)
+            effectivePolicy: EffectivePolicy(resolvedMode: .locked, policyVersion: 2)
         )
 
         try storage.writePolicySnapshot(snap1)
         try storage.writePolicySnapshot(snap2)
 
         let read = storage.readPolicySnapshot()
-        #expect(read?.effectivePolicy.resolvedMode == .essentialOnly)
+        #expect(read?.effectivePolicy.resolvedMode == .locked)
         #expect(read?.effectivePolicy.policyVersion == 2)
     }
 }

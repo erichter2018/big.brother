@@ -8,7 +8,7 @@ struct PolicyReconcilerTests {
     let deviceID = DeviceID.generate()
 
     private func makeSnapshot(
-        mode: LockMode = .essentialOnly,
+        mode: LockMode = .locked,
         version: Int64 = 1,
         isTemporaryUnlock: Bool = false,
         temporaryUnlockExpiresAt: Date? = nil
@@ -27,7 +27,7 @@ struct PolicyReconcilerTests {
 
     @Test("Detects mode mismatch and recommends reapply")
     func detectsMismatch() {
-        let snapshot = makeSnapshot(mode: .essentialOnly)
+        let snapshot = makeSnapshot(mode: .locked)
         let action = PolicyReconciler.evaluate(
             currentSnapshot: snapshot,
             lastAppliedMode: .unlocked,
@@ -45,10 +45,10 @@ struct PolicyReconcilerTests {
 
     @Test("No change when modes match on heartbeat cycle")
     func noChangeWhenMatching() {
-        let snapshot = makeSnapshot(mode: .essentialOnly)
+        let snapshot = makeSnapshot(mode: .locked)
         let action = PolicyReconciler.evaluate(
             currentSnapshot: snapshot,
-            lastAppliedMode: .essentialOnly,
+            lastAppliedMode: .locked,
             authorizationHealth: AuthorizationHealth(currentState: .authorized),
             temporaryUnlockState: nil,
             trigger: .heartbeatCycle
@@ -76,7 +76,7 @@ struct PolicyReconcilerTests {
 
     @Test("App launch with no prior mode triggers reapply")
     func appLaunchFirstEnforcement() {
-        let snapshot = makeSnapshot(mode: .dailyMode)
+        let snapshot = makeSnapshot(mode: .restricted)
         let action = PolicyReconciler.evaluate(
             currentSnapshot: snapshot,
             lastAppliedMode: nil,
@@ -94,10 +94,10 @@ struct PolicyReconcilerTests {
 
     @Test("Sync completed always triggers reapply")
     func syncCompletedReapply() {
-        let snapshot = makeSnapshot(mode: .essentialOnly)
+        let snapshot = makeSnapshot(mode: .locked)
         let action = PolicyReconciler.evaluate(
             currentSnapshot: snapshot,
-            lastAppliedMode: .essentialOnly,
+            lastAppliedMode: .locked,
             authorizationHealth: AuthorizationHealth(currentState: .authorized),
             temporaryUnlockState: nil,
             trigger: .syncCompleted
@@ -112,10 +112,10 @@ struct PolicyReconcilerTests {
 
     @Test("Authorization restored triggers reapply")
     func authRestoredReapply() {
-        let snapshot = makeSnapshot(mode: .essentialOnly)
+        let snapshot = makeSnapshot(mode: .locked)
         let action = PolicyReconciler.evaluate(
             currentSnapshot: snapshot,
-            lastAppliedMode: .essentialOnly,
+            lastAppliedMode: .locked,
             authorizationHealth: AuthorizationHealth(currentState: .authorized),
             temporaryUnlockState: nil,
             trigger: .authorizationRestored
@@ -133,7 +133,7 @@ struct PolicyReconcilerTests {
         let snapshot = makeSnapshot(mode: .unlocked, isTemporaryUnlock: true)
         let unlock = TemporaryUnlockState(
             origin: .remoteCommand,
-            previousMode: .dailyMode,
+            previousMode: .restricted,
             startedAt: Date().addingTimeInterval(-3600),
             expiresAt: Date().addingTimeInterval(-60)
         )
@@ -146,15 +146,15 @@ struct PolicyReconcilerTests {
             trigger: .heartbeatCycle
         )
 
-        #expect(action == .expireTemporaryUnlock(previousMode: .dailyMode))
+        #expect(action == .expireTemporaryUnlock(previousMode: .restricted))
     }
 
     @Test("Degraded enforcement when authorization denied")
     func degradedOnAuthDenied() {
-        let snapshot = makeSnapshot(mode: .essentialOnly)
+        let snapshot = makeSnapshot(mode: .locked)
         let action = PolicyReconciler.evaluate(
             currentSnapshot: snapshot,
-            lastAppliedMode: .essentialOnly,
+            lastAppliedMode: .locked,
             authorizationHealth: AuthorizationHealth(currentState: .denied),
             temporaryUnlockState: nil,
             trigger: .heartbeatCycle

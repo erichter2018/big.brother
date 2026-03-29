@@ -295,17 +295,17 @@ final class ChildDetailViewModel: CommandSendable {
             await performCommand(.returnToSchedule, target: .child(child.id))
 
         case .indefinite:
-            appState.expectedModes[child.id] = (.dailyMode, Date())
-            await performCommand(.setMode(.dailyMode), target: .child(child.id))
+            appState.expectedModes[child.id] = (.restricted, Date())
+            await performCommand(.setMode(.restricted), target: .child(child.id))
 
         case .untilMidnight:
             let midnight = Calendar.current.startOfDay(for: Date()).addingTimeInterval(86400)
-            appState.expectedModes[child.id] = (.dailyMode, Date())
+            appState.expectedModes[child.id] = (.restricted, Date())
             await performCommand(.lockUntil(date: midnight), target: .child(child.id))
 
         case .hours(let h):
             let target = Date().addingTimeInterval(Double(h) * 3600)
-            appState.expectedModes[child.id] = (.dailyMode, Date())
+            appState.expectedModes[child.id] = (.restricted, Date())
             await performCommand(.lockUntil(date: target), target: .child(child.id))
         }
     }

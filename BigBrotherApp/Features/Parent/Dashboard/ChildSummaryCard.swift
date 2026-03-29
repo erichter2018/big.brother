@@ -239,8 +239,8 @@ struct ChildSummaryCard: View {
     private var modeBadgeLabel: String {
         switch dominantMode {
         case .unlocked: return countdown ?? "Unlocked"
-        case .dailyMode: return "Restricted"
-        case .essentialOnly: return "Locked"
+        case .restricted: return "Restricted"
+        case .locked: return "Locked"
         case .lockedDown:
             if let cd = lockDownCountdown { return "Locked Down \(cd)" }
             return "Locked Down"
@@ -250,8 +250,8 @@ struct ChildSummaryCard: View {
     private var modeBadgeIcon: String {
         switch dominantMode {
         case .unlocked: return "lock.open.fill"
-        case .dailyMode: return "lock.fill"
-        case .essentialOnly: return "shield.fill"
+        case .restricted: return "lock.fill"
+        case .locked: return "shield.fill"
         case .lockedDown: return "wifi.slash"
         }
     }
@@ -861,8 +861,8 @@ struct ChildSummaryCard: View {
     private var modeColor: Color {
         switch dominantMode {
         case .unlocked: return .green
-        case .dailyMode: return .blue
-        case .essentialOnly: return .purple
+        case .restricted: return .blue
+        case .locked: return .purple
         case .lockedDown: return .red
         }
     }
@@ -871,8 +871,8 @@ struct ChildSummaryCard: View {
     private var mutedModeColor: Color {
         switch dominantMode {
         case .unlocked: return Color(.systemGreen).opacity(0.7)
-        case .dailyMode: return Color(.systemBlue).opacity(0.7)
-        case .essentialOnly: return Color(.systemPurple).opacity(0.7)
+        case .restricted: return Color(.systemBlue).opacity(0.7)
+        case .locked: return Color(.systemPurple).opacity(0.7)
         case .lockedDown: return Color(.systemRed).opacity(0.7)
         }
     }

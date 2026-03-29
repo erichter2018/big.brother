@@ -67,7 +67,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         case .unlocked:
             clearAllShieldStores()
 
-        case .dailyMode, .essentialOnly, .lockedDown:
+        case .restricted, .locked, .lockedDown:
             if let profile = storage.readActiveScheduleProfile() {
                 let scheduleMode = profile.resolvedMode(at: Date())
                 if scheduleMode == .unlocked {
@@ -76,11 +76,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                     // Use the schedule-resolved mode for shield decisions —
                     // essential windows should get essentialOnly enforcement
                     // even if the base policy says dailyMode.
-                    let effectiveMode = scheduleMode == .essentialOnly ? .essentialOnly : policy.resolvedMode
-                    applyShield(allowExemptions: effectiveMode == .dailyMode)
+                    let effectiveMode = scheduleMode == .locked ? .locked : policy.resolvedMode
+                    applyShield(allowExemptions: effectiveMode == .restricted)
                 }
             } else {
-                applyShield(allowExemptions: policy.resolvedMode == .dailyMode)
+                applyShield(allowExemptions: policy.resolvedMode == .restricted)
             }
         }
 
@@ -334,9 +334,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         switch policy.resolvedMode {
         case .unlocked:
             return "This app should be accessible."
-        case .dailyMode:
+        case .restricted:
             return "This app is not in your allowed list. Ask a parent to unlock it."
-        case .essentialOnly:
+        case .locked:
             return "Only essential apps are available right now."
         case .lockedDown:
             return "Device is locked down. Only essential apps, no internet."
