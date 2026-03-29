@@ -7,12 +7,12 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
 
     /// Block everything except explicitly allowed apps.
     /// The allowed list is defined per-child and per-device.
-    case restricted
+    case restricted = "dailyMode"
 
     /// Allow only a narrow essential set: Messages, Maps, Phone,
     /// FaceTime, Find My, Camera, Clock, Contacts.
     /// Best-effort — some system apps cannot be blocked regardless.
-    case locked
+    case locked = "essentialOnly"
 
     /// Essential-only apps AND internet disabled (VPN DNS blackhole).
     /// Most restrictive mode — device is effectively offline.
