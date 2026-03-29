@@ -1,18 +1,20 @@
 import Foundation
 
 /// The restriction modes that can be applied to a child device.
-public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashable {
+/// Custom Codable: reads both old ("dailyMode"/"essentialOnly") and new ("restricted"/"locked")
+/// values, but always writes the new clean values.
+public enum LockMode: String, Sendable, CaseIterable, Equatable, Hashable {
     /// No restrictions. All apps accessible.
     case unlocked
 
     /// Block everything except explicitly allowed apps.
     /// The allowed list is defined per-child and per-device.
-    case restricted = "dailyMode"
+    case restricted
 
     /// Allow only a narrow essential set: Messages, Maps, Phone,
     /// FaceTime, Find My, Camera, Clock, Contacts.
     /// Best-effort — some system apps cannot be blocked regardless.
-    case locked = "essentialOnly"
+    case locked
 
     /// Essential-only apps AND internet disabled (VPN DNS blackhole).
     /// Most restrictive mode — device is effectively offline.
@@ -36,5 +38,33 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
         case .locked: 2
         case .lockedDown: 3
         }
+    }
+}
+
+// MARK: - Codable (reads old + new values, writes new)
+
+extension LockMode: Codable {
+    /// Legacy raw values from before the rename. Accepted on decode, never written.
+    private static let legacyMapping: [String: LockMode] = [
+        "dailyMode": .restricted,
+        "essentialOnly": .locked,
+    ]
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if let mode = LockMode(rawValue: raw) {
+            self = mode
+        } else if let mode = Self.legacyMapping[raw] {
+            self = mode
+        } else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "Unknown LockMode: \(raw)")
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue) // always writes the new clean value
     }
 }
