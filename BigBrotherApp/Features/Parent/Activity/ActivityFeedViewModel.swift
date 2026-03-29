@@ -90,8 +90,8 @@ final class ActivityFeedViewModel {
         .namedPlaceArrival, .namedPlaceDeparture, .tripCompleted,
         .authorizationLost, .enforcementDegraded,
         .unlockRequested, .temporaryUnlockStarted, .temporaryUnlockExpired,
-        .modeChanged, .localPINUnlock, .enrollmentCompleted, .enrollmentRevoked,
-        .sosAlert,
+        .localPINUnlock, .enrollmentCompleted, .enrollmentRevoked,
+        .sosAlert, .selfUnlockUsed,
     ]
 
     private func matchesFilter(_ type: EventType) -> Bool {
@@ -118,12 +118,11 @@ final class ActivityFeedViewModel {
 
         let since = Date().addingTimeInterval(-7 * 86400)
         do {
-            let rawEvents = try await cloudKit.fetchEventLogs(familyID: familyID, since: since)
+            let rawEvents = try await cloudKit.fetchEventLogs(familyID: familyID, since: since, types: Self.visibleTypes)
             let profiles = appState.childProfiles
             let devices = appState.childDevices
 
             let filtered = rawEvents
-                .filter { Self.visibleTypes.contains($0.eventType) }
                 .filter { selectedChildID == nil || deviceBelongsToChild($0.deviceID, childID: selectedChildID!, devices: devices) }
                 .filter { matchesFilter($0.eventType) }
                 .sorted { $0.timestamp > $1.timestamp }
@@ -149,9 +148,7 @@ final class ActivityFeedViewModel {
                     )
                 }
 
-            unreadCount = rawEvents.filter {
-                Self.visibleTypes.contains($0.eventType) && $0.timestamp > lastViewedAt
-            }.count
+            unreadCount = rawEvents.filter { $0.timestamp > lastViewedAt }.count
 
             // Safety notifications
             for profile in profiles {
@@ -177,10 +174,19 @@ final class ActivityFeedViewModel {
         devices.first { $0.id == deviceID }?.childProfileID == childID
     }
 
+    /// Resolve the child profile for a device ID (used by the view for navigation).
+    func resolveChild(deviceID: DeviceID) -> ChildProfile? {
+        guard let device = appState.childDevices.first(where: { $0.id == deviceID }),
+              let profile = appState.childProfiles.first(where: { $0.id == device.childProfileID }) else {
+            return nil
+        }
+        return profile
+    }
+
     private func resolveChildName(deviceID: DeviceID, profiles: [ChildProfile], devices: [ChildDevice]) -> String {
         guard let device = devices.first(where: { $0.id == deviceID }),
               let profile = profiles.first(where: { $0.id == device.childProfileID }) else {
-            return "Unknown"
+            return "I"
         }
         return profile.name
     }
@@ -194,6 +200,7 @@ struct ActivityEvent: Identifiable, Equatable {
     let eventType: EventType
     let details: String?
     let timestamp: Date
+    let deviceID: DeviceID
 
     init(entry: EventLogEntry, childName: String) {
         self.id = entry.id
@@ -201,6 +208,7 @@ struct ActivityEvent: Identifiable, Equatable {
         self.eventType = entry.eventType
         self.details = entry.details
         self.timestamp = entry.timestamp
+        self.deviceID = entry.deviceID
     }
 
     var icon: String {
@@ -221,6 +229,7 @@ struct ActivityEvent: Identifiable, Equatable {
         case .localPINUnlock: return "key"
         case .enrollmentCompleted: return "person.badge.plus"
         case .enrollmentRevoked: return "person.badge.minus"
+        case .selfUnlockUsed: return "lock.rotation"
         case .sosAlert: return "sos"
         default: return "bell"
         }
@@ -236,6 +245,8 @@ struct ActivityEvent: Identifiable, Equatable {
             return .blue
         case .tripCompleted, .authorizationRestored, .enrollmentCompleted:
             return .green
+        case .selfUnlockUsed:
+            return .teal
         default:
             return .secondary
         }
@@ -260,6 +271,7 @@ struct ActivityEvent: Identifiable, Equatable {
         case .localPINUnlock: return "\(childName) — local PIN unlock"
         case .enrollmentCompleted: return "\(childName) enrolled"
         case .enrollmentRevoked: return "\(childName) unenrolled"
+        case .selfUnlockUsed: return "\(childName) used self-unlock"
         case .sosAlert: return "\(childName) — SOS EMERGENCY"
         default: return "\(childName) — \(eventType.displayName)"
         }
@@ -279,7 +291,26 @@ struct ActivityEvent: Identifiable, Equatable {
     /// Detail text that adds value beyond the title. Suppresses redundant details
     /// (e.g. "Authorization restored" when the title already says "permissions restored").
     var meaningfulDetail: String? {
-        guard let details, !details.isEmpty, !details.hasPrefix("{") else { return nil }
+        guard let details, !details.isEmpty else { return nil }
+
+        // Parse trip JSON into a human-readable summary
+        if eventType == .tripCompleted, details.hasPrefix("{"),
+           let data = details.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            var parts: [String] = []
+            if let dist = json["distanceMiles"] as? String ?? (json["distanceMiles"] as? Double).map({ String(format: "%.1f", $0) }) {
+                parts.append("\(dist) mi")
+            }
+            if let dur = json["durationMinutes"] as? Int {
+                parts.append("\(dur) min")
+            }
+            if let max = json["maxSpeedMPH"] as? Int, max > 0 {
+                parts.append("\(max) mph max")
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        }
+
+        guard !details.hasPrefix("{") else { return nil }
         // Suppress details that just repeat the event type name
         let lowered = details.lowercased()
         if lowered == eventType.rawValue.lowercased() { return nil }

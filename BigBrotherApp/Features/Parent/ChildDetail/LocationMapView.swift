@@ -11,6 +11,8 @@ struct LocationMapView: View {
     let cloudKit: (any CloudKitServiceProtocol)?
     let onLocate: () async -> Void
     var autoLocate: Bool = false
+    /// When set, auto-selects the trip closest to this timestamp after loading.
+    var focusTripAt: Date? = nil
 
     @State private var breadcrumbs: [DeviceLocation] = []
     @State private var routeSegments: [MKPolyline] = []
@@ -230,7 +232,7 @@ struct LocationMapView: View {
             return ScrubPosition(
                 coord: coord, timestamp: interpolatedTime,
                 address: fraction < 0.5 ? (from.address ?? "") : (to.address ?? ""),
-                isInterpolated: false, speed: speed, breadcrumbIndex: lower
+                isInterpolated: true, speed: speed, breadcrumbIndex: lower
             )
         }
 
@@ -319,21 +321,26 @@ struct LocationMapView: View {
             return "\(mph) mph"
         }
 
-        // Fallback: sliding window of nearby breadcrumbs
-        let windowSize = 2
-        let lo = max(0, index - windowSize)
-        let hi = min(breadcrumbs.count - 1, index + windowSize)
-        guard hi > lo else { return nil }
-
-        let startLoc = CLLocation(latitude: breadcrumbs[lo].latitude, longitude: breadcrumbs[lo].longitude)
-        let endLoc = CLLocation(latitude: breadcrumbs[hi].latitude, longitude: breadcrumbs[hi].longitude)
-        let dist = startLoc.distance(from: endLoc)
-        let time = breadcrumbs[hi].timestamp.timeIntervalSince(breadcrumbs[lo].timestamp)
-        guard time > 0 else { return nil }
-        let mph = (dist / time) * 2.237
-        if mph < 2 { return "stationary" }
-        if mph < 8 { return "walking" }
-        return "\(Int(mph)) mph"
+        // Fallback: compute speed from distance/time to the nearest neighbor.
+        // Use the closer of (prev→current) and (current→next) for best accuracy.
+        var bestMPH: Double = 0
+        if index > 0 {
+            let prev = breadcrumbs[index - 1]
+            let dist = CLLocation(latitude: prev.latitude, longitude: prev.longitude)
+                .distance(from: CLLocation(latitude: bc.latitude, longitude: bc.longitude))
+            let time = bc.timestamp.timeIntervalSince(prev.timestamp)
+            if time > 0 { bestMPH = max(bestMPH, (dist / time) * 2.237) }
+        }
+        if index < breadcrumbs.count - 1 {
+            let next = breadcrumbs[index + 1]
+            let dist = CLLocation(latitude: bc.latitude, longitude: bc.longitude)
+                .distance(from: CLLocation(latitude: next.latitude, longitude: next.longitude))
+            let time = next.timestamp.timeIntervalSince(bc.timestamp)
+            if time > 0 { bestMPH = max(bestMPH, (dist / time) * 2.237) }
+        }
+        if bestMPH < 2 { return "stationary" }
+        if bestMPH < 8 { return "walking" }
+        return "\(Int(bestMPH)) mph"
     }
 
     struct ScrubPosition {
@@ -1009,6 +1016,12 @@ struct LocationMapView: View {
             trips = detectTrips()
             await correlateDriveReportEvents()
             await resolveTripPOIs()
+            // Auto-focus on a specific trip if requested
+            if let target = focusTripAt, let match = trips.min(by: {
+                abs($0.endTime.timeIntervalSince(target)) < abs($1.endTime.timeIntervalSince(target))
+            }), abs(match.endTime.timeIntervalSince(target)) < 600 {
+                jumpToTrip(match)
+            }
             // Routes and speed limits load in parallel
             async let routes: () = resolveRoutes()
             async let speedLimits: () = prefetchSpeedLimitsForTrips()

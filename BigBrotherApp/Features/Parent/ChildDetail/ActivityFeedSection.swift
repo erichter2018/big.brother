@@ -5,6 +5,11 @@ import BigBrotherCore
 struct ActivityFeedSection: View {
     let entries: [TimelineEntry]
     let limit: Int
+    let child: ChildProfile
+    let devices: [ChildDevice]
+    let heartbeats: [DeviceHeartbeat]
+    let cloudKit: (any CloudKitServiceProtocol)?
+    let onLocate: () async -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -22,7 +27,23 @@ struct ActivityFeedSection: View {
                     .padding(.vertical, 8)
             } else {
                 ForEach(entries.prefix(limit)) { entry in
-                    activityRow(entry)
+                    if entry.eventType == .tripCompleted {
+                        NavigationLink {
+                            LocationMapView(
+                                child: child,
+                                devices: devices,
+                                heartbeats: heartbeats,
+                                cloudKit: cloudKit,
+                                onLocate: onLocate,
+                                focusTripAt: entry.timestamp
+                            )
+                        } label: {
+                            activityRowContent(entry, showChevron: true)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        activityRowContent(entry, showChevron: false)
+                    }
                 }
             }
         }
@@ -31,7 +52,7 @@ struct ActivityFeedSection: View {
     }
 
     @ViewBuilder
-    private func activityRow(_ entry: TimelineEntry) -> some View {
+    private func activityRowContent(_ entry: TimelineEntry, showChevron: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: iconName(for: entry))
                 .font(.system(size: 11))
@@ -47,10 +68,29 @@ struct ActivityFeedSection: View {
             Text(entry.timestamp, style: .relative)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+
+            if showChevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 
     private func iconName(for entry: TimelineEntry) -> String {
+        if let type = entry.eventType {
+            switch type {
+            case .tripCompleted: return "car.fill"
+            case .speedingDetected: return "gauge.with.dots.needle.67percent"
+            case .phoneWhileDriving: return "iphone.gen3.radiowaves.left.and.right"
+            case .hardBrakingDetected: return "exclamationmark.octagon"
+            case .namedPlaceArrival: return "figure.walk.arrival"
+            case .namedPlaceDeparture: return "figure.walk.departure"
+            case .selfUnlockUsed: return "lock.rotation"
+            case .sosAlert: return "sos"
+            default: break
+            }
+        }
         let label = entry.label.lowercased()
         if entry.isUnlockRequest { return "hand.raised" }
         if label.contains("self-unlock") || label.contains("Self-Unlock") { return "lock.rotation" }
@@ -65,6 +105,16 @@ struct ActivityFeedSection: View {
     }
 
     private func iconColor(for entry: TimelineEntry) -> Color {
+        if let type = entry.eventType {
+            switch type {
+            case .tripCompleted: return .green
+            case .speedingDetected, .sosAlert: return .red
+            case .phoneWhileDriving, .hardBrakingDetected: return .orange
+            case .namedPlaceArrival, .namedPlaceDeparture: return .blue
+            case .selfUnlockUsed: return .teal
+            default: break
+            }
+        }
         let label = entry.label.lowercased()
         if entry.isUnlockRequest { return .orange }
         if label.contains("self-unlock") || label.contains("Self-Unlock") { return .teal }

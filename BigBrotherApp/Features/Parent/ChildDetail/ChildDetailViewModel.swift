@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CloudKit
 import BigBrotherCore
 
 /// A unified timeline entry combining child-reported events and parent-sent commands.
@@ -21,6 +22,9 @@ struct TimelineEntry: Identifiable {
     /// The app name extracted from unlock request details.
     let appName: String?
 
+    /// The event type (for non-command entries).
+    let eventType: EventType?
+
     init(
         id: UUID,
         label: String,
@@ -29,7 +33,8 @@ struct TimelineEntry: Identifiable {
         status: CommandStatus? = nil,
         isUnlockRequest: Bool = false,
         deviceID: DeviceID? = nil,
-        appName: String? = nil
+        appName: String? = nil,
+        eventType: EventType? = nil
     ) {
         self.id = id
         self.label = label
@@ -39,6 +44,7 @@ struct TimelineEntry: Identifiable {
         self.isUnlockRequest = isUnlockRequest
         self.deviceID = deviceID
         self.appName = appName
+        self.eventType = eventType
     }
 }
 
@@ -53,6 +59,8 @@ final class ChildDetailViewModel: CommandSendable {
     var timeline: [TimelineEntry] = []
     /// Daily screen time for the last 7 days (date → minutes). Loaded from CloudKit heartbeats.
     var weeklyScreenTime: [(date: Date, minutes: Int)] = []
+    /// DNS-based online activity snapshot for this child.
+    var onlineActivity: DomainActivitySnapshot?
     private var refreshTimer: Timer?
 
     /// Parent-side restriction state for this child (persisted in UserDefaults).
@@ -507,7 +515,8 @@ final class ChildDetailViewModel: CommandSendable {
                     isCommand: false,
                     isUnlockRequest: event.eventType == .unlockRequested,
                     deviceID: event.deviceID,
-                    appName: extractedAppName
+                    appName: extractedAppName,
+                    eventType: event.eventType
                 )
             }
 
@@ -565,6 +574,7 @@ final class ChildDetailViewModel: CommandSendable {
         try? await appState.refreshDashboard()
         await loadEvents()
         await loadWeeklyScreenTime()
+        await loadOnlineActivity()
     }
 
     /// Fetch heartbeats from the last 7 days to build daily screen time trend.
@@ -606,6 +616,44 @@ final class ChildDetailViewModel: CommandSendable {
             result.append((date: date, minutes: dailyMax[key] ?? 0))
         }
         weeklyScreenTime = result
+    }
+
+    /// Fetch DNS activity from CloudKit for this child's devices.
+    func loadOnlineActivity() async {
+        guard let cloudKit = appState.cloudKit,
+              let familyID = appState.parentState?.familyID else { return }
+
+        let deviceIDs = Set(devices.map(\.id))
+        guard !deviceIDs.isEmpty else { return }
+
+        let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
+        let db = container.publicCloudDatabase
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        let today = fmt.string(from: Date())
+
+        // Try to fetch today's activity for each device
+        for deviceID in deviceIDs {
+            let recordID = CKRecord.ID(recordName: "BBDNSActivity_\(deviceID.rawValue)_\(today)")
+            do {
+                let record = try await db.record(for: recordID)
+                if let json = record["domainsJSON"] as? String,
+                   let data = json.data(using: .utf8),
+                   let domains = try? JSONDecoder().decode([DomainHit].self, from: data) {
+                    onlineActivity = DomainActivitySnapshot(
+                        deviceID: deviceID,
+                        familyID: familyID,
+                        date: today,
+                        timestamp: record["timestamp"] as? Date ?? Date(),
+                        domains: domains,
+                        totalQueries: (record["totalQueries"] as? Int) ?? domains.reduce(0) { $0 + $1.count }
+                    )
+                }
+            } catch {
+                // No activity record for today — normal if device just started
+            }
+        }
     }
 
     // MARK: - Location

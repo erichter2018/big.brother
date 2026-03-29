@@ -152,25 +152,7 @@ struct ChildSummaryCard: View {
 
             // Detail info — one concept per line, consistent alignment
             VStack(alignment: .leading, spacing: 4) {
-                // Row 1: Penalty timer (if active)
-                penaltyLine
-
-                // Row 2: Screen time
-                screenTimeLine
-
-                // Row 3: Device health (heartbeat + lock state)
-                heartbeatLine(cached: cached)
-
-                // Row 4: Location
-                locationLine
-
-                // Row 5: Alerts (jailbreak, shields down) — inline with text
-                if cached.hasJailbreak {
-                    infoRow(icon: "exclamationmark.shield.fill", color: .red) {
-                        Text("jailbreak detected")
-                            .foregroundStyle(.red)
-                    }
-                }
+                // Row 1: Critical alerts (shields down, jailbreak) — always first
                 if cached.isShieldMismatch {
                     infoRow(icon: "shield.slash", color: .red) {
                         Text("shields down")
@@ -178,6 +160,24 @@ struct ChildSummaryCard: View {
                             .fontWeight(.semibold)
                     }
                 }
+                if cached.hasJailbreak {
+                    infoRow(icon: "exclamationmark.shield.fill", color: .red) {
+                        Text("jailbreak detected")
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                // Row 2: Penalty timer (if active)
+                penaltyLine
+
+                // Row 3: Screen time
+                screenTimeLine
+
+                // Row 4: Device health (heartbeat + lock state)
+                heartbeatLine(cached: cached)
+
+                // Row 5: Location
+                locationLine
             }
             .font(.system(size: 12))
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -574,9 +574,17 @@ struct ChildSummaryCard: View {
     private var locationLine: some View {
         if let loc = locationInfo {
             infoRow(icon: "location.fill", color: Self.mutedBlue) {
-                Text("\(loc.address) \u{00B7} \(formatAge(loc.age))")
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 3) {
+                    Text("\(loc.address) \u{00B7} \(formatAge(loc.age))")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let movement = movementIndicator {
+                        Image(systemName: movement.icon)
+                            .font(.system(size: 9))
+                            .foregroundStyle(movement.color)
+                    }
+                }
             }
         } else if isLocationExpected {
             infoRow(icon: "location.slash.fill", color: Self.mutedRed) {
@@ -614,6 +622,21 @@ struct ChildSummaryCard: View {
 
     /// Latest location data from heartbeats (preferring iPhone, falling back to iPad).
     /// Resolves to named place (Home, School, etc.) if the child is near one.
+    /// Movement indicator from the location device's heartbeat.
+    private var movementIndicator: (icon: String, color: Color)? {
+        guard let device = locationDevice,
+              let hb = heartbeats.first(where: { $0.deviceID == device.id }),
+              // Only show if heartbeat is recent (< 5 min)
+              Date().timeIntervalSince(hb.timestamp) < 300 else { return nil }
+        if hb.isDriving == true {
+            return ("car.fill", .orange)
+        }
+        if let speed = hb.currentSpeed, speed > 1.0 { // > ~2 mph
+            return ("figure.walk", .blue)
+        }
+        return nil
+    }
+
     private var locationInfo: (address: String, age: TimeInterval)? {
         guard let device = locationDevice,
               let hb = heartbeats.first(where: { $0.deviceID == device.id }),

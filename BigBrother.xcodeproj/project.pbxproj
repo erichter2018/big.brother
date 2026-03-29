@@ -26,6 +26,7 @@
 		12A992FB6A2BFCE74B6527E3 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8C3939798BF967B152FD03DA /* WidgetKit.framework */; };
 		1388286ED65D3E8B317600D7 /* ScheduleFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = CED1645C78764A9692A27103 /* ScheduleFormatting.swift */; };
 		16144B9C887CE205EC6470FE /* SafetyEventNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6805362753E5A5ACC38AE02 /* SafetyEventNotificationService.swift */; };
+		18977F8842041230F38E679B /* OnlineActivitySection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */; };
 		18E1CE741E8B697EDA04B8E9 /* SyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B177EFF146758126614A476D /* SyncCoordinator.swift */; };
 		1A842D8C523CC78746CB9163 /* ParentAppNameMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BB7CF9073113D2C6EAD80E0 /* ParentAppNameMapping.swift */; };
 		1B1350B1188BD7AE8E142FB9 /* ScheduleOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A2B8283DF2B8F94B78B92F0 /* ScheduleOverviewView.swift */; };
@@ -36,6 +37,7 @@
 		28E4C5F8E9ED4BE1D277AC66 /* BigBrotherWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F86CFA23355E9739773F4D3 /* BigBrotherWidget.swift */; };
 		2A7333B38AD4A92D3676A910 /* ActivityFeedViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B95B2F5C9CFDAFB5A63907B0 /* ActivityFeedViewModel.swift */; };
 		2C07273E33EED3CF492EC083 /* LocalParentUnlockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B2932282E5C1291793D282 /* LocalParentUnlockViewModel.swift */; };
+		2C2DC3DFB2D37A7069EE7A84 /* DNSProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D41227A54F0B86A1736CFC5 /* DNSProxy.swift */; };
 		2FAFBBB2E116F22FE3F34104 /* ScheduleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7425110E1AD24BCA7B6F62EE /* ScheduleManager.swift */; };
 		3052250EB127B85C0D3C219F /* HeartbeatProfileListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBE922CC1D119DC068B1B419 /* HeartbeatProfileListView.swift */; };
 		30858EE4CAFAC79BC85802B0 /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B33EA033B68C98649EBD6B4A /* DeviceActivity.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
@@ -270,6 +272,7 @@
 		1A2ACF78BD6A37BB1AA7C14F /* CommandProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandProcessor.swift; sourceTree = "<group>"; };
 		1B5DC2165FE4CA5A8229AB9A /* InsightsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsView.swift; sourceTree = "<group>"; };
 		1BB7CF9073113D2C6EAD80E0 /* ParentAppNameMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentAppNameMapping.swift; sourceTree = "<group>"; };
+		1D41227A54F0B86A1736CFC5 /* DNSProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DNSProxy.swift; sourceTree = "<group>"; };
 		1F86CFA23355E9739773F4D3 /* BigBrotherWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherWidget.swift; sourceTree = "<group>"; };
 		1F8E53364DF4E12B275CB1A3 /* CodeGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeGenerator.swift; sourceTree = "<group>"; };
 		21D9F4B16AB65B9226B9D66C /* ParentDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentDashboardView.swift; sourceTree = "<group>"; };
@@ -302,6 +305,7 @@
 		50EC40AF79E592665680B22C /* ActivityFeedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityFeedView.swift; sourceTree = "<group>"; };
 		545535D1C70ABF0A003B9E5B /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		57E39333DD2C79C3B88F786B /* SubscriptionGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionGate.swift; sourceTree = "<group>"; };
+		5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineActivitySection.swift; sourceTree = "<group>"; };
 		596B83F9E91AB835D52CB4BA /* EnforcementService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnforcementService.swift; sourceTree = "<group>"; };
 		5A0BC10A81629745D210A6A0 /* SubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionManager.swift; sourceTree = "<group>"; };
 		5DE768E3BFD59F635C9657B0 /* AuthServiceImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthServiceImpl.swift; sourceTree = "<group>"; };
@@ -864,6 +868,7 @@
 		C54B84651566E255B83222B9 /* BigBrotherTunnel */ = {
 			isa = PBXGroup;
 			children = (
+				1D41227A54F0B86A1736CFC5 /* DNSProxy.swift */,
 				01DD1591B2240F1031E098A7 /* Info.plist */,
 				545535D1C70ABF0A003B9E5B /* PacketTunnelProvider.swift */,
 			);
@@ -896,6 +901,7 @@
 				C07395C4A7FA6A27B2702AD0 /* ChildDetailViewModel.swift */,
 				C439A682AED725B73ACC0B0C /* LocationMapView.swift */,
 				A66C4E57EACD24F29FF12DF5 /* MiniMapCard.swift */,
+				5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */,
 				046007F86CF46F5120A2EBCA /* PermissionsStatusView.swift */,
 				BEB7831DF84D91F491777624 /* RemoteDiagnosticsView.swift */,
 				60D14983C74C7A47D8751D0E /* ScreenTimeTrendChart.swift */,
@@ -1299,6 +1305,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2C2DC3DFB2D37A7069EE7A84 /* DNSProxy.swift in Sources */,
 				F7639CC871DA156BB8CB2007 /* PacketTunnelProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1430,6 +1437,7 @@
 				ADB4806898CD589D49D3E575 /* NamedPlaceEditorView.swift in Sources */,
 				91A9EB0DC3A8BFE6ABD11AAE /* NetworkMonitor.swift in Sources */,
 				49747191729E6B1BB94BE4D4 /* OnboardingView.swift in Sources */,
+				18977F8842041230F38E679B /* OnlineActivitySection.swift in Sources */,
 				1A842D8C523CC78746CB9163 /* ParentAppNameMapping.swift in Sources */,
 				0420C705A806FABBC093726B /* ParentDashboardView.swift in Sources */,
 				C6ECBD5359BE483745B75775 /* ParentDashboardViewModel.swift in Sources */,

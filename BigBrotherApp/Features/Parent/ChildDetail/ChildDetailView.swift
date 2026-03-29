@@ -44,9 +44,20 @@ struct ChildDetailView: View {
                 // 4. Screen time trend (7-day chart)
                 ScreenTimeTrendChart(dailyMinutes: viewModel.weeklyScreenTime)
 
-                // 5. Activity feed (5 most recent)
+                // 5. Online activity (DNS-based)
+                OnlineActivitySection(activity: viewModel.onlineActivity)
+
+                // 6. Activity feed (5 most recent)
                 VStack(alignment: .leading, spacing: 0) {
-                    ActivityFeedSection(entries: viewModel.timeline, limit: 5)
+                    ActivityFeedSection(
+                        entries: viewModel.timeline,
+                        limit: 5,
+                        child: viewModel.child,
+                        devices: viewModel.devices,
+                        heartbeats: viewModel.heartbeats,
+                        cloudKit: viewModel.appState.cloudKit,
+                        onLocate: { await viewModel.requestLocation() }
+                    )
                     if viewModel.timeline.count > 5 {
                         NavigationLink(destination: fullActivityList) {
                             HStack {
@@ -309,21 +320,41 @@ struct ChildDetailView: View {
     private var fullActivityList: some View {
         List {
             ForEach(viewModel.timeline) { entry in
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(entry.isCommand ? Color.purple : .blue)
-                        .frame(width: 6, height: 6)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.label)
-                            .font(.subheadline)
-                        Text(entry.timestamp, style: .relative)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                if entry.eventType == .tripCompleted {
+                    NavigationLink {
+                        LocationMapView(
+                            child: viewModel.child,
+                            devices: viewModel.devices,
+                            heartbeats: viewModel.heartbeats,
+                            cloudKit: viewModel.appState.cloudKit,
+                            onLocate: { await viewModel.requestLocation() },
+                            focusTripAt: entry.timestamp
+                        )
+                    } label: {
+                        activityListRow(entry)
                     }
+                } else {
+                    activityListRow(entry)
                 }
             }
         }
         .navigationTitle("Activity")
+    }
+
+    @ViewBuilder
+    private func activityListRow(_ entry: TimelineEntry) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(entry.eventType == .tripCompleted ? Color.green : (entry.isCommand ? Color.purple : .blue))
+                .frame(width: 6, height: 6)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.label)
+                    .font(.subheadline)
+                Text(entry.timestamp, style: .relative)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     // MARK: - Devices (Collapsible)
@@ -975,29 +1006,40 @@ struct ChildDetailView: View {
                 }
 
                 // Driving Safety
-                Section("Driving Safety") {
-                    HStack {
-                        Label("Speed Limit", systemImage: "gauge.with.dots.needle.67percent")
-                        Spacer()
-                        Text("\(Int(viewModel.drivingSettings.speedThresholdMPH)) mph")
-                            .foregroundStyle(.secondary)
-                        Stepper("", value: $viewModel.drivingSettings.speedThresholdMPH, in: 40...100, step: 5)
-                            .labelsHidden()
-                            .frame(width: 94)
+                Section {
+                    Toggle(isOn: $viewModel.drivingSettings.isDriver) {
+                        Label("Is a Driver", systemImage: "car.fill")
                     }
-                    Toggle(isOn: $viewModel.drivingSettings.speedAlertEnabled) {
-                        Label("Speed Alerts", systemImage: "exclamationmark.triangle")
-                    }
-                    Toggle(isOn: $viewModel.drivingSettings.phoneUsageDetectionEnabled) {
-                        Label("Phone While Driving", systemImage: "iphone.gen3.radiowaves.left.and.right")
-                    }
-                    Toggle(isOn: $viewModel.drivingSettings.hardBrakingDetectionEnabled) {
-                        Label("Hard Braking", systemImage: "exclamationmark.octagon")
+                    if viewModel.drivingSettings.isDriver {
+                        HStack {
+                            Label("Speed Limit", systemImage: "gauge.with.dots.needle.67percent")
+                            Spacer()
+                            Text("\(Int(viewModel.drivingSettings.speedThresholdMPH)) mph")
+                                .foregroundStyle(.secondary)
+                            Stepper("", value: $viewModel.drivingSettings.speedThresholdMPH, in: 40...100, step: 5)
+                                .labelsHidden()
+                                .frame(width: 94)
+                        }
+                        Toggle(isOn: $viewModel.drivingSettings.speedAlertEnabled) {
+                            Label("Speed Alerts", systemImage: "exclamationmark.triangle")
+                        }
+                        Toggle(isOn: $viewModel.drivingSettings.phoneUsageDetectionEnabled) {
+                            Label("Phone While Driving", systemImage: "iphone.gen3.radiowaves.left.and.right")
+                        }
+                        Toggle(isOn: $viewModel.drivingSettings.hardBrakingDetectionEnabled) {
+                            Label("Hard Braking", systemImage: "exclamationmark.octagon")
+                        }
                     }
                     Button("Save Driving Settings") {
                         Task { await viewModel.sendDrivingSettings() }
                     }
                     .disabled(viewModel.isSendingCommand)
+                } header: {
+                    Text("Driving Safety")
+                } footer: {
+                    if !viewModel.drivingSettings.isDriver {
+                        Text("Trips are still tracked when this child is a passenger.")
+                    }
                 }
 
                 // Named Places

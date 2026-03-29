@@ -54,6 +54,12 @@ final class AppState {
     /// Latest heartbeats for all devices (parent mode).
     var latestHeartbeats: [DeviceHeartbeat] = []
 
+    /// Heartbeats for a specific child's devices.
+    func latestHeartbeats(for childID: ChildProfileID) -> [DeviceHeartbeat] {
+        let deviceIDs = Set(childDevices.filter { $0.childProfileID == childID }.map(\.id))
+        return latestHeartbeats.filter { deviceIDs.contains($0.deviceID) }
+    }
+
     /// Heartbeat monitoring profiles (parent mode).
     var heartbeatProfiles: [HeartbeatProfile] = []
 
@@ -1314,9 +1320,17 @@ final class AppState {
             let seconds = timer?.penaltySeconds
             let endTime = timer?.timerEndTime
 
-            // Skip if unchanged from last relay.
+            // Skip no-op "clear penalty" relays — no point sending (0, nil) repeatedly.
+            let effectiveSeconds = seconds ?? 0
+            let isNoop = effectiveSeconds <= 0 && endTime == nil
             if let last = lastRelayedPenalty[childID],
                last.seconds == seconds && last.endTime == endTime {
+                continue
+            }
+            if isNoop, lastRelayedPenalty[childID] == nil {
+                // First snapshot after app relaunch with no active penalty — skip.
+                // Only relay a "clear" if we previously relayed a non-zero value.
+                lastRelayedPenalty[childID] = (seconds, endTime)
                 continue
             }
             lastRelayedPenalty[childID] = (seconds, endTime)

@@ -348,6 +348,18 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             .compactMap(CKRecordConversion.eventLogEntry)
     }
 
+    func fetchEventLogs(familyID: FamilyID, since: Date, types: Set<EventType>) async throws -> [EventLogEntry] {
+        let typeStrings = types.map(\.rawValue) as [String]
+        let predicate = NSPredicate(
+            format: "%K == %@ AND %K >= %@ AND %K IN %@",
+            CKFieldName.familyID, familyID.rawValue,
+            CKFieldName.timestamp, since as NSDate,
+            CKFieldName.eventType, typeStrings
+        )
+        return try await query(CKRecordType.eventLog, predicate: predicate)
+            .compactMap(CKRecordConversion.eventLogEntry)
+    }
+
     // MARK: - Policy
 
     func savePolicy(_ policy: Policy) async throws {
@@ -725,7 +737,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 case .success:
                     continuation.resume()
                 case .failure(let error):
-                    continuation.resume(throwing: CloudKitError.serverError(error))
+                    // If some records succeeded individually (non-atomic mode),
+                    // don't throw — return partial success instead.
+                    if !succeeded.values.isEmpty {
+                        continuation.resume()
+                    } else {
+                        continuation.resume(throwing: CloudKitError.serverError(error))
+                    }
                 }
             }
             database.add(op)

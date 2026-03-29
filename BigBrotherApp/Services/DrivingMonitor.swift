@@ -121,11 +121,11 @@ final class DrivingMonitor: @unchecked Sendable {
         guard shouldStartBraking else { return }
 
         let s = settings
-        if s.hardBrakingDetectionEnabled {
+        if s.isDriver && s.hardBrakingDetectionEnabled {
             startBrakingDetection()
         }
 
-        logDiag("Trip started (speed alert=\(s.speedAlertEnabled) threshold=\(Int(s.speedThresholdMPH))mph phone=\(s.phoneUsageDetectionEnabled) braking=\(s.hardBrakingDetectionEnabled))")
+        logDiag("Trip started (driver=\(s.isDriver) speed alert=\(s.speedAlertEnabled) threshold=\(Int(s.speedThresholdMPH))mph phone=\(s.phoneUsageDetectionEnabled) braking=\(s.hardBrakingDetectionEnabled))")
     }
 
     /// Called by LocationService when CoreMotion reports stationary for >5 min.
@@ -212,7 +212,7 @@ final class DrivingMonitor: @unchecked Sendable {
             return (avg, true, speedSamples, maxSpeedMPS, _currentSpeedLimitMPH)
         }
 
-        guard shouldCheckAbsolute else { return }
+        guard shouldCheckAbsolute, settings.isDriver else { return }
 
         // Query speed limit for this location (async, cached by geohash)
         let coord = location.coordinate
@@ -226,7 +226,7 @@ final class DrivingMonitor: @unchecked Sendable {
         // Also check absolute speed threshold from parent settings
         let s = settings
         let alertSent = stateQueue.sync { speedAlertSentThisTrip }
-        if s.speedAlertEnabled && avgSpeedMPH > s.speedThresholdMPH && !alertSent {
+        if s.isDriver && s.speedAlertEnabled && avgSpeedMPH > s.speedThresholdMPH && !alertSent {
             let overThreshold = samplesSnapshot.filter { $0 * 2.23694 > s.speedThresholdMPH }
             if overThreshold.count >= 3 {
                 stateQueue.sync { speedAlertSentThisTrip = true }
@@ -270,7 +270,7 @@ final class DrivingMonitor: @unchecked Sendable {
     /// Called by DeviceLockMonitor when screen lock state changes.
     func onScreenLockStateChanged(isLocked: Bool) {
         let driving = stateQueue.sync { _isDriving }
-        guard driving, settings.phoneUsageDetectionEnabled else {
+        guard driving, settings.isDriver, settings.phoneUsageDetectionEnabled else {
             cancelPhoneCheck()
             stateQueue.sync { screenUnlockedWhileDrivingAt = nil }
             return

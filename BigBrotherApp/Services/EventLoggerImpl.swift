@@ -52,7 +52,14 @@ final class EventLoggerImpl: EventLoggerProtocol {
 
     func syncPendingEvents() async throws {
         let allEvents = storage.readPendingEventLogs()
-        let pending = allEvents.filter { $0.uploadState == .pending }
+
+        // Recover events stuck in .uploading state (app was killed mid-upload).
+        let stuckUploading = allEvents.filter { $0.uploadState == .uploading }
+        if !stuckUploading.isEmpty {
+            try? storage.updateEventUploadState(ids: Set(stuckUploading.map(\.id)), state: .pending)
+        }
+
+        let pending = allEvents.filter { $0.uploadState == .pending || $0.uploadState == .uploading }
 
         #if DEBUG
         if !allEvents.isEmpty || !pending.isEmpty {
@@ -114,11 +121,18 @@ final class EventLoggerImpl: EventLoggerProtocol {
                 print("[BigBrother] Event sync FAILED: \(error.localizedDescription)")
                 #endif
 
-                try? storage.appendDiagnosticEntry(DiagnosticEntry(
-                    category: .eventUpload,
-                    message: "Event batch upload failed",
-                    details: "\(batchIDs.count) events, error: \(error.localizedDescription)"
-                ))
+                // Only log diagnostic once per 10 minutes to avoid flooding.
+                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                let lastFailLogKey = "eventUploadLastFailLogAt"
+                let lastFailLog = defaults?.object(forKey: lastFailLogKey) as? Date ?? .distantPast
+                if Date().timeIntervalSince(lastFailLog) > 600 {
+                    defaults?.set(Date(), forKey: lastFailLogKey)
+                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .eventUpload,
+                        message: "Event batch upload failed",
+                        details: "\(batchIDs.count) events, error: \(error.localizedDescription)"
+                    ))
+                }
             }
         }
 

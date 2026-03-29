@@ -1,6 +1,8 @@
 import NetworkExtension
 import CloudKit
 import UserNotifications
+import UIKit
+import notify
 import BigBrotherCore
 
 /// VPN Packet Tunnel extension.
@@ -33,6 +35,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Prevent duplicate heartbeats — only send from tunnel when main app is dead.
     private var tunnelOwnsHeartbeat = false
 
+    /// DNS proxy for domain activity logging.
+    private var dnsProxy: DNSProxy?
+
+    /// Timer for periodic DNS activity sync.
+    private var dnsActivitySyncTimer: DispatchSourceTimer?
+
+    // MARK: - Screen Lock Monitoring
+
+    private var lockNotifyToken: Int32 = NOTIFY_TOKEN_INVALID
+    private var lastUnlockAt: Date?
+
     // MARK: - Tunnel Lifecycle
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
@@ -51,20 +64,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let safeSearchEnabled = defaults?.bool(forKey: "safeSearchEnabled") ?? false
 
+        // Determine upstream DNS server
+        let upstreamDNS: String
         if isInternetBlocked {
-            // DNS blackhole — all domain lookups fail
-            let dns = NEDNSSettings(servers: ["127.0.0.1"])
-            dns.matchDomains = [""]
-            settings.dnsSettings = dns
+            upstreamDNS = "127.0.0.1" // blackhole
             NSLog("[Tunnel] DNS blackhole active — internet blocked")
         } else if safeSearchEnabled {
-            // CleanBrowsing Family Filter DNS: enforces safe search on major search engines
-            // and blocks adult content domains at the DNS level.
-            let dns = NEDNSSettings(servers: ["185.228.168.168", "185.228.169.168"])
-            dns.matchDomains = [""]  // Match ALL domains (empty string = default DNS)
-            settings.dnsSettings = dns
+            upstreamDNS = "185.228.168.168" // CleanBrowsing Family
             NSLog("[Tunnel] DNS safe search enabled (CleanBrowsing Family)")
+        } else {
+            upstreamDNS = "1.1.1.1" // Cloudflare (fast, reliable)
         }
+
+        // Route ALL DNS through our tunnel IP so DNSProxy can intercept and log queries
+        let dns = NEDNSSettings(servers: ["198.18.0.1"])
+        dns.matchDomains = [""]
+        settings.dnsSettings = dns
+
+        // Create DNS proxy with the selected upstream
+        dnsProxy = DNSProxy(provider: self, upstreamDNSServer: upstreamDNS)
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error {
@@ -76,8 +94,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             NSLog("[Tunnel] Tunnel started successfully (no-route mode)")
 
             self?.writeTunnelStatus("running")
+            self?.dnsProxy?.start()
+            self?.startDNSActivitySyncTimer()
             self?.startHeartbeatTimer()
             self?.startLivenessTimer()
+            self?.startScreenLockMonitoring()
 
             completionHandler(nil)
         }
@@ -90,6 +111,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         heartbeatTimer = nil
         livenessTimer?.cancel()
         livenessTimer = nil
+        dnsActivitySyncTimer?.cancel()
+        dnsActivitySyncTimer = nil
+        dnsProxy?.flushToAppGroup()
+        dnsProxy?.stop()
+        flushScreenTimeSession()
+        stopScreenLockMonitoring()
 
         writeTunnelStatus("stopped:\(reason.rawValue)")
         completionHandler()
@@ -105,9 +132,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         switch message {
         case "ping":
-            // Main app is alive
+            // Main app is alive — hand off screen time tracking
             lastPingFromApp = Date()
             if !mainAppAlive {
+                flushScreenTimeSession()
+                lastUnlockAt = nil // Main app's DeviceLockMonitor takes over
                 NSLog("[Tunnel] Main app came back alive")
                 mainAppAlive = true
                 tunnelOwnsHeartbeat = false
@@ -164,6 +193,83 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         heartbeatTimer = timer
     }
 
+    // MARK: - DNS Activity Sync
+
+    /// Flush DNS activity to App Group + CloudKit every 15 minutes.
+    private func startDNSActivitySyncTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 900, repeating: 900) // 15 min
+        timer.setEventHandler { [weak self] in
+            self?.dnsProxy?.flushToAppGroup()
+            self?.dnsProxy?.cleanupStalePendingQueries()
+
+            // Sync to CloudKit so parent can see near-real-time activity
+            guard let self,
+                  let enrollment = try? self.keychain.get(
+                      ChildEnrollmentState.self,
+                      forKey: StorageKeys.enrollmentState
+                  ) else { return }
+
+            let snapshot = self.dnsProxy?.takeSnapshot(
+                deviceID: enrollment.deviceID,
+                familyID: enrollment.familyID
+            )
+            guard let snapshot, !snapshot.domains.isEmpty else { return }
+
+            Task {
+                await self.syncDNSActivityToCloudKit(snapshot, enrollment: enrollment)
+            }
+        }
+        timer.resume()
+        dnsActivitySyncTimer = timer
+    }
+
+    private func syncDNSActivityToCloudKit(_ snapshot: DomainActivitySnapshot, enrollment: ChildEnrollmentState) async {
+        let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
+        let db = container.publicCloudDatabase
+
+        // Upsert: one record per device per day
+        let recordID = CKRecord.ID(recordName: "BBDNSActivity_\(enrollment.deviceID.rawValue)_\(snapshot.date)")
+        let record: CKRecord
+        do {
+            record = try await db.record(for: recordID)
+        } catch {
+            record = CKRecord(recordType: "BBDNSActivity", recordID: recordID)
+        }
+
+        record["deviceID"] = enrollment.deviceID.rawValue
+        record["familyID"] = enrollment.familyID.rawValue
+        record["date"] = snapshot.date
+        record["timestamp"] = snapshot.timestamp as NSDate
+        record["totalQueries"] = snapshot.totalQueries as NSNumber
+        if let data = try? JSONEncoder().encode(snapshot.domains),
+           let json = String(data: data, encoding: .utf8) {
+            record["domainsJSON"] = json
+        }
+
+        do {
+            try await db.save(record)
+            NSLog("[Tunnel] DNS activity synced: \(snapshot.domains.count) domains, \(snapshot.totalQueries) queries")
+        } catch {
+            NSLog("[Tunnel] DNS activity sync failed: \(error.localizedDescription)")
+        }
+    }
+
+    private var lastDNSDateCheck: String?
+
+    private func checkDNSDayRollover() {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let today = dateFormatter.string(from: Date())
+        if let last = lastDNSDateCheck, last != today {
+            // Day changed — flush yesterday's data, reset counters
+            dnsProxy?.flushToAppGroup()
+            dnsProxy?.resetDaily()
+            NSLog("[Tunnel] DNS activity reset for new day")
+        }
+        lastDNSDateCheck = today
+    }
+
     // MARK: - App Liveness Detection
 
     /// Check every 60 seconds if the main app is still alive + poll for pending commands.
@@ -174,6 +280,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         timer.schedule(deadline: .now() + 60, repeating: 60)
         timer.setEventHandler { [weak self] in
             self?.checkAppLiveness()
+            self?.checkDNSDayRollover()
             Task {
                 await self?.pollAndProcessCommands()
                 await self?.syncScheduleProfileIfNeeded()
@@ -208,10 +315,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let appDead = pingStale && appGroupStale
 
         if appDead && mainAppAlive {
-            // App just died
+            // App just died — take over screen time tracking + heartbeats
             NSLog("[Tunnel] Main app appears dead — taking over heartbeat duties")
             mainAppAlive = false
             tunnelOwnsHeartbeat = true
+
+            // If screen is currently unlocked, start tracking from now
+            var currentLockState: UInt64 = 0
+            if lockNotifyToken != NOTIFY_TOKEN_INVALID {
+                notify_get_state(lockNotifyToken, &currentLockState)
+            }
+            if currentLockState == 0 {
+                lastUnlockAt = Date()
+            }
 
             // Send immediate heartbeat
             Task { await sendHeartbeatFromTunnel(reason: "appDeath") }
@@ -521,6 +637,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Send a lightweight heartbeat to CloudKit from the tunnel extension.
     /// Uses the same BBHeartbeat record type and deviceID as the main app.
     private func sendHeartbeatFromTunnel(reason: String) async {
+        // Flush screen time so heartbeat reports current numbers.
+        flushScreenTimeSession()
+
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self,
             forKey: StorageKeys.enrollmentState
@@ -550,17 +669,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             record = CKRecord(recordType: "BBHeartbeat", recordID: recordID)
         }
 
-        // Write minimal heartbeat fields
+        // Core identity
         record["deviceID"] = enrollment.deviceID.rawValue
         record["familyID"] = enrollment.familyID.rawValue
         record["timestamp"] = Date() as NSDate
         record["hbAppBuildNumber"] = AppConstants.appBuildNumber as NSNumber
-        record["hbSource"] = "vpnExtension" // Signal that this came from the tunnel
+        record["hbSource"] = "vpnTunnel"
         record["hbTunnel"] = 1 as NSNumber
 
-        // Report actual enforcement state from App Group.
-        // Check temporary unlock first — if active, device is unlocked regardless
-        // of what ExtensionSharedState or PolicySnapshot says.
+        // Enforcement state from App Group
         let policyVersion = storage.readPolicySnapshot()?.effectivePolicy.policyVersion ?? 0
         if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
             record["currentMode"] = LockMode.unlocked.rawValue
@@ -571,12 +688,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         record["policyVersion"] = policyVersion as NSNumber
 
-        // Null out fields the tunnel cannot refresh — prevents stale main-app
-        // values from persisting in the upserted CKRecord after app offload.
-        record["hbScreenTimeMins"] = nil
+        // Screen time + unlock count (tunnel tracks this when main app is dead)
+        record["hbScreenTimeMins"] = defaults?.integer(forKey: screenTimeMinutesKey) as NSNumber?
+        record["hbUnlockCount"] = defaults?.integer(forKey: screenTimeUnlockCountKey) as NSNumber?
+
+        // Device lock state (tunnel tracks this via Darwin notification)
+        var lockState: UInt64 = 0
+        if lockNotifyToken != NOTIFY_TOKEN_INVALID {
+            notify_get_state(lockNotifyToken, &lockState)
+        }
+        record["hbLocked"] = (lockState != 0 ? 1 : 0) as NSNumber
+
+        // Battery — changes while app is dead, parent wants current level
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let batteryLevel = UIDevice.current.batteryLevel
+        if batteryLevel >= 0 {
+            record["batteryLevel"] = batteryLevel as NSNumber
+            record["isCharging"] = (UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full ? 1 : 0) as NSNumber
+        }
+
+        // Null out fields the tunnel can't provide — prevents stale main-app values
         record["hbDriving"] = nil
         record["hbSpeed"] = nil
-        record["hbLocked"] = nil
 
         do {
             try await db.save(record)
@@ -611,5 +744,112 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             .set(status, forKey: "tunnelStatus")
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set(Date().timeIntervalSince1970, forKey: "tunnelLastActiveAt")
+    }
+
+    // MARK: - Screen Lock Monitoring
+    //
+    // Tracks screen unlock/lock transitions via Darwin notification.
+    // Writes to the same App Group keys as DeviceLockMonitor in the main app,
+    // so screen time accumulates even when the main app is dead.
+
+    private let screenTimeDateKey = "screenTimeDate"
+    private let screenTimeMinutesKey = "screenTimeMinutes"
+    private let screenTimeSecondsKey = "screenTimeAccumulatedSeconds"
+    private let screenTimeUnlockCountKey = "screenUnlockCount"
+
+    private func startScreenLockMonitoring() {
+        guard lockNotifyToken == NOTIFY_TOKEN_INVALID else { return }
+
+        notify_register_dispatch(
+            "com.apple.springboard.lockstate",
+            &lockNotifyToken,
+            DispatchQueue.main
+        ) { [weak self] token in
+            var state: UInt64 = 0
+            notify_get_state(token, &state)
+            let locked = state != 0
+            self?.handleScreenLockTransition(locked: locked)
+        }
+
+        // Query initial state.
+        if lockNotifyToken != NOTIFY_TOKEN_INVALID {
+            var state: UInt64 = 0
+            notify_get_state(lockNotifyToken, &state)
+            if state == 0 {
+                lastUnlockAt = Date()
+            }
+            NSLog("[Tunnel] Screen lock monitoring started (initial: \(state == 0 ? "unlocked" : "locked"))")
+        }
+    }
+
+    private func stopScreenLockMonitoring() {
+        if lockNotifyToken != NOTIFY_TOKEN_INVALID {
+            notify_cancel(lockNotifyToken)
+            lockNotifyToken = NOTIFY_TOKEN_INVALID
+        }
+    }
+
+    private func handleScreenLockTransition(locked: Bool) {
+        // Only track screen time when the main app is dead.
+        // When both are running, DeviceLockMonitor in the main app handles this.
+        guard !mainAppAlive else { return }
+
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let today = screenTimeTodayString()
+
+        if locked {
+            // Screen locked — accumulate the unlock→lock session
+            if let unlockTime = lastUnlockAt {
+                let sessionSeconds = Int(Date().timeIntervalSince(unlockTime))
+                if sessionSeconds > 0 {
+                    addScreenTimeFromTunnel(seconds: sessionSeconds, date: today, defaults: defaults)
+                }
+            }
+            lastUnlockAt = nil
+        } else {
+            // Screen unlocked — start tracking
+            lastUnlockAt = Date()
+
+            // Reset counters on new day
+            if defaults?.string(forKey: screenTimeDateKey) != today {
+                defaults?.set(today, forKey: screenTimeDateKey)
+                defaults?.set(0, forKey: screenTimeSecondsKey)
+                defaults?.set(0, forKey: screenTimeMinutesKey)
+                defaults?.set(0, forKey: screenTimeUnlockCountKey)
+            }
+
+            // Increment unlock count
+            let count = defaults?.integer(forKey: screenTimeUnlockCountKey) ?? 0
+            defaults?.set(count + 1, forKey: screenTimeUnlockCountKey)
+        }
+    }
+
+    private func addScreenTimeFromTunnel(seconds: Int, date: String, defaults: UserDefaults?) {
+        // Reset if day changed
+        if defaults?.string(forKey: screenTimeDateKey) != date {
+            defaults?.set(date, forKey: screenTimeDateKey)
+            defaults?.set(0, forKey: screenTimeSecondsKey)
+        }
+
+        let accumulated = (defaults?.integer(forKey: screenTimeSecondsKey) ?? 0) + seconds
+        defaults?.set(accumulated, forKey: screenTimeSecondsKey)
+        defaults?.set(accumulated / 60, forKey: screenTimeMinutesKey)
+
+        NSLog("[Tunnel] Screen time: +\(seconds)s = \(accumulated / 60)m total today")
+    }
+
+    /// Flush any in-progress unlock session (call before heartbeat or tunnel stop).
+    private func flushScreenTimeSession() {
+        guard let unlockTime = lastUnlockAt else { return }
+        let sessionSeconds = Int(Date().timeIntervalSince(unlockTime))
+        guard sessionSeconds > 0 else { return }
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        addScreenTimeFromTunnel(seconds: sessionSeconds, date: screenTimeTodayString(), defaults: defaults)
+        lastUnlockAt = Date()
+    }
+
+    private func screenTimeTodayString() -> String {
+        let comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        return String(format: "%04d-%02d-%02d", comps.year ?? 0, comps.month ?? 0, comps.day ?? 0)
     }
 }

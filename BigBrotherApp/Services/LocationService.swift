@@ -672,7 +672,13 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             do {
                 let placemarks = try await CLGeocoder().reverseGeocodeLocation(location)
                 if let pm = placemarks.first {
-                    let parts = [pm.thoroughfare, pm.locality].compactMap { $0 }
+                    // Build street with number: "123 Holland Dr"
+                    let street: String? = {
+                        guard let road = pm.thoroughfare else { return nil }
+                        if let num = pm.subThoroughfare { return "\(num) \(road)" }
+                        return road
+                    }()
+                    let parts = [street, pm.locality].compactMap { $0 }
                     address = parts.isEmpty ? pm.administrativeArea : parts.joined(separator: ", ")
                 }
                 lastGeocodedLocation = location

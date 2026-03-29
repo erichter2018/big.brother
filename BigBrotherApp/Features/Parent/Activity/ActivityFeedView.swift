@@ -110,6 +110,26 @@ struct ActivityFeedView: View {
 
     @ViewBuilder
     private func eventRow(_ event: ActivityEvent) -> some View {
+        if event.eventType == .tripCompleted, let child = viewModel.resolveChild(deviceID: event.deviceID) {
+            NavigationLink {
+                LocationMapView(
+                    child: child,
+                    devices: viewModel.appState.childDevices.filter { $0.childProfileID == child.id },
+                    heartbeats: viewModel.appState.latestHeartbeats(for: child.id),
+                    cloudKit: viewModel.appState.cloudKit,
+                    onLocate: {},
+                    focusTripAt: event.timestamp
+                )
+            } label: {
+                eventRowContent(event)
+            }
+        } else {
+            eventRowContent(event)
+        }
+    }
+
+    @ViewBuilder
+    private func eventRowContent(_ event: ActivityEvent) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: event.icon)
                 .font(.system(size: 13))
@@ -133,9 +153,16 @@ struct ActivityFeedView: View {
 
             Spacer(minLength: 0)
 
-            Text(event.timeOnly)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(event.timeOnly)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                if event.eventType == .tripCompleted {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
         }
         .padding(.vertical, 2)
     }

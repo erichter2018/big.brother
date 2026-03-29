@@ -87,11 +87,12 @@ enum DiagnosticCollector {
         flags["breadcrumbInterval"] = "\(Int(locationService?.breadcrumbInterval ?? -1))s"
         flags["motionMonitoringActive"] = "\(locationService?.motionMonitoringActive ?? false)"
 
-        // Fetch last 20 breadcrumbs from CloudKit for trip debugging
+        // Fetch breadcrumbs from CloudKit — last 48h for trip debugging
         if let cloudKit = appState.cloudKit {
-            let since = Date().addingTimeInterval(-24 * 3600) // last 24h
+            let since = Date().addingTimeInterval(-48 * 3600)
             if let crumbs = try? await cloudKit.fetchLocationBreadcrumbs(deviceID: deviceID, since: since) {
-                let recent = crumbs.sorted { $0.timestamp < $1.timestamp }.suffix(20)
+                let sorted = crumbs.sorted { $0.timestamp < $1.timestamp }
+                let recent = sorted.suffix(40)
                 var prevLoc: CLLocation?
                 let timeFmt = DateFormatter()
                 timeFmt.dateFormat = "h:mm:ss a"
@@ -101,18 +102,64 @@ enum DiagnosticCollector {
                     let interval = prevLoc != nil && i > 0
                         ? c.timestamp.timeIntervalSince(recent[recent.index(recent.startIndex, offsetBy: i - 1)].timestamp)
                         : 0
+                    // Compute speed from distance/time between consecutive breadcrumbs
+                    let computedSpeedStr: String
+                    if interval > 0 && dist > 10 {
+                        let mph = (dist / interval) * 2.237
+                        computedSpeedStr = "calc=\(Int(mph))mph"
+                    } else {
+                        computedSpeedStr = "calc=0"
+                    }
                     let speedStr = c.speed.map { $0 >= 0 ? "\(String(format: "%.0f", $0 * 2.237))mph" : "invalid" } ?? "nil"
                     flags["breadcrumb_\(String(format: "%02d", i))"] =
-                        "\(timeFmt.string(from: c.timestamp)) | \(String(format: "%.4f,%.4f", c.latitude, c.longitude)) | speed=\(speedStr) | dist=\(Int(dist))m | gap=\(Int(interval))s | acc=\(Int(c.horizontalAccuracy))m"
+                        "\(timeFmt.string(from: c.timestamp)) | \(String(format: "%.4f,%.4f", c.latitude, c.longitude)) | speed=\(speedStr) | \(computedSpeedStr) | dist=\(Int(dist))m | gap=\(Int(interval))s | acc=\(Int(c.horizontalAccuracy))m"
                     prevLoc = loc
                 }
-                flags["breadcrumbCount24h"] = "\(crumbs.count)"
+                flags["breadcrumbCount48h"] = "\(sorted.count)"
+
+                // Detect and summarize recent trips (movement segments)
+                var tripNum = 0
+                var tripStart: Date?
+                var tripDist: Double = 0
+                var prevTripLoc: CLLocation?
+                let tripThreshold: Double = 150 // meters between breadcrumbs = movement
+                for c in sorted {
+                    let loc = CLLocation(latitude: c.latitude, longitude: c.longitude)
+                    if let prev = prevTripLoc {
+                        let d = loc.distance(from: prev)
+                        if d >= tripThreshold {
+                            if tripStart == nil { tripStart = prev.timestamp }
+                            tripDist += d
+                        } else if tripStart != nil {
+                            // Trip ended — log summary
+                            let dur = c.timestamp.timeIntervalSince(tripStart!)
+                            let avgMPH = dur > 0 ? (tripDist / dur) * 2.237 : 0
+                            let dayFmt = DateFormatter()
+                            dayFmt.dateFormat = "MMM d h:mm a"
+                            flags["trip_\(String(format: "%02d", tripNum))"] =
+                                "\(dayFmt.string(from: tripStart!)) → \(dayFmt.string(from: c.timestamp)) | \(String(format: "%.1f", tripDist / 1609))mi | avg \(Int(avgMPH))mph | \(Int(dur / 60))min"
+                            tripNum += 1
+                            tripStart = nil
+                            tripDist = 0
+                        }
+                    }
+                    prevTripLoc = loc
+                }
+                // Close any open trip
+                if let start = tripStart, let last = sorted.last {
+                    let dur = last.timestamp.timeIntervalSince(start)
+                    let avgMPH = dur > 0 ? (tripDist / dur) * 2.237 : 0
+                    let dayFmt = DateFormatter()
+                    dayFmt.dateFormat = "MMM d h:mm a"
+                    flags["trip_\(String(format: "%02d", tripNum))"] =
+                        "\(dayFmt.string(from: start)) → \(dayFmt.string(from: last.timestamp)) | \(String(format: "%.1f", tripDist / 1609))mi | avg \(Int(avgMPH))mph | \(Int(dur / 60))min (ongoing?)"
+                }
             }
         }
 
-        // Recent diagnostic log entries (last 50)
+        // Recent diagnostic log entries (last 200)
         let allLogs = storage.readDiagnosticEntries(category: nil)
-        let recentLogs = Array(allLogs.suffix(50))
+        let recentLogs = Array(allLogs.suffix(200))
 
         return DiagnosticReport(
             deviceID: deviceID,

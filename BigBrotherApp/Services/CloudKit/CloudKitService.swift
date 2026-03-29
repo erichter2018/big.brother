@@ -57,6 +57,7 @@ protocol CloudKitServiceProtocol: Sendable {
     @discardableResult
     func syncEventLogs(_ entries: [EventLogEntry]) async throws -> Set<UUID>
     func fetchEventLogs(familyID: FamilyID, since: Date) async throws -> [EventLogEntry]
+    func fetchEventLogs(familyID: FamilyID, since: Date, types: Set<EventType>) async throws -> [EventLogEntry]
     func deleteEventLog(_ id: UUID) async throws
 
     // MARK: - Policy
