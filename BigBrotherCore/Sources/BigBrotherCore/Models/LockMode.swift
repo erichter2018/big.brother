@@ -39,22 +39,27 @@ public enum LockMode: String, Sendable, CaseIterable, Equatable, Hashable {
         case .lockedDown: 3
         }
     }
+
+    /// Initialize from a raw string, accepting both old ("dailyMode"/"essentialOnly")
+    /// and new ("restricted"/"locked") values. Use this instead of init(rawValue:)
+    /// when reading from CloudKit or any external storage.
+    public static func from(_ raw: String) -> LockMode? {
+        if let mode = LockMode(rawValue: raw) { return mode }
+        return legacyMapping[raw]
+    }
+
+    private static let legacyMapping: [String: LockMode] = [
+        "dailyMode": .restricted,
+        "essentialOnly": .locked,
+    ]
 }
 
 // MARK: - Codable (reads old + new values, writes new)
 
 extension LockMode: Codable {
-    /// Legacy raw values from before the rename. Accepted on decode, never written.
-    private static let legacyMapping: [String: LockMode] = [
-        "dailyMode": .restricted,
-        "essentialOnly": .locked,
-    ]
-
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        if let mode = LockMode(rawValue: raw) {
-            self = mode
-        } else if let mode = Self.legacyMapping[raw] {
+        if let mode = LockMode.from(raw) {
             self = mode
         } else {
             throw DecodingError.dataCorrupted(

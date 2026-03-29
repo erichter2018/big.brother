@@ -356,7 +356,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
 
                 let lockedModeRaw = record["lockedMode"] as? String ?? "dailyMode"
-                let lockedMode = LockMode(rawValue: lockedModeRaw) ?? .restricted
+                let lockedMode = LockMode.from(lockedModeRaw) ?? .restricted
 
                 var exceptionDates: [Date] = []
                 if let exJSON = record["exceptionDatesJSON"] as? String,

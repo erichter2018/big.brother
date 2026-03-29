@@ -171,7 +171,7 @@ enum CKRecordConversion {
         guard record.recordType == CKRecordType.policy,
               let deviceID = record[CKFieldName.deviceID] as? String,
               let modeRaw = record[CKFieldName.mode] as? String,
-              let mode = LockMode(rawValue: modeRaw),
+              let mode = LockMode.from( modeRaw),
               let version = record[CKFieldName.version] as? Int64,
               let updatedAt = record[CKFieldName.updatedAt] as? Date
         else {
@@ -388,7 +388,7 @@ enum CKRecordConversion {
               let familyID = record[CKFieldName.familyID] as? String,
               let timestamp = record[CKFieldName.timestamp] as? Date,
               let modeRaw = record[CKFieldName.currentMode] as? String,
-              let mode = LockMode(rawValue: modeRaw),
+              let mode = LockMode.from( modeRaw),
               let pv = record[CKFieldName.policyVersion] as? Int64,
               let fc = record[CKFieldName.fcAuthorized] as? Int64
         else {
@@ -583,7 +583,7 @@ enum CKRecordConversion {
               let profileID = record[CKFieldName.profileID] as? String,
               let name = record[CKFieldName.scheduleName] as? String,
               let modeRaw = record[CKFieldName.mode] as? String,
-              let mode = LockMode(rawValue: modeRaw),
+              let mode = LockMode.from( modeRaw),
               let startH = record[CKFieldName.startHour] as? Int64,
               let startM = record[CKFieldName.startMinute] as? Int64,
               let endH = record[CKFieldName.endHour] as? Int64,
@@ -725,7 +725,7 @@ enum CKRecordConversion {
               let familyID = record[CKFieldName.familyID] as? String,
               let name = record[CKFieldName.name] as? String,
               let lockedModeRaw = record[CKFieldName.lockedMode] as? String,
-              let lockedMode = LockMode(rawValue: lockedModeRaw),
+              let lockedMode = LockMode.from( lockedModeRaw),
               let isDefaultInt = record[CKFieldName.isDefault] as? Int64,
               let updatedAt = record[CKFieldName.updatedAt] as? Date
         else {

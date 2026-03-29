@@ -772,7 +772,7 @@ struct ChildDetailView: View {
         let childScheduleMode: LockMode? = hb.scheduleResolvedMode.flatMap { detail in
             // Parse mode from enriched string like "essentialOnly (in essential window)"
             let raw = detail.components(separatedBy: " ").first ?? detail
-            return LockMode(rawValue: raw)
+            return LockMode.from(raw)
         }
         // Use parent's expectation as the canonical "expected" mode
         let expectedMode = dominantMode

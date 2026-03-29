@@ -236,7 +236,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.name] = "_seed_"
         r[CKFieldName.freeWindowsJSON] = "[]"
         r[CKFieldName.essentialWindowsJSON] = "[]"
-        r[CKFieldName.lockedMode] = "dailyMode"
+        r[CKFieldName.lockedMode] = LockMode.restricted.rawValue
         r[CKFieldName.isDefault] = 0 as NSNumber
         r[CKFieldName.updatedAt] = Date() as NSDate
         return r
