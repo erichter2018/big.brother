@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import BigBrotherCore
 
 /// Queries OpenStreetMap Overpass API for posted speed limits at a given coordinate.
 /// Results are cached by geohash cell to avoid redundant queries for the same road.
@@ -36,6 +37,15 @@ actor SpeedLimitService {
     private var needsSave = false
 
     init() {
+        // Flush cache when build number changes (geometry-aware queries produce different results)
+        let buildKey = "speedLimitCacheBuild"
+        let defaults = UserDefaults.standard
+        let lastBuild = defaults.integer(forKey: buildKey)
+        if lastBuild != AppConstants.appBuildNumber {
+            try? FileManager.default.removeItem(at: Self.diskCacheURL)
+            defaults.set(AppConstants.appBuildNumber, forKey: buildKey)
+        }
+
         // Load disk cache
         if let data = try? Data(contentsOf: Self.diskCacheURL),
            let loaded = try? JSONDecoder().decode([String: CachedLimit].self, from: data) {
@@ -130,10 +140,11 @@ actor SpeedLimitService {
     // MARK: - Overpass Query
 
     private func queryOverpass(latitude: Double, longitude: Double) async throws -> CachedLimit {
+        // Request geometry so we can pick the closest road (important at interchanges/overpasses)
         let query = """
         [out:json][timeout:5];
         way[maxspeed][highway](around:100,\(latitude),\(longitude));
-        out tags;
+        out body geom;
         """
 
         var request = URLRequest(url: Self.endpoint)
@@ -154,9 +165,11 @@ actor SpeedLimitService {
             return CachedLimit(speedMPH: nil, roadName: nil, fetchedAt: Date())
         }
 
-        // Find the best match: prefer roads with highway type matching (residential, primary, etc.)
+        // Pick the closest road by minimum distance from query point to any node in the way.
+        let queryPoint = (lat: latitude, lon: longitude)
         var bestSpeed: Int?
         var bestRoad: String?
+        var bestDistance: Double = .greatestFiniteMagnitude
 
         for element in elements {
             guard let tags = element["tags"] as? [String: String],
@@ -164,8 +177,22 @@ actor SpeedLimitService {
 
             if let mph = parseSpeedMPH(maxspeed) {
                 let roadName = tags["name"] ?? tags["ref"]
-                // Prefer named roads over unnamed
-                if bestSpeed == nil || (roadName != nil && bestRoad == nil) {
+
+                // Compute minimum distance from query point to this way's geometry
+                var minDist = Double.greatestFiniteMagnitude
+                if let geometry = element["geometry"] as? [[String: Double]] {
+                    for node in geometry {
+                        if let nLat = node["lat"], let nLon = node["lon"] {
+                            let dLat = nLat - queryPoint.lat
+                            let dLon = (nLon - queryPoint.lon) * cos(queryPoint.lat * .pi / 180)
+                            let dist = sqrt(dLat * dLat + dLon * dLon)
+                            minDist = min(minDist, dist)
+                        }
+                    }
+                }
+
+                if minDist < bestDistance {
+                    bestDistance = minDist
                     bestSpeed = mph
                     bestRoad = roadName
                 }

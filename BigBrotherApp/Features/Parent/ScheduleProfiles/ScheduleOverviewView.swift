@@ -203,7 +203,7 @@ struct ScheduleOverviewView: View {
         let lines = FreeWindowFormatter.format(windows)
         if !lines.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Essential Only")
+                Text("Locked")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.purple)
                 ForEach(lines, id: \.self) { line in
@@ -288,7 +288,7 @@ private struct AssignScheduleSheet: View {
 
                         let essentialLines = FreeWindowFormatter.format(profile.essentialWindows)
                         if !essentialLines.isEmpty {
-                            Text("Essential Only")
+                            Text("Locked")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.purple)
                             ForEach(essentialLines, id: \.self) { line in

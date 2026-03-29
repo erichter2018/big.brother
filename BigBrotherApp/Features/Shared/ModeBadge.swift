@@ -26,6 +26,7 @@ struct ModeBadge: View {
         case .unlocked: return "lock.open"
         case .dailyMode: return "calendar"
         case .essentialOnly: return "shield"
+        case .lockedDown: return "wifi.slash"
         }
     }
 
@@ -35,6 +36,7 @@ struct ModeBadge: View {
         case .unlocked: return .green
         case .dailyMode: return .blue
         case .essentialOnly: return .purple
+        case .lockedDown: return .red
         }
     }
 }

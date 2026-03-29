@@ -75,10 +75,11 @@ public struct PolicyResolver {
             shieldedCategoriesData = Data()
             allowedAppTokensData = alwaysAllowedTokensData
 
-        case .essentialOnly:
+        case .essentialOnly, .lockedDown:
             // Shield all categories; essential + always-allowed are exceptions.
             // The actual essential token resolution happens in the enforcement layer
             // because it requires FamilyControls framework types.
+            // lockedDown is identical shielding to essentialOnly (internet block is via VPN).
             shieldedCategoriesData = Data()
             allowedAppTokensData = alwaysAllowedTokensData
             warnings.append(.someSystemAppsCannotBeBlocked)

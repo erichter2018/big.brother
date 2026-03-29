@@ -338,7 +338,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 try applyTemporaryUnlock(
                     durationSeconds: durationSeconds,
                     enrollment: enrollment,
-                    commandID: command.id
+                    commandID: command.id,
+                    issuedAt: command.issuedAt
                 )
                 let h = durationSeconds / 3600
                 let m = (durationSeconds % 3600) / 60
@@ -634,6 +635,22 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 }
                 eventLogger.log(.commandApplied, details: "Safe search \(enabled ? "enabled" : "disabled")")
                 return .applied
+
+            case .blockInternet(let durationSeconds):
+                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                if durationSeconds > 0 {
+                    let unblockAt = Date().addingTimeInterval(Double(durationSeconds))
+                    defaults?.set(unblockAt.timeIntervalSince1970, forKey: "internetBlockedUntil")
+                    eventLogger.log(.commandApplied, details: "Internet blocked for \(durationSeconds / 60) minutes")
+                } else {
+                    defaults?.removeObject(forKey: "internetBlockedUntil")
+                    eventLogger.log(.commandApplied, details: "Internet unblocked")
+                }
+                // Restart VPN tunnel to apply DNS change immediately
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRestartVPNTunnel?()
+                }
+                return .applied
             }
 
         } catch {
@@ -644,6 +661,15 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
     /// Apply a mode change through the canonical snapshot pipeline.
     private func applyMode(_ mode: LockMode, enrollment: ChildEnrollmentState, commandID: UUID) throws {
+        // If permissions are missing, force essential mode regardless of requested mode.
+        let effectiveMode: LockMode
+        if hasPermissionDeficiency() && mode != .essentialOnly {
+            effectiveMode = .essentialOnly
+            eventLogger.log(.enforcementDegraded, details: "Permissions missing — forced essential mode (requested: \(mode.rawValue))")
+        } else {
+            effectiveMode = mode
+        }
+
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("command", forKey: "lastShieldChangeReason")
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
@@ -651,7 +677,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         let policy = Policy(
             targetDeviceID: enrollment.deviceID,
-            mode: mode,
+            mode: effectiveMode,
             version: currentVersion + 1
         )
 
@@ -672,7 +698,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             authorizationHealth: storage.readAuthorizationHealth(),
             deviceID: enrollment.deviceID,
             source: .commandApplied,
-            trigger: "setMode(\(mode.rawValue)) command \(commandID)"
+            trigger: "setMode(\(effectiveMode.rawValue)) command \(commandID)"
         )
 
         let output = PolicyPipelineCoordinator.generateSnapshot(
@@ -686,7 +712,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             try snapshotStore.markApplied()
 
             if output.modeChanged {
-                eventLogger.log(.modeChanged, details: "Mode changed from \(output.previousMode?.rawValue ?? "none") to \(mode.rawValue)")
+                eventLogger.log(.modeChanged, details: "Mode changed from \(output.previousMode?.rawValue ?? "none") to \(effectiveMode.rawValue)")
             }
         }
     }
@@ -698,14 +724,29 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     private func applyTemporaryUnlock(
         durationSeconds: Int,
         enrollment: ChildEnrollmentState,
-        commandID: UUID
+        commandID: UUID,
+        issuedAt: Date = Date()
     ) throws {
+        // Block unlock if permissions are missing
+        if hasPermissionDeficiency() {
+            eventLogger.log(.enforcementDegraded, details: "Temporary unlock blocked: permissions missing")
+            return
+        }
+
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
         let currentMode = currentSnapshot?.effectivePolicy.resolvedMode ?? .essentialOnly
 
+        // Expiry is anchored to when the parent SENT the command, not when the child processes it.
+        // This ensures the unlock window is the same regardless of delivery delay.
         let now = Date()
-        let expiresAt = now.addingTimeInterval(Double(durationSeconds))
+        let expiresAt = issuedAt.addingTimeInterval(Double(durationSeconds))
+
+        // If the unlock has already expired by the time we process it, skip.
+        guard expiresAt > now else {
+            eventLogger.log(.commandFailed, details: "Temporary unlock expired before delivery (issued \(Int(Date().timeIntervalSince(issuedAt)))s ago)")
+            return
+        }
 
         // Create durable temp unlock state.
         let unlockState = TemporaryUnlockState(
@@ -1460,9 +1501,25 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
              .setPenaltyTimer, .requestHeartbeat, .requestAppConfiguration,
              .setAllowedWebDomains, .addTrustedSigningKey, .sendMessage,
              .setLocationMode, .requestLocation, .requestPermissions, .setHomeLocation,
-             .syncNamedPlaces, .setDrivingSettings, .requestDiagnostics, .setSafeSearch:
+             .syncNamedPlaces, .setDrivingSettings, .requestDiagnostics, .setSafeSearch,
+             .blockInternet:
             return false
         }
+    }
+
+    /// Returns true if critical permissions are missing (FamilyControls or location not "Always").
+    /// Used to block unlock and force essential mode until the child grants permissions.
+    private func hasPermissionDeficiency() -> Bool {
+        // FamilyControls must be authorized
+        if let enforcement, enforcement.authorizationStatus != .authorized {
+            return true
+        }
+        // Location must be "Always" (not denied, not whenInUse, not notDetermined)
+        let locStatus = CLLocationManager().authorizationStatus
+        if locStatus != .authorizedAlways {
+            return true
+        }
+        return false
     }
 
     private func makeReceipt(

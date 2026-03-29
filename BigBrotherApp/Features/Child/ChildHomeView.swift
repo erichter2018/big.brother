@@ -12,6 +12,7 @@ struct ChildHomeView: View {
     @State private var showPINUnlock = false
     @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
     @State private var showSOSConfirmation = false
+    @State private var showPermissionFixer = false
     @State private var sosSent = false
     @Environment(\.scenePhase) private var scenePhase
 
@@ -76,6 +77,32 @@ struct ChildHomeView: View {
             sosButton
                 .padding(.leading, 16)
                 .padding(.bottom, 16)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if viewModel.hasPermissionIssues {
+                Button {
+                    showPermissionFixer = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 14))
+                        Text("Permissions")
+                            .font(.subheadline.bold())
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.orange)
+                    .clipShape(Capsule())
+                    .shadow(color: .orange.opacity(0.4), radius: 8, y: 4)
+                }
+                .padding(.trailing, 16)
+                .padding(.bottom, 16)
+                .accessibilityLabel("Fix permissions. Some permissions are missing.")
+            }
+        }
+        .sheet(isPresented: $showPermissionFixer) {
+            PermissionFixerView(appState: viewModel.appState)
         }
         .sheet(isPresented: $showPINUnlock, onDismiss: {
             pinUnlockViewModel = nil
@@ -191,7 +218,19 @@ struct ChildHomeView: View {
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
 
-            if let reason = viewModel.lockReasonText {
+            if viewModel.hasPermissionIssues && viewModel.currentMode != .unlocked {
+                VStack(spacing: 4) {
+                    Text("Permissions Required")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.orange)
+                    Text("This device will stay in essential mode until all permissions are granted. Tap the orange button below to fix.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 20)
+            } else if let reason = viewModel.lockReasonText {
                 Text(reason)
                     .font(.subheadline)
                     .fontWeight(.medium)
@@ -290,6 +329,19 @@ struct ChildHomeView: View {
                 now: now,
                 subtitle: "remaining",
                 color: .white
+            )
+            .frame(maxWidth: .infinity)
+        }
+
+        // Internet block countdown (Lock Down mode)
+        if viewModel.currentMode == .lockedDown, let blockedUntil = viewModel.internetBlockedUntil,
+           blockedUntil > now {
+            liveCountdownCard(
+                title: "Internet Disabled",
+                end: blockedUntil,
+                now: now,
+                subtitle: "remaining",
+                color: .red
             )
             .frame(maxWidth: .infinity)
         }
@@ -588,7 +640,8 @@ struct ChildHomeView: View {
 
     private func lockReasonColor(_ reason: String) -> Color {
         if reason.hasPrefix("Free") { return .green }
-        if reason.hasPrefix("Essential") { return .purple }
+        if reason.hasPrefix("Locked Down") { return .red }
+        if reason.hasPrefix("Locked") { return .purple }
         if reason.contains("until") { return .blue }
         return .white.opacity(0.6)
     }
@@ -598,6 +651,7 @@ struct ChildHomeView: View {
         case .unlocked: return "lock.open"
         case .dailyMode: return "lock"
         case .essentialOnly: return "shield"
+        case .lockedDown: return "wifi.slash"
         }
     }
 
@@ -606,6 +660,7 @@ struct ChildHomeView: View {
         case .unlocked: return "All apps are accessible"
         case .dailyMode: return "Only allowed apps are available"
         case .essentialOnly: return "Only essential apps are available"
+        case .lockedDown: return "Only essential apps, no internet"
         }
     }
 
@@ -624,6 +679,11 @@ struct ChildHomeView: View {
         case .essentialOnly:
             return LinearGradient(
                 colors: [Color(red: 0.3, green: 0.1, blue: 0.35), Color(red: 0.15, green: 0.05, blue: 0.2)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        case .lockedDown:
+            return LinearGradient(
+                colors: [Color(red: 0.4, green: 0.05, blue: 0.05), Color(red: 0.2, green: 0.02, blue: 0.02)],
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
         }

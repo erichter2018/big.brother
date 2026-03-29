@@ -11,6 +11,7 @@ struct ChildSummaryCard: View {
     let dominantMode: LockMode
     let isSending: Bool
     let countdown: String?
+    let lockDownCountdown: String?
     let remainingSeconds: Int?
     let penaltyTimer: String?
     let isPenaltyRunning: Bool
@@ -21,6 +22,7 @@ struct ChildSummaryCard: View {
     let unlockOrigin: TemporaryUnlockOrigin?
     let isHeartbeatConfirmed: Bool
     let isInPenaltyPhase: Bool
+    let penaltyWindowCountdown: String?  // countdown of full unlock window during penalty
     let isScheduleActive: Bool
     let scheduleLabel: String?      // e.g. "Middle School Schedule"
     let scheduleStatus: String?     // e.g. "Locked until 3:00 PM"
@@ -162,8 +164,20 @@ struct ChildSummaryCard: View {
                 // Row 4: Location
                 locationLine
 
-                // Row 5: Alerts (jailbreak, shields down)
-                alertsRow(cached: cached)
+                // Row 5: Alerts (jailbreak, shields down) — inline with text
+                if cached.hasJailbreak {
+                    infoRow(icon: "exclamationmark.shield.fill", color: .red) {
+                        Text("jailbreak detected")
+                            .foregroundStyle(.red)
+                    }
+                }
+                if cached.isShieldMismatch {
+                    infoRow(icon: "shield.slash", color: .red) {
+                        Text("shields down")
+                            .foregroundStyle(.red)
+                            .fontWeight(.semibold)
+                    }
+                }
             }
             .font(.system(size: 12))
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -225,8 +239,11 @@ struct ChildSummaryCard: View {
     private var modeBadgeLabel: String {
         switch dominantMode {
         case .unlocked: return countdown ?? "Unlocked"
-        case .dailyMode: return "Locked"
-        case .essentialOnly: return "Essential"
+        case .dailyMode: return "Restricted"
+        case .essentialOnly: return "Locked"
+        case .lockedDown:
+            if let cd = lockDownCountdown { return "Locked Down \(cd)" }
+            return "Locked Down"
         }
     }
 
@@ -235,6 +252,7 @@ struct ChildSummaryCard: View {
         case .unlocked: return "lock.open.fill"
         case .dailyMode: return "lock.fill"
         case .essentialOnly: return "shield.fill"
+        case .lockedDown: return "wifi.slash"
         }
     }
 
@@ -258,7 +276,15 @@ struct ChildSummaryCard: View {
 
     @ViewBuilder
     private var statusDetail: some View {
-        if isInPenaltyPhase {
+        if dominantMode == .lockedDown, let cd = lockDownCountdown {
+            HStack(spacing: 2) {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 9))
+                Text("Internet off \(cd)")
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(Self.mutedRed)
+        } else if isInPenaltyPhase {
             HStack(spacing: 2) {
                 Image(systemName: "hourglass")
                     .font(.system(size: 9))
@@ -273,7 +299,7 @@ struct ChildSummaryCard: View {
         } else if isScheduleActive, let scheduleStatus {
             Text(scheduleStatus)
                 .font(.system(size: 11))
-                .foregroundStyle(scheduleStatusIsFree ? Self.mutedGreen : Self.mutedBlue)
+                .foregroundStyle(scheduleStatusColor)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         } else if let loc = locationInfo {
@@ -381,21 +407,28 @@ struct ChildSummaryCard: View {
     @ViewBuilder
     private var statusLine: some View {
         if isInPenaltyPhase {
-            HStack(spacing: 3) {
-                Image(systemName: "hourglass")
-                    .font(.system(size: 13))
+            VStack(spacing: 2) {
+                Text("Unlock pending timer")
+                    .font(.system(size: 12))
                     .foregroundStyle(Self.mutedOrange)
-                if let timer = penaltyTimer {
-                    Text("Penalty \u{00B7} \(timer)")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Self.mutedOrange)
-                } else {
-                    Text("Penalty active")
-                        .font(.system(size: 13))
+                if let windowCountdown = penaltyWindowCountdown {
+                    Text(windowCountdown)
+                        .font(.system(size: 14, weight: .semibold).monospacedDigit())
                         .foregroundStyle(Self.mutedOrange)
                 }
             }
             .accessibilityElement(children: .combine)
+        } else if dominantMode == .lockedDown, let cd = lockDownCountdown {
+            HStack(spacing: 4) {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 13))
+                Text("Locked Down \u{00B7} \(cd) left")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Self.mutedRed)
+            }
+            .accessibilityElement(children: .combine)
+        } else if dominantMode == .lockedDown {
+            modeBadge
         } else if let countdown {
             HStack(spacing: 4) {
                 if !isHeartbeatConfirmed {
@@ -424,7 +457,7 @@ struct ChildSummaryCard: View {
                         .foregroundStyle(.gray)
                 }
                 if let scheduleStatus {
-                    let statusColor = scheduleStatusIsFree ? Self.mutedGreen : scheduleStatus.hasPrefix("Essential") ? Self.mutedPurple : Self.mutedBlue
+                    let statusColor = scheduleStatusColor
                     Text(scheduleStatus)
                         .foregroundColor(statusColor)
                         .font(.system(size: 13))
@@ -473,8 +506,11 @@ struct ChildSummaryCard: View {
     private var penaltyLine: some View {
         if let penaltyTimer {
             infoRow(icon: isPenaltyRunning ? "timer" : "hourglass", color: Self.mutedRed) {
-                Text("penalty \(penaltyTimer)")
+                Text(penaltyTimer)
                     .monospacedDigit()
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.red)
+                Text("remaining")
                     .foregroundStyle(Self.mutedRed)
             }
         }
@@ -827,6 +863,7 @@ struct ChildSummaryCard: View {
         case .unlocked: return .green
         case .dailyMode: return .blue
         case .essentialOnly: return .purple
+        case .lockedDown: return .red
         }
     }
 
@@ -836,7 +873,18 @@ struct ChildSummaryCard: View {
         case .unlocked: return Color(.systemGreen).opacity(0.7)
         case .dailyMode: return Color(.systemBlue).opacity(0.7)
         case .essentialOnly: return Color(.systemPurple).opacity(0.7)
+        case .lockedDown: return Color(.systemRed).opacity(0.7)
         }
+    }
+
+    /// Color for schedule status text, derived from the label prefix.
+    private var scheduleStatusColor: Color {
+        guard let scheduleStatus else { return Self.mutedBlue }
+        if scheduleStatusIsFree { return Self.mutedGreen }
+        if scheduleStatus.hasPrefix("Locked Down") { return Self.mutedRed }
+        if scheduleStatus.hasPrefix("Locked") { return Self.mutedPurple }
+        // "Restricted" or anything else
+        return Self.mutedBlue
     }
 
     private static let mutedGreen = Color(.systemGreen).opacity(0.7)

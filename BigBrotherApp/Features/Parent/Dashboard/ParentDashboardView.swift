@@ -192,6 +192,18 @@ struct ParentDashboardView: View {
             dominantMode: dominant.mode,
             isSending: viewModel.isSendingCommand,
             countdown: viewModel.countdownString(for: child),
+            lockDownCountdown: {
+                guard let expiry = viewModel.lockDownExpiries[child.id] else {
+                    print("[BigBrother] VIEW lockDownCountdown nil for \(child.name) — no expiry (dict count=\(viewModel.lockDownExpiries.count))")
+                    return nil
+                }
+                let secs = max(0, Int(expiry.timeIntervalSince(viewModel.now)))
+                guard secs > 0 else { return nil }
+                let h = secs / 3600; let m = (secs % 3600) / 60; let s = secs % 60
+                let result = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+                print("[BigBrother] VIEW lockDownCountdown for \(child.name) = \(result)")
+                return result
+            }(),
             remainingSeconds: viewModel.remainingSeconds(for: child),
             penaltyTimer: viewModel.penaltyTimerString(for: child),
             isPenaltyRunning: viewModel.penaltyTimer(for: child)?.isActivelyRunning ?? false,
@@ -202,6 +214,7 @@ struct ParentDashboardView: View {
             unlockOrigin: viewModel.unlockOrigin(for: child),
             isHeartbeatConfirmed: dominant.confirmed,
             isInPenaltyPhase: viewModel.isInPenaltyPhase(for: child),
+            penaltyWindowCountdown: viewModel.penaltyWindowCountdown(for: child),
             isScheduleActive: viewModel.isScheduleActive(for: child),
             scheduleLabel: viewModel.scheduleLabel(for: child),
             scheduleStatus: viewModel.scheduleStatus(for: child)?.label,
@@ -232,48 +245,25 @@ struct ParentDashboardView: View {
 
     @ViewBuilder
     private func childContextMenu(_ child: ChildProfile) -> some View {
-        let dominant = viewModel.dominantMode(for: child)
-        let remaining = viewModel.remainingSeconds(for: child)
-        let isUnlocked = dominant.mode == .unlocked
+        let hasActiveUnlock = viewModel.remainingSeconds(for: child) != nil
 
-        if isUnlocked {
-            if let remaining, remaining > 0 {
-                Button { Task { await viewModel.unlockChild(child, seconds: remaining + 15 * 60) } } label: {
-                    Label("+15 minutes", systemImage: "plus.circle")
-                }
-                Button { Task { await viewModel.unlockChild(child, seconds: remaining + 30 * 60) } } label: {
-                    Label("+30 minutes", systemImage: "plus.circle")
-                }
-                Button { Task { await viewModel.unlockChild(child, seconds: remaining + 3600) } } label: {
-                    Label("+1 hour", systemImage: "plus.circle")
-                }
-                Divider()
-            }
-            Button { Task { await viewModel.lockChild(child, duration: .indefinite) } } label: {
-                Label("Lock", systemImage: "lock.fill")
-            }
-            Button { Task { await viewModel.lockChild(child, duration: .returnToSchedule) } } label: {
-                Label("Back to schedule", systemImage: "calendar.badge.clock")
-            }
-        } else {
+        // Quick +15 (always additive)
+        Button { Task { await viewModel.unlockChild(child, seconds: 15 * 60) } } label: {
+            Label("+15 minutes", systemImage: "plus.circle")
+        }
+        // More unlock options
+        Menu {
             Button { Task { await viewModel.unlockChild(child, seconds: 15 * 60) } } label: {
-                Label("Unlock 15 min", systemImage: "clock")
+                Label("15 minutes", systemImage: "clock")
             }
             Button { Task { await viewModel.unlockChild(child, seconds: 3600) } } label: {
-                Label("Unlock 1 hour", systemImage: "clock")
-            }
-            Button { Task { await viewModel.unlockChild(child, seconds: 5400) } } label: {
-                Label("Unlock 1.5 hours", systemImage: "clock")
+                Label("1 hour", systemImage: "clock")
             }
             Button { Task { await viewModel.unlockChild(child, seconds: 2 * 3600) } } label: {
-                Label("Unlock 2 hours", systemImage: "clock")
+                Label("2 hours", systemImage: "clock")
             }
-            Divider()
             Button { Task { await viewModel.unlockChild(child, seconds: Date.secondsUntilMidnight) } } label: {
                 Label("Until midnight", systemImage: "moon.fill")
-            }
-            Button { Task { await viewModel.unlockChild(child, seconds: 24 * 3600) } } label: {
-                Label("24 hours", systemImage: "clock.badge.checkmark")
             }
             if viewModel.appState.timerService != nil {
                 Divider()
@@ -284,10 +274,37 @@ struct ParentDashboardView: View {
                     Label("2 hours + timer", systemImage: "timer")
                 }
             }
-            Divider()
-            Button { Task { await viewModel.lockChild(child, duration: .returnToSchedule) } } label: {
-                Label("Back to schedule", systemImage: "calendar.badge.clock")
+        } label: {
+            Label("Unlock...", systemImage: "lock.open")
+        }
+        Divider()
+        Button { Task { await viewModel.lockChild(child, duration: .indefinite) } } label: {
+            Label("Restrict", systemImage: "lock.fill")
+        }
+        Button { Task { await viewModel.essentialChild(child) } } label: {
+            Label("Lock", systemImage: "shield.fill")
+        }
+        Divider()
+        Button { Task { await viewModel.lockDownChild(child, seconds: 900) } } label: {
+            Label("Lock Down 15 min", systemImage: "wifi.slash")
+        }
+        Menu {
+            Button { Task { await viewModel.lockDownChild(child, seconds: 1800) } } label: {
+                Label("30 minutes", systemImage: "wifi.slash")
             }
+            Button { Task { await viewModel.lockDownChild(child, seconds: 3600) } } label: {
+                Label("1 hour", systemImage: "wifi.slash")
+            }
+            Divider()
+            Button { Task { await viewModel.lockDownChild(child) } } label: {
+                Label("Indefinite", systemImage: "wifi.slash")
+            }
+        } label: {
+            Label("Lock Down...", systemImage: "wifi.slash")
+        }
+        Divider()
+        Button { Task { await viewModel.scheduleChild(child) } } label: {
+            Label("Return to Schedule", systemImage: "calendar.badge.clock")
         }
     }
 

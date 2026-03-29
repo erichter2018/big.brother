@@ -167,6 +167,8 @@ public final class PolicySnapshotStore: @unchecked Sendable {
             message = "This app is not in your allowed list. Ask a parent to unlock it."
         case .essentialOnly:
             message = "Only essential apps are available right now."
+        case .lockedDown:
+            message = "Device is locked down. Only essential apps, no internet."
         }
         return ShieldConfig(
             title: mode.displayName,

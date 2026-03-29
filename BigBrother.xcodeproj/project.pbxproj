@@ -10,6 +10,7 @@
 		00112DDE0F8361B08C24C106 /* BigBrotherCore in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAE8FE59CE938EB7886B496 /* BigBrotherCore */; };
 		01C22EB6003255D3C3694526 /* HeartbeatProfileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95BA68D077C7483423F8E0D2 /* HeartbeatProfileEditorView.swift */; };
 		0420C705A806FABBC093726B /* ParentDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21D9F4B16AB65B9226B9D66C /* ParentDashboardView.swift */; };
+		065CA226A2425B7E763B3F93 /* PermissionFixerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EC09EF49E97410562D4FF70 /* PermissionFixerView.swift */; };
 		0ACF3723165A03A115455C65 /* CloudKitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4833A3196E6024880CCF1A39 /* CloudKitService.swift */; };
 		0AE6D622FCEC2B53CFE04FA3 /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 345EFFA5E6FB762373A303F6 /* GoogleService-Info.plist */; };
 		0C57F1B36354648C448051F9 /* HeartbeatService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48249F6BA483A02C1511EE96 /* HeartbeatService.swift */; };
@@ -312,6 +313,7 @@
 		773C468E734D5EDF5913F67B /* CommandSendable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSendable.swift; sourceTree = "<group>"; };
 		792778475B47D7B9A5347B7E /* ScheduleEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleEditorViewModel.swift; sourceTree = "<group>"; };
 		7B798B36FE0FAEB8B606C217 /* BigBrotherMonitorExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherMonitorExtension.swift; sourceTree = "<group>"; };
+		7EC09EF49E97410562D4FF70 /* PermissionFixerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionFixerView.swift; sourceTree = "<group>"; };
 		7F85AF48051FD61F7CC41174 /* BigBrotherShieldExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherShieldExtension.swift; sourceTree = "<group>"; };
 		80835F4F3592BD8FA99A77D4 /* UnlockRequestPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnlockRequestPickerView.swift; sourceTree = "<group>"; };
 		8195715243C101C3954C7A3A /* DeviceDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDetailView.swift; sourceTree = "<group>"; };
@@ -718,6 +720,7 @@
 				A3B2932282E5C1291793D282 /* LocalParentUnlockViewModel.swift */,
 				D9D1291EB600DF958D8E04FF /* LocalUnlockView.swift */,
 				B7D78A40DA38C5873164B394 /* NameMyAppsView.swift */,
+				7EC09EF49E97410562D4FF70 /* PermissionFixerView.swift */,
 				DE5B1871C1F66FEF4A3237B5 /* ShieldApplicationsTestView.swift */,
 				80835F4F3592BD8FA99A77D4 /* UnlockRequestPickerView.swift */,
 			);
@@ -1423,6 +1426,7 @@
 				0E782CC55EC6F990858C74A1 /* ParentPINSetupView.swift in Sources */,
 				8C464F8C12C8C9C525632EF1 /* ParentSetupView.swift in Sources */,
 				DD8B0636042E88362F4F0EB4 /* PaywallView.swift in Sources */,
+				065CA226A2425B7E763B3F93 /* PermissionFixerView.swift in Sources */,
 				6B6797978DFC4B19CAF4EEC1 /* PermissionsStatusView.swift in Sources */,
 				DC8E994E852DD9A72E3B6784 /* RemoteDiagnosticsView.swift in Sources */,
 				87BDFC96EAB6238C695AA0B5 /* RootRouter.swift in Sources */,

@@ -74,7 +74,7 @@ struct ModeActionButtons: View {
                 } label: {
                     VStack(spacing: 2) {
                         Image(systemName: "lock.fill").font(.subheadline)
-                        Text("Lock").font(.caption2).fontWeight(.medium)
+                        Text("Restrict").font(.caption2).fontWeight(.medium)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -84,9 +84,9 @@ struct ModeActionButtons: View {
                     onLockWithDuration(.indefinite)
                 }
             } else {
-                modeButton("Lock", icon: "lock.fill", color: .blue, mode: .dailyMode)
+                modeButton("Restrict", icon: "lock.fill", color: .blue, mode: .dailyMode)
             }
-            modeButton("Essential", icon: "shield", color: .purple, mode: .essentialOnly)
+            modeButton("Lock", icon: "shield", color: .purple, mode: .essentialOnly)
         }
         .disabled(disabled)
         .opacity(disabled ? 0.6 : 1)

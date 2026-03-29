@@ -14,11 +14,16 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
     /// Best-effort — some system apps cannot be blocked regardless.
     case essentialOnly
 
+    /// Essential-only apps AND internet disabled (VPN DNS blackhole).
+    /// Most restrictive mode — device is effectively offline.
+    case lockedDown
+
     public var displayName: String {
         switch self {
         case .unlocked: "Unlocked"
-        case .dailyMode: "Locked"
-        case .essentialOnly: "Essential Only"
+        case .dailyMode: "Restricted"
+        case .essentialOnly: "Locked"
+        case .lockedDown: "Locked Down"
         }
     }
 
@@ -29,6 +34,7 @@ public enum LockMode: String, Codable, Sendable, CaseIterable, Equatable, Hashab
         case .unlocked: 0
         case .dailyMode: 1
         case .essentialOnly: 2
+        case .lockedDown: 3
         }
     }
 }

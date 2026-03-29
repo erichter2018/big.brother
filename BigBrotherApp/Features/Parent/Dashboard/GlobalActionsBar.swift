@@ -64,10 +64,6 @@ struct GlobalActionsBar: View {
 
             // Lock All (tap = until midnight, menu = duration options)
             Menu {
-                Button { Task { await viewModel.lockAll(duration: .returnToSchedule) } } label: {
-                    Label("Return to Schedule", systemImage: "calendar.badge.clock")
-                }
-                Divider()
                 Button { Task { await viewModel.lockAll(duration: .untilMidnight) } } label: {
                     Label("Until Midnight", systemImage: "moon.fill")
                 }
@@ -84,13 +80,30 @@ struct GlobalActionsBar: View {
                 Button { Task { await viewModel.lockAll(duration: .hours(4)) } } label: {
                     Label("4 hours", systemImage: "clock")
                 }
+                Divider()
+                Button { Task { await viewModel.lockAllEssential() } } label: {
+                    Label("Lock All", systemImage: "shield.fill")
+                }
+                Divider()
+                Button { Task { await viewModel.lockDownAll() } } label: {
+                    Label("Lock Down All", systemImage: "wifi.slash")
+                }
+                Button { Task { await viewModel.lockDownAll(seconds: 900) } } label: {
+                    Label("15 min Lock Down", systemImage: "wifi.slash")
+                }
+                Button { Task { await viewModel.lockDownAll(seconds: 1800) } } label: {
+                    Label("30 min Lock Down", systemImage: "wifi.slash")
+                }
+                Button { Task { await viewModel.lockDownAll(seconds: 3600) } } label: {
+                    Label("1 hour Lock Down", systemImage: "wifi.slash")
+                }
             } label: {
-                chipLabel("Lock All", icon: "lock.fill", color: Color(.systemBlue).opacity(0.7))
+                chipLabel("Restrict All", icon: "lock.fill", color: Color(.systemBlue).opacity(0.7))
             } primaryAction: {
                 Task { await viewModel.lockAll(duration: .untilMidnight) }
             }
-            .accessibilityLabel("Lock All Devices")
-            .accessibilityHint("Locks all children's devices. Long press for more options.")
+            .accessibilityLabel("Restrict All Devices")
+            .accessibilityHint("Restricts all children's devices. Long press for more options.")
 
             // Schedule All
             Button {

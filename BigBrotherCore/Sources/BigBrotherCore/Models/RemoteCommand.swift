@@ -126,6 +126,9 @@ public enum CommandAction: Codable, Sendable, Equatable {
     case setSafeSearch(enabled: Bool)
     /// Set driving safety settings (speed threshold, braking threshold, detection toggles).
     case setDrivingSettings(DrivingSettings)
+    /// Block all internet traffic for a duration (seconds). 0 = unblock immediately.
+    /// Handled directly by the VPN tunnel — works even when the main app is dead.
+    case blockInternet(durationSeconds: Int)
 
     // Thread-safe date formatting via Date.FormatStyle (replaces non-thread-safe static DateFormatter)
 
@@ -168,6 +171,7 @@ public enum CommandAction: Codable, Sendable, Equatable {
         case .requestDiagnostics: return "requestDiagnostics"
         case .setSafeSearch: return "setSafeSearch"
         case .setDrivingSettings: return "setDrivingSettings"
+        case .blockInternet: return "blockInternet"
         }
     }
 
@@ -277,6 +281,11 @@ public enum CommandAction: Codable, Sendable, Equatable {
             return "Sync named places"
         case .setDrivingSettings(let s):
             return "Set driving safety (speed limit: \(Int(s.speedThresholdMPH)) mph)"
+        case .blockInternet(let seconds):
+            if seconds <= 0 { return "Unblock internet" }
+            let h = seconds / 3600
+            let m = (seconds % 3600) / 60
+            return h > 0 ? "Block internet (\(h)h \(m)m)" : "Block internet (\(m)m)"
         case .requestDiagnostics:
             return "Request diagnostic report"
         case .setSafeSearch(let enabled):

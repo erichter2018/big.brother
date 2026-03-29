@@ -636,6 +636,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     }
 
     private static func currentScreenTimeMinutes(from storage: any SharedStorageProtocol) -> Int? {
+        // Flush any in-progress unlock session so the count is current.
+        DeviceLockMonitor.shared.flushCurrentSession()
+
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
         let dateKey = "screenTimeDate"
         let minutesKey = "screenTimeMinutes"

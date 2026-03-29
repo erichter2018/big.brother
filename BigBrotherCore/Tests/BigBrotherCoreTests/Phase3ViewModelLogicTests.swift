@@ -195,9 +195,9 @@ struct Phase3ViewModelLogicTests {
     @Test("LockMode displayName")
     func lockModeDisplayName() {
         #expect(LockMode.unlocked.displayName == "Unlocked")
-        #expect(LockMode.dailyMode.displayName == "Locked")
-        #expect(LockMode.essentialOnly.displayName == "Essential Only")
-        #expect(LockMode.essentialOnly.displayName == "Essential Only")
+        #expect(LockMode.dailyMode.displayName == "Restricted")
+        #expect(LockMode.essentialOnly.displayName == "Locked")
+        #expect(LockMode.lockedDown.displayName == "Locked Down")
     }
 
     // MARK: - DiagnosticEntry

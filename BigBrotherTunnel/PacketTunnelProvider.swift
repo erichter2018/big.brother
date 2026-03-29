@@ -51,7 +51,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let safeSearchEnabled = defaults?.bool(forKey: "safeSearchEnabled") ?? false
 
-        if safeSearchEnabled {
+        if isInternetBlocked {
+            // DNS blackhole — all domain lookups fail
+            let dns = NEDNSSettings(servers: ["127.0.0.1"])
+            dns.matchDomains = [""]
+            settings.dnsSettings = dns
+            NSLog("[Tunnel] DNS blackhole active — internet blocked")
+        } else if safeSearchEnabled {
             // CleanBrowsing Family Filter DNS: enforces safe search on major search engines
             // and blocks adult content domains at the DNS level.
             let dns = NEDNSSettings(servers: ["185.228.168.168", "185.228.169.168"])
@@ -128,6 +134,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             } else {
                 completionHandler?(nil)
             }
+
+        case "blockInternet":
+            applyInternetBlock(durationSeconds: 3600) // default 1 hour via IPC
+            completionHandler?("blocked".data(using: .utf8))
+
+        case "unblockInternet":
+            applyInternetBlock(durationSeconds: 0)
+            completionHandler?("unblocked".data(using: .utf8))
 
         default:
             completionHandler?(nil)
@@ -208,7 +222,81 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // App came back (via App Group timestamp, before IPC resumes)
             NSLog("[Tunnel] Main app appears alive again (App Group timestamp updated)")
             mainAppAlive = true
+
+        }
+
+        // Check if internet block has expired
+        let blockDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if let unblockAt = blockDefaults?.double(forKey: "internetBlockedUntil"),
+           unblockAt > 0, Date().timeIntervalSince1970 >= unblockAt {
+            blockDefaults?.removeObject(forKey: "internetBlockedUntil")
+            reapplyNetworkSettings()
+            NSLog("[Tunnel] Internet block expired — traffic restored")
             tunnelOwnsHeartbeat = false
+        }
+    }
+
+    // MARK: - Internet Block
+
+    /// Block or unblock internet by reapplying tunnel DNS settings.
+    /// When blocked, DNS routes to 127.0.0.1 (blackhole) — no app can resolve any domain.
+    /// CloudKit polling continues because the tunnel makes direct IP connections for its own queries.
+    private func applyInternetBlock(durationSeconds: Int) {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if durationSeconds > 0 {
+            let unblockAt = Date().addingTimeInterval(Double(durationSeconds))
+            defaults?.set(unblockAt.timeIntervalSince1970, forKey: "internetBlockedUntil")
+            NSLog("[Tunnel] Internet blocked for \(durationSeconds)s (until \(unblockAt))")
+        } else {
+            defaults?.removeObject(forKey: "internetBlockedUntil")
+            NSLog("[Tunnel] Internet unblocked")
+        }
+        // Reapply network settings with updated DNS
+        reapplyNetworkSettings()
+    }
+
+    /// Check if internet is currently blocked (called during settings application).
+    private var isInternetBlocked: Bool {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard let unblockTimestamp = defaults?.double(forKey: "internetBlockedUntil"),
+              unblockTimestamp > 0 else { return false }
+        if Date().timeIntervalSince1970 >= unblockTimestamp {
+            // Block expired — clean up
+            defaults?.removeObject(forKey: "internetBlockedUntil")
+            return false
+        }
+        return true
+    }
+
+    /// Reapply tunnel network settings (DNS) based on current block/safe-search state.
+    private func reapplyNetworkSettings() {
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
+        let ipv4 = NEIPv4Settings(addresses: ["198.18.0.1"], subnetMasks: ["255.255.255.0"])
+        settings.ipv4Settings = ipv4
+        settings.mtu = 1500
+
+        if isInternetBlocked {
+            // DNS blackhole — all domain lookups resolve to localhost (no internet)
+            let dns = NEDNSSettings(servers: ["127.0.0.1"])
+            dns.matchDomains = [""]
+            settings.dnsSettings = dns
+            NSLog("[Tunnel] DNS blackhole active — internet blocked")
+        } else {
+            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            let safeSearchEnabled = defaults?.bool(forKey: "safeSearchEnabled") ?? false
+            if safeSearchEnabled {
+                let dns = NEDNSSettings(servers: ["185.228.168.168", "185.228.169.168"])
+                dns.matchDomains = [""]
+                settings.dnsSettings = dns
+            }
+        }
+
+        setTunnelNetworkSettings(settings) { error in
+            if let error {
+                NSLog("[Tunnel] Failed to reapply settings: \(error.localizedDescription)")
+            } else {
+                NSLog("[Tunnel] Network settings reapplied")
+            }
         }
     }
 
@@ -360,6 +448,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     record["status"] = "applied"
                     _ = try? await db.save(record)
                     NSLog("[Tunnel] Processed requestDiagnostics command: \(commandID)")
+                } else if actionJSON.contains("blockInternet") {
+                    // Parse duration from actionJSON
+                    if let data = actionJSON.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let duration = (json["blockInternet"] as? [String: Any])?["durationSeconds"] as? Int {
+                        applyInternetBlock(durationSeconds: duration)
+                    }
+                    record["status"] = "applied"
+                    _ = try? await db.save(record)
+                    NSLog("[Tunnel] Processed blockInternet command: \(commandID)")
                 }
                 // Other commands are left for the main app
             }

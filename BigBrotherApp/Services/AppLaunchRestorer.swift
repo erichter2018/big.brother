@@ -207,7 +207,7 @@ struct AppLaunchRestorer {
                 eventLogger.log(.commandFailed, details: "Schedule reconciliation: failed to clear restrictions: \(error.localizedDescription)")
             }
             eventLogger.log(.policyReconciled, details: "Schedule reconciliation: cleared shields for free window")
-        case .essentialOnly, .dailyMode:
+        case .essentialOnly, .dailyMode, .lockedDown:
             // Locked or essential — re-apply enforcement from snapshot.
             if let snapshot = currentSnapshot {
                 do { try enforcement.reconcile(with: snapshot) } catch {

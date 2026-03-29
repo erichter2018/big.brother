@@ -38,17 +38,11 @@ struct ChildDetailView: View {
                     locationCard
                 }
 
-                // 4. Self-unlock + apps — compact
-                selfUnlockRow
-
                 if !viewModel.temporaryAllowedAppsForChild.isEmpty {
                     temporaryAppsRow
                 }
 
                 appsRow
-
-                // 5. Bottom: settings + message
-                bottomActions
 
                 // Feedback
                 if let feedback = viewModel.commandFeedback {
@@ -65,6 +59,11 @@ struct ChildDetailView: View {
         .navigationTitle(viewModel.child.name)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                Button { showSettings = true } label: {
+                    Image(systemName: "gear")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button { showMessageComposer = true } label: {
                         Label("Send Message", systemImage: "envelope")
@@ -79,9 +78,6 @@ struct ChildDetailView: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
-                }
-                Button { showSettings = true } label: {
-                    Image(systemName: "gear")
                 }
             }
         }
@@ -572,6 +568,26 @@ struct ChildDetailView: View {
                         }
                         .font(.caption)
                     }
+                }
+
+                // Self-Unlocks
+                Section("Self-Unlocks") {
+                    Stepper(
+                        "\(viewModel.selfUnlockBudget) per day",
+                        value: Binding(
+                            get: { viewModel.selfUnlockBudget },
+                            set: { viewModel.selfUnlockBudget = $0 }
+                        ),
+                        in: 0...10
+                    )
+                    if let used = viewModel.selfUnlocksUsedToday, viewModel.selfUnlockBudget > 0 {
+                        Text("\(used) of \(viewModel.selfUnlockBudget) used today")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("How many times per day the child can unlock their own device for 15 minutes.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 // Restrictions

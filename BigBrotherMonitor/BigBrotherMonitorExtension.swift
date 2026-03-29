@@ -653,6 +653,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Clear shield properties on ALL named stores + default store.
     /// ManagedSettings merges across stores with OR logic — if any store blocks, it's blocked.
     private func clearAllShieldStores() {
+        // Don't allow unlock if permissions are missing — stay in essential mode.
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if defaults?.bool(forKey: "allPermissionsGranted") == false {
+            // Apply essential-only shielding instead of clearing
+            let policy = storage.readPolicySnapshot()?.effectivePolicy
+            applyShieldingToAllStores(mode: .essentialOnly, policy: policy)
+            return
+        }
+
         let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
         for s in [baseStore, store, tempUnlockStore] {
             s.shield.applications = nil
@@ -672,6 +681,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private static let maxShieldApplications = 50
 
     private func applyShieldingToAllStores(mode: LockMode, policy: EffectivePolicy?) {
+        // Force essential mode if permissions are missing.
+        let effectiveMode: LockMode
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if defaults?.bool(forKey: "allPermissionsGranted") == false && mode != .essentialOnly {
+            effectiveMode = .essentialOnly
+        } else {
+            effectiveMode = mode
+        }
+
         // Always clear tempUnlock store shields — schedule transitions supersede temp unlocks.
         let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
         tempUnlockStore.shield.applications = nil
@@ -679,12 +697,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         tempUnlockStore.shield.webDomainCategories = nil
         tempUnlockStore.shield.webDomains = nil
 
-        switch mode {
+        switch effectiveMode {
         case .unlocked:
             clearAllShieldStores()
 
-        case .dailyMode, .essentialOnly:
-            let allowExemptions = mode == .dailyMode
+        case .dailyMode, .essentialOnly, .lockedDown:
+            let allowExemptions = effectiveMode == .dailyMode
             let allowedTokens = allowExemptions ? collectAllowedTokens() : []
             let pickerTokens = loadPickerTokens()
 
@@ -763,7 +781,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         case .unlocked:
             store.clearAllSettings()
 
-        case .dailyMode, .essentialOnly:
+        case .dailyMode, .essentialOnly, .lockedDown:
             let allowExemptions = mode == .dailyMode
             let allowedTokens = allowExemptions ? collectAllowedTokens() : []
             if allowedTokens.isEmpty {

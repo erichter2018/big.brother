@@ -67,7 +67,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         case .unlocked:
             clearAllShieldStores()
 
-        case .dailyMode, .essentialOnly:
+        case .dailyMode, .essentialOnly, .lockedDown:
             if let profile = storage.readActiveScheduleProfile() {
                 let scheduleMode = profile.resolvedMode(at: Date())
                 if scheduleMode == .unlocked {
@@ -338,6 +338,8 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             return "This app is not in your allowed list. Ask a parent to unlock it."
         case .essentialOnly:
             return "Only essential apps are available right now."
+        case .lockedDown:
+            return "Device is locked down. Only essential apps, no internet."
         }
     }
 }

@@ -144,6 +144,12 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         locationManager.authorizationStatus
     }
 
+    /// Request "Always" location authorization. Shows system dialog if not determined,
+    /// or upgrades from "When In Use" if applicable.
+    func requestAlwaysAuthorization() {
+        locationManager.requestAlwaysAuthorization()
+    }
+
     /// Current CLAuthorizationStatus as a heartbeat-friendly string.
     var authorizationStatusString: String {
         switch locationManager.authorizationStatus {

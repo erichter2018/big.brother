@@ -196,21 +196,13 @@ struct LocationMapView: View {
         let from = breadcrumbs[lower]
         let to = breadcrumbs[upper]
 
-        // Snap to nearest breadcrumb if close (within ~half a breadcrumb interval)
-        if fraction < 0.3 || lower == upper {
+        // At exact breadcrumb position
+        if fraction < 0.01 || lower == upper {
             let speed = speedAtIndex(lower)
             return ScrubPosition(
                 coord: CLLocationCoordinate2D(latitude: from.latitude, longitude: from.longitude),
                 timestamp: from.timestamp, address: from.address ?? "",
                 isInterpolated: false, speed: speed, breadcrumbIndex: lower
-            )
-        }
-        if fraction > 0.7 {
-            let speed = speedAtIndex(upper)
-            return ScrubPosition(
-                coord: CLLocationCoordinate2D(latitude: to.latitude, longitude: to.longitude),
-                timestamp: to.timestamp, address: to.address ?? "",
-                isInterpolated: false, speed: speed, breadcrumbIndex: upper
             )
         }
 
@@ -238,7 +230,7 @@ struct LocationMapView: View {
             return ScrubPosition(
                 coord: coord, timestamp: interpolatedTime,
                 address: fraction < 0.5 ? (from.address ?? "") : (to.address ?? ""),
-                isInterpolated: true, speed: speed, breadcrumbIndex: lower
+                isInterpolated: false, speed: speed, breadcrumbIndex: lower
             )
         }
 
@@ -1016,9 +1008,11 @@ struct LocationMapView: View {
             await loadBreadcrumbs()
             trips = detectTrips()
             await correlateDriveReportEvents()
-            await prefetchSpeedLimitsForTrips()
             await resolveTripPOIs()
-            await resolveRoutes()
+            // Routes and speed limits load in parallel
+            async let routes: () = resolveRoutes()
+            async let speedLimits: () = prefetchSpeedLimitsForTrips()
+            _ = await (routes, speedLimits)
         }
         .onChange(of: heartbeats.first?.latitude) { _, _ in
             if !isScrubbing, let coord = currentLocation {

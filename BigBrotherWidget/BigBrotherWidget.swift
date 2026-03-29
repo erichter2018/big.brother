@@ -84,11 +84,11 @@ struct StatusProvider: TimelineProvider {
             case .unlocked:
                 return "Free until \(formatter.string(from: next))"
             case .dailyMode:
-                return nextMode == .unlocked
-                    ? "Locked until \(formatter.string(from: next))"
-                    : "Locked until \(formatter.string(from: next))"
+                return "Restricted until \(formatter.string(from: next))"
             case .essentialOnly:
-                return "Essential until \(formatter.string(from: next))"
+                return "Locked until \(formatter.string(from: next))"
+            case .lockedDown:
+                return "Locked down until \(formatter.string(from: next))"
             }
         }()
 
@@ -136,6 +136,7 @@ struct StatusWidgetView: View {
         case .unlocked: .green
         case .dailyMode: .blue
         case .essentialOnly: .purple
+        case .lockedDown: .red
         }
     }
 
@@ -144,14 +145,16 @@ struct StatusWidgetView: View {
         case .unlocked: "lock.open.fill"
         case .dailyMode: "lock.fill"
         case .essentialOnly: "shield.fill"
+        case .lockedDown: "wifi.slash"
         }
     }
 
     private var modeLabel: String {
         switch entry.currentMode {
         case .unlocked: "Free"
-        case .dailyMode: "Locked"
-        case .essentialOnly: "Essential"
+        case .dailyMode: "Restricted"
+        case .essentialOnly: "Locked"
+        case .lockedDown: "Locked Down"
         }
     }
 

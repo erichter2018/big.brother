@@ -33,6 +33,11 @@ final class ParentDashboardViewModel: CommandSendable {
     var timedUnlockPhases: [ChildProfileID: TimedUnlockPhase] = [:] {
         didSet { persistTimedUnlockPhases() }
     }
+    /// How many penalty seconds to deduct when the timed unlock window expires.
+    /// Stored at unlock time so the expire handler knows the correct remaining value.
+    var timedUnlockPenaltyDeductions: [ChildProfileID: Int] = [:]
+    /// Tracks when a timed lock-down (internet block) expires per child.
+    var lockDownExpiries: [ChildProfileID: Date] = [:]
 
     private static let unlockExpiriesKey = "unlockExpiries"
     private static let timedUnlockPhasesKey = "timedUnlockPhases"
@@ -154,6 +159,24 @@ final class ParentDashboardViewModel: CommandSendable {
         autoDismissFeedback()
     }
 
+    func lockAllEssential() async {
+        isSendingCommand = true
+        commandFeedback = nil
+        unlockExpiries.removeAll()
+        timedUnlockPhases.removeAll()
+        timedUnlockPenaltyDeductions.removeAll()
+        lockDownExpiries.removeAll()
+        scheduleActiveChildren.removeAll()
+        for child in childProfiles {
+            await essentialChild(child)
+        }
+        commandFeedback = "Lock All sent"
+        isSendingCommand = false
+        trackPendingCommand(.setMode(.essentialOnly), target: .allDevices)
+        startConfirmationPolling()
+        autoDismissFeedback()
+    }
+
     func unlockAllWithTimer(seconds: Int) async {
         isSendingCommand = true
         commandFeedback = nil
@@ -166,18 +189,15 @@ final class ParentDashboardViewModel: CommandSendable {
     }
 
     func unlockAll(seconds: Int = 24 * 3600) async {
-        now = Date()
-        // Don't clear scheduleActiveChildren — children return to schedule after expiry.
-        let expiry = now.addingTimeInterval(Double(seconds))
+        isSendingCommand = true
+        commandFeedback = nil
+        // Unlock each child individually so per-child expiry extension works correctly.
         for child in childProfiles {
-            unlockExpiries[child.id] = expiry
-            appState.expectedModes.removeValue(forKey: child.id)
+            await unlockChild(child, seconds: seconds)
         }
-        startCountdownTimer()
-        let action: CommandAction = .temporaryUnlock(durationSeconds: seconds)
-        trackPendingCommand(action, target: .allDevices)
-        await performCommand(action, target: .allDevices)
-        startConfirmationPolling()
+        commandFeedback = "Unlock All sent"
+        isSendingCommand = false
+        autoDismissFeedback()
     }
 
     // MARK: - Per-Child Actions
@@ -192,6 +212,8 @@ final class ParentDashboardViewModel: CommandSendable {
     private func lockChildQuiet(_ child: ChildProfile, duration: LockDuration) async {
         unlockExpiries.removeValue(forKey: child.id)
         timedUnlockPhases.removeValue(forKey: child.id)
+        timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
+        lockDownExpiries.removeValue(forKey: child.id)
         scheduleActiveChildren.remove(child.id)
 
         let commandAction: CommandAction
@@ -220,19 +242,37 @@ final class ParentDashboardViewModel: CommandSendable {
             try? await appState.sendCommand(target: .child(child.id), action: commandAction)
         }
         trackPendingCommand(commandAction, target: .child(child.id))
+        // Restore internet in case device was locked down.
+        try? await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: 0))
         // Stop Firebase penalty timer on any lock action.
         await stopPenaltyTimer(for: child)
     }
 
     func unlockChild(_ child: ChildProfile, seconds: Int = 24 * 3600) async {
         now = Date()
-        unlockExpiries[child.id] = now.addingTimeInterval(Double(seconds))
-        // Don't remove from scheduleActiveChildren — child returns to schedule after expiry.
+
+        // Compute absolute expiry: extend existing expiry or start fresh.
+        let currentExpiry = unlockExpiries[child.id]
+        let newExpiry: Date
+        if let currentExpiry, currentExpiry > now {
+            // Already unlocked — extend by the requested amount
+            newExpiry = currentExpiry.addingTimeInterval(Double(seconds))
+        } else {
+            // Locked or expired — start fresh from now
+            newExpiry = now.addingTimeInterval(Double(seconds))
+        }
+        unlockExpiries[child.id] = newExpiry
+
+        // Send the absolute duration from NOW to the child device.
+        let durationFromNow = max(1, Int(newExpiry.timeIntervalSince(now)))
+
         appState.expectedModes.removeValue(forKey: child.id)
         startCountdownTimer()
-        let action: CommandAction = .temporaryUnlock(durationSeconds: seconds)
+        let action: CommandAction = .temporaryUnlock(durationSeconds: durationFromNow)
         trackPendingCommand(action, target: .child(child.id))
         await performCommand(action, target: .child(child.id))
+        // Restore internet in case device was locked down.
+        try? await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: 0))
         startConfirmationPolling()
     }
 
@@ -278,30 +318,15 @@ final class ParentDashboardViewModel: CommandSendable {
                     penaltyEndsAt: windowEnd, unlockEndsAt: windowEnd
                 )
             }
+            // Store how much penalty to deduct when the window expires.
+            // This is used by the countdown timer to set the correct remaining value
+            // instead of reading the live Firebase countdown (which includes unconsumed time).
+            timedUnlockPenaltyDeductions[child.id] = penaltyConsumed
+
             startCountdownTimer()
             let action: CommandAction = .timedUnlock(totalSeconds: seconds, penaltySeconds: penaltySecs)
             trackPendingCommand(action, target: .child(child.id))
             await performCommand(action, target: .child(child.id))
-
-            // Deduct consumed penalty from the stored total.
-            let remainingPenalty = max(0, penaltySecs - penaltyConsumed)
-            await performCommand(
-                .setPenaltyTimer(seconds: remainingPenalty > 0 ? remainingPenalty : nil, endTime: nil),
-                target: .child(child.id)
-            )
-
-            // Also update Firebase if timer service is available.
-            if let timerService = appState.timerService,
-               let familyID = appState.parentState?.familyID.rawValue,
-               let firestoreKidID = penaltyTimer(for: child)?.firestoreKidID {
-                Task {
-                    if remainingPenalty > 0 {
-                        await timerService.setPenalty(familyID: familyID, kidID: firestoreKidID, seconds: remainingPenalty)
-                    } else {
-                        await timerService.clearTimer(familyID: familyID, kidID: firestoreKidID)
-                    }
-                }
-            }
 
             startConfirmationPolling()
         }
@@ -310,12 +335,72 @@ final class ParentDashboardViewModel: CommandSendable {
     func essentialChild(_ child: ChildProfile) async {
         unlockExpiries.removeValue(forKey: child.id)
         timedUnlockPhases.removeValue(forKey: child.id)
+        timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
+        lockDownExpiries.removeValue(forKey: child.id)
         scheduleActiveChildren.remove(child.id)
         appState.expectedModes[child.id] = (.essentialOnly, Date())
         let action: CommandAction = .setMode(.essentialOnly)
         trackPendingCommand(action, target: .child(child.id))
         await performCommand(action, target: .child(child.id))
+        // Restore internet in case device was locked down.
+        try? await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: 0))
         startConfirmationPolling()
+    }
+
+    /// Lock down a child: essentialOnly + internet blocked.
+    /// seconds: duration for internet block. nil = indefinite (24h auto-expire).
+    func lockDownChild(_ child: ChildProfile, seconds: Int? = nil) async {
+        unlockExpiries.removeValue(forKey: child.id)
+        timedUnlockPhases.removeValue(forKey: child.id)
+        timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
+        lockDownExpiries.removeValue(forKey: child.id)
+        scheduleActiveChildren.remove(child.id)
+        appState.expectedModes[child.id] = (.lockedDown, Date())
+        // Track lock-down expiry for countdown display.
+        let blockDuration = seconds ?? 86400 // 24h default
+        if let seconds, seconds < 86400 {
+            let expiry = Date().addingTimeInterval(Double(seconds))
+            lockDownExpiries[child.id] = expiry
+            startCountdownTimer()
+            print("[BigBrother] SET lockDownExpiry for \(child.name): \(expiry), seconds=\(seconds), dict count=\(lockDownExpiries.count)")
+        } else {
+            lockDownExpiries.removeValue(forKey: child.id)
+            print("[BigBrother] NO lockDownExpiry (seconds=\(String(describing: seconds)))")
+        }
+        // Send lockedDown mode + internet block as two commands.
+        isSendingCommand = true
+        do {
+            try await appState.sendCommand(target: .child(child.id), action: .setMode(.lockedDown))
+            try await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: blockDuration))
+            let name = appState.childProfiles.first(where: { $0.id == child.id })?.name ?? ""
+            commandFeedback = "Locked Down sent to \(name)."
+        } catch {
+            commandFeedback = "Failed: \(error.localizedDescription)"
+            isCommandError = true
+        }
+        isSendingCommand = false
+        trackPendingCommand(.setMode(.essentialOnly), target: .child(child.id))
+        await stopPenaltyTimer(for: child)
+        startConfirmationPolling()
+        autoDismissFeedback()
+    }
+
+    func lockDownAll(seconds: Int? = nil) async {
+        isSendingCommand = true
+        commandFeedback = nil
+        unlockExpiries.removeAll()
+        timedUnlockPhases.removeAll()
+        timedUnlockPenaltyDeductions.removeAll()
+        lockDownExpiries.removeAll()
+        scheduleActiveChildren.removeAll()
+        for child in childProfiles {
+            await lockDownChild(child, seconds: seconds)
+        }
+        commandFeedback = "Lock Down All sent"
+        isSendingCommand = false
+        trackPendingCommand(.setMode(.lockedDown), target: .allDevices)
+        startConfirmationPolling()
+        autoDismissFeedback()
     }
 
     // MARK: - Schedule Mode
@@ -330,11 +415,15 @@ final class ParentDashboardViewModel: CommandSendable {
     func scheduleChild(_ child: ChildProfile) async {
         unlockExpiries.removeValue(forKey: child.id)
         timedUnlockPhases.removeValue(forKey: child.id)
+        timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
+        lockDownExpiries.removeValue(forKey: child.id)
         appState.expectedModes.removeValue(forKey: child.id)
         scheduleActiveChildren.insert(child.id)
         let action: CommandAction = .returnToSchedule
         trackPendingCommand(action, target: .child(child.id))
         await performCommand(action, target: .child(child.id))
+        // Restore internet in case device was locked down.
+        try? await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: 0))
         startConfirmationPolling()
     }
 
@@ -346,6 +435,7 @@ final class ParentDashboardViewModel: CommandSendable {
         for child in childProfiles {
             unlockExpiries.removeValue(forKey: child.id)
             timedUnlockPhases.removeValue(forKey: child.id)
+            timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
             appState.expectedModes.removeValue(forKey: child.id)
             scheduleActiveChildren.insert(child.id)
             try? await appState.sendCommand(target: .child(child.id), action: .returnToSchedule)
@@ -394,8 +484,9 @@ final class ParentDashboardViewModel: CommandSendable {
         let modeLabel: String
         switch mode {
         case .unlocked: modeLabel = "Free"
-        case .essentialOnly: modeLabel = "Essential"
-        case .dailyMode: modeLabel = "Locked"
+        case .dailyMode: modeLabel = "Restricted"
+        case .essentialOnly: modeLabel = "Locked"
+        case .lockedDown: modeLabel = "Locked Down"
         }
 
         if let transition = profile.nextTransitionTime(from: self.now) {
@@ -425,6 +516,17 @@ final class ParentDashboardViewModel: CommandSendable {
     }
 
     private func computeMode(for child: ChildProfile) -> (mode: LockMode, isTemp: Bool) {
+        // 0a. Active lock-down with expiry always wins — this is parent's explicit intent
+        // and must not be overridden by heartbeat or schedule until the timer expires.
+        if let expiry = lockDownExpiries[child.id], expiry > now {
+            return (.lockedDown, false)
+        }
+        // 0a-bis. Indefinite lock-down (no expiry but expectedMode is lockedDown).
+        if appState.expectedModes[child.id]?.mode == .lockedDown,
+           lockDownExpiries[child.id] == nil {
+            return (.lockedDown, false)
+        }
+
         // 0. Check if parent explicitly set mode — this takes priority over everything
         //    (including schedule) because it represents the most recent parent intent.
         //    Covers setMode from both dashboard and child detail views.
@@ -723,16 +825,16 @@ final class ParentDashboardViewModel: CommandSendable {
                     }
                 }
 
-                // Stop (not clear) penalty timer when penalty phase ends.
-                // stopPenaltyTimer preserves remaining time; clearPenaltyTimer zeroes it out.
+                // When penalty phase ends (transitioning to unlock), stop the running
+                // Firebase timer and set the correct remaining penalty (original minus consumed).
                 for (childID, phase) in self.timedUnlockPhases {
                     if self.now >= phase.penaltyEndsAt,
                        self.now < phase.unlockEndsAt,
                        let child = self.childProfiles.first(where: { $0.id == childID }) {
-                        // Check if we already stopped this timer (avoid repeated calls).
                         let timer = self.penaltyTimer(for: child)
-                        if timer?.penaltySeconds ?? 0 > 0 || timer?.isActivelyRunning == true {
-                            await self.stopPenaltyTimer(for: child)
+                        if timer?.isActivelyRunning == true {
+                            // Deduct consumed penalty and stop the timer.
+                            await self.deductAndStopPenalty(for: child)
                             #if DEBUG
                             print("[BigBrother] Penalty phase ended for \(child.name), stopped timer (device now unlocked)")
                             #endif
@@ -741,8 +843,7 @@ final class ParentDashboardViewModel: CommandSendable {
                 }
 
                 // Prune fully expired timed unlock phases.
-                // Use stopPenaltyTimer to preserve any remaining penalty time
-                // (e.g., kid had 2.5h penalty but window was only 2h → 30min remains).
+                // Deduct consumed penalty and stop the timer.
                 let expiredPhases = self.timedUnlockPhases.filter { $0.value.unlockEndsAt <= self.now }
                 if !expiredPhases.isEmpty {
                     self.timedUnlockPhases = self.timedUnlockPhases.filter { $0.value.unlockEndsAt > self.now }
@@ -751,8 +852,9 @@ final class ParentDashboardViewModel: CommandSendable {
                         print("[BigBrother] Timed unlock fully expired for child \(childID.rawValue.prefix(8))")
                         #endif
                         if let child = self.childProfiles.first(where: { $0.id == childID }) {
-                            await self.stopPenaltyTimer(for: child)
+                            await self.deductAndStopPenalty(for: child)
                         }
+                        self.timedUnlockPenaltyDeductions.removeValue(forKey: childID)
                     }
                 }
                 // Prune expired unlock expiries and stop Firebase timers.
@@ -761,6 +863,18 @@ final class ParentDashboardViewModel: CommandSendable {
                 for (childID, _) in expired {
                     if let child = self.childProfiles.first(where: { $0.id == childID }) {
                         await self.stopPenaltyTimer(for: child)
+                    }
+                }
+
+                // Prune expired lock-down expiries and revert display to essentialOnly.
+                let expiredLockDowns = self.lockDownExpiries.filter { $0.value <= self.now }
+                if !expiredLockDowns.isEmpty {
+                    self.lockDownExpiries = self.lockDownExpiries.filter { $0.value > self.now }
+                    for (childID, _) in expiredLockDowns {
+                        // Internet auto-unblocks in tunnel; revert parent display to Locked.
+                        if self.appState.expectedModes[childID]?.mode == .lockedDown {
+                            self.appState.expectedModes[childID] = (.essentialOnly, Date())
+                        }
                     }
                 }
 
@@ -839,6 +953,27 @@ final class ParentDashboardViewModel: CommandSendable {
         return String(format: "%d:%02d", m, s)
     }
 
+    /// Formatted countdown for a timed lock-down (e.g. "14:32").
+    func lockDownCountdown(for child: ChildProfile) -> String? {
+        guard let expiry = lockDownExpiries[child.id] else {
+            #if DEBUG
+            if appState.expectedModes[child.id]?.mode == .lockedDown {
+                print("[BigBrother] lockDownCountdown nil for \(child.name) — no expiry in lockDownExpiries (count: \(lockDownExpiries.count))")
+            }
+            #endif
+            return nil
+        }
+        let secs = max(0, Int(expiry.timeIntervalSince(now)))
+        guard secs > 0 else { return nil }
+        let h = secs / 3600
+        let m = (secs % 3600) / 60
+        let s = secs % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%d:%02d", m, s)
+    }
+
     // MARK: - Timer Integration
 
     /// Returns the AllowanceTracker penalty timer state for a child, if integration is enabled.
@@ -872,6 +1007,33 @@ final class ParentDashboardViewModel: CommandSendable {
         await service.addTime(familyID: familyID, kidID: mapping.firestoreKidID, minutes: minutes)
     }
 
+    /// Deducts consumed penalty time and stops the Firebase timer.
+    /// Uses the pre-computed deduction from when the timed unlock was issued,
+    /// so the remaining value is correct regardless of how long the Firebase timer ran.
+    func deductAndStopPenalty(for child: ChildProfile) async {
+        guard let timerService = appState.timerService else { return }
+        let config = TimerIntegrationConfig.load()
+        guard let mapping = config.kidMappings.first(where: { $0.childProfileID == child.id }),
+              let familyID = config.firebaseFamilyID else { return }
+
+        let timer = penaltyTimer(for: child)
+        let originalPenalty = timer?.penaltySeconds ?? 0
+        let consumed = timedUnlockPenaltyDeductions[child.id] ?? 0
+        let remaining = max(0, originalPenalty - consumed)
+
+        if remaining > 0 {
+            await timerService.setPenalty(familyID: familyID, kidID: mapping.firestoreKidID, seconds: remaining)
+        } else {
+            await timerService.clearTimer(familyID: familyID, kidID: mapping.firestoreKidID)
+        }
+
+        // Also send to child via CloudKit.
+        await performCommand(
+            .setPenaltyTimer(seconds: remaining > 0 ? remaining : nil, endTime: nil),
+            target: .child(child.id)
+        )
+    }
+
     func clearPenaltyTimer(for child: ChildProfile) async {
         guard let service = appState.timerService else { return }
         let config = TimerIntegrationConfig.load()
@@ -902,6 +1064,19 @@ final class ParentDashboardViewModel: CommandSendable {
     func isInPenaltyPhase(for child: ChildProfile) -> Bool {
         guard let phase = timedUnlockPhases[child.id] else { return false }
         return now < phase.penaltyEndsAt
+    }
+
+    /// Countdown string for the unlock window during penalty phase (counts down to unlockEndsAt).
+    func penaltyWindowCountdown(for child: ChildProfile) -> String? {
+        guard let phase = timedUnlockPhases[child.id], now < phase.penaltyEndsAt else { return nil }
+        let secs = max(0, Int(phase.unlockEndsAt.timeIntervalSince(now)))
+        let h = secs / 3600
+        let m = (secs % 3600) / 60
+        let s = secs % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%d:%02d", m, s)
     }
 
     func unlockOrigin(for child: ChildProfile) -> TemporaryUnlockOrigin? {

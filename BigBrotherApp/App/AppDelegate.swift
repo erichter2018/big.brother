@@ -142,6 +142,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             mode = snapshot?.effectivePolicy.resolvedMode ?? .dailyMode
         }
 
+        // Force essential mode if permissions are missing.
+        let effectiveMode: LockMode
+        let permDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if permDefaults?.bool(forKey: "allPermissionsGranted") == false && mode != .essentialOnly {
+            effectiveMode = .essentialOnly
+        } else {
+            effectiveMode = mode
+        }
+
         // Apply shields to ManagedSettingsStore.
         let baseStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
         let scheduleStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
@@ -153,7 +162,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         tempUnlockStore.shield.webDomainCategories = nil
         tempUnlockStore.shield.webDomains = nil
 
-        switch mode {
+        switch effectiveMode {
         case .unlocked:
             // Free window or unlocked — clear all shields.
             for s in [baseStore, scheduleStore, tempUnlockStore] {
@@ -168,8 +177,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             defaultStore.shield.webDomainCategories = nil
             defaultStore.shield.webDomains = nil
 
-        case .dailyMode, .essentialOnly:
-            let allowExemptions = mode == .dailyMode
+        case .dailyMode, .essentialOnly, .lockedDown:
+            let allowExemptions = effectiveMode == .dailyMode
             let decoder = JSONDecoder()
 
             // Collect allowed tokens (parent-approved apps).

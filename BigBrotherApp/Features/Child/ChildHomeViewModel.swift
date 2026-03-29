@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import CoreLocation
+import CoreMotion
 import UIKit
 import BigBrotherCore
 
@@ -49,6 +50,14 @@ final class ChildHomeViewModel {
 
     var currentMode: LockMode {
         appState.currentEffectivePolicy?.resolvedMode ?? .unlocked
+    }
+
+    /// When the internet block expires (from VPN DNS blackhole). Nil if not blocked.
+    var internetBlockedUntil: Date? {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard let timestamp = defaults?.double(forKey: "internetBlockedUntil"), timestamp > 0 else { return nil }
+        let date = Date(timeIntervalSince1970: timestamp)
+        return date > now ? date : nil
     }
 
     var isTemporaryUnlock: Bool {
@@ -147,6 +156,19 @@ final class ChildHomeViewModel {
 
     var needsReauthorization: Bool {
         appState.familyControlsAvailable && appState.enforcement?.authorizationStatus != .authorized
+    }
+
+    /// Cached VPN status, refreshed periodically.
+    var vpnConfigured: Bool = true
+
+    /// True when any required permission is missing. Drives the floating "Permissions" button.
+    var hasPermissionIssues: Bool {
+        if needsReauthorization { return true }
+        if cachedLocationAuthStatus != .authorizedAlways { return true }
+        if CMMotionActivityManager.isActivityAvailable(),
+           CMMotionActivityManager.authorizationStatus() != .authorized { return true }
+        if !vpnConfigured { return true }
+        return false
     }
 
     // MARK: - Location Authorization
@@ -483,6 +505,16 @@ final class ChildHomeViewModel {
         if let locService = appState.locationService {
             cachedLocationAuthStatus = locService.authorizationStatus
         }
+        // Refresh VPN status (async)
+        if let vpn = appState.vpnManager {
+            Task {
+                let configured = await vpn.isConfigured()
+                await MainActor.run { vpnConfigured = configured }
+            }
+        }
+        // Write permission status to App Group so Monitor extension can check it.
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(!hasPermissionIssues, forKey: "allPermissionsGranted")
     }
 
     /// Tracks which timed unlock phase we last saw, to detect transitions.
