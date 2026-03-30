@@ -61,17 +61,6 @@ final class DNSProxy {
         upstreamSession = nil
     }
 
-    /// Recreate the upstream session (call after network changes).
-    func recreateSession() {
-        let old = upstreamSession
-        upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
-        upstreamSession?.setReadHandler({ [weak self] datagrams, _ in
-            guard let datagrams else { return }
-            for d in datagrams { self?.onUpstreamResponse(d) }
-        }, maxDatagrams: 64)
-        old?.cancel()
-        NSLog("[DNSProxy] Session recreated")
-    }
 
     // MARK: - Packet Loop
 

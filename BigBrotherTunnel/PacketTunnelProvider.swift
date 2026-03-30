@@ -122,12 +122,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler()
     }
 
-    /// Called when the tunnel wakes from sleep or after a network change.
-    override func wake() {
-        NSLog("[Tunnel] wake()")
-        dnsProxy?.recreateSession()
-    }
-
     // MARK: - IPC (Main App Communication)
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
