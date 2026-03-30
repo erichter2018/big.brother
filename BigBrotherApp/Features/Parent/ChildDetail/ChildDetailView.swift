@@ -497,24 +497,6 @@ struct ChildDetailView: View {
                 shieldDiagnosticRow(hb)
             }
 
-            // VPN warning
-            if hb?.vpnDetected == true {
-                HStack(spacing: 6) {
-                    Image(systemName: "network.badge.shield.half.filled")
-                        .foregroundStyle(.orange)
-                    Text("VPN active")
-                        .foregroundStyle(.orange)
-                    Spacer()
-                    Button {
-                        UserDefaults.standard.set(true, forKey: "vpnAcknowledged.\(device.id.rawValue)")
-                    } label: {
-                        Text("Dismiss")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .font(.caption2)
-            }
-
             // Permissions
             DisclosureGroup {
                 PermissionsStatusView(

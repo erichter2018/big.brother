@@ -125,21 +125,9 @@ final class DeviceMonitor {
                 )
             }
 
-            // --- VPN Detection ---
-            let vpnAckKey = "vpnAcknowledged.\(device.id.rawValue)"
-            if let hb = heartbeat, hb.vpnDetected == true {
-                if !UserDefaults.standard.bool(forKey: vpnAckKey) {
-                    let name = childName(for: device)
-                    sendThrottledNotification(
-                        id: "vpn-\(key)",
-                        title: "VPN Detected",
-                        body: "\(name)'s \(device.displayName) has an active VPN connection. This may block Big Brother.",
-                        throttleHours: 6
-                    )
-                }
-            } else {
-                UserDefaults.standard.removeObject(forKey: vpnAckKey)
-            }
+            // VPN detection: still tracked in heartbeat data but no longer triggers
+            // a notification. Third-party VPNs (school, etc.) don't affect shield
+            // enforcement — only DNS-based features (safe search, domain logging).
 
             // --- VPN Tunnel Disconnect Detection ---
             // Only alert if the child has been on a VPN-capable build (167+) for at least 10 minutes.
