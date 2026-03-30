@@ -91,16 +91,16 @@ final class ChildHomeViewModel {
 
         // Schedule-driven — show next transition time
         if isScheduleDriving, let profile = activeScheduleProfile {
-            let inFree = profile.isInFreeWindow(at: now)
-            let inEssential = profile.isInEssentialWindow(at: now)
+            let inFree = profile.isInUnlockedWindow(at: now)
+            let inEssential = profile.isInLockedWindow(at: now)
             let formatter = DateFormatter()
             formatter.dateFormat = "h:mm a"
 
             if inFree {
                 if let transition = profile.nextTransitionTime(from: now) {
-                    return "Free until \(formatter.string(from: transition))"
+                    return "Unlocked until \(formatter.string(from: transition))"
                 }
-                return "Free time"
+                return "Unlocked"
             } else if inEssential {
                 if let transition = profile.nextTransitionTime(from: now) {
                     return "Locked until \(formatter.string(from: transition))"
@@ -118,12 +118,12 @@ final class ChildHomeViewModel {
         return nil
     }
 
-    /// Human-readable schedule status, e.g. "Free until 8:00 PM" or "Locked until 3:00 PM".
+    /// Human-readable schedule status, e.g. "Unlocked until 8:00 PM" or "Locked until 3:00 PM".
     var scheduleStatusText: String? {
         guard let profile = activeScheduleProfile else { return nil }
-        let inFree = profile.isInFreeWindow(at: now)
-        let inEssential = profile.isInEssentialWindow(at: now)
-        let label = inFree ? "Free" : inEssential ? "Locked" : "Restricted"
+        let inFree = profile.isInUnlockedWindow(at: now)
+        let inEssential = profile.isInLockedWindow(at: now)
+        let label = inFree ? "Unlocked" : inEssential ? "Locked" : "Restricted"
         if let transition = profile.nextTransitionTime(from: now) {
             let formatter = DateFormatter()
             formatter.dateFormat = "h:mm a"
@@ -132,14 +132,14 @@ final class ChildHomeViewModel {
         return label
     }
 
-    /// Today's free windows formatted as start–end pairs.
+    /// Today's unlocked windows formatted as start-end pairs.
     var todaysFreeWindows: [(start: String, end: String)] {
         guard let profile = activeScheduleProfile else { return [] }
         let weekday = Calendar.current.component(.weekday, from: now)
         guard let today = DayOfWeek(rawValue: weekday) else { return [] }
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
-        return profile.freeWindows
+        return profile.unlockedWindows
             .filter { $0.daysOfWeek.contains(today) }
             .sorted { $0.startTime < $1.startTime }
             .map { window in

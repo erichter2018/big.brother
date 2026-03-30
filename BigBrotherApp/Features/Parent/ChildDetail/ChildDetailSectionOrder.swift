@@ -7,6 +7,8 @@ enum ChildDetailSection: String, Codable, CaseIterable, Identifiable {
     case todaySummary = "todaySummary"
     case screenTimeTrend = "screenTimeTrend"
     case screenTimeTimeline = "screenTimeTimeline"
+    case bedtimeCompliance = "bedtimeCompliance"
+    case appUsage = "appUsage"
     case onlineActivity = "onlineActivity"
     case flaggedActivity = "flaggedActivity"
     case recentActivity = "recentActivity"
@@ -20,6 +22,8 @@ enum ChildDetailSection: String, Codable, CaseIterable, Identifiable {
         case .todaySummary: return "Today's Summary"
         case .screenTimeTrend: return "Screen Time Trend"
         case .screenTimeTimeline: return "Screen Time Timeline"
+        case .bedtimeCompliance: return "Bedtime Compliance"
+        case .appUsage: return "App Usage"
         case .onlineActivity: return "Online Activity"
         case .flaggedActivity: return "Flagged Activity"
         case .recentActivity: return "Recent Activity"
@@ -33,6 +37,8 @@ enum ChildDetailSection: String, Codable, CaseIterable, Identifiable {
         case .todaySummary: return "chart.bar"
         case .screenTimeTrend: return "clock"
         case .screenTimeTimeline: return "chart.bar.xaxis"
+        case .bedtimeCompliance: return "moon.zzz"
+        case .appUsage: return "app.badge.checkmark"
         case .onlineActivity: return "globe"
         case .flaggedActivity: return "exclamationmark.triangle"
         case .recentActivity: return "bell"
@@ -43,7 +49,7 @@ enum ChildDetailSection: String, Codable, CaseIterable, Identifiable {
     /// Default section order.
     static let defaultOrder: [ChildDetailSection] = [
         .miniMap, .todaySummary, .screenTimeTrend, .screenTimeTimeline,
-        .flaggedActivity, .onlineActivity, .recentActivity,
+        .bedtimeCompliance, .appUsage, .flaggedActivity, .onlineActivity, .recentActivity,
         .devices
     ]
 

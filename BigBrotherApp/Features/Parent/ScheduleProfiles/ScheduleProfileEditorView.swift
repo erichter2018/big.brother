@@ -23,8 +23,8 @@ struct ScheduleProfileEditorView: View {
                     ForEach(ScheduleProfile.presets(familyID: profile.familyID), id: \.name) { preset in
                         Button {
                             profile.name = preset.name
-                            profile.freeWindows = preset.freeWindows
-                            profile.essentialWindows = preset.essentialWindows
+                            profile.unlockedWindows = preset.unlockedWindows
+                            profile.lockedWindows = preset.lockedWindows
                             profile.lockedMode = preset.lockedMode
                         } label: {
                             Label(preset.name, systemImage: "doc.on.doc")
@@ -38,13 +38,13 @@ struct ScheduleProfileEditorView: View {
             }
 
             Section("Locked Mode") {
-                Picker("Mode outside free windows", selection: $profile.lockedMode) {
+                Picker("Mode outside unlocked windows", selection: $profile.lockedMode) {
                     Text("Restricted").tag(LockMode.restricted)
                     Text("Locked").tag(LockMode.locked)
                 }
                 .pickerStyle(.segmented)
 
-                Text("Applied when the device is NOT in a free window.")
+                Text("Applied when the device is NOT in an unlocked window.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -57,20 +57,20 @@ struct ScheduleProfileEditorView: View {
                     .foregroundStyle(.tertiary)
             }
 
-            Section("Free Windows") {
+            Section("Unlocked Windows") {
                 Text("During these windows, the device is fully unlocked.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
-                ForEach($profile.freeWindows) { $window in
+                ForEach($profile.unlockedWindows) { $window in
                     windowEditor(window: $window, tint: .green)
                 }
                 .onDelete { indexSet in
-                    profile.freeWindows.remove(atOffsets: indexSet)
+                    profile.unlockedWindows.remove(atOffsets: indexSet)
                 }
 
                 Button {
-                    profile.freeWindows.append(
+                    profile.unlockedWindows.append(
                         ActiveWindow(
                             daysOfWeek: DayOfWeek.weekdays,
                             startTime: DayTime(hour: 15, minute: 0),
@@ -78,24 +78,24 @@ struct ScheduleProfileEditorView: View {
                         )
                     )
                 } label: {
-                    Label("Add Free Window", systemImage: "plus.circle")
+                    Label("Add Unlocked Window", systemImage: "plus.circle")
                 }
             }
 
-            Section("Essential Windows") {
+            Section("Locked Windows") {
                 Text("During these windows, only essential apps (Phone, Messages) are available. Use for bedtime or overnight.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
-                ForEach($profile.essentialWindows) { $window in
+                ForEach($profile.lockedWindows) { $window in
                     windowEditor(window: $window, tint: .purple)
                 }
                 .onDelete { indexSet in
-                    profile.essentialWindows.remove(atOffsets: indexSet)
+                    profile.lockedWindows.remove(atOffsets: indexSet)
                 }
 
                 Button {
-                    profile.essentialWindows.append(
+                    profile.lockedWindows.append(
                         ActiveWindow(
                             daysOfWeek: Set(DayOfWeek.allCases),
                             startTime: DayTime(hour: 21, minute: 30),
@@ -103,7 +103,7 @@ struct ScheduleProfileEditorView: View {
                         )
                     )
                 } label: {
-                    Label("Add Essential Window", systemImage: "plus.circle")
+                    Label("Add Locked Window", systemImage: "plus.circle")
                 }
             }
 

@@ -14,6 +14,7 @@ final class ActivityFeedViewModel {
     var selectedChildID: ChildProfileID?
     var selectedFilter: EventFilter = .all
     var unreadCount: Int = 0
+    var weeklySummary: WeeklySummary?
 
     private var lastViewedAt: Date {
         get { UserDefaults.standard.object(forKey: "activityLastViewedAt") as? Date ?? .distantPast }
@@ -91,7 +92,7 @@ final class ActivityFeedViewModel {
         .authorizationLost, .enforcementDegraded,
         .unlockRequested, .temporaryUnlockStarted, .temporaryUnlockExpired,
         .localPINUnlock, .enrollmentCompleted, .enrollmentRevoked,
-        .sosAlert, .selfUnlockUsed,
+        .sosAlert, .selfUnlockUsed, .newAppDetected,
     ]
 
     private func matchesFilter(_ type: EventType) -> Bool {
@@ -156,6 +157,21 @@ final class ActivityFeedViewModel {
                 let childEvents = rawEvents.filter { deviceIDs.contains($0.deviceID) }
                 SafetyEventNotificationService.checkAndNotify(events: childEvents, childName: profile.name)
             }
+
+            // Compute weekly summary (unfiltered — always shows full picture)
+            weeklySummary = computeWeeklySummary(events: rawEvents, profiles: profiles, devices: devices)
+
+            // Weekly digest push notification (fires at most once per 6 days)
+            var heartbeatsByChild: [ChildProfileID: [DeviceHeartbeat]] = [:]
+            for profile in profiles {
+                heartbeatsByChild[profile.id] = appState.latestHeartbeats(for: profile.id)
+            }
+            WeeklyDigestService.checkAndSend(
+                profiles: profiles,
+                devices: devices,
+                heartbeats: heartbeatsByChild,
+                events: rawEvents
+            )
         } catch {
             #if DEBUG
             print("[Activity] Failed to load events: \(error.localizedDescription)")
@@ -189,6 +205,68 @@ final class ActivityFeedViewModel {
             return "I"
         }
         return profile.name
+    }
+
+    // MARK: - Weekly Summary
+
+    private func computeWeeklySummary(events: [EventLogEntry], profiles: [ChildProfile], devices: [ChildDevice]) -> WeeklySummary {
+        var childSummaries: [WeeklySummary.ChildWeek] = []
+
+        for profile in profiles {
+            let deviceIDs = Set(devices.filter { $0.childProfileID == profile.id }.map(\.id))
+            let childEvents = events.filter { deviceIDs.contains($0.deviceID) }
+
+            let safetyCount = childEvents.filter {
+                [.speedingDetected, .phoneWhileDriving, .hardBrakingDetected, .sosAlert,
+                 .authorizationLost, .enforcementDegraded].contains($0.eventType)
+            }.count
+
+            let unlockRequests = childEvents.filter { $0.eventType == .unlockRequested }.count
+            let selfUnlocks = childEvents.filter { $0.eventType == .selfUnlockUsed }.count
+            let trips = childEvents.filter { $0.eventType == .tripCompleted }.count
+
+            let newApps = childEvents
+                .filter { $0.eventType == .newAppDetected }
+                .compactMap { $0.details?.replacingOccurrences(of: "New app activity: ", with: "") }
+
+            // Screen time from heartbeats
+            let heartbeats = appState.latestHeartbeats(for: profile.id)
+            let avgScreenTime: Int? = {
+                let values = heartbeats.compactMap(\.screenTimeMinutes).filter { $0 > 0 }
+                guard !values.isEmpty else { return nil }
+                return values.reduce(0, +) / values.count
+            }()
+
+            childSummaries.append(WeeklySummary.ChildWeek(
+                name: profile.name,
+                totalEvents: childEvents.count,
+                safetyEvents: safetyCount,
+                unlockRequests: unlockRequests,
+                selfUnlocks: selfUnlocks,
+                trips: trips,
+                newApps: newApps,
+                avgScreenTimeMinutes: avgScreenTime
+            ))
+        }
+
+        return WeeklySummary(children: childSummaries)
+    }
+}
+
+// MARK: - Weekly Summary Model
+
+struct WeeklySummary {
+    let children: [ChildWeek]
+
+    struct ChildWeek {
+        let name: String
+        let totalEvents: Int
+        let safetyEvents: Int
+        let unlockRequests: Int
+        let selfUnlocks: Int
+        let trips: Int
+        let newApps: [String]
+        let avgScreenTimeMinutes: Int?
     }
 }
 
@@ -231,6 +309,7 @@ struct ActivityEvent: Identifiable, Equatable {
         case .enrollmentRevoked: return "person.badge.minus"
         case .selfUnlockUsed: return "lock.rotation"
         case .sosAlert: return "sos"
+        case .newAppDetected: return "app.badge"
         default: return "bell"
         }
     }
@@ -247,6 +326,8 @@ struct ActivityEvent: Identifiable, Equatable {
             return .green
         case .selfUnlockUsed:
             return .teal
+        case .newAppDetected:
+            return .indigo
         default:
             return .secondary
         }
@@ -273,6 +354,7 @@ struct ActivityEvent: Identifiable, Equatable {
         case .enrollmentRevoked: return "\(childName) unenrolled"
         case .selfUnlockUsed: return "\(childName) used self-unlock"
         case .sosAlert: return "\(childName) — SOS EMERGENCY"
+        case .newAppDetected: return "\(childName) — new app activity"
         default: return "\(childName) — \(eventType.displayName)"
         }
     }

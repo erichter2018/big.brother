@@ -16,9 +16,9 @@ import BigBrotherCore
 /// Both use the same window ID so the Monitor maps them to the same ActiveWindow.
 enum ScheduleRegistrar {
 
-    /// Prefix for free-window schedule activities.
+    /// Prefix for unlocked-window schedule activities.
     static let activityPrefix = "bigbrother.scheduleprofile."
-    /// Prefix for essential-window schedule activities.
+    /// Prefix for locked-window schedule activities.
     static let essentialPrefix = "bigbrother.essentialwindow."
     /// Prefix for the usage tracking schedule.
     static let usageTrackingPrefix = "bigbrother.usagetracking"
@@ -39,14 +39,14 @@ enum ScheduleRegistrar {
         // Write the profile to App Group so the extension can read it.
         try? storage.writeActiveScheduleProfile(profile)
 
-        // Register one DeviceActivity per free window.
-        for window in profile.freeWindows {
-            registerWindow(window, prefix: activityPrefix, label: "free", center: center)
+        // Register one DeviceActivity per unlocked window.
+        for window in profile.unlockedWindows {
+            registerWindow(window, prefix: activityPrefix, label: "unlocked", center: center)
         }
 
-        // Register one DeviceActivity per essential window.
-        for window in profile.essentialWindows {
-            registerWindow(window, prefix: essentialPrefix, label: "essential", center: center)
+        // Register one DeviceActivity per locked window.
+        for window in profile.lockedWindows {
+            registerWindow(window, prefix: essentialPrefix, label: "locked", center: center)
         }
 
         // Register usage tracking milestones.

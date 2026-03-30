@@ -154,6 +154,10 @@ struct ChildDetailView: View {
             ScreenTimeTrendChart(dailyMinutes: viewModel.weeklyScreenTime)
         case .screenTimeTimeline:
             ScreenTimeTimelineSection(slotsByDay: viewModel.screenTimeByDay, weeklyScreenTime: viewModel.weeklyScreenTime)
+        case .bedtimeCompliance:
+            BedtimeComplianceSection(compliance: viewModel.bedtimeCompliance, weeklyScreenTime: viewModel.weeklyScreenTime)
+        case .appUsage:
+            AppUsageSection(activity: viewModel.onlineActivity, weekActivity: viewModel.onlineActivityWeek, dailySnapshots: viewModel.onlineActivityByDay)
         case .onlineActivity:
             OnlineActivitySection(activity: viewModel.onlineActivity, weekActivity: viewModel.onlineActivityWeek, dailySnapshots: viewModel.onlineActivityByDay, showFlagged: false)
         case .flaggedActivity:
@@ -1063,7 +1067,7 @@ struct ChildDetailView: View {
                     .onChange(of: viewModel.safeSearchEnabled) { _, enabled in
                         Task { await viewModel.sendSafeSearch(enabled: enabled) }
                     }
-                    Text("Enforces safe search on Google, Bing, YouTube, and blocks adult content at the DNS level via CleanBrowsing Family Filter.")
+                    Text("Enforces safe search on Google, Bing, and DuckDuckGo. Forces YouTube Restricted Mode (strict). Blocks adult content at the DNS level via CleanBrowsing Family Filter.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

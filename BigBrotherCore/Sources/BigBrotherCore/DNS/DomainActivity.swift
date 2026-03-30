@@ -161,4 +161,41 @@ public struct DomainActivitySnapshot: Codable, Sendable, Equatable, Identifiable
     public func totalQueries(forSlot slot: Int) -> Int {
         domains.reduce(0) { $0 + ($1.slotCounts?[slot] ?? 0) }
     }
+
+    /// Estimated app usage in minutes using proportional time allocation.
+    ///
+    /// For each 15-minute slot, app queries are divided by total queries in that slot
+    /// to get the app's share of that time window. This avoids inflating usage when
+    /// multiple apps share a slot or background queries dominate.
+    ///
+    /// Returns sorted array of (appName, estimatedMinutes) descending by minutes.
+    public func estimatedAppUsage() -> [(appName: String, minutes: Double)] {
+        // Map each domain to its app name (if any)
+        var appDomains: [String: [DomainHit]] = [:]
+        for hit in domains {
+            guard let name = DomainCategorizer.appName(for: DomainCategorizer.rootDomain(hit.domain)) else { continue }
+            appDomains[name, default: []].append(hit)
+        }
+
+        guard !appDomains.isEmpty else { return [] }
+
+        // For each slot, compute proportional time per app
+        var appMinutes: [String: Double] = [:]
+        for slot in 0..<96 {
+            let slotTotal = totalQueries(forSlot: slot)
+            guard slotTotal > 0 else { continue }
+
+            for (appName, hits) in appDomains {
+                let appQueries = hits.reduce(0) { $0 + ($1.slotCounts?[slot] ?? 0) }
+                guard appQueries > 0 else { continue }
+                let share = Double(appQueries) / Double(slotTotal) * 15.0
+                appMinutes[appName, default: 0] += share
+            }
+        }
+
+        return appMinutes
+            .map { (appName: $0.key, minutes: $0.value) }
+            .filter { $0.minutes >= 1.0 }
+            .sorted { $0.minutes > $1.minutes }
+    }
 }

@@ -48,7 +48,7 @@ struct ScheduleTemplateListView: View {
                         editingProfile = ScheduleProfile(
                             familyID: viewModel.appState.parentState?.familyID ?? FamilyID(rawValue: ""),
                             name: "",
-                            freeWindows: []
+                            unlockedWindows: []
                         )
                     }
 
@@ -97,9 +97,9 @@ struct ScheduleTemplateListView: View {
             }
 
             HStack(spacing: 12) {
-                Label("\(profile.freeWindows.count) free", systemImage: "clock")
-                if !profile.essentialWindows.isEmpty {
-                    Label("\(profile.essentialWindows.count) essential", systemImage: "shield")
+                Label("\(profile.unlockedWindows.count) unlocked", systemImage: "clock")
+                if !profile.lockedWindows.isEmpty {
+                    Label("\(profile.lockedWindows.count) locked", systemImage: "shield")
                         .foregroundStyle(.purple)
                 }
                 Label("Locked: \(profile.lockedMode.displayName)", systemImage: "lock")

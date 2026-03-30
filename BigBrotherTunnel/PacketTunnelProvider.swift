@@ -498,19 +498,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 guard let name = record["name"] as? String,
                       let familyID = record["familyID"] as? String else { continue }
 
-                var freeWindows: [ActiveWindow] = []
-                var essentialWindows: [ActiveWindow] = []
+                var unlockedWindows: [ActiveWindow] = []
+                var lockedWindows: [ActiveWindow] = []
 
                 if let freeJSON = record["freeWindowsJSON"] as? String,
                    let freeData = freeJSON.data(using: .utf8) {
-                    freeWindows = (try? JSONDecoder().decode([ActiveWindow].self, from: freeData)) ?? []
+                    unlockedWindows = (try? JSONDecoder().decode([ActiveWindow].self, from: freeData)) ?? []
                 }
                 if let essJSON = record["essentialWindowsJSON"] as? String,
                    let essData = essJSON.data(using: .utf8) {
-                    essentialWindows = (try? JSONDecoder().decode([ActiveWindow].self, from: essData)) ?? []
+                    lockedWindows = (try? JSONDecoder().decode([ActiveWindow].self, from: essData)) ?? []
                 }
 
-                let lockedModeRaw = record["lockedMode"] as? String ?? "dailyMode"
+                let lockedModeRaw = record["lockedMode"] as? String ?? "restricted"
                 let lockedMode = LockMode.from(lockedModeRaw) ?? .restricted
 
                 var exceptionDates: [Date] = []
@@ -530,8 +530,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     id: UUID(uuidString: scheduleProfileID) ?? UUID(),
                     familyID: FamilyID(rawValue: familyID),
                     name: name,
-                    freeWindows: freeWindows,
-                    essentialWindows: essentialWindows,
+                    unlockedWindows: unlockedWindows,
+                    lockedWindows: lockedWindows,
                     lockedMode: lockedMode,
                     exceptionDates: exceptionDates,
                     updatedAt: updatedAt
@@ -541,7 +541,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let local = storage.readActiveScheduleProfile()
                 if local != profile {
                     try? storage.writeActiveScheduleProfile(profile)
-                    NSLog("[Tunnel] Schedule profile synced: \(name) (\(essentialWindows.count) essential, \(freeWindows.count) free windows)")
+                    NSLog("[Tunnel] Schedule profile synced: \(name) (\(profile.lockedWindows.count) locked, \(profile.unlockedWindows.count) unlocked windows)")
                 }
                 break
             }
@@ -859,10 +859,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if lockNotifyToken != NOTIFY_TOKEN_INVALID {
             var state: UInt64 = 0
             notify_get_state(lockNotifyToken, &state)
-            if state == 0 {
+            let locked = state != 0
+            dnsProxy?.isDeviceLocked = locked
+            if !locked {
                 lastUnlockAt = Date()
             }
-            NSLog("[Tunnel] Screen lock monitoring started (initial: \(state == 0 ? "unlocked" : "locked"))")
+            NSLog("[Tunnel] Screen lock monitoring started (initial: \(locked ? "locked" : "unlocked"))")
         }
     }
 
@@ -874,6 +876,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func handleScreenLockTransition(locked: Bool) {
+        // Update DNS proxy so it skips activity counting while screen is locked.
+        dnsProxy?.isDeviceLocked = locked
+
         // Only track screen time when the main app is dead.
         // When both are running, DeviceLockMonitor in the main app handles this.
         guard !mainAppAlive else { return }

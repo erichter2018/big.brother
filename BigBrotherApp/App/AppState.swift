@@ -480,6 +480,7 @@ final class AppState {
             }
             self.locationService = locService
             hbService.locationService = locService
+            hbService.eventLogger = eventLogger
             locService.onRequestImmediateHeartbeat = { [weak hbService] in
                 Task { try? await hbService?.sendNow(force: true) }
             }
@@ -1758,7 +1759,7 @@ final class AppState {
                         .set(deviceVersion, forKey: localVersionKey)
                 }
                 #if DEBUG
-                print("[BigBrother] Schedule profile updated: \(profile.name) (\(profile.freeWindows.count) free, \(profile.essentialWindows.count) essential windows)")
+                print("[BigBrother] Schedule profile updated: \(profile.name) (\(profile.unlockedWindows.count) unlocked, \(profile.lockedWindows.count) locked windows)")
                 #endif
             }
         } catch {
@@ -1875,7 +1876,7 @@ final class AppState {
 
     /// Enforce the correct mode based on the active schedule profile.
     /// Called from the 1s timer and BGTask as a safety net in case the
-    /// DeviceActivityMonitor extension missed a free window transition.
+    /// DeviceActivityMonitor extension missed an unlocked window transition.
     func enforceScheduleTransition() {
         guard enforcement != nil else { return }
         guard let profile = storage.readActiveScheduleProfile() else { return }

@@ -59,6 +59,7 @@
 		49747191729E6B1BB94BE4D4 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C0FFC37B50916FF87927448 /* OnboardingView.swift */; };
 		49CEC07AD72E09C47BB11496 /* EnrollmentPermissionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 439E2595BA6673DD7180F128 /* EnrollmentPermissionsView.swift */; };
 		4A7C1B990B3D2B026E0BB90C /* DrivingMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8374DC2E6FACFEFDEE4C7434 /* DrivingMonitor.swift */; };
+		4AC2F3C374264C0BACF56F06 /* WeeklyDigestService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4410A3A4DE9602C784ED43B /* WeeklyDigestService.swift */; };
 		51A1931A8FDE8FBA17C2A7B5 /* WebFilterConfigView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1E01878E3348C356886FF3A /* WebFilterConfigView.swift */; };
 		5457D7394464140AF28FB3C7 /* ScheduleOverviewViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB28AAE3C623830A59AF3FA9 /* ScheduleOverviewViewModel.swift */; };
 		54647100AF3EC99E715A1CAC /* AppBlockingSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A53748BB4CB2D47E27569BE /* AppBlockingSetupView.swift */; };
@@ -106,6 +107,7 @@
 		9112E9310D49FB81DB2D2465 /* DeviceDetailViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6E1E462E13CE9E0E219EF8A /* DeviceDetailViewModel.swift */; };
 		9158FC3FD64FD81B9052FEF5 /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B33EA033B68C98649EBD6B4A /* DeviceActivity.framework */; };
 		91A9EB0DC3A8BFE6ABD11AAE /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B9424E819FFE29BB14E89 /* NetworkMonitor.swift */; };
+		923B6DEAA3097619F97B3AC6 /* BedtimeComplianceSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7D9C138A1239E96996144D /* BedtimeComplianceSection.swift */; };
 		997213C1D484F1F0BBE2D0E0 /* SyncCoordinatorImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 508B63D3F65B1A2E0E8636EE /* SyncCoordinatorImpl.swift */; };
 		9C272FFC62FFF8E521BC661B /* CloudKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 94E53286F8FE359FEF93B0B9 /* CloudKit.framework */; };
 		9E973AA701B475E740B3C6E0 /* ManagedSettings.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2F2C1FAF31FCCB98CFE58693 /* ManagedSettings.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
@@ -155,6 +157,7 @@
 		DBF299DA2B164B9585A42E50 /* ChildOrderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA7238370DF087C7217A13FB /* ChildOrderView.swift */; };
 		DC8ADB08068191383E5DCDA5 /* MyDrivingDebugView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B66A15318AE5013DC9ECEFB3 /* MyDrivingDebugView.swift */; };
 		DC8E994E852DD9A72E3B6784 /* RemoteDiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEB7831DF84D91F491777624 /* RemoteDiagnosticsView.swift */; };
+		DCFD7E20D4746BA1A7D301F2 /* AppUsageSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50169D4894ADE2E8B7C59BD9 /* AppUsageSection.swift */; };
 		DD594557DD83B8D9648FDCE6 /* ScreenTimeTrendChart.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60D14983C74C7A47D8751D0E /* ScreenTimeTrendChart.swift */; };
 		DD6B2303988124953A6E3C13 /* ScheduleEditorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 792778475B47D7B9A5347B7E /* ScheduleEditorViewModel.swift */; };
 		DD8B0636042E88362F4F0EB4 /* PaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 074905BFAA2347B40F5C7CEF /* PaywallView.swift */; };
@@ -302,6 +305,7 @@
 		4833A3196E6024880CCF1A39 /* CloudKitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitService.swift; sourceTree = "<group>"; };
 		4A4B29C488B4C2B865CE5069 /* ModeBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModeBadge.swift; sourceTree = "<group>"; };
 		4B1BAD800AE4351C2A956551 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		50169D4894ADE2E8B7C59BD9 /* AppUsageSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUsageSection.swift; sourceTree = "<group>"; };
 		5074D042431F7060EE5C975B /* RootRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootRouter.swift; sourceTree = "<group>"; };
 		508B63D3F65B1A2E0E8636EE /* SyncCoordinatorImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncCoordinatorImpl.swift; sourceTree = "<group>"; };
 		50EC40AF79E592665680B22C /* ActivityFeedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityFeedView.swift; sourceTree = "<group>"; };
@@ -310,6 +314,7 @@
 		5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineActivitySection.swift; sourceTree = "<group>"; };
 		596B83F9E91AB835D52CB4BA /* EnforcementService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnforcementService.swift; sourceTree = "<group>"; };
 		5A0BC10A81629745D210A6A0 /* SubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionManager.swift; sourceTree = "<group>"; };
+		5A7D9C138A1239E96996144D /* BedtimeComplianceSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BedtimeComplianceSection.swift; sourceTree = "<group>"; };
 		5DE768E3BFD59F635C9657B0 /* AuthServiceImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthServiceImpl.swift; sourceTree = "<group>"; };
 		6053AC6882632276193BFB7D /* BigBrotherTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		60D14983C74C7A47D8751D0E /* ScreenTimeTrendChart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTimeTrendChart.swift; sourceTree = "<group>"; };
@@ -399,6 +404,7 @@
 		CFAF03C9A24BB53CC55973CE /* BackgroundRefreshHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRefreshHandler.swift; sourceTree = "<group>"; };
 		D0811174D94EC9F49D4D13C0 /* SkeletonChildCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkeletonChildCard.swift; sourceTree = "<group>"; };
 		D0FC85C498B643706950C782 /* ChildDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildDetailView.swift; sourceTree = "<group>"; };
+		D4410A3A4DE9602C784ED43B /* WeeklyDigestService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeeklyDigestService.swift; sourceTree = "<group>"; };
 		D6805362753E5A5ACC38AE02 /* SafetyEventNotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyEventNotificationService.swift; sourceTree = "<group>"; };
 		D7C70AFE0EFE8DF653DDC9C7 /* TimerIntegrationConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimerIntegrationConfig.swift; sourceTree = "<group>"; };
 		D8CF4700D57C3049078838A3 /* EnrollmentCodeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentCodeView.swift; sourceTree = "<group>"; };
@@ -574,6 +580,7 @@
 				5A0BC10A81629745D210A6A0 /* SubscriptionManager.swift */,
 				8B0DBC61635D3A9E9DF2BC8D /* UnlockRequestNotificationService.swift */,
 				8D3FD2FDC0A9345100187E61 /* VPNManagerService.swift */,
+				D4410A3A4DE9602C784ED43B /* WeeklyDigestService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -901,6 +908,8 @@
 			isa = PBXGroup;
 			children = (
 				25B72B0369A8D42F28572244 /* ActivityFeedSection.swift */,
+				50169D4894ADE2E8B7C59BD9 /* AppUsageSection.swift */,
+				5A7D9C138A1239E96996144D /* BedtimeComplianceSection.swift */,
 				6D6F28C469F306643A072853 /* ChildDetailSectionOrder.swift */,
 				D0FC85C498B643706950C782 /* ChildDetailView.swift */,
 				C07395C4A7FA6A27B2702AD0 /* ChildDetailViewModel.swift */,
@@ -1372,9 +1381,11 @@
 				F5A704A8F29CB3E9B03060B6 /* AppLaunchRestorer.swift in Sources */,
 				E757F4FD5DAFA47B4F899DB8 /* AppNamingPromptView.swift in Sources */,
 				37ADED53FF15FE544BB9B6FE /* AppState.swift in Sources */,
+				DCFD7E20D4746BA1A7D301F2 /* AppUsageSection.swift in Sources */,
 				374C12848223C3B8A45CFF0B /* AuthService.swift in Sources */,
 				7054C59617472D95C454ACC7 /* AuthServiceImpl.swift in Sources */,
 				577DCC5B38F6332990C62E49 /* BackgroundRefreshHandler.swift in Sources */,
+				923B6DEAA3097619F97B3AC6 /* BedtimeComplianceSection.swift in Sources */,
 				FBB0ED519F73C07712C23DA4 /* BigBrotherApp.swift in Sources */,
 				BE4F33E2AC94D8F17A4F9804 /* CKRecordConversion.swift in Sources */,
 				F769EAB5135B8524DE985B3B /* CKRecordMapping.swift in Sources */,
@@ -1494,6 +1505,7 @@
 				6133402CFD04D41875EC1A07 /* VPNManagerService.swift in Sources */,
 				8903BDAC477CBE91C9A58BF1 /* WarningBanner.swift in Sources */,
 				51A1931A8FDE8FBA17C2A7B5 /* WebFilterConfigView.swift in Sources */,
+				4AC2F3C374264C0BACF56F06 /* WeeklyDigestService.swift in Sources */,
 				C3D257A128479FDDDA3F0E0A /* WrappingHStack.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

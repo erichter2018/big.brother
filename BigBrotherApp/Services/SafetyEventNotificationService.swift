@@ -15,6 +15,7 @@ enum SafetyEventNotificationService {
         .namedPlaceArrival,
         .namedPlaceDeparture,
         .sosAlert,
+        .newAppDetected,
     ]
 
     /// Check recent events and post notifications for safety-relevant ones.
@@ -80,6 +81,11 @@ enum SafetyEventNotificationService {
             content.body = event.details ?? "Emergency alert triggered"
             content.sound = UNNotificationSound.defaultCritical
             content.interruptionLevel = .critical
+
+        case .newAppDetected:
+            content.title = "\(childName) — New App Activity"
+            content.body = event.details ?? "New app detected on device"
+            content.sound = .default
 
         default:
             return

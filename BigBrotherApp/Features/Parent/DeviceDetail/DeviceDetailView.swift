@@ -158,7 +158,7 @@ struct DeviceDetailView: View {
             if let profileID = selectedID,
                let profile = profiles.first(where: { $0.id == profileID }) {
                 HStack(spacing: 12) {
-                    Label("\(profile.freeWindows.count) free window\(profile.freeWindows.count == 1 ? "" : "s")",
+                    Label("\(profile.unlockedWindows.count) unlocked window\(profile.unlockedWindows.count == 1 ? "" : "s")",
                           systemImage: "clock")
                     Label("Locked: \(profile.lockedMode.displayName)", systemImage: "lock")
                 }

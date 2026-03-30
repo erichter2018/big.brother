@@ -28,9 +28,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private let baseStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
     private lazy var keychain = KeychainManager()
 
-    /// Prefix used by ScheduleRegistrar for free-window activities.
+    /// Prefix used by ScheduleRegistrar for unlocked-window activities.
     private let scheduleProfilePrefix = "bigbrother.scheduleprofile."
-    /// Prefix used by ScheduleRegistrar for essential-window activities.
+    /// Prefix used by ScheduleRegistrar for locked-window activities.
     private let essentialWindowPrefix = "bigbrother.essentialwindow."
 
     /// Extract the window UUID from an activity name, stripping cross-midnight suffixes (.pm/.am).
@@ -61,15 +61,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Schedule profile free window — unlock if today matches.
+        // Schedule profile unlocked window — unlock if today matches.
         if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
-            handleFreeWindowStart(activity)
+            handleUnlockedWindowStart(activity)
             return
         }
 
-        // Essential window — apply essential-only mode if today matches.
+        // Locked window — apply essential-only mode if today matches.
         if activity.rawValue.hasPrefix(essentialWindowPrefix) {
-            handleEssentialWindowStart(activity)
+            handleLockedWindowStart(activity)
             return
         }
 
@@ -110,15 +110,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     override func intervalDidEnd(for activity: DeviceActivityName) {
         if activity.rawValue.hasPrefix("bigbrother.reconciliation") { return }
 
-        // Schedule profile free window ended — re-lock.
+        // Schedule profile unlocked window ended — re-lock.
         if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
-            handleFreeWindowEnd(activity)
+            handleUnlockedWindowEnd(activity)
             return
         }
 
-        // Essential window ended — return to locked mode.
+        // Locked window ended — return to locked mode.
         if activity.rawValue.hasPrefix(essentialWindowPrefix) {
-            handleEssentialWindowEnd(activity)
+            handleLockedWindowEnd(activity)
             return
         }
 
@@ -197,8 +197,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     // MARK: - Schedule Profile Handling
 
-    /// Free window started: check if today is a valid day, then unlock.
-    private func handleFreeWindowStart(_ activity: DeviceActivityName) {
+    /// Unlocked window started: check if today is a valid day, then unlock.
+    private func handleUnlockedWindowStart(_ activity: DeviceActivityName) {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("freeWindowStart", forKey: "lastShieldChangeReason")
 
@@ -218,7 +218,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         let windowID = extractWindowID(from: activity, prefix: scheduleProfilePrefix)
-        guard let window = profile.freeWindows.first(where: { $0.id.uuidString == windowID }) else {
+        guard let window = profile.unlockedWindows.first(where: { $0.id.uuidString == windowID }) else {
             return
         }
 
@@ -231,7 +231,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // This is the ONE case where we nag — the kid's free time is being blocked.
         if shouldTreatMainAppAsUnavailable() {
             sendForceCloseEnforcement(nagNotification: true)
-            logEvent(.scheduleTriggered, details: "Free window blocked — app force-closed: \(activity.rawValue)")
+            logEvent(.scheduleTriggered, details: "Unlocked window blocked — app force-closed: \(activity.rawValue)")
             return
         }
 
@@ -243,12 +243,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Update shared state so the heartbeat reports .unlocked.
         updateSharedState(mode: .unlocked)
 
-        logEvent(.scheduleTriggered, details: "Free window started: \(activity.rawValue)")
+        logEvent(.scheduleTriggered, details: "Unlocked window started: \(activity.rawValue)")
         sendModeNotification(title: "Free Time Started", body: "All apps are now accessible.")
     }
 
-    /// Free window ended: re-apply the profile's locked mode.
-    private func handleFreeWindowEnd(_ activity: DeviceActivityName) {
+    /// Unlocked window ended: re-apply the profile's locked mode.
+    private func handleUnlockedWindowEnd(_ activity: DeviceActivityName) {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("freeWindowEnd", forKey: "lastShieldChangeReason")
 
@@ -263,9 +263,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Exception date — don't re-lock.
         if profile.isExceptionDate(Date()) { return }
 
-        // Check if we're currently inside another free window.
-        // If so, don't lock — the device should stay free.
-        if profile.isInFreeWindow(at: Date()) {
+        // Check if we're currently inside another unlocked window.
+        // If so, don't lock — the device should stay unlocked.
+        if profile.isInUnlockedWindow(at: Date()) {
             return
         }
 
@@ -283,17 +283,17 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
         }
 
-        logEvent(.scheduleEnded, details: "Free window ended, mode \(mode.rawValue)")
+        logEvent(.scheduleEnded, details: "Unlocked window ended, mode \(mode.rawValue)")
         sendModeNotification(
             title: "Free Time Ended",
             body: mode == .unlocked ? "All apps are now accessible." : "Device locked — \(mode.displayName) mode active."
         )
     }
 
-    // MARK: - Essential Window Handling
+    // MARK: - Locked Window Handling
 
-    /// Essential window started: apply essential-only mode if today matches.
-    private func handleEssentialWindowStart(_ activity: DeviceActivityName) {
+    /// Locked window started: apply essential-only mode if today matches.
+    private func handleLockedWindowStart(_ activity: DeviceActivityName) {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("essentialStart", forKey: "lastShieldChangeReason")
 
@@ -313,15 +313,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         let windowID = extractWindowID(from: activity, prefix: essentialWindowPrefix)
-        guard let window = profile.essentialWindows.first(where: { $0.id.uuidString == windowID }) else {
+        guard let window = profile.lockedWindows.first(where: { $0.id.uuidString == windowID }) else {
             return
         }
 
         // Check if the current date/time actually falls within this window.
         guard window.contains(Date()) else { return }
 
-        // Don't override if currently in a free window (free > essential).
-        if profile.isInFreeWindow(at: Date()) { return }
+        // Don't override if currently in an unlocked window (unlocked > locked).
+        if profile.isInUnlockedWindow(at: Date()) { return }
 
         // Apply essential-only mode on ALL stores.
         // Never block tightening restrictions — essential mode should ALWAYS apply,
@@ -329,12 +329,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: .locked, policy: policy)
         updateSharedState(mode: .locked)
-        logEvent(.scheduleTriggered, details: "Essential window started: \(activity.rawValue)")
+        logEvent(.scheduleTriggered, details: "Locked window started: \(activity.rawValue)")
         sendModeNotification(title: "Locked Mode", body: "Only essential apps are available.")
     }
 
-    /// Essential window ended: return to the profile's locked mode.
-    private func handleEssentialWindowEnd(_ activity: DeviceActivityName) {
+    /// Locked window ended: return to the profile's locked mode.
+    private func handleLockedWindowEnd(_ activity: DeviceActivityName) {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("essentialEnd", forKey: "lastShieldChangeReason")
 
@@ -349,15 +349,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Exception date — don't re-lock.
         if profile.isExceptionDate(Date()) { return }
 
-        // If in a free window, don't re-lock.
-        if profile.isInFreeWindow(at: Date()) { return }
-        // If in another essential window, stay essential.
-        if profile.isInEssentialWindow(at: Date()) { return }
+        // If in an unlocked window, don't re-lock.
+        if profile.isInUnlockedWindow(at: Date()) { return }
+        // If in another locked window, stay locked.
+        if profile.isInLockedWindow(at: Date()) { return }
 
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
         updateSharedState(mode: profile.lockedMode)
-        logEvent(.scheduleEnded, details: "Essential window ended, locked to \(profile.lockedMode.rawValue)")
+        logEvent(.scheduleEnded, details: "Locked window ended, locked to \(profile.lockedMode.rawValue)")
         sendModeNotification(
             title: "Locked Mode Ended",
             body: "Device returned to \(profile.lockedMode.displayName) mode."
@@ -395,7 +395,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
         }
         logEvent(.scheduleEnded, details: "Timed unlock ended, mode \(mode.rawValue)")
-        sendModeNotification(title: "Free Time Ended", body: mode == .unlocked ? "Free window — all apps accessible." : "Device locked — \(mode.displayName) mode active.")
+        sendModeNotification(title: "Free Time Ended", body: mode == .unlocked ? "Unlocked window — all apps accessible." : "Device locked — \(mode.displayName) mode active.")
     }
 
     // MARK: - Temporary Unlock Expiry
@@ -599,13 +599,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 } else if scheduleMode == .unlocked {
                     clearAllShieldStores()
                     updateSharedState(mode: .unlocked)
-                    logEvent(.policyReconciled, details: "Reconciliation: in free window, stores cleared")
+                    logEvent(.policyReconciled, details: "Reconciliation: in unlocked window, stores cleared")
                     return
                 } else {
                     let policy = storage.readPolicySnapshot()?.effectivePolicy
                     applyShieldingToAllStores(mode: .locked, policy: policy)
                     updateSharedState(mode: .locked)
-                    logEvent(.policyReconciled, details: "Reconciliation: in essential window, essential mode applied")
+                    logEvent(.policyReconciled, details: "Reconciliation: in locked window, locked mode applied")
                     return
                 }
             }
@@ -615,7 +615,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // --- Force-close check (regardless of schedule profile) ---
         // Don't nag the kid when the device is already locked down — shields are
         // enforced by ManagedSettingsStore independently of the main app.
-        // Only apply essential mode silently; nag only when a free window is blocked.
+        // Only apply locked mode silently; nag only when an unlocked window is blocked.
 
         if shouldTreatMainAppAsUnavailable() {
             sendForceCloseEnforcement(nagNotification: false)
@@ -969,12 +969,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     }
 
     /// Apply essential-only mode and nag the kid to open Big Brother.
-    /// Essential mode blocks most apps but allows phone, messages, and other
+    /// Locked mode blocks most apps but allows phone, messages, and other
     /// essentials — less aggressive than blocking everything, but still enforced.
     /// When the main app launches, it clears the forceCloseWebBlocked flag and
     /// re-applies normal enforcement with proper exemptions via performRestoration().
     /// Apply essential-only enforcement. Only sends a notification when `nagNotification`
-    /// is true (free window blocked). Silent when the device is already locked down.
+    /// is true (unlocked window blocked). Silent when the device is already locked down.
     private func sendForceCloseEnforcement(nagNotification: Bool) {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         defaults?.set("appClosed", forKey: "lastShieldChangeReason")

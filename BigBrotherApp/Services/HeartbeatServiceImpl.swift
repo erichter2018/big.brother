@@ -30,6 +30,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     /// since the device is clearly online.
     var onHeartbeatSent: (() -> Void)?
 
+    /// Event logger for creating new-app-detected events.
+    var eventLogger: (any EventLoggerProtocol)?
+
     /// Called when the main app positively acknowledges an extension liveness
     /// request or otherwise proves it is responsive again.
     var onLivenessConfirmed: (() -> Void)?
@@ -292,20 +295,20 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         if let profile = storage.readActiveScheduleProfile() {
             let now = Date()
             let mode = profile.resolvedMode(at: now)
-            let inFree = profile.isInFreeWindow(at: now)
-            let inEssential = profile.isInEssentialWindow(at: now)
+            let inFree = profile.isInUnlockedWindow(at: now)
+            let inEssential = profile.isInLockedWindow(at: now)
             // Include diagnostic detail: mode + why
             let detail: String
             if inFree {
-                detail = "\(mode.rawValue) (in free window)"
+                detail = "\(mode.rawValue) (in unlocked window)"
             } else if inEssential {
-                detail = "\(mode.rawValue) (in essential window)"
+                detail = "\(mode.rawValue) (in locked window)"
             } else {
-                let ewCount = profile.essentialWindows.count
-                let ewDays = profile.essentialWindows.first?.daysOfWeek.map(\.displayName).sorted().joined(separator: ",") ?? "none"
-                let ewStart = profile.essentialWindows.first.map { "\($0.startTime.hour):\(String(format: "%02d", $0.startTime.minute))" } ?? "?"
-                let ewEnd = profile.essentialWindows.first.map { "\($0.endTime.hour):\(String(format: "%02d", $0.endTime.minute))" } ?? "?"
-                detail = "\(mode.rawValue) (ew:\(ewCount) days:\(ewDays) \(ewStart)-\(ewEnd))"
+                let ewCount = profile.lockedWindows.count
+                let ewDays = profile.lockedWindows.first?.daysOfWeek.map(\.displayName).sorted().joined(separator: ",") ?? "none"
+                let ewStart = profile.lockedWindows.first.map { "\($0.startTime.hour):\(String(format: "%02d", $0.startTime.minute))" } ?? "?"
+                let ewEnd = profile.lockedWindows.first.map { "\($0.endTime.hour):\(String(format: "%02d", $0.endTime.minute))" } ?? "?"
+                detail = "\(mode.rawValue) (lw:\(ewCount) days:\(ewDays) \(ewStart)-\(ewEnd))"
             }
             scheduleResolvedMode = detail
         } else {
@@ -395,6 +398,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             // Safety net: reconcile enforcement on every successful heartbeat.
             reconcileEnforcement()
 
+            // Check for new app activity detected by the VPN tunnel.
+            flushNewAppDetections()
+
             // Process commands — device is online if heartbeat succeeded.
             onHeartbeatSent?()
         } catch {
@@ -426,6 +432,28 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         }
         guard let snapshot = storage.readPolicySnapshot() else { return }
         try? enforcement.apply(snapshot.effectivePolicy)
+    }
+
+    // MARK: - New App Detection
+
+    /// Flush pending new-app detections written by the VPN tunnel's DNS proxy.
+    private func flushNewAppDetections() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard let pending = defaults?.stringArray(forKey: "newAppDetections"),
+              !pending.isEmpty else { return }
+
+        // Clear immediately to avoid duplicate processing.
+        defaults?.removeObject(forKey: "newAppDetections")
+
+        // Deduplicate in case tunnel wrote the same app multiple times.
+        let unique = Set(pending)
+        for appName in unique.sorted() {
+            eventLogger?.log(.newAppDetected, details: "New app activity: \(appName)")
+        }
+
+        #if DEBUG
+        print("[BigBrother] Flushed \(unique.count) new app detections: \(unique.sorted().joined(separator: ", "))")
+        #endif
     }
 
     // MARK: - Device Info
@@ -590,19 +618,19 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         guard let profile = storage.readActiveScheduleProfile() else { return nil }
         let now = Date()
         let cal = Calendar.current
-        if profile.isInFreeWindow(at: now, calendar: cal) {
+        if profile.isInUnlockedWindow(at: now, calendar: cal) {
             // Find matching window and format its time range.
             let weekday = cal.component(.weekday, from: now)
-            guard let today = DayOfWeek(rawValue: weekday) else { return "Free" }
+            guard let today = DayOfWeek(rawValue: weekday) else { return "Unlocked" }
             let hour = cal.component(.hour, from: now)
             let minute = cal.component(.minute, from: now)
             let nowTime = DayTime(hour: hour, minute: minute)
-            for window in profile.freeWindows where window.daysOfWeek.contains(today) {
+            for window in profile.unlockedWindows where window.daysOfWeek.contains(today) {
                 if nowTime >= window.startTime && nowTime < window.endTime {
-                    return "\(profile.name) free window"
+                    return "\(profile.name) unlocked window"
                 }
             }
-            return "Free"
+            return "Unlocked"
         }
         return nil
     }

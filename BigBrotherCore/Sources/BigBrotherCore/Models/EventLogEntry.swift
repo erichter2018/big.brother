@@ -103,4 +103,5 @@ public enum EventType: String, Codable, Sendable, Equatable {
     case tripCompleted
     case sosAlert
     case selfUnlockUsed
+    case newAppDetected
 }

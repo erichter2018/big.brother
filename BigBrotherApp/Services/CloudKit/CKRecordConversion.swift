@@ -697,17 +697,17 @@ enum CKRecordConversion {
         record[CKFieldName.updatedAt] = profile.updatedAt as NSDate
 
         do {
-            let windowsData = try JSONEncoder().encode(profile.freeWindows)
+            let windowsData = try JSONEncoder().encode(profile.unlockedWindows)
             record[CKFieldName.freeWindowsJSON] = String(data: windowsData, encoding: .utf8)
         } catch {
-            ckLogger.error("Failed to encode freeWindows for schedule profile \(profile.id.uuidString): \(error.localizedDescription)")
+            ckLogger.error("Failed to encode unlockedWindows for schedule profile \(profile.id.uuidString): \(error.localizedDescription)")
         }
 
         do {
-            let essentialData = try JSONEncoder().encode(profile.essentialWindows)
+            let essentialData = try JSONEncoder().encode(profile.lockedWindows)
             record[CKFieldName.essentialWindowsJSON] = String(data: essentialData, encoding: .utf8)
         } catch {
-            ckLogger.error("Failed to encode essentialWindows for schedule profile \(profile.id.uuidString): \(error.localizedDescription)")
+            ckLogger.error("Failed to encode lockedWindows for schedule profile \(profile.id.uuidString): \(error.localizedDescription)")
         }
 
         if !profile.exceptionDates.isEmpty {
@@ -749,11 +749,11 @@ enum CKRecordConversion {
             windows = decoded
         }
 
-        var essentialWindows: [ActiveWindow] = []
+        var lockedWindows: [ActiveWindow] = []
         if let json = record[CKFieldName.essentialWindowsJSON] as? String,
            let data = json.data(using: .utf8),
            let decoded = try? JSONDecoder().decode([ActiveWindow].self, from: data) {
-            essentialWindows = decoded
+            lockedWindows = decoded
         }
 
         var exceptionDates: [Date] = []
@@ -767,8 +767,8 @@ enum CKRecordConversion {
             id: profileID,
             familyID: FamilyID(rawValue: familyID),
             name: name,
-            freeWindows: windows,
-            essentialWindows: essentialWindows,
+            unlockedWindows: windows,
+            lockedWindows: lockedWindows,
             lockedMode: lockedMode,
             exceptionDates: exceptionDates,
             isDefault: isDefaultInt != 0,

@@ -15,6 +15,20 @@ struct ActivityFeedView: View {
                     .listRowBackground(Color(.systemGroupedBackground))
             }
 
+            // Weekly summary card
+            if let summary = viewModel.weeklySummary, !summary.children.isEmpty {
+                Section {
+                    weeklySummaryCard(summary)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color(.systemGroupedBackground))
+                } header: {
+                    Text("This Week")
+                        .font(.caption.weight(.semibold))
+                        .textCase(nil)
+                }
+            }
+
             // Events grouped by day
             if viewModel.isLoading && viewModel.events.isEmpty {
                 Section {
@@ -165,5 +179,76 @@ struct ActivityFeedView: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    // MARK: - Weekly Summary Card
+
+    @ViewBuilder
+    private func weeklySummaryCard(_ summary: WeeklySummary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(summary.children, id: \.name) { child in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(child.name)
+                        .font(.subheadline.weight(.semibold))
+
+                    HStack(spacing: 12) {
+                        if let avg = child.avgScreenTimeMinutes, avg > 0 {
+                            statPill(icon: "clock", value: formatMinutes(avg), label: "avg/day")
+                        }
+                        if child.unlockRequests > 0 {
+                            statPill(icon: "lock.open", value: "\(child.unlockRequests)", label: "unlocks")
+                        }
+                        if child.selfUnlocks > 0 {
+                            statPill(icon: "lock.rotation", value: "\(child.selfUnlocks)", label: "self")
+                        }
+                        if child.safetyEvents > 0 {
+                            statPill(icon: "exclamationmark.triangle", value: "\(child.safetyEvents)", label: "safety", tint: .red)
+                        }
+                        if child.trips > 0 {
+                            statPill(icon: "car.fill", value: "\(child.trips)", label: "trips")
+                        }
+                    }
+
+                    if !child.newApps.isEmpty {
+                        let unique = Array(Set(child.newApps)).sorted()
+                        Text("New: \(unique.joined(separator: ", "))")
+                            .font(.caption2)
+                            .foregroundStyle(.indigo)
+                    }
+                }
+
+                if child.name != summary.children.last?.name {
+                    Divider()
+                }
+            }
+        }
+        .padding(12)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    @ViewBuilder
+    private func statPill(icon: String, value: String, label: String, tint: Color = .secondary) -> some View {
+        VStack(spacing: 1) {
+            HStack(spacing: 3) {
+                Image(systemName: icon)
+                    .font(.system(size: 9))
+                    .foregroundStyle(tint)
+                Text(value)
+                    .font(.caption.weight(.semibold))
+            }
+            Text(label)
+                .font(.system(size: 8))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func formatMinutes(_ minutes: Int) -> String {
+        if minutes >= 60 {
+            let h = minutes / 60
+            let m = minutes % 60
+            return m > 0 ? "\(h)h \(m)m" : "\(h)h"
+        }
+        return "\(minutes)m"
     }
 }

@@ -298,7 +298,7 @@ final class InsightsViewModel {
             guard let windowUUID = UUID(uuidString: windowIDStr),
                   let profileID = deviceProfileMap[event.deviceID],
                   let profile = profileMap[profileID],
-                  let window = profile.freeWindows.first(where: { $0.id == windowUUID }) else { continue }
+                  let window = profile.unlockedWindows.first(where: { $0.id == windowUUID }) else { continue }
 
             var comps = cal.dateComponents([.year, .month, .day], from: event.timestamp)
             comps.hour = window.startTime.hour
@@ -316,7 +316,7 @@ final class InsightsViewModel {
         // Lock transitions
         for event in scheduleEnds {
             guard let details = event.details,
-                  details.hasPrefix("Free window ended") else { continue }
+                  details.hasPrefix("Unlocked window ended") || details.hasPrefix("Free window ended") else { continue }
             guard let deviceStarts = schedStartsByDevice[event.deviceID],
                   let matchingStart = deviceStarts.last(where: { $0.timestamp < event.timestamp }),
                   let startDetails = matchingStart.details,
@@ -326,7 +326,7 @@ final class InsightsViewModel {
             guard let windowUUID = UUID(uuidString: windowIDStr),
                   let profileID = deviceProfileMap[event.deviceID],
                   let profile = profileMap[profileID],
-                  let window = profile.freeWindows.first(where: { $0.id == windowUUID }) else { continue }
+                  let window = profile.unlockedWindows.first(where: { $0.id == windowUUID }) else { continue }
 
             var comps = cal.dateComponents([.year, .month, .day], from: event.timestamp)
             comps.hour = window.endTime.hour

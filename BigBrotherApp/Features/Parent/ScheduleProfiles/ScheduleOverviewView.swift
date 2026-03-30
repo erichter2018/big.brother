@@ -2,7 +2,7 @@ import SwiftUI
 import BigBrotherCore
 
 /// Kid-centric schedule overview. Shows which child has which schedule
-/// template assigned, with a compact summary of free windows.
+/// template assigned, with a compact summary of unlocked windows.
 struct ScheduleOverviewView: View {
     var viewModel: ScheduleOverviewViewModel
     @State private var showingAssignSheet = false
@@ -97,10 +97,10 @@ struct ScheduleOverviewView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                freeWindowSummary(schedule.freeWindows)
+                unlockedWindowSummary(schedule.unlockedWindows)
 
-                if !schedule.essentialWindows.isEmpty {
-                    essentialWindowSummary(schedule.essentialWindows)
+                if !schedule.lockedWindows.isEmpty {
+                    lockedWindowSummary(schedule.lockedWindows)
                 }
             }
         }
@@ -176,13 +176,13 @@ struct ScheduleOverviewView: View {
         }
     }
 
-    // MARK: - Free Window Summary
+    // MARK: - Unlocked Window Summary
 
     @ViewBuilder
-    private func freeWindowSummary(_ windows: [ActiveWindow]) -> some View {
+    private func unlockedWindowSummary(_ windows: [ActiveWindow]) -> some View {
         let lines = FreeWindowFormatter.format(windows)
         if lines.isEmpty {
-            Text("No free windows")
+            Text("No unlocked windows")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         } else {
@@ -196,10 +196,10 @@ struct ScheduleOverviewView: View {
         }
     }
 
-    // MARK: - Essential Window Summary
+    // MARK: - Locked Window Summary
 
     @ViewBuilder
-    private func essentialWindowSummary(_ windows: [ActiveWindow]) -> some View {
+    private func lockedWindowSummary(_ windows: [ActiveWindow]) -> some View {
         let lines = FreeWindowFormatter.format(windows)
         if !lines.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
@@ -273,9 +273,9 @@ private struct AssignScheduleSheet: View {
                 if let profileID = selectedProfileID,
                    let profile = viewModel.appState.scheduleProfiles.first(where: { $0.id == profileID }) {
                     Section("Preview") {
-                        let freeLines = FreeWindowFormatter.format(profile.freeWindows)
+                        let freeLines = FreeWindowFormatter.format(profile.unlockedWindows)
                         if freeLines.isEmpty {
-                            Text("No free windows defined")
+                            Text("No unlocked windows defined")
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         } else {
@@ -286,7 +286,7 @@ private struct AssignScheduleSheet: View {
                             }
                         }
 
-                        let essentialLines = FreeWindowFormatter.format(profile.essentialWindows)
+                        let essentialLines = FreeWindowFormatter.format(profile.lockedWindows)
                         if !essentialLines.isEmpty {
                             Text("Locked")
                                 .font(.caption2.weight(.semibold))
@@ -326,10 +326,10 @@ private struct AssignScheduleSheet: View {
     }
 }
 
-// MARK: - Free Window Formatter
+// MARK: - Window Formatter
 
 enum FreeWindowFormatter {
-    /// Groups free windows by day-set and formats them compactly.
+    /// Groups windows by day-set and formats them compactly.
     /// Returns lines like "Mon-Fri  3:00-5:00 PM, 7:00-8:00 PM"
     static func format(_ windows: [ActiveWindow]) -> [String] {
         guard !windows.isEmpty else { return [] }

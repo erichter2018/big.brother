@@ -3,6 +3,22 @@ import Observation
 import CloudKit
 import BigBrotherCore
 
+/// Bedtime compliance result for a single day.
+struct BedtimeComplianceResult {
+    let date: String              // "yyyy-MM-dd"
+    let bedtimeSlot: Int          // slot index when bedtime starts
+    let totalSecondsAfter: Int    // screen time seconds after bedtime
+    let violationSlots: [Int]     // which slots had activity after bedtime
+
+    var isCompliant: Bool { totalSecondsAfter == 0 }
+    var minutesAfterBedtime: Int { totalSecondsAfter / 60 }
+
+    /// Human-readable bedtime time (e.g. "9:30 PM").
+    var bedtimeLabel: String {
+        DomainHit.slotLabel(bedtimeSlot)
+    }
+}
+
 /// A unified timeline entry combining child-reported events and parent-sent commands.
 struct TimelineEntry: Identifiable {
     let id: UUID
@@ -61,6 +77,9 @@ final class ChildDetailViewModel: CommandSendable {
     var weeklyScreenTime: [(date: Date, minutes: Int)] = []
     /// Per-day screen time slot data keyed by "yyyy-MM-dd" (slot index → seconds).
     var screenTimeByDay: [String: [Int: Int]] = [:]
+    /// Bedtime compliance results keyed by "yyyy-MM-dd".
+    var bedtimeCompliance: [String: BedtimeComplianceResult] = [:]
+
     /// DNS-based online activity snapshot for this child (today only, with slot data for timeline scrubbing).
     var onlineActivity: DomainActivitySnapshot?
     /// DNS-based online activity merged across last 7 days (aggregate counts, no slot data).
@@ -482,6 +501,7 @@ final class ChildDetailViewModel: CommandSendable {
         .enforcementDegraded,
         .enrollmentRevoked,
         .sosAlert,
+        .newAppDetected,
     ]
 
     /// Parse event details for display, stripping TOKEN payloads and truncating.
@@ -689,6 +709,48 @@ final class ChildDetailViewModel: CommandSendable {
         }
         weeklyScreenTime = result
         screenTimeByDay = slotsByDay
+
+        // Compute bedtime compliance from slot data + schedule
+        computeBedtimeCompliance(slotsByDay: slotsByDay)
+    }
+
+    private func computeBedtimeCompliance(slotsByDay: [String: [Int: Int]]) {
+        // Find schedule profile for this child
+        let deviceIDs = Set(devices.map(\.id))
+        let scheduleProfileID = appState.childDevices
+            .filter { deviceIDs.contains($0.id) }
+            .compactMap(\.scheduleProfileID)
+            .first
+
+        guard let profileID = scheduleProfileID,
+              let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) else {
+            bedtimeCompliance = [:]
+            return
+        }
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+
+        var results: [String: BedtimeComplianceResult] = [:]
+        for (dateStr, slots) in slotsByDay {
+            // Determine the day of week for this date
+            guard let date = fmt.date(from: dateStr) else { continue }
+            let weekdayIndex = Calendar.current.component(.weekday, from: date) // 1=Sun, 7=Sat
+            let dayOfWeek = DayOfWeek(rawValue: weekdayIndex)
+            guard let dayOfWeek,
+                  let bedtimeSlot = profile.bedtimeSlot(for: dayOfWeek) else { continue }
+
+            // Find slots after bedtime that had screen time
+            let violations = slots.filter { $0.key >= bedtimeSlot && $0.value > 0 }
+            let totalSecs = violations.values.reduce(0, +)
+            results[dateStr] = BedtimeComplianceResult(
+                date: dateStr,
+                bedtimeSlot: bedtimeSlot,
+                totalSecondsAfter: totalSecs,
+                violationSlots: violations.keys.sorted()
+            )
+        }
+        bedtimeCompliance = results
     }
 
     /// Fetch DNS activity from CloudKit for this child's devices.

@@ -22,6 +22,14 @@ final class DNSProxy {
     private var totalQueries: Int = 0
     private let lock = NSLock()
 
+    /// Apps already seen (persisted in App Group) — keyed by app name.
+    private var knownApps: Set<String> = []
+    private let appLock = NSLock()
+
+    /// Set by PacketTunnelProvider when screen lock state changes.
+    /// When true, DNS queries are still forwarded but NOT counted as usage activity.
+    var isDeviceLocked: Bool = false
+
     /// Pending DNS queries waiting for upstream response (keyed by transaction ID + source).
     private var pendingQueries: [UInt16: PendingQuery] = [:]
     private let queryLock = NSLock()
@@ -53,10 +61,10 @@ final class DNSProxy {
         // Google → forcesafesearch.google.com
         "www.google.com": "216.239.38.120",
         "google.com": "216.239.38.120",
-        // YouTube → restrictmoderate.youtube.com
-        "www.youtube.com": "216.239.38.119",
-        "youtube.com": "216.239.38.119",
-        "m.youtube.com": "216.239.38.119",
+        // YouTube → restrict.youtube.com (strict restricted mode)
+        "www.youtube.com": "216.239.38.120",
+        "youtube.com": "216.239.38.120",
+        "m.youtube.com": "216.239.38.120",
         // Bing → strict.bing.com
         "www.bing.com": "204.79.197.220",
         "bing.com": "204.79.197.220",
@@ -67,16 +75,22 @@ final class DNSProxy {
 
     /// Check if a domain should be redirected for safe search.
     /// Returns the safe IP if applicable, nil otherwise.
+    /// Activates when either denyExplicitContent (device restriction) or
+    /// safeSearchEnabled (Force Safe Search toggle) is on.
     private func safeSearchIP(for domain: String) -> String? {
-        guard storage.readDeviceRestrictions()?.denyExplicitContent == true else { return nil }
+        let restrictionEnabled = storage.readDeviceRestrictions()?.denyExplicitContent == true
+        let toggleEnabled = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .bool(forKey: "safeSearchEnabled") ?? false
+        guard restrictionEnabled || toggleEnabled else { return nil }
         return Self.safeSearchRedirects[domain.lowercased()]
     }
 
     // MARK: - Lifecycle
 
     func start() {
-        // Restore persisted counts from App Group so data survives tunnel restarts.
+        // Restore persisted state from App Group so data survives tunnel restarts.
         restoreFromAppGroup()
+        restoreKnownApps()
 
         // Create UDP session to upstream DNS (bypasses tunnel via NEProvider base class)
         upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
@@ -360,6 +374,13 @@ final class DNSProxy {
         // Skip infrastructure noise
         if DomainCategorizer.isNoise(fullDomain) || DomainCategorizer.isNoise(root) { return }
 
+        // Don't count background queries while screen is locked as activity.
+        // DNS is still forwarded (apps work), but it doesn't inflate usage stats.
+        guard !isDeviceLocked else { return }
+
+        // Check for new app activity
+        checkForNewApp(root)
+
         // Use display domain to preserve meaningful subdomains
         let display = DomainCategorizer.displayDomain(fullDomain)
         let (flagged, category) = DomainCategorizer.categorize(root)
@@ -389,6 +410,50 @@ final class DNSProxy {
             )
         }
         lock.unlock()
+    }
+
+    // MARK: - New App Detection
+
+    /// Check if a DNS query root domain maps to a known app we haven't seen before.
+    private func checkForNewApp(_ rootDomain: String) {
+        guard let appName = DomainCategorizer.appName(for: rootDomain) else { return }
+
+        appLock.lock()
+        let isNew = !knownApps.contains(appName)
+        if isNew { knownApps.insert(appName) }
+        appLock.unlock()
+
+        guard isNew else { return }
+
+        // Persist updated known set
+        persistKnownApps()
+
+        // Write detection for the main app to pick up
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        var pending = defaults?.stringArray(forKey: "newAppDetections") ?? []
+        pending.append(appName)
+        defaults?.set(pending, forKey: "newAppDetections")
+
+        NSLog("[DNSProxy] New app activity detected: \(appName) (\(rootDomain))")
+    }
+
+    private func persistKnownApps() {
+        appLock.lock()
+        let apps = Array(knownApps)
+        appLock.unlock()
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(apps, forKey: "knownAppDomains")
+    }
+
+    private func restoreKnownApps() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let saved = defaults?.stringArray(forKey: "knownAppDomains") ?? []
+        appLock.lock()
+        knownApps = Set(saved)
+        appLock.unlock()
+        if !saved.isEmpty {
+            NSLog("[DNSProxy] Restored \(saved.count) known apps")
+        }
     }
 
     // MARK: - Snapshot for Sync

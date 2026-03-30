@@ -93,7 +93,7 @@ public enum DomainCategorizer {
         "fios-router.home", "local", "localhost", "home",
         // Misc tracking / infra
         "fontawesome.com", "fn-pz.com", "dewrain.world", "iteleserve.com",
-        "real.vg", "realapp.com",
+        "real.vg",
         // Adobe CDN / media
         "scene7.com",
         // Email tracking pixels / ESP
@@ -437,6 +437,107 @@ public enum DomainCategorizer {
         }
 
         return "\(parts[parts.count - 2]).\(parts[parts.count - 1])"
+    }
+
+    // MARK: - App Detection
+
+    /// Maps root domains to human-readable app names.
+    /// Used by the VPN tunnel to detect new app activity.
+    private static let appDomainCatalog: [String: String] = [
+        // Social Media
+        "tiktok.com": "TikTok",
+        "snapchat.com": "Snapchat",
+        "instagram.com": "Instagram",
+        "facebook.com": "Facebook",
+        "messenger.com": "Messenger",
+        "twitter.com": "X (Twitter)",
+        "x.com": "X (Twitter)",
+        "reddit.com": "Reddit",
+        "pinterest.com": "Pinterest",
+        "tumblr.com": "Tumblr",
+        "threads.net": "Threads",
+        "bsky.app": "Bluesky",
+        "mastodon.social": "Mastodon",
+        "bereal.com": "BeReal",
+        "locketcamera.com": "Locket",
+        "realapp.com": "Real",
+        // Messaging
+        "discord.com": "Discord",
+        "discordapp.com": "Discord",
+        "telegram.org": "Telegram",
+        "whatsapp.com": "WhatsApp",
+        "whatsapp.net": "WhatsApp",
+        "signal.org": "Signal",
+        "kik.com": "Kik",
+        "viber.com": "Viber",
+        "line.me": "LINE",
+        // Video & Streaming
+        "youtube.com": "YouTube",
+        "netflix.com": "Netflix",
+        "hulu.com": "Hulu",
+        "disneyplus.com": "Disney+",
+        "max.com": "Max",
+        "hbomax.com": "Max",
+        "peacocktv.com": "Peacock",
+        "paramountplus.com": "Paramount+",
+        "crunchyroll.com": "Crunchyroll",
+        "twitch.tv": "Twitch",
+        "kick.com": "Kick",
+        "rumble.com": "Rumble",
+        // Music
+        "spotify.com": "Spotify",
+        "tidal.com": "Tidal",
+        "soundcloud.com": "SoundCloud",
+        "pandora.com": "Pandora",
+        // Gaming
+        "roblox.com": "Roblox",
+        "minecraft.net": "Minecraft",
+        "fortnite.com": "Fortnite",
+        "epicgames.com": "Epic Games",
+        "steampowered.com": "Steam",
+        "store.steampowered.com": "Steam",
+        "ea.com": "EA Games",
+        "supercell.com": "Supercell (Clash/Brawl Stars)",
+        "mihoyo.com": "HoYoverse (Genshin)",
+        "hoyoverse.com": "HoYoverse (Genshin)",
+        // Dating (concerning for minors)
+        "tinder.com": "Tinder",
+        "bumble.com": "Bumble",
+        "hinge.co": "Hinge",
+        "grindr.com": "Grindr",
+        "badoo.com": "Badoo",
+        // Shopping
+        "amazon.com": "Amazon",
+        "ebay.com": "eBay",
+        "etsy.com": "Etsy",
+        "shein.com": "SHEIN",
+        "temu.com": "Temu",
+        // Productivity / AI
+        "openai.com": "ChatGPT",
+        "anthropic.com": "Claude",
+        "character.ai": "Character.AI",
+        // Content
+        "wattpad.com": "Wattpad",
+        "archiveofourown.org": "Archive of Our Own",
+        "webtoons.com": "Webtoon",
+        // Anonymous / risky
+        "omegle.com": "Omegle",
+        "chatroulette.com": "Chatroulette",
+        "whisper.sh": "Whisper",
+        "yolo.live": "YOLO",
+        // VPN/Proxy (bypass attempts)
+        "nordvpn.com": "NordVPN",
+        "expressvpn.com": "ExpressVPN",
+        "surfshark.com": "Surfshark",
+        "protonvpn.com": "ProtonVPN",
+        "windscribe.com": "Windscribe",
+        "tunnelbear.com": "TunnelBear",
+        "1.1.1.1": "Cloudflare WARP",
+    ]
+
+    /// Returns the app name for a root domain, if it's a known app.
+    public static func appName(for rootDomain: String) -> String? {
+        appDomainCatalog[rootDomain.lowercased()]
     }
 
     // MARK: - Subdomain Intelligence

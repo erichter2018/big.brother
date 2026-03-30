@@ -13,16 +13,15 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
     public let familyID: FamilyID
     public var name: String
 
-    /// Time windows when the device is FREE (unlocked).
+    /// Time windows when the device is unlocked.
     /// Outside these windows, `lockedMode` is applied.
-    public var freeWindows: [ActiveWindow]
+    public var unlockedWindows: [ActiveWindow]
 
-    /// Time windows when essential-only mode is applied (e.g., overnight).
-    /// Takes priority over `lockedMode` but not over `freeWindows`.
-    /// Old child builds ignore this field — device stays in `lockedMode` (safer, stricter).
-    public var essentialWindows: [ActiveWindow]
+    /// Time windows when locked mode is applied (e.g., bedtime).
+    /// Takes priority over `lockedMode` but not over `unlockedWindows`.
+    public var lockedWindows: [ActiveWindow]
 
-    /// The lock mode applied outside free windows and essential windows.
+    /// The mode applied outside unlocked and locked windows (typically .restricted).
     public var lockedMode: LockMode
 
     /// Dates on which the schedule is suspended — device stays unlocked all day.
@@ -36,8 +35,8 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         id: UUID = UUID(),
         familyID: FamilyID,
         name: String,
-        freeWindows: [ActiveWindow],
-        essentialWindows: [ActiveWindow] = [],
+        unlockedWindows: [ActiveWindow],
+        lockedWindows: [ActiveWindow] = [],
         lockedMode: LockMode = .restricted,
         exceptionDates: [Date] = [],
         isDefault: Bool = false,
@@ -46,8 +45,8 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         self.id = id
         self.familyID = familyID
         self.name = name
-        self.freeWindows = freeWindows
-        self.essentialWindows = essentialWindows
+        self.unlockedWindows = unlockedWindows
+        self.lockedWindows = lockedWindows
         self.lockedMode = lockedMode
         self.exceptionDates = exceptionDates
         self.isDefault = isDefault
@@ -56,7 +55,10 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
 
     // Custom Codable to allow backward-compatible decoding (exceptionDates may be absent in older data).
     enum CodingKeys: String, CodingKey {
-        case id, familyID, name, freeWindows, essentialWindows, lockedMode, exceptionDates, isDefault, updatedAt
+        case id, familyID, name, lockedMode, exceptionDates, isDefault, updatedAt
+        // Map new property names to old JSON keys for backward compatibility
+        case unlockedWindows = "freeWindows"
+        case lockedWindows = "essentialWindows"
     }
 
     public init(from decoder: Decoder) throws {
@@ -64,8 +66,8 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         id = try container.decode(UUID.self, forKey: .id)
         familyID = try container.decode(FamilyID.self, forKey: .familyID)
         name = try container.decode(String.self, forKey: .name)
-        freeWindows = try container.decode([ActiveWindow].self, forKey: .freeWindows)
-        essentialWindows = try container.decodeIfPresent([ActiveWindow].self, forKey: .essentialWindows) ?? []
+        unlockedWindows = try container.decode([ActiveWindow].self, forKey: .unlockedWindows)
+        lockedWindows = try container.decodeIfPresent([ActiveWindow].self, forKey: .lockedWindows) ?? []
         lockedMode = try container.decode(LockMode.self, forKey: .lockedMode)
         exceptionDates = try container.decodeIfPresent([Date].self, forKey: .exceptionDates) ?? []
         isDefault = try container.decode(Bool.self, forKey: .isDefault)
@@ -79,21 +81,21 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
     }
 
     /// Returns `true` if any free window contains the given date.
-    public func isInFreeWindow(at date: Date, calendar: Calendar = .current) -> Bool {
-        freeWindows.contains { $0.contains(date, calendar: calendar) }
+    public func isInUnlockedWindow(at date: Date, calendar: Calendar = .current) -> Bool {
+        unlockedWindows.contains { $0.contains(date, calendar: calendar) }
     }
 
     /// Returns `true` if any essential window contains the given date.
-    public func isInEssentialWindow(at date: Date, calendar: Calendar = .current) -> Bool {
-        essentialWindows.contains { $0.contains(date, calendar: calendar) }
+    public func isInLockedWindow(at date: Date, calendar: Calendar = .current) -> Bool {
+        lockedWindows.contains { $0.contains(date, calendar: calendar) }
     }
 
     /// Returns the mode that should be active at the given date.
     /// Priority: exception date > free window > essential window > lockedMode.
     public func resolvedMode(at date: Date, calendar: Calendar = .current) -> LockMode {
         if isExceptionDate(date, calendar: calendar) { return .unlocked }
-        if isInFreeWindow(at: date, calendar: calendar) { return .unlocked }
-        if isInEssentialWindow(at: date, calendar: calendar) { return .locked }
+        if isInUnlockedWindow(at: date, calendar: calendar) { return .unlocked }
+        if isInLockedWindow(at: date, calendar: calendar) { return .locked }
         return lockedMode
     }
 
@@ -116,9 +118,9 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         let currentMode = resolvedMode(at: date, calendar: calendar)
 
         // If in a free or essential window, find its end time.
-        let activeWindows: [ActiveWindow] = currentMode == .unlocked ? freeWindows :
-                                             currentMode == .locked ? essentialWindows : []
-        if currentMode == .unlocked || (currentMode == .locked && !essentialWindows.isEmpty) {
+        let activeWindows: [ActiveWindow] = currentMode == .unlocked ? unlockedWindows :
+                                             currentMode == .locked ? lockedWindows : []
+        if currentMode == .unlocked || (currentMode == .locked && !lockedWindows.isEmpty) {
             for window in activeWindows where window.contains(date, calendar: calendar) {
                 if window.startTime < window.endTime {
                     // Same-day window — end is today
@@ -146,7 +148,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         }
 
         // Outside active windows — find the next transition (free or essential, whichever is sooner).
-        let allWindows = freeWindows + essentialWindows
+        let allWindows = unlockedWindows + lockedWindows
         let todayStarts = allWindows
             .filter { $0.daysOfWeek.contains(today) && $0.startTime > now }
             .sorted { $0.startTime < $1.startTime }
@@ -189,7 +191,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
             ScheduleProfile(
                 familyID: familyID,
                 name: "School Day",
-                freeWindows: [
+                unlockedWindows: [
                     ActiveWindow(
                         daysOfWeek: weekdays,
                         startTime: DayTime(hour: 7, minute: 0),
@@ -211,7 +213,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
             ScheduleProfile(
                 familyID: familyID,
                 name: "Weekend Only",
-                freeWindows: [
+                unlockedWindows: [
                     ActiveWindow(
                         daysOfWeek: weekend,
                         startTime: DayTime(hour: 9, minute: 0),
@@ -223,7 +225,7 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
             ScheduleProfile(
                 familyID: familyID,
                 name: "Lenient",
-                freeWindows: [
+                unlockedWindows: [
                     ActiveWindow(
                         daysOfWeek: everyday,
                         startTime: DayTime(hour: 7, minute: 0),
@@ -232,6 +234,65 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
                 ],
                 lockedMode: .restricted
             ),
+            ScheduleProfile(
+                familyID: familyID,
+                name: "Bedtime Only",
+                unlockedWindows: [
+                    ActiveWindow(
+                        daysOfWeek: everyday,
+                        startTime: DayTime(hour: 6, minute: 0),
+                        endTime: DayTime(hour: 21, minute: 30)
+                    ),
+                ],
+                lockedMode: .locked
+            ),
         ]
+    }
+
+    /// Returns the bedtime slot for a given day of the week.
+    /// Bedtime = the evening transition to `.locked` mode.
+    /// Walks from 6 PM to midnight to find when the mode first becomes `.locked`.
+    /// Returns nil if locked mode never kicks in during that window.
+    public func bedtimeSlot(for day: DayOfWeek) -> Int? {
+        // Scan from 6 PM (slot 72) to midnight (slot 95) in 15-min steps.
+        // Bedtime is the first slot where the mode becomes .locked
+        // after being non-locked earlier in the evening.
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+
+        // Find a reference date for this day of the week
+        var refDate = today
+        while cal.component(.weekday, from: refDate) != day.rawValue {
+            refDate = cal.date(byAdding: .day, value: 1, to: refDate)!
+        }
+
+        var foundNonLocked = false
+        for slot in 72...95 { // 6 PM to midnight
+            let hour = slot / 4
+            let minute = (slot % 4) * 15
+            guard let checkTime = cal.date(bySettingHour: hour, minute: minute, second: 0, of: refDate) else { continue }
+            let mode = resolvedMode(at: checkTime, calendar: cal)
+            if mode != .locked {
+                foundNonLocked = true
+            } else if foundNonLocked {
+                // Transition from non-locked to locked — this is bedtime
+                return slot
+            }
+        }
+
+        // If the whole evening is locked (lockedMode = .locked, no free/essential windows),
+        // check if there's a free or essential window ending in the evening
+        let allWindows = unlockedWindows + lockedWindows
+        let eveningEnds = allWindows
+            .filter { $0.daysOfWeek.contains(day) }
+            .map { $0.endTime }
+            .filter { ($0.hour * 60 + $0.minute) >= 18 * 60 } // after 6 PM
+            .sorted { ($0.hour * 60 + $0.minute) < ($1.hour * 60 + $1.minute) }
+
+        if let lastEnd = eveningEnds.last {
+            return lastEnd.hour * 4 + lastEnd.minute / 15
+        }
+
+        return nil
     }
 }
