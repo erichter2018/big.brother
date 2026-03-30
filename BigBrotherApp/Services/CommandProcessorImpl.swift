@@ -686,10 +686,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             isOnline: true
         )
 
-        // Clear any active temporary/timed unlock on explicit mode change.
-        try? storage.clearTemporaryUnlockState()
-        try? storage.clearTimedUnlockInfo()
-        cancelNonScheduleActivities()
+        // NOTE: Stack clearing (clearTemporaryUnlockState, clearTimedUnlockInfo,
+        // cancelNonScheduleActivities) is handled by the CALLER (setMode, returnToSchedule),
+        // NOT here. applyMode() is also called by lockUntil and timedUnlock which should
+        // NOT clear the stack — they're pushing onto it.
 
         let inputs = PolicyPipelineCoordinator.Inputs(
             basePolicy: policy,
