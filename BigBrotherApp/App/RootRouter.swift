@@ -60,25 +60,29 @@ struct ParentTabView: View {
     @State private var navigationPath = NavigationPath()
     @Environment(\.scenePhase) private var scenePhase
 
+    /// Non-observable VM resolver — keeps navigationDestination from re-evaluating
+    /// when @Observable properties on appState change.
+    private let vmResolver: (ChildProfileID) -> ChildDetailViewModel
+
     init(appState: AppState) {
         self.appState = appState
         self._dashboardViewModel = State(initialValue: ParentDashboardViewModel(appState: appState))
         self._activityViewModel = State(initialValue: ActivityFeedViewModel(appState: appState))
+        // Capture appState weakly in a plain closure — not tracked by @Observable
+        let state = appState
+        self.vmResolver = { childID in
+            state.childDetailViewModel(forID: childID)
+        }
     }
 
     var body: some View {
         TabView {
             NavigationStack(path: $navigationPath) {
                 ParentDashboardView(viewModel: dashboardViewModel)
-                    .navigationDestination(for: ChildProfileID.self) { childID in
-                        if let child = appState.childProfiles.first(where: { $0.id == childID }) {
-                            ChildDetailView(
-                                viewModel: ChildDetailViewModel(
-                                    appState: appState,
-                                    child: child
-                                )
-                            )
-                        }
+                    .navigationDestination(for: ChildProfileID.self) { [vmResolver] childID in
+                        ChildDetailView(
+                            viewModel: vmResolver(childID)
+                        )
                     }
             }
             .onChange(of: appState.pendingChildNavigation) { _, childID in

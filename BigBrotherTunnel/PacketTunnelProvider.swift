@@ -82,7 +82,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         settings.dnsSettings = dns
 
         // Create DNS proxy with the selected upstream
-        dnsProxy = DNSProxy(provider: self, upstreamDNSServer: upstreamDNS)
+        dnsProxy = DNSProxy(provider: self, upstreamDNSServer: upstreamDNS, storage: storage)
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error {
@@ -231,25 +231,52 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Upsert: one record per device per day
         let recordID = CKRecord.ID(recordName: "BBDNSActivity_\(enrollment.deviceID.rawValue)_\(snapshot.date)")
         let record: CKRecord
+        var existingDomains: [String: DomainHit] = [:]
+
         do {
             record = try await db.record(for: recordID)
+            // Parse existing domains to merge with (never lose data)
+            if let json = record["domainsJSON"] as? String,
+               let data = json.data(using: .utf8),
+               let saved = try? JSONDecoder().decode([DomainHit].self, from: data) {
+                for hit in saved {
+                    existingDomains[hit.domain] = hit
+                }
+            }
         } catch {
             record = CKRecord(recordType: "BBDNSActivity", recordID: recordID)
         }
+
+        // Merge: for each domain, keep the higher count (handles tunnel restarts)
+        var merged = existingDomains
+        for hit in snapshot.domains {
+            if let existing = merged[hit.domain] {
+                if hit.count > existing.count {
+                    merged[hit.domain] = hit
+                }
+            } else {
+                merged[hit.domain] = hit
+            }
+        }
+        let mergedDomains = Array(merged.values)
+        let mergedTotal = max(
+            snapshot.totalQueries,
+            (record["totalQueries"] as? Int) ?? 0
+        )
 
         record["deviceID"] = enrollment.deviceID.rawValue
         record["familyID"] = enrollment.familyID.rawValue
         record["date"] = snapshot.date
         record["timestamp"] = snapshot.timestamp as NSDate
-        record["totalQueries"] = snapshot.totalQueries as NSNumber
-        if let data = try? JSONEncoder().encode(snapshot.domains),
+        record["totalQueries"] = mergedTotal as NSNumber
+        if let data = try? JSONEncoder().encode(mergedDomains),
            let json = String(data: data, encoding: .utf8) {
             record["domainsJSON"] = json
         }
 
         do {
             try await db.save(record)
-            NSLog("[Tunnel] DNS activity synced: \(snapshot.domains.count) domains, \(snapshot.totalQueries) queries")
+            NSLog("[Tunnel] DNS activity synced: \(mergedDomains.count) domains (merged), \(mergedTotal) queries")
         } catch {
             NSLog("[Tunnel] DNS activity sync failed: \(error.localizedDescription)")
         }
@@ -265,7 +292,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Day changed — flush yesterday's data, reset counters
             dnsProxy?.flushToAppGroup()
             dnsProxy?.resetDaily()
-            NSLog("[Tunnel] DNS activity reset for new day")
+
+            // Reset screen time counters for new day
+            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            if defaults?.string(forKey: screenTimeDateKey) != today {
+                NSLog("[Tunnel] Screen time reset for new day (was: \(defaults?.integer(forKey: screenTimeMinutesKey) ?? 0)m, \(defaults?.integer(forKey: screenTimeUnlockCountKey) ?? 0) unlocks)")
+                defaults?.set(today, forKey: screenTimeDateKey)
+                defaults?.set(0, forKey: screenTimeSecondsKey)
+                defaults?.set(0, forKey: screenTimeMinutesKey)
+                defaults?.set(0, forKey: screenTimeUnlockCountKey)
+                defaults?.removeObject(forKey: screenTimeSlotKey)
+            }
+
+            NSLog("[Tunnel] Daily reset for new day")
         }
         lastDNSDateCheck = today
     }
@@ -332,8 +371,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Send immediate heartbeat
             Task { await sendHeartbeatFromTunnel(reason: "appDeath") }
 
-            // Notify the child to reopen the app
-            sendReopenNotification()
+            // Don't nag the kid — the device is already locked down via
+            // ManagedSettingsStore. The Monitor handles free-window-specific nags.
         } else if !appDead && !mainAppAlive {
             // App came back (via App Group timestamp, before IPC resumes)
             NSLog("[Tunnel] Main app appears alive again (App Group timestamp updated)")
@@ -715,8 +754,53 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             try await db.save(record)
             defaults?.set(Date().timeIntervalSince1970, forKey: "lastHeartbeatSentAt")
             NSLog("[Tunnel] Heartbeat sent (reason: \(reason))")
+
+            // Save daily screen time snapshot (one record per device per day)
+            let slotData = (defaults?.dictionary(forKey: screenTimeSlotKey) as? [String: Int]) ?? [:]
+            await saveDailyScreenTimeSnapshot(
+                db: db,
+                enrollment: enrollment,
+                minutes: defaults?.integer(forKey: screenTimeMinutesKey) ?? 0,
+                unlocks: defaults?.integer(forKey: screenTimeUnlockCountKey) ?? 0,
+                date: defaults?.string(forKey: screenTimeDateKey),
+                slotSeconds: slotData
+            )
         } catch {
             NSLog("[Tunnel] Heartbeat failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func saveDailyScreenTimeSnapshot(db: CKDatabase, enrollment: ChildEnrollmentState, minutes: Int, unlocks: Int, date: String?, slotSeconds: [String: Int]) async {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        let dateStr = date ?? fmt.string(from: Date())
+
+        let recordID = CKRecord.ID(recordName: "BBScreenTime_\(enrollment.deviceID.rawValue)_\(dateStr)")
+        let stRecord: CKRecord
+        do {
+            stRecord = try await db.record(for: recordID)
+        } catch {
+            stRecord = CKRecord(recordType: "BBScreenTime", recordID: recordID)
+        }
+
+        stRecord["deviceID"] = enrollment.deviceID.rawValue
+        stRecord["familyID"] = enrollment.familyID.rawValue
+        stRecord["date"] = dateStr
+        stRecord["timestamp"] = Date() as NSDate
+        stRecord["minutes"] = minutes as NSNumber
+        stRecord["unlocks"] = unlocks as NSNumber
+
+        // Slot data: seconds per 15-minute slot (key = "0"-"95", value = seconds)
+        if !slotSeconds.isEmpty,
+           let data = try? JSONEncoder().encode(slotSeconds),
+           let json = String(data: data, encoding: .utf8) {
+            stRecord["slotsJSON"] = json
+        }
+
+        do {
+            try await db.save(stRecord)
+        } catch {
+            NSLog("[Tunnel] Screen time snapshot save failed: \(error.localizedDescription)")
         }
     }
 
@@ -816,6 +900,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 defaults?.set(0, forKey: screenTimeSecondsKey)
                 defaults?.set(0, forKey: screenTimeMinutesKey)
                 defaults?.set(0, forKey: screenTimeUnlockCountKey)
+                defaults?.removeObject(forKey: screenTimeSlotKey)
             }
 
             // Increment unlock count
@@ -824,16 +909,45 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    private let screenTimeSlotKey = "screenTimeSlots"
+
     private func addScreenTimeFromTunnel(seconds: Int, date: String, defaults: UserDefaults?) {
         // Reset if day changed
         if defaults?.string(forKey: screenTimeDateKey) != date {
             defaults?.set(date, forKey: screenTimeDateKey)
             defaults?.set(0, forKey: screenTimeSecondsKey)
+            defaults?.removeObject(forKey: screenTimeSlotKey)
         }
 
         let accumulated = (defaults?.integer(forKey: screenTimeSecondsKey) ?? 0) + seconds
         defaults?.set(accumulated, forKey: screenTimeSecondsKey)
         defaults?.set(accumulated / 60, forKey: screenTimeMinutesKey)
+
+        // Distribute this session across 15-minute slots
+        // Walk backward from now by `seconds` to find which slots this session covers
+        let endTime = Date()
+        let startTime = endTime.addingTimeInterval(TimeInterval(-seconds))
+        let cal = Calendar.current
+
+        var slots = (defaults?.dictionary(forKey: screenTimeSlotKey) as? [String: Int]) ?? [:]
+
+        // Walk through slots from session start to end
+        var cursor = startTime
+        while cursor < endTime {
+            let comps = cal.dateComponents([.hour, .minute], from: cursor)
+            let slotIndex = (comps.hour ?? 0) * 4 + (comps.minute ?? 0) / 15
+            let slotKey = String(slotIndex)
+
+            // How many seconds fall in this slot?
+            let slotEnd = cal.date(bySettingHour: slotIndex / 4, minute: ((slotIndex % 4) + 1) * 15, second: 0, of: cursor) ?? endTime
+            let chunkEnd = min(slotEnd, endTime)
+            let chunkSeconds = max(1, Int(chunkEnd.timeIntervalSince(cursor)))
+
+            slots[slotKey, default: 0] += chunkSeconds
+            cursor = chunkEnd
+        }
+
+        defaults?.set(slots, forKey: screenTimeSlotKey)
 
         NSLog("[Tunnel] Screen time: +\(seconds)s = \(accumulated / 60)m total today")
     }

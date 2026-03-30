@@ -28,6 +28,7 @@
 		16144B9C887CE205EC6470FE /* SafetyEventNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6805362753E5A5ACC38AE02 /* SafetyEventNotificationService.swift */; };
 		18977F8842041230F38E679B /* OnlineActivitySection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */; };
 		18E1CE741E8B697EDA04B8E9 /* SyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B177EFF146758126614A476D /* SyncCoordinator.swift */; };
+		193B12163F589A2778F742D8 /* ChildDetailSectionOrder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D6F28C469F306643A072853 /* ChildDetailSectionOrder.swift */; };
 		1A842D8C523CC78746CB9163 /* ParentAppNameMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BB7CF9073113D2C6EAD80E0 /* ParentAppNameMapping.swift */; };
 		1B1350B1188BD7AE8E142FB9 /* ScheduleOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A2B8283DF2B8F94B78B92F0 /* ScheduleOverviewView.swift */; };
 		1BAE60F19C6DC8BA80494E88 /* InsightsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93AB64D843657348AB731417 /* InsightsViewModel.swift */; };
@@ -140,6 +141,7 @@
 		C6ECBD5359BE483745B75775 /* ParentDashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C1FF0756210534239D6F1DA /* ParentDashboardViewModel.swift */; };
 		CB796E08DCC775A7133BB958 /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B33EA033B68C98649EBD6B4A /* DeviceActivity.framework */; };
 		CC040B1E9C3BD6D5FED8F69E /* TodaySummaryCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5BEDC86D658D9D712BAE0D3 /* TodaySummaryCard.swift */; };
+		CCB4BE78C651BFAA0938BF8D /* ScreenTimeTimelineSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBE9E9C7264D0F28954F67C1 /* ScreenTimeTimelineSection.swift */; };
 		CD727B994DDC3CAB72B1D7B4 /* CommandSendable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 773C468E734D5EDF5913F67B /* CommandSendable.swift */; };
 		CD80BF2C155A9A0AE6689FBF /* AlwaysAllowedSelectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1995DC304FA128CA2C780C /* AlwaysAllowedSelectionView.swift */; };
 		CE913E70130861E1EB377FCE /* SecuritySettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87FED7DA09DE4FD29C084934 /* SecuritySettingsView.swift */; };
@@ -318,6 +320,7 @@
 		66CC1C7C86E43A2DFF81F367 /* LoadingStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadingStateView.swift; sourceTree = "<group>"; };
 		695F97B4CD2251C2A9692A8F /* FamilyDataExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FamilyDataExporter.swift; sourceTree = "<group>"; };
 		6A55FE0C902BD2E34AEBBEAE /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		6D6F28C469F306643A072853 /* ChildDetailSectionOrder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildDetailSectionOrder.swift; sourceTree = "<group>"; };
 		6F4546B78CBB0E676E0F52A1 /* CKRecordMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CKRecordMapping.swift; sourceTree = "<group>"; };
 		7425110E1AD24BCA7B6F62EE /* ScheduleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleManager.swift; sourceTree = "<group>"; };
 		773C468E734D5EDF5913F67B /* CommandSendable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSendable.swift; sourceTree = "<group>"; };
@@ -378,6 +381,7 @@
 		B990D2705A50DABAD5E9BE6E /* AppLaunchRestorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLaunchRestorer.swift; sourceTree = "<group>"; };
 		BA7238370DF087C7217A13FB /* ChildOrderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildOrderView.swift; sourceTree = "<group>"; };
 		BB28AAE3C623830A59AF3FA9 /* ScheduleOverviewViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleOverviewViewModel.swift; sourceTree = "<group>"; };
+		BBE9E9C7264D0F28954F67C1 /* ScreenTimeTimelineSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTimeTimelineSection.swift; sourceTree = "<group>"; };
 		BE6A2F740EEDD95FD5798333 /* Combine.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Combine.framework; path = System/Library/Frameworks/Combine.framework; sourceTree = SDKROOT; };
 		BEB7831DF84D91F491777624 /* RemoteDiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDiagnosticsView.swift; sourceTree = "<group>"; };
 		C07395C4A7FA6A27B2702AD0 /* ChildDetailViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildDetailViewModel.swift; sourceTree = "<group>"; };
@@ -897,6 +901,7 @@
 			isa = PBXGroup;
 			children = (
 				25B72B0369A8D42F28572244 /* ActivityFeedSection.swift */,
+				6D6F28C469F306643A072853 /* ChildDetailSectionOrder.swift */,
 				D0FC85C498B643706950C782 /* ChildDetailView.swift */,
 				C07395C4A7FA6A27B2702AD0 /* ChildDetailViewModel.swift */,
 				C439A682AED725B73ACC0B0C /* LocationMapView.swift */,
@@ -904,6 +909,7 @@
 				5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */,
 				046007F86CF46F5120A2EBCA /* PermissionsStatusView.swift */,
 				BEB7831DF84D91F491777624 /* RemoteDiagnosticsView.swift */,
+				BBE9E9C7264D0F28954F67C1 /* ScreenTimeTimelineSection.swift */,
 				60D14983C74C7A47D8751D0E /* ScreenTimeTrendChart.swift */,
 				C5BEDC86D658D9D712BAE0D3 /* TodaySummaryCard.swift */,
 				C1E01878E3348C356886FF3A /* WebFilterConfigView.swift */,
@@ -1372,6 +1378,7 @@
 				FBB0ED519F73C07712C23DA4 /* BigBrotherApp.swift in Sources */,
 				BE4F33E2AC94D8F17A4F9804 /* CKRecordConversion.swift in Sources */,
 				F769EAB5135B8524DE985B3B /* CKRecordMapping.swift in Sources */,
+				193B12163F589A2778F742D8 /* ChildDetailSectionOrder.swift in Sources */,
 				464AEC91C84B6F2BFEAC36D0 /* ChildDetailView.swift in Sources */,
 				59029416293F2117553684E0 /* ChildDetailViewModel.swift in Sources */,
 				6F2F95CDC75262F66B57C711 /* ChildHomeView.swift in Sources */,
@@ -1465,6 +1472,7 @@
 				F587BAA1061EB1A4A0E0D898 /* ScheduleProfileListViewModel.swift in Sources */,
 				FB2DF0709AD02AFEFC5B9AFC /* ScheduleRegistrar.swift in Sources */,
 				0E4442903D9CC5B5BE776D48 /* ScheduleTemplateListView.swift in Sources */,
+				CCB4BE78C651BFAA0938BF8D /* ScreenTimeTimelineSection.swift in Sources */,
 				DD594557DD83B8D9648FDCE6 /* ScreenTimeTrendChart.swift in Sources */,
 				CE913E70130861E1EB377FCE /* SecuritySettingsView.swift in Sources */,
 				6FDECA7F76351E81B6D0CC11 /* SettingsView.swift in Sources */,

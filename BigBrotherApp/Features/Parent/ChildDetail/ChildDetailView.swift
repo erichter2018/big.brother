@@ -19,6 +19,8 @@ struct ChildDetailView: View {
     @State private var showDiagnostics = false
     @State private var showNamedPlaceEditor = false
     @State private var permissionsFeedback: String?
+    @State private var sectionOrder: [ChildDetailSection] = ChildDetailSection.defaultOrder
+    @State private var hiddenSections: Set<ChildDetailSection> = []
 
     @State private var showFullActivity = false
 
@@ -35,54 +37,10 @@ struct ChildDetailView: View {
                     remainingSeconds: viewModel.remainingUnlockSeconds
                 )
 
-                // 2. Mini map — tap to open full map/trips
-                miniMapSection
-
-                // 3. Today's summary — screen time, battery, last seen
-                todaySummary
-
-                // 4. Screen time trend (7-day chart)
-                ScreenTimeTrendChart(dailyMinutes: viewModel.weeklyScreenTime)
-
-                // 5. Online activity (DNS-based)
-                OnlineActivitySection(activity: viewModel.onlineActivity)
-
-                // 6. Activity feed (5 most recent)
-                VStack(alignment: .leading, spacing: 0) {
-                    ActivityFeedSection(
-                        entries: viewModel.timeline,
-                        limit: 5,
-                        child: viewModel.child,
-                        devices: viewModel.devices,
-                        heartbeats: viewModel.heartbeats,
-                        cloudKit: viewModel.appState.cloudKit,
-                        onLocate: { await viewModel.requestLocation() }
-                    )
-                    if viewModel.timeline.count > 5 {
-                        NavigationLink(destination: fullActivityList) {
-                            HStack {
-                                Spacer()
-                                Text("See All Activity")
-                                    .font(.caption)
-                                    .foregroundStyle(.blue)
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2)
-                                    .foregroundStyle(.blue)
-                                Spacer()
-                            }
-                            .padding(.top, 8)
-                            .padding(.bottom, 4)
-                        }
-                    }
+                // Dynamic sections in user-configured order
+                ForEach(sectionOrder.filter { !hiddenSections.contains($0) }) { section in
+                    sectionView(for: section)
                 }
-
-                // 6. Temporary apps (if any)
-                if !viewModel.temporaryAllowedAppsForChild.isEmpty {
-                    temporaryAppsRow
-                }
-
-                // 8. Devices (collapsible)
-                devicesSection
 
                 // Feedback
                 if let feedback = viewModel.commandFeedback {
@@ -163,25 +121,20 @@ struct ChildDetailView: View {
             )
         }
         .refreshable { await viewModel.refresh() }
-        .task {
-            await viewModel.loadNamedPlaces()
+        .onAppear {
+            sectionOrder = ChildDetailSection.loadOrder(for: viewModel.child.id)
+            hiddenSections = ChildDetailSection.loadHidden(for: viewModel.child.id)
             if let raw = UserDefaults.standard.string(forKey: "locationMode.\(viewModel.child.id.rawValue)"),
                let mode = LocationTrackingMode(rawValue: raw) {
                 locationMode = mode
             } else if viewModel.heartbeats.contains(where: { $0.latitude != nil }) {
-                // Child is sending location but parent never set the mode — infer it
                 locationMode = .continuous
                 UserDefaults.standard.set("continuous", forKey: "locationMode.\(viewModel.child.id.rawValue)")
             }
-            await viewModel.loadEvents()
-            await viewModel.loadWeeklyScreenTime()
             viewModel.startAutoRefresh()
-            // Ensure timer cleanup on task cancellation (covers navigation-during-transition).
-            await withTaskCancellationHandler {
-                await Task.yield()
-            } onCancel: {
-                Task { @MainActor in viewModel.stopAutoRefresh() }
-            }
+        }
+        .task {
+            await viewModel.loadNamedPlaces()
         }
         .onDisappear { viewModel.stopAutoRefresh() }
     }
@@ -189,6 +142,57 @@ struct ChildDetailView: View {
     // MARK: - Mini Map
 
     @State private var navigateToMap = false
+
+    @ViewBuilder
+    private func sectionView(for section: ChildDetailSection) -> some View {
+        switch section {
+        case .miniMap:
+            miniMapSection
+        case .todaySummary:
+            todaySummary
+        case .screenTimeTrend:
+            ScreenTimeTrendChart(dailyMinutes: viewModel.weeklyScreenTime)
+        case .screenTimeTimeline:
+            ScreenTimeTimelineSection(slotsByDay: viewModel.screenTimeByDay, weeklyScreenTime: viewModel.weeklyScreenTime)
+        case .onlineActivity:
+            OnlineActivitySection(activity: viewModel.onlineActivity, weekActivity: viewModel.onlineActivityWeek, dailySnapshots: viewModel.onlineActivityByDay, showFlagged: false)
+        case .flaggedActivity:
+            let flagSource = viewModel.onlineActivityWeek ?? viewModel.onlineActivity
+            if let activity = flagSource, !activity.flaggedDomains.isEmpty {
+                OnlineActivitySection(activity: activity, showFlagged: true, flaggedOnly: true)
+            }
+        case .recentActivity:
+            VStack(alignment: .leading, spacing: 0) {
+                ActivityFeedSection(
+                    entries: viewModel.timeline,
+                    limit: 5,
+                    child: viewModel.child,
+                    devices: viewModel.devices,
+                    heartbeats: viewModel.heartbeats,
+                    cloudKit: viewModel.appState.cloudKit,
+                    onLocate: { await viewModel.requestLocation() }
+                )
+                if viewModel.timeline.count > 5 {
+                    NavigationLink(destination: fullActivityList) {
+                        HStack {
+                            Spacer()
+                            Text("See All Activity")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2)
+                                .foregroundStyle(.blue)
+                            Spacer()
+                        }
+                        .padding(.top, 8)
+                        .padding(.bottom, 4)
+                    }
+                }
+            }
+        case .devices:
+            devicesSection
+        }
+    }
 
     @ViewBuilder
     private var miniMapSection: some View {
@@ -278,12 +282,8 @@ struct ChildDetailView: View {
     @ViewBuilder
     private var todaySummary: some View {
         let hb = viewModel.heartbeats.first
-        let screenMins: Int? = {
-            guard let hb, let mins = hb.screenTimeMinutes,
-                  hb.timestamp >= Calendar.current.startOfDay(for: Date()),
-                  hb.heartbeatSource != "vpnExtension" else { return nil }
-            return mins
-        }()
+        let screenMins = hb?.screenTimeMinutes
+        let unlockCount = hb?.screenUnlockCount
 
         // Schedule status
         let schedStatus: String? = {
@@ -305,7 +305,7 @@ struct ChildDetailView: View {
 
         TodaySummaryCard(
             screenTimeMinutes: screenMins,
-            screenUnlockCount: hb?.screenUnlockCount,
+            screenUnlockCount: unlockCount,
             batteryLevel: hb?.batteryLevel,
             isCharging: hb?.isCharging ?? false,
             lastHeartbeat: hb?.timestamp,
@@ -469,7 +469,7 @@ struct ChildDetailView: View {
             HStack(spacing: 8) {
                 if let hb, let minutes = hb.screenTimeMinutes,
                    hb.timestamp >= Calendar.current.startOfDay(for: Date()),
-                   hb.heartbeatSource != "vpnExtension" {
+                   hb.heartbeatSource != "vpnTunnel" {
                     let h = minutes / 60, m = minutes % 60
                     HStack(spacing: 2) {
                         Image(systemName: "hourglass")
@@ -586,7 +586,7 @@ struct ChildDetailView: View {
             HStack(spacing: 8) {
                 if let hb, let minutes = hb.screenTimeMinutes,
                    hb.timestamp >= Calendar.current.startOfDay(for: Date()),
-                   hb.heartbeatSource != "vpnExtension" {
+                   hb.heartbeatSource != "vpnTunnel" {
                     let h = minutes / 60, m = minutes % 60
                     HStack(spacing: 2) {
                         Image(systemName: "hourglass")
@@ -897,12 +897,86 @@ struct ChildDetailView: View {
         .presentationDetents([.medium])
     }
 
+    // MARK: - Dashboard Layout Section
+
+    @ViewBuilder
+    private var dashboardLayoutSection: some View {
+        Section {
+            ForEach(Array(sectionOrder.enumerated()), id: \.element) { index, section in
+                dashboardLayoutRow(section: section, index: index)
+            }
+        } header: {
+            Text("Dashboard Layout")
+        } footer: {
+            Text("Use arrows to reorder. Tap the eye to show or hide sections.")
+        }
+    }
+
+    @ViewBuilder
+    private func dashboardLayoutRow(section: ChildDetailSection, index: Int) -> some View {
+        HStack(spacing: 10) {
+            VStack(spacing: 0) {
+                Button {
+                    guard index > 0 else { return }
+                    sectionOrder.swapAt(index, index - 1)
+                    ChildDetailSection.saveOrder(sectionOrder, for: viewModel.child.id)
+                } label: {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(index > 0 ? .blue : .secondary.opacity(0.3))
+                }
+                .disabled(index == 0)
+
+                Button {
+                    guard index < sectionOrder.count - 1 else { return }
+                    sectionOrder.swapAt(index, index + 1)
+                    ChildDetailSection.saveOrder(sectionOrder, for: viewModel.child.id)
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(index < sectionOrder.count - 1 ? .blue : .secondary.opacity(0.3))
+                }
+                .disabled(index == sectionOrder.count - 1)
+            }
+            .buttonStyle(.plain)
+            .frame(width: 18)
+
+            Image(systemName: section.icon)
+                .font(.system(size: 13))
+                .foregroundColor(hiddenSections.contains(section) ? .gray.opacity(0.4) : .blue)
+                .frame(width: 20)
+
+            Text(section.displayName)
+                .font(.subheadline)
+                .foregroundColor(hiddenSections.contains(section) ? .secondary : .primary)
+
+            Spacer()
+
+            Button {
+                if hiddenSections.contains(section) {
+                    hiddenSections.remove(section)
+                } else {
+                    hiddenSections.insert(section)
+                }
+                ChildDetailSection.saveHidden(hiddenSections, for: viewModel.child.id)
+            } label: {
+                Image(systemName: hiddenSections.contains(section) ? "eye.slash" : "eye")
+                    .font(.system(size: 14))
+                    .foregroundColor(hiddenSections.contains(section) ? .gray.opacity(0.4) : .blue)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     // MARK: - Settings Sheet (Restrictions + Web Filter + Location Mode + Permissions)
 
     @ViewBuilder
     private var settingsSheet: some View {
         NavigationStack {
             List {
+                // Dashboard Layout
+                dashboardLayoutSection
+
                 // Location Mode
                 Section("Location Tracking") {
                     Picker("Mode", selection: $locationMode) {
@@ -1182,7 +1256,7 @@ struct ChildDetailView: View {
                         .foregroundStyle(shieldsOK ? .green : .secondary)
                 }
 
-                if hb.heartbeatSource == "vpnExtension" {
+                if hb.heartbeatSource == "vpnTunnel" {
                     Text("(via tunnel)")
                         .foregroundStyle(.orange)
                 }
@@ -1288,8 +1362,8 @@ struct ChildDetailView: View {
         case "reconcile": return "auto-reconciled"
         case "freeWindowStart": return "free time started"
         case "freeWindowEnd": return "free time ended"
-        case "essentialWindowStart": return "essential mode started"
-        case "essentialWindowEnd": return "essential mode ended"
+        case "essentialWindowStart": return "locked mode started"
+        case "essentialWindowEnd": return "locked mode ended"
         default: return reason
         }
     }

@@ -35,14 +35,49 @@ final class DNSProxy {
     /// The tunnel's own IP address (DNS queries arrive addressed to this).
     private let tunnelIP: Data = Data([198, 18, 0, 1])
 
-    init(provider: NEPacketTunnelProvider, upstreamDNSServer: String) {
+    /// App Group storage for reading restrictions (safe search).
+    private let storage: AppGroupStorage
+
+    init(provider: NEPacketTunnelProvider, upstreamDNSServer: String, storage: AppGroupStorage) {
         self.provider = provider
         self.upstreamDNS = NWHostEndpoint(hostname: upstreamDNSServer, port: "53")
+        self.storage = storage
+    }
+
+    // MARK: - Safe Search
+
+    /// Maps search engine domains to their safe search IP addresses.
+    /// When denyExplicitContent is enabled, DNS queries for these domains
+    /// return the safe search IP instead of the real one.
+    private static let safeSearchRedirects: [String: String] = [
+        // Google → forcesafesearch.google.com
+        "www.google.com": "216.239.38.120",
+        "google.com": "216.239.38.120",
+        // YouTube → restrictmoderate.youtube.com
+        "www.youtube.com": "216.239.38.119",
+        "youtube.com": "216.239.38.119",
+        "m.youtube.com": "216.239.38.119",
+        // Bing → strict.bing.com
+        "www.bing.com": "204.79.197.220",
+        "bing.com": "204.79.197.220",
+        // DuckDuckGo → safe.duckduckgo.com
+        "duckduckgo.com": "52.142.124.215",
+        "www.duckduckgo.com": "52.142.124.215",
+    ]
+
+    /// Check if a domain should be redirected for safe search.
+    /// Returns the safe IP if applicable, nil otherwise.
+    private func safeSearchIP(for domain: String) -> String? {
+        guard storage.readDeviceRestrictions()?.denyExplicitContent == true else { return nil }
+        return Self.safeSearchRedirects[domain.lowercased()]
     }
 
     // MARK: - Lifecycle
 
     func start() {
+        // Restore persisted counts from App Group so data survives tunnel restarts.
+        restoreFromAppGroup()
+
         // Create UDP session to upstream DNS (bypasses tunnel via NEProvider base class)
         upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
         upstreamSession?.setReadHandler({ [weak self] datagrams, error in
@@ -108,8 +143,23 @@ final class DNSProxy {
         let txnID = UInt16(dnsPayload[0]) << 8 | UInt16(dnsPayload[1])
 
         // Parse domain name from question section
-        if let domain = parseDNSQuestionDomain(dnsPayload) {
+        let domain = parseDNSQuestionDomain(dnsPayload)
+        if let domain {
             recordDomainQuery(domain)
+        }
+
+        // Safe Search: if this domain should be redirected, return a spoofed response
+        if let domain, let safeIP = safeSearchIP(for: domain) {
+            let response = buildSafeSearchResponse(query: dnsPayload, ip: safeIP)
+            let responsePacket = buildIPPacket(
+                sourceIP: tunnelIP,
+                destIP: sourceIP,
+                sourcePort: 53,
+                destPort: sourcePort,
+                payload: response
+            )
+            provider?.packetFlow.writePackets([responsePacket], withProtocols: [AF_INET as NSNumber])
+            return
         }
 
         // Store pending query for response routing
@@ -183,6 +233,76 @@ final class DNSProxy {
         return labels.isEmpty ? nil : labels.joined(separator: ".")
     }
 
+    // MARK: - Safe Search Response
+
+    /// Build a DNS response that returns the given IP for an A-record query.
+    /// Copies the transaction ID and question section from the original query.
+    private func buildSafeSearchResponse(query: Data, ip: String) -> Data {
+        guard query.count >= 12 else { return query }
+
+        // Parse IP string to 4 bytes
+        let octets = ip.split(separator: ".").compactMap { UInt8($0) }
+        guard octets.count == 4 else { return query }
+
+        var response = Data()
+
+        // Transaction ID (2 bytes) — copy from query
+        response.append(query[0])
+        response.append(query[1])
+
+        // Flags: standard response, no error, recursion available
+        response.append(0x81) // QR=1, Opcode=0, AA=0, TC=0, RD=1
+        response.append(0x80) // RA=1, Z=0, RCODE=0
+
+        // QDCOUNT = 1
+        response.append(0x00)
+        response.append(0x01)
+        // ANCOUNT = 1
+        response.append(0x00)
+        response.append(0x01)
+        // NSCOUNT = 0
+        response.append(0x00)
+        response.append(0x00)
+        // ARCOUNT = 0
+        response.append(0x00)
+        response.append(0x00)
+
+        // Question section — copy from query (starts at byte 12)
+        // Find end of question: scan past domain name + 4 bytes (QTYPE + QCLASS)
+        var offset = 12
+        while offset < query.count {
+            let len = query[offset]
+            if len == 0 { offset += 1; break }
+            offset += Int(len) + 1
+        }
+        offset += 4 // QTYPE (2) + QCLASS (2)
+
+        // Copy question section
+        if offset <= query.count {
+            response.append(query.subdata(in: 12..<offset))
+        }
+
+        // Answer section: pointer to name in question + A record
+        response.append(0xC0) // Pointer to offset 12 (domain name in question)
+        response.append(0x0C)
+        response.append(0x00) // TYPE = A (1)
+        response.append(0x01)
+        response.append(0x00) // CLASS = IN (1)
+        response.append(0x01)
+        response.append(0x00) // TTL = 300 seconds
+        response.append(0x00)
+        response.append(0x01)
+        response.append(0x2C)
+        response.append(0x00) // RDLENGTH = 4
+        response.append(0x04)
+        // RDATA = IP address
+        for octet in octets {
+            response.append(octet)
+        }
+
+        return response
+    }
+
     // MARK: - IP Packet Construction
 
     private func buildIPPacket(sourceIP: Data, destIP: Data, sourcePort: UInt16, destPort: UInt16, payload: Data) -> Data {
@@ -240,24 +360,32 @@ final class DNSProxy {
         // Skip infrastructure noise
         if DomainCategorizer.isNoise(fullDomain) || DomainCategorizer.isNoise(root) { return }
 
+        // Use display domain to preserve meaningful subdomains
+        let display = DomainCategorizer.displayDomain(fullDomain)
         let (flagged, category) = DomainCategorizer.categorize(root)
         let now = Date()
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
+        let slot = DomainHit.slotIndex(hour: comps.hour ?? 0, minute: comps.minute ?? 0)
 
         lock.lock()
         totalQueries += 1
-        if var existing = domainCounts[root] {
+        if var existing = domainCounts[display] {
             existing.count += 1
             existing.lastSeen = now
+            var slots = existing.slotCounts ?? [:]
+            slots[slot, default: 0] += 1
+            existing.slotCounts = slots
             if flagged && !existing.flagged {
                 existing.flagged = true
                 existing.category = category
             }
-            domainCounts[root] = existing
+            domainCounts[display] = existing
         } else {
-            domainCounts[root] = DomainHit(
-                domain: root, count: 1,
+            domainCounts[display] = DomainHit(
+                domain: display, count: 1,
                 firstSeen: now, lastSeen: now,
-                flagged: flagged, category: category
+                flagged: flagged, category: category,
+                slotCounts: [slot: 1]
             )
         }
         lock.unlock()
@@ -285,7 +413,7 @@ final class DNSProxy {
         )
     }
 
-    /// Flush to App Group storage for the main app to read.
+    /// Flush to App Group storage so data survives tunnel restarts.
     func flushToAppGroup() {
         lock.lock()
         let domains = Array(domainCounts.values)
@@ -306,12 +434,49 @@ final class DNSProxy {
         defaults?.set(Date().timeIntervalSince1970, forKey: "dnsActivityUpdatedAt")
     }
 
+    /// Restore persisted counts from App Group after tunnel restart.
+    private func restoreFromAppGroup() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let today = dateFormatter.string(from: Date())
+
+        // Only restore if the persisted data is from today
+        guard defaults?.string(forKey: "dnsActivityDate") == today,
+              let data = defaults?.data(forKey: "dnsActivityDomains"),
+              let saved = try? JSONDecoder().decode([DomainHit].self, from: data) else {
+            return
+        }
+
+        lock.lock()
+        for hit in saved {
+            if let existing = domainCounts[hit.domain] {
+                // Keep whichever has the higher count (in-memory may already have new queries)
+                if hit.count > existing.count {
+                    domainCounts[hit.domain] = hit
+                }
+            } else {
+                domainCounts[hit.domain] = hit
+            }
+        }
+        let savedTotal = defaults?.integer(forKey: "dnsActivityTotalQueries") ?? 0
+        totalQueries = max(totalQueries, savedTotal)
+        lock.unlock()
+
+        NSLog("[DNSProxy] Restored \(saved.count) domains from App Group (\(savedTotal) total queries)")
+    }
+
     /// Reset daily counters (call at midnight).
     func resetDaily() {
         lock.lock()
         domainCounts.removeAll()
         totalQueries = 0
         lock.unlock()
+
+        // Clear persisted data too
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        defaults?.removeObject(forKey: "dnsActivityDomains")
+        defaults?.set(0, forKey: "dnsActivityTotalQueries")
     }
 
     /// Clean up stale pending queries older than 10 seconds.

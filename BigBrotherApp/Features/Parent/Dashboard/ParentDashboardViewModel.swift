@@ -39,6 +39,146 @@ final class ParentDashboardViewModel: CommandSendable {
     /// Tracks when a timed lock-down (internet block) expires per child.
     var lockDownExpiries: [ChildProfileID: Date] = [:]
 
+    // MARK: - Family Pause
+
+    /// Whether the family pause button is shown in the dashboard toolbar.
+    var familyPauseEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "familyPauseEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "familyPauseEnabled") }
+    }
+
+    /// When the current family pause expires (nil = not paused).
+    var familyPauseExpiresAt: Date? {
+        get {
+            let ts = UserDefaults.standard.double(forKey: "familyPauseExpiresAt")
+            guard ts > 0 else { return nil }
+            let date = Date(timeIntervalSince1970: ts)
+            return date > Date() ? date : nil
+        }
+        set {
+            if let date = newValue {
+                UserDefaults.standard.set(date.timeIntervalSince1970, forKey: "familyPauseExpiresAt")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "familyPauseExpiresAt")
+            }
+        }
+    }
+
+    var isFamilyPaused: Bool { familyPauseExpiresAt != nil }
+
+    /// Snapshot of parent-side state before pause, so we can restore on unpause.
+    struct PauseSnapshot: Codable {
+        let pausedAt: Date
+        let unlockExpiries: [String: Date]           // ChildProfileID.rawValue → expiry
+        let timedUnlockPhases: [String: TimedUnlockPhase]
+        let timedUnlockPenaltyDeductions: [String: Int]
+        let scheduleActiveChildIDs: [String]
+        let expectedModes: [String: String]          // childID → LockMode.rawValue
+    }
+
+    private var pauseSnapshot: PauseSnapshot? {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: "familyPauseSnapshot") else { return nil }
+            return try? JSONDecoder().decode(PauseSnapshot.self, from: data)
+        }
+        set {
+            if let snapshot = newValue, let data = try? JSONEncoder().encode(snapshot) {
+                UserDefaults.standard.set(data, forKey: "familyPauseSnapshot")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "familyPauseSnapshot")
+            }
+        }
+    }
+
+    func pauseAll() async {
+        // Snapshot current state before pausing
+        pauseSnapshot = PauseSnapshot(
+            pausedAt: Date(),
+            unlockExpiries: Dictionary(uniqueKeysWithValues: unlockExpiries.map { ($0.key.rawValue, $0.value) }),
+            timedUnlockPhases: Dictionary(uniqueKeysWithValues: timedUnlockPhases.map { ($0.key.rawValue, $0.value) }),
+            timedUnlockPenaltyDeductions: Dictionary(uniqueKeysWithValues: timedUnlockPenaltyDeductions.map { ($0.key.rawValue, $0.value) }),
+            scheduleActiveChildIDs: scheduleActiveChildren.map(\.rawValue),
+            expectedModes: Dictionary(uniqueKeysWithValues: appState.expectedModes.compactMap { k, v in
+                (k.rawValue, v.mode.rawValue)
+            })
+        )
+
+        let duration = 3600 // 1 hour
+        familyPauseExpiresAt = Date().addingTimeInterval(Double(duration))
+        await lockDownAll(seconds: duration)
+    }
+
+    func unpauseAll() async {
+        let snapshot = pauseSnapshot
+        let pausedAt = snapshot?.pausedAt ?? Date()
+        let pauseDuration = Date().timeIntervalSince(pausedAt)
+
+        familyPauseExpiresAt = nil
+        pauseSnapshot = nil
+        isSendingCommand = true
+
+        for child in childProfiles {
+            lockDownExpiries.removeValue(forKey: child.id)
+            let childKey = child.id.rawValue
+
+            // Check if this child had an active temporary unlock when paused
+            if let originalExpiry = snapshot?.unlockExpiries[childKey] {
+                let remaining = originalExpiry.timeIntervalSince(pausedAt)
+                if remaining > 10 {
+                    // Re-issue temp unlock with remaining time
+                    let restoredExpiry = Date().addingTimeInterval(remaining)
+                    unlockExpiries[child.id] = restoredExpiry
+                    appState.expectedModes[child.id] = (.unlocked, Date())
+                    try? await appState.sendCommand(
+                        target: .child(child.id),
+                        action: .temporaryUnlock(durationSeconds: Int(remaining))
+                    )
+                    continue
+                }
+            }
+
+            // Check if this child had a timed unlock phase when paused
+            if let phase = snapshot?.timedUnlockPhases[childKey] {
+                let penaltyRemaining = phase.penaltyEndsAt.timeIntervalSince(pausedAt)
+                let unlockRemaining = phase.unlockEndsAt.timeIntervalSince(pausedAt)
+                if unlockRemaining > 10 {
+                    // Shift the phase forward by pause duration
+                    let newPhase = TimedUnlockPhase(
+                        penaltyEndsAt: Date().addingTimeInterval(max(0, penaltyRemaining)),
+                        unlockEndsAt: Date().addingTimeInterval(unlockRemaining)
+                    )
+                    timedUnlockPhases[child.id] = newPhase
+                    if let deduction = snapshot?.timedUnlockPenaltyDeductions[childKey] {
+                        timedUnlockPenaltyDeductions[child.id] = deduction
+                    }
+
+                    // Re-send timed unlock with remaining total seconds
+                    let penaltySecs = Int(max(0, penaltyRemaining))
+                    let totalSecs = Int(unlockRemaining)
+                    appState.expectedModes[child.id] = (.unlocked, Date())
+                    try? await appState.sendCommand(
+                        target: .child(child.id),
+                        action: .timedUnlock(totalSeconds: totalSecs, penaltySeconds: penaltySecs)
+                    )
+                    continue
+                }
+            }
+
+            // Default: return to schedule
+            if snapshot?.scheduleActiveChildIDs.contains(childKey) ?? true {
+                scheduleActiveChildren.insert(child.id)
+            }
+            appState.expectedModes[child.id] = nil
+            try? await appState.sendCommand(target: .child(child.id), action: .returnToSchedule)
+        }
+
+        commandFeedback = "Unpause — restored previous states"
+        isSendingCommand = false
+        startCountdownTimer()
+        startConfirmationPolling()
+        autoDismissFeedback()
+    }
+
     private static let unlockExpiriesKey = "unlockExpiries"
     private static let timedUnlockPhasesKey = "timedUnlockPhases"
 
@@ -822,20 +962,21 @@ final class ParentDashboardViewModel: CommandSendable {
                     }
                 }
 
-                // When penalty phase ends (transitioning to unlock), stop the running
-                // Firebase timer and set the correct remaining penalty (original minus consumed).
+                // When penalty phase ends (transitioning to unlock), clear the Firebase timer.
+                // Check both: timer still running (we catch it mid-countdown) OR
+                // timer already expired naturally (Firebase countdown finished before we checked).
                 for (childID, phase) in self.timedUnlockPhases {
                     if self.now >= phase.penaltyEndsAt,
                        self.now < phase.unlockEndsAt,
+                       self.timedUnlockPenaltyDeductions[childID] != nil,
                        let child = self.childProfiles.first(where: { $0.id == childID }) {
-                        let timer = self.penaltyTimer(for: child)
-                        if timer?.isActivelyRunning == true {
-                            // Deduct consumed penalty and stop the timer.
-                            await self.deductAndStopPenalty(for: child)
-                            #if DEBUG
-                            print("[BigBrother] Penalty phase ended for \(child.name), stopped timer (device now unlocked)")
-                            #endif
-                        }
+                        // Deduct consumed penalty and clear/stop the timer.
+                        await self.deductAndStopPenalty(for: child)
+                        // Remove deduction so we don't re-fire every second.
+                        self.timedUnlockPenaltyDeductions.removeValue(forKey: childID)
+                        #if DEBUG
+                        print("[BigBrother] Penalty phase ended for \(child.name), timer cleared (device now unlocked)")
+                        #endif
                     }
                 }
 
@@ -873,6 +1014,11 @@ final class ParentDashboardViewModel: CommandSendable {
                             self.appState.expectedModes[childID] = (.locked, Date())
                         }
                     }
+                }
+
+                // Auto-unpause when family pause expires
+                if self.isFamilyPaused, let pauseExpiry = self.familyPauseExpiresAt, pauseExpiry <= self.now {
+                    await self.unpauseAll()
                 }
 
                 // Always keep self.now updated so schedule status stays current.

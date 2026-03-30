@@ -150,35 +150,40 @@ final class DrivingMonitor: @unchecked Sendable {
             return snapshot
         }
 
-        guard tripSnapshot != nil else { return }
+        guard let snap = tripSnapshot else { return }
 
         stopBrakingDetection()
         cancelPhoneCheck()
 
-        // Log trip completion
-        if let snap = tripSnapshot {
-            let duration = Date().timeIntervalSince(snap.startedAt)
+        let duration = Date().timeIntervalSince(snap.startedAt)
 
-            let details: [String: Any] = [
-                "maxSpeedMPH": Int(snap.maxMPH),
-                "avgSpeedMPH": Int(snap.avgMPH),
-                "durationMinutes": Int(duration / 60),
-                "distanceMiles": String(format: "%.1f", snap.miles),
-                "hardBrakingCount": snap.brakes,
-                "phoneUsageCount": snap.phone,
-                "speedLimitViolations": snap.speedViolations
-            ]
-
-            if let json = try? JSONSerialization.data(withJSONObject: details),
-               let str = String(data: json, encoding: .utf8) {
-                eventLogger.log(.tripCompleted, details: str)
-                syncEventsImmediately()
-            }
-
-            #if DEBUG
-            print("[DrivingMonitor] Trip ended: \(Int(snap.maxMPH)) mph max, \(String(format: "%.1f", snap.miles)) mi, \(snap.brakes) hard brakes, \(snap.phone) phone events")
-            #endif
+        // Filter out false trips — walking, GPS jitter, brief vehicle proximity.
+        // Real car trips are > 0.2 miles AND > 10 mph max speed AND > 1 minute.
+        if snap.miles < 0.2 || snap.maxMPH < 10 || duration < 60 {
+            logDiag("Trip discarded (too short: \(String(format: "%.1f", snap.miles))mi, \(Int(snap.maxMPH))mph max, \(Int(duration))s)")
+            return
         }
+
+        // Log trip completion
+        let details: [String: Any] = [
+            "maxSpeedMPH": Int(snap.maxMPH),
+            "avgSpeedMPH": Int(snap.avgMPH),
+            "durationMinutes": Int(duration / 60),
+            "distanceMiles": String(format: "%.1f", snap.miles),
+            "hardBrakingCount": snap.brakes,
+            "phoneUsageCount": snap.phone,
+            "speedLimitViolations": snap.speedViolations
+        ]
+
+        if let json = try? JSONSerialization.data(withJSONObject: details),
+           let str = String(data: json, encoding: .utf8) {
+            eventLogger.log(.tripCompleted, details: str)
+            syncEventsImmediately()
+        }
+
+        #if DEBUG
+        print("[DrivingMonitor] Trip ended: \(Int(snap.maxMPH)) mph max, \(String(format: "%.1f", snap.miles)) mi, \(snap.brakes) hard brakes, \(snap.phone) phone events")
+        #endif
     }
 
     // MARK: - Location Updates

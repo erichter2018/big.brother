@@ -115,6 +115,25 @@ struct ParentDashboardView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dashboard. Tap to ping all devices.")
             }
+            if viewModel.familyPauseEnabled {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task {
+                            if viewModel.isFamilyPaused {
+                                await viewModel.unpauseAll()
+                            } else {
+                                await viewModel.pauseAll()
+                            }
+                        }
+                    } label: {
+                        Text(viewModel.isFamilyPaused ? "Unpause" : "Pause All")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(viewModel.isFamilyPaused ? .green : .red)
+                    }
+                    .disabled(viewModel.isSendingCommand)
+                }
+            }
             if showAddChild {
                 ToolbarItem(placement: .primaryAction) {
                     NavigationLink {
@@ -128,10 +147,7 @@ struct ParentDashboardView: View {
         }
         .navigationDestination(item: $selectedChild) { nav in
             ChildDetailView(
-                viewModel: ChildDetailViewModel(
-                    appState: viewModel.appState,
-                    child: nav.child
-                ),
+                viewModel: viewModel.appState.childDetailViewModel(forID: nav.child.id),
                 dominantMode: nav.mode
             )
         }

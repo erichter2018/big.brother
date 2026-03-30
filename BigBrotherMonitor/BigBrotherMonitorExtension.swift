@@ -228,8 +228,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         guard window.contains(Date()) else { return }
 
         // Block scheduled unlocks if the main app was force-closed.
+        // This is the ONE case where we nag — the kid's free time is being blocked.
         if shouldTreatMainAppAsUnavailable() {
-            sendForceCloseNag()
+            sendForceCloseEnforcement(nagNotification: true)
             logEvent(.scheduleTriggered, details: "Free window blocked — app force-closed: \(activity.rawValue)")
             return
         }
@@ -329,7 +330,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         applyShieldingToAllStores(mode: .locked, policy: policy)
         updateSharedState(mode: .locked)
         logEvent(.scheduleTriggered, details: "Essential window started: \(activity.rawValue)")
-        sendModeNotification(title: "Essential Mode", body: "Only essential apps are available.")
+        sendModeNotification(title: "Locked Mode", body: "Only essential apps are available.")
     }
 
     /// Essential window ended: return to the profile's locked mode.
@@ -358,7 +359,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         updateSharedState(mode: profile.lockedMode)
         logEvent(.scheduleEnded, details: "Essential window ended, locked to \(profile.lockedMode.rawValue)")
         sendModeNotification(
-            title: "Essential Mode Ended",
+            title: "Locked Mode Ended",
             body: "Device returned to \(profile.lockedMode.displayName) mode."
         )
     }
@@ -592,7 +593,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 // But NEVER block essential mode — tightening restrictions is always safe
                 // and should happen regardless of app state.
                 if scheduleMode == .unlocked && shouldTreatMainAppAsUnavailable() {
-                    sendForceCloseNag()
+                    sendForceCloseEnforcement(nagNotification: true)
                     logEvent(.policyReconciled, details: "Reconciliation: unlock blocked — app dead, essential mode")
                     return
                 } else if scheduleMode == .unlocked {
@@ -612,10 +613,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         // --- Force-close check (regardless of schedule profile) ---
+        // Don't nag the kid when the device is already locked down — shields are
+        // enforced by ManagedSettingsStore independently of the main app.
+        // Only apply essential mode silently; nag only when a free window is blocked.
 
         if shouldTreatMainAppAsUnavailable() {
-            sendForceCloseNag()
-            logEvent(.policyReconciled, details: "Reconciliation: app dead — essential mode until BB reopened")
+            sendForceCloseEnforcement(nagNotification: false)
+            logEvent(.policyReconciled, details: "Reconciliation: app dead — essential mode applied silently")
             return
         }
 
@@ -969,7 +973,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// essentials — less aggressive than blocking everything, but still enforced.
     /// When the main app launches, it clears the forceCloseWebBlocked flag and
     /// re-applies normal enforcement with proper exemptions via performRestoration().
-    private func sendForceCloseNag() {
+    /// Apply essential-only enforcement. Only sends a notification when `nagNotification`
+    /// is true (free window blocked). Silent when the device is already locked down.
+    private func sendForceCloseEnforcement(nagNotification: Bool) {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         defaults?.set("appClosed", forKey: "lastShieldChangeReason")
 
@@ -981,16 +987,17 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
         updateSharedState(mode: .locked)
 
-        // Throttle notification: don't nag more than once per 15 minutes.
-        // Every reconciliation cycle re-triggers this, so throttle prevents spam.
+        guard nagNotification else { return }
+
+        // Throttle notification: don't nag more than once per hour.
         let lastNagAt = defaults?.double(forKey: "forceCloseLastNagAt") ?? 0
         let nagAge = Date().timeIntervalSince1970 - lastNagAt
-        guard nagAge > 900 else { return }  // 15 minutes
+        guard nagAge > 3600 else { return }  // 1 hour
         defaults?.set(Date().timeIntervalSince1970, forKey: "forceCloseLastNagAt")
 
         let content = UNMutableNotificationContent()
-        content.title = "Essential Mode"
-        content.body = "Open Big Brother to restore your full app access."
+        content.title = "Free Time Blocked"
+        content.body = "Open Big Brother to start your free time."
         content.sound = .default
         content.interruptionLevel = .timeSensitive
 

@@ -19,7 +19,7 @@ struct AlwaysAllowedSetupView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
-                Text("Select apps that should always be available in Daily Mode. These apps will NOT be blocked.")
+                Text("Select apps that should always be available in Restricted mode. These apps will NOT be blocked.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

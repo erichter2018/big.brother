@@ -6,65 +6,333 @@ public enum DomainCategorizer {
 
     // MARK: - Noise Filtering
 
+    // Root domains that are infrastructure noise — checked against rootDomain() output.
+    private static let noiseDomains: Set<String> = [
+        // Apple
+        "apple.com", "icloud.com", "mzstatic.com", "apple-dns.net", "aaplimg.com",
+        "apple-cloudkit.com", "cdn-apple.com", "icloud-content.com",
+        "safebrowsing.apple", "app-analytics-services.com",
+        // Google
+        "googleapis.com", "gstatic.com", "googlesyndication.com", "googleadservices.com",
+        "google-analytics.com", "googletagmanager.com", "googletagservices.com",
+        "gvt1.com", "gvt2.com", "1e100.net", "googleusercontent.com", "googlevideo.com",
+        "ggpht.com", "withgoogle.com", "adtrafficquality.google",
+        "2mdn.net", "googlesource.com", "google.com",
+        // CDNs
+        "akamaihd.net", "akamai.net", "akamaiedge.net", "akamaitechnologies.com",
+        "akadns.net", "akam.net", "akahost.net", "edgekey.net", "edgesuite.net",
+        "cloudfront.net", "cloudflare.com", "cloudflare.net", "cloudflare-dns.com",
+        "cdninstagram.com", "fbcdn.net",
+        "fastly.net", "fastlylb.net", "fastly-edge.com", "fastly.com",
+        "edgecastcdn.net", "azureedge.net", "azurefd.net", "azure.com",
+        "jsdelivr.net", "unpkg.com", "cdnjs.com",
+        "llnwd.net", "lldns.net", "hwcdn.net", "stackpathdns.com",
+        "bamgrid.com", "go.com",
+        // TikTok CDN/infra
+        "tiktokcdn.com", "tiktokcdn-us.com", "tiktokv.us", "tiktokv.com",
+        "byteoversea.com", "bytecdn.cn", "ibytedtos.com", "bytedance.com",
+        "sgsnssdk.com", "musical.ly", "ibyteimg.com", "pstatp.com",
+        "ttoverseaus.net",
+        // Twitter/X infra
+        "twimg.com", "t.co",
+        // Meta infra
+        "fbsbx.com", "facebook.net", "fbpigeon.com", "accountkit.com",
+        // Snap infra
+        "sc-cdn.net", "sc-static.net", "snapkit.co", "snapkit.com", "sc-gw.com",
+        // Ad tech / programmatic
+        "doubleclick.net", "adsrvr.org", "adnxs.com", "criteo.com",
+        "moatads.com", "scorecardresearch.com", "quantserve.com",
+        "taboola.com", "outbrain.com", "unity3d.com",
+        "rubiconproject.com", "casalemedia.com", "doubleverify.com",
+        "iponweb.net", "impactradius-event.com", "impactradius.com",
+        "pubmatic.com", "openx.net", "spotxchange.com", "smartadserver.com",
+        "advertising.com", "mopub.com", "inmobi.com", "vungle.com",
+        "chartboost.com", "ironsrc.com", "fyber.com",
+        // Analytics / tracking
+        "appsflyer.com", "appsflyersdk.com", "adjust.com", "branch.io",
+        "amplitude.com", "mixpanel.com", "segment.io", "segment.com",
+        "sentry.io", "crashlytics.com", "newrelic.com", "nr-data.net",
+        "demdex.net", "omtrdc.net", "app-measurement.com",
+        "kochava.com", "onesignal.com", "braze.com", "conviva.com",
+        "imrworldwide.com", "nielsencollections.com", "nielsen.com",
+        "chartbeat.net", "chartbeat.com", "statsig.com",
+        "livesegmentservice.com", "dmed.technology",
+        "vtwenty.com", "sng.link", "nc0.co",
+        "hotjar.com", "mouseflow.com", "optimizely.com", "launchdarkly.com",
+        // Cookie consent / privacy
+        "onetrust.com", "onetrust.io", "cookielaw.org",
+        // Adobe
+        "adobedtm.com", "adobeprimetime.com", "adobepass.com", "adobe.com",
+        "typekit.net",
+        // Microsoft
+        "msftconnecttest.com", "windowsupdate.com", "microsoft.com",
+        "msedge.net", "t-msedge.net", "ax-msedge.net",
+        "msn.com", "live.com", "bing.net", "appcenter.ms",
+        // DNS/network
+        "in-addr.arpa", "ip6.arpa", "resolver.arpa",
+        "one.one", "dns.google",
+        // Push/messaging infra
+        "push.apple.com", "firebaseio.com", "firebaseapp.com",
+        "firebasedatabase.app",
+        // Certificate/OCSP
+        "digicert.com", "letsencrypt.org", "pki.goog", "globalsign.com",
+        "symantec.com", "verisign.com", "entrust.net",
+        // YouTube infra
+        "ytimg.com", "yt3.ggpht.com", "youtube-nocookie.com", "youtubei.googleapis.com",
+        // CDN/security
+        "incapdns.net", "incapsula.com", "imperva.com",
+        // Apple additional
+        "me.com",
+        // Product analytics
+        "aptrinsic.com", "gainsight.com", "pendo.io", "walkme.com",
+        // Cloud infra
+        "amazonaws.com", "awsstatic.com",
+        // AMP
+        "ampproject.org",
+        // Local network
+        "fios-router.home", "local", "localhost", "home",
+        // Misc tracking / infra
+        "fontawesome.com", "fn-pz.com", "dewrain.world", "iteleserve.com",
+        "real.vg", "realapp.com",
+        // Adobe CDN / media
+        "scene7.com",
+        // Email tracking pixels / ESP
+        "fdske.com", "awstrack.me", "esp1.co",
+        // Microsoft crash/analytics
+        "hockeyapp.net",
+        // Marketing / push infra
+        "braze-images.com",
+        // Oracle / cloud infra
+        "oraclecloud.com",
+        // Ad/tracking misc
+        "akaquill.net", "techsolutions.net",
+        // Link shorteners (tracking)
+        "bnc.lt",
+        // Cloudflare analytics
+        "cloudflareinsights.com",
+        // Ad networks / mobile ads
+        "moloco.com", "supersonicads.com", "tiktokpangle-b.us",
+        "craftsmanplus.com", "oldspice.com",
+        // Salesforce infra
+        "salesforce-scrt.com", "sfdcfc.net",
+        // Alibaba Cloud CDN
+        "aliyuncsslbintl.com",
+        // Apple ad attribution
+        "app-ads-services.com",
+        // Retail CDN
+        "walmartimages.com", "shopifycloud.com",
+        // Ad sync / retargeting
+        "rezync.com",
+        // DNS infra
+        "ultradns-wal.co",
+        // Content classification
+        "assessor.com", "webcontentassessor.com",
+        // Azure
+        "trafficmanager.net",
+        // Ad tech / programmatic (round 2)
+        "inbake.com", "appier.net", "pricespider.com",
+        "cybermission.tech", "extragum.com", "bidswitch.net",
+        // Shopify infra (not shopify.com itself)
+        "shopifysvc.com",
+        // Generic / tracking
+        "site.com",
+        // Apple system services
+        "apple.news",
+        // Retail shortlinks
+        "wal.co",
+        // Fraud detection / bot protection
+        "riskified.com", "px-cloud.net",
+        // reCAPTCHA
+        "recaptcha.net",
+        // Cookie consent (round 2)
+        "osano.com",
+        // Video / TV ad tech
+        "innovid.com", "ispot.tv",
+        // Review / UGC infra
+        "bazaarvoice.com",
+        // Cross-device tracking
+        "tapad.com",
+        // Ad networks (round 3)
+        "adsmoloco.com", "criteo.net", "tiktokpangle.us", "appiersig.com",
+        // A/B testing
+        "growthbook.io",
+        // Shopify store infra
+        "myshopify.com",
+        // Brand ad landing pages
+        "oreo.com",
+        // Retail / sports image CDN
+        "frgimages.com",
+        // App API infra
+        "capcutapi.us",
+        // Email marketing / tracking (round 2)
+        "mlbemail.com", "newyorktimesinfo.com", "flodesk.com",
+        // Adobe data collection
+        "adobedc.net",
+        // ESPN SSL/CDN infra
+        "espssl.com",
+        // Link tracking
+        "spgo.io",
+        // College admissions CRM
+        "technolutions.net",
+        // CDN proxy
+        "fastly-masque.net",
+        // In-app purchase SDK
+        "revenuecat.com",
+        // Crash / performance monitoring
+        "bugsnag.com", "dynatrace.com",
+        // A/B testing / optimization
+        "abtasty.com", "polldaddy.com", "visualwebsiteoptimizer.com",
+        // E-commerce infra
+        "channeladvisor.com", "stylitics.com", "curalate.com", "yotpo.com",
+        "signifyd.com", "gorgias.chat", "klarna.net",
+        // Video ad / player infra
+        "tvpage.com", "connatix.com", "plyr.io", "jwplatform.com",
+        "aniview.com", "trinitymedia.ai", "sundaysky.com",
+        // Ad exchanges / SSPs / DSPs
+        "narrativ.com", "kargo.com", "dotomi.com", "liadm.com",
+        "33across.com", "lijit.com", "undertone.com", "turn.com",
+        "teads.tv", "3lift.com", "media.net", "id5-sync.com",
+        "eu-1-id5-sync.com", "sonobi.com", "contextweb.com",
+        "exelator.com", "sharethrough.com", "1rx.io", "thisisdax.com",
+        "mookie1.com", "bfmio.com", "deepintent.com", "richaudience.com",
+        "loopme.me", "iqzone.com", "hadronid.net", "stackadapt.com",
+        "videoamp.com", "emxdgt.com", "colossusssp.com",
+        "simpli.fi", "eyeota.net", "bidr.io", "onetag-sys.com",
+        "smilewanted.com", "pippio.com", "yieldmo.com",
+        "storygize.net", "ipredictive.com", "gumgum.com",
+        "blogherads.com", "krushmedia.com", "fastclick.net",
+        "rfihub.com", "presage.io", "smaato.net", "rtbsystem.com",
+        "sitescout.com", "iqm.com", "prmutv.co", "excelate.ai",
+        "mediago.io", "360yield.com", "betweendigital.com",
+        "celtra.com", "seedtag.com", "eskimi.com", "openwebmp.com",
+        "servenobid.com", "optable.co", "agkn.com", "crwdcntrl.net",
+        "ogury.io", "cadent.com", "cadent.app",
+        // Ad verification / fraud
+        "adsafeprotected.com", "confiant-integrations.net",
+        "adlightning.com", "dv.tech", "ad-score.com",
+        // Cross-device / identity
+        "tapad.com", "intentiq.com", "liveintent.com",
+        "thrtle.com", "zetaglobal.io",
+        // Email / push marketing
+        "boomtrain.com", "iterable.com", "klaviyo.com",
+        "pardot.com",
+        // Data / audience platforms
+        "permutive.com", "permutive.app", "cxense.com",
+        "ml314.com", "singular.net", "browsiprod.com",
+        // Content analytics
+        "parsely.com", "spot.im", "piano.io", "tinypass.com",
+        // Audio ads
+        "adswizz.com", "tritondigital.com",
+        // Misc tracking / ad tech
+        "kampyle.com", "yellowblue.io", "skimresources.com",
+        "zineone.com", "zineone.live", "tru.am", "crcldu.com",
+        "mygaru.com", "mgaru.dev", "b2c.com", "pubmnet.com",
+        "px-client.net", "tynt.com", "a-mx.net", "a-mo.net",
+        "a-mx.com", "amx1.net", "amxrtb.com", "pghub.io",
+        "privacymanager.io", "trustarc.com", "truste.com", "cookiebot.com",
+        "2o7.net", "omnitagjs.com", "tsbluebox.com",
+        "vistarsagency.com", "bizticket.net", "thinkpivot.io",
+        "ss2.us", "trackonomics.net", "addtoany.com", "measureadv.com",
+        "ad-delivery.net", "adentifi.com", "targetimg1.com",
+        "pmbmonetize.live", "imtwjwoasak.com", "aidemsrv.com",
+        "html-load.com", "fwmrm.net", "zeronaught.com",
+        "rkdms.com", "adotmob.com", "audienceexposure.com",
+        "scalibur.io", "im-apps.net", "geistm.com",
+        "cootlogix.com", "acuityplatform.com",
+        "usbrowserspeed.com", "bttrack.com", "hs-banner.com",
+        "activemetering.com", "rfpx1.com", "medallia.com",
+        "plerdy.com", "beamimpact.com", "copper6.com",
+        "adn.cloud", "mfadsrvr.com", "rqtrk.eu", "trx-hub.com",
+        "clarium.io", "qvdt3feo.com", "postrelease.com",
+        "ad.gt", "admaster.cc", "ads-twitter.com",
+        "insightexpressai.com", "dxtech.ai", "pitaya-clientai.com",
+        // Amazon infra
+        "media-amazon.com", "ssl-images-amazon.com", "amazontrust.com",
+        "a2z.com", "amazon.dev",
+        // Yahoo infra
+        "yimg.com", "yahoodns.net",
+        // Pinterest CDN
+        "pinimg.com",
+        // Ulta internal
+        "ultainc.com",
+        // Misc CDN / infra
+        "polyfill-fastly.io", "ionicframework.com", "lencr.org",
+        "hcaptcha.com", "dewrain.life", "speedcurve.com",
+        "cloudflarestream.com", "rapidssl.com", "elasticbeanstalk.com",
+        "streamtheworld.com", "outbrainimg.com", "outbrain.org",
+        "ak-is2.net", "ov1o.com", "ln-msedge.net",
+        // TikTok additional
+        "tiktokw.us", "tiktokglobalshopv.com", "ttdns2.com", "byteglb.com",
+        // Payment / commerce infra
+        "stripe.com", "stripe.network",
+        // CRM / support infra
+        "hubspot.com", "hubspotusercontent-na1.net", "niceincontact.com",
+        // Publishing / paywall
+        "pmc.com",
+        // Misc
+        "fullstory.com", "godaddy.com", "gravatar.com", "wp.com",
+        "onelink.me", "joinaccountingplus.com", "lnk.to",
+        // Cloud storage infra
+        "backblazeb2.com",
+        // TikTok/ByteDance additional
+        "byteoversea.net", "tiktokv.eu",
+        // WordPress VIP
+        "go-vip.net",
+        // Unknown tracking
+        "trustedstack.com", "puzztake.com", "wp.pl",
+    ]
+
     /// Returns true if the domain is infrastructure noise (CDN, analytics, ads, OS services).
     public static func isNoise(_ domain: String) -> Bool {
         let lower = domain.lowercased()
 
-        // Apple system services
-        if lower.hasSuffix(".apple.com") || lower.hasSuffix(".icloud.com") ||
-           lower.hasSuffix(".mzstatic.com") || lower.hasSuffix(".apple-dns.net") { return true }
+        // Check root domain against the noise set FIRST
+        // (even "live.rezync.com" is noise if rezync.com is in the list)
+        let root = rootDomain(lower)
+        if noiseDomains.contains(root) { return true }
 
-        // Google infrastructure
-        if lower.hasSuffix(".googleapis.com") || lower.hasSuffix(".gstatic.com") ||
-           lower.hasSuffix(".googlesyndication.com") || lower.hasSuffix(".googleadservices.com") ||
-           lower.hasSuffix(".google-analytics.com") || lower.hasSuffix(".googletagmanager.com") ||
-           lower.hasSuffix(".gvt1.com") || lower.hasSuffix(".gvt2.com") ||
-           lower.hasSuffix(".1e100.net") { return true }
+        // Also check the full domain (for subdomains of noise roots)
+        for noise in noiseDomains {
+            if lower == noise || lower.hasSuffix("." + noise) { return true }
+        }
 
-        // CDNs
-        if lower.hasSuffix(".akamaihd.net") || lower.hasSuffix(".akamai.net") ||
-           lower.hasSuffix(".akamaiedge.net") || lower.hasSuffix(".akamaitechnologies.com") ||
-           lower.hasSuffix(".cloudfront.net") || lower.hasSuffix(".cloudflare.com") ||
-           lower.hasSuffix(".cloudflare-dns.com") || lower.hasSuffix(".cdninstagram.com") ||
-           lower.hasSuffix(".fbcdn.net") || lower.hasSuffix(".fastly.net") ||
-           lower.hasSuffix(".fastlylb.net") || lower.hasSuffix(".edgecastcdn.net") ||
-           lower.hasSuffix(".azureedge.net") || lower.hasSuffix(".azurefd.net") ||
-           lower.hasSuffix(".jsdelivr.net") || lower.hasSuffix(".unpkg.com") { return true }
+        // If it has a meaningful subdomain prefix on a non-noise root, keep it
+        // (e.g., "mail.google.com" or "search.yahoo.com" should show)
+        let parts = lower.split(separator: ".")
+        if parts.count > 2 {
+            let firstSub = String(parts[0])
+            if meaningfulSubdomains.contains(firstSub) { return false }
+        }
 
-        // Ad/tracking networks
-        if lower.hasSuffix(".doubleclick.net") || lower.hasSuffix(".adsrvr.org") ||
-           lower.hasSuffix(".adnxs.com") || lower.hasSuffix(".criteo.com") ||
-           lower.hasSuffix(".moatads.com") || lower.hasSuffix(".scorecardresearch.com") ||
-           lower.hasSuffix(".quantserve.com") || lower.hasSuffix(".taboola.com") ||
-           lower.hasSuffix(".outbrain.com") || lower.hasSuffix(".unity3d.com") ||
-           lower.hasSuffix(".appsflyer.com") || lower.hasSuffix(".adjust.com") ||
-           lower.hasSuffix(".branch.io") || lower.hasSuffix(".amplitude.com") ||
-           lower.hasSuffix(".mixpanel.com") || lower.hasSuffix(".segment.io") ||
-           lower.hasSuffix(".segment.com") || lower.hasSuffix(".sentry.io") ||
-           lower.hasSuffix(".crashlytics.com") || lower.hasSuffix(".newrelic.com") ||
-           lower.hasSuffix(".demdex.net") || lower.hasSuffix(".omtrdc.net") { return true }
-
-        // DNS/network infrastructure
-        if lower.hasSuffix(".in-addr.arpa") || lower.hasSuffix(".ip6.arpa") ||
-           lower.hasSuffix(".local") || lower.hasSuffix(".localhost") ||
-           lower == "dns.google" || lower == "dns.cloudflare.com" ||
-           lower == "dns.quad9.net" { return true }
-
-        // Microsoft/system
-        if lower.hasSuffix(".msftconnecttest.com") || lower.hasSuffix(".windowsupdate.com") ||
-           lower.hasSuffix(".microsoft.com") && !lower.contains("bing") { return true }
-
-        // Push notification / messaging infra
-        if lower.hasSuffix(".push.apple.com") || lower.hasSuffix(".courier.push.apple.com") ||
-           lower.hasSuffix(".firebaseio.com") || lower.hasSuffix(".firebaseapp.com") { return true }
-
-        // Certificate / OCSP
-        if lower.contains("ocsp") || lower.contains("crl.") ||
-           lower.hasSuffix(".digicert.com") || lower.hasSuffix(".letsencrypt.org") ||
-           lower.hasSuffix(".pki.goog") { return true }
-
-        // Known short/system domains
+        // Special patterns
+        if lower.hasSuffix(".local") || lower.hasSuffix(".localhost") { return true }
+        if lower.contains("ocsp") || lower.contains("crl.") { return true }
         if lower.count < 4 { return true }
+
+        // Email tracking subdomains (email.etsy.com, email.myfitnesspal.com, etc.)
+        if lower.hasPrefix("email.") { return true }
+
+        // Keyword-based noise detection
+        let noiseKeywords = [
+            "cdn", "static", "metric", "telemetry", "beacon", "pixel", "tracker",
+            "analytics", "adserver", "adsystem", "adtech", "adservice",
+            "doubleclick", "impression", "clicktrack", "retarget",
+            "syndication", "openx", "pubmatic", "appnexus",
+            "measurement", "collect", "reporting",
+            "ultradns", "impervadns",
+            // Broad ad-tech patterns
+            "adsrvr", "adform", "adkernel", "admanmedia", "monetize",
+            "bidswitch", "rtbsystem", "dsp", "ssp",
+        ]
+        for kw in noiseKeywords {
+            if root.contains(kw) { return true }
+        }
+
+        // TLD-based noise (link shorteners, tracking domains)
+        let noiseTLDs = [".link", ".ms", ".arpa"]
+        for tld in noiseTLDs {
+            if lower.hasSuffix(tld) && root.count < 12 { return true }
+        }
 
         return false
     }
@@ -169,5 +437,56 @@ public enum DomainCategorizer {
         }
 
         return "\(parts[parts.count - 2]).\(parts[parts.count - 1])"
+    }
+
+    // MARK: - Subdomain Intelligence
+
+    /// Subdomains that reveal meaningful user behavior.
+    /// If a query matches one of these prefixes, we preserve "prefix.rootdomain" instead of just "rootdomain".
+    private static let meaningfulSubdomains: Set<String> = [
+        // Content type
+        "video", "videos", "music", "play", "watch", "stream", "live",
+        "search", "images", "photos", "maps", "news", "sports",
+        "mail", "chat", "messages", "dm",
+        "shop", "store", "buy", "checkout", "cart",
+        "games", "gaming",
+        // Platform sections
+        "kids", "family", "teen",
+        "shorts",  // YouTube Shorts
+        "reels",   // Instagram Reels
+        "stories",
+    ]
+
+    /// Returns a display-friendly domain that preserves meaningful subdomains.
+    /// "video.tiktok.com" → "video.tiktok.com" (watching videos)
+    /// "www.tiktok.com" → "tiktok.com" (strips www)
+    /// "edge-cdn3.tiktok.com" → "tiktok.com" (strips CDN noise)
+    /// "search.yahoo.com" → "search.yahoo.com" (searching)
+    /// "mail.google.com" → "mail.google.com" (email)
+    public static func displayDomain(_ fullDomain: String) -> String {
+        let lower = fullDomain.lowercased()
+        let root = rootDomain(lower)
+        let parts = lower.split(separator: ".")
+
+        // If it's already a root domain (2 parts), return as-is
+        guard parts.count > 2 else { return root }
+
+        // Check if the first subdomain is meaningful
+        let firstSub = String(parts[0])
+        if meaningfulSubdomains.contains(firstSub) {
+            return "\(firstSub).\(root)"
+        }
+
+        // For 3-part domains, check if the second part is meaningful
+        // e.g., "us.video.example.com" → check "video"
+        if parts.count > 3 {
+            let secondSub = String(parts[1])
+            if meaningfulSubdomains.contains(secondSub) {
+                return "\(secondSub).\(root)"
+            }
+        }
+
+        // Default: just the root domain (strips www, cdn, edge, etc.)
+        return root
     }
 }

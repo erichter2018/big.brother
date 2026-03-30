@@ -17,7 +17,7 @@ struct AlwaysAllowedSelectionView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("Select apps that should always be allowed in Daily Mode for \(childProfile.name).")
+            Text("Select apps that should always be allowed in Restricted mode for \(childProfile.name).")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

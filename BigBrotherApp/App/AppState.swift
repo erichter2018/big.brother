@@ -60,6 +60,22 @@ final class AppState {
         return latestHeartbeats.filter { deviceIDs.contains($0.deviceID) }
     }
 
+    /// Cached child detail view models — prevents re-creation on every dashboard refresh.
+    @ObservationIgnored private var childDetailViewModels: [ChildProfileID: ChildDetailViewModel] = [:]
+
+    func childDetailViewModel(forID childID: ChildProfileID) -> ChildDetailViewModel {
+        if let existing = childDetailViewModels[childID] {
+            existing.ensureDataLoaded()
+            return existing
+        }
+        let child = childProfiles.first(where: { $0.id == childID })
+            ?? ChildProfile(id: childID, familyID: FamilyID(rawValue: ""), name: "Unknown")
+        let vm = ChildDetailViewModel(appState: self, child: child)
+        vm.ensureDataLoaded()
+        childDetailViewModels[childID] = vm
+        return vm
+    }
+
     /// Heartbeat monitoring profiles (parent mode).
     var heartbeatProfiles: [HeartbeatProfile] = []
 
@@ -1107,6 +1123,8 @@ final class AppState {
         }
 
         // Merge heartbeat data into device records BEFORE publishing to UI.
+        // Only assign to @Observable properties when content actually changed
+        // to avoid unnecessary SwiftUI re-renders (which tear down navigationDestination views).
         if var devices = fetchedDevices, let heartbeats = fetchedHeartbeats {
             for heartbeat in heartbeats {
                 if let idx = devices.firstIndex(where: { $0.id == heartbeat.deviceID }) {
@@ -1118,17 +1136,15 @@ final class AppState {
                     if let model = heartbeat.modelIdentifier { devices[idx].modelIdentifier = model }
                 }
             }
-            // Preserve parent-set fields that may not have propagated to CloudKit yet.
             preserveLocalDeviceFields(into: &devices)
-            // Publish merged data in one shot — no intermediate empty state.
-            childDevices = devices
-            latestHeartbeats = heartbeats
+            if devices != childDevices { childDevices = devices }
+            if heartbeats != latestHeartbeats { latestHeartbeats = heartbeats }
         } else if let devices = fetchedDevices {
             var merged = devices
             preserveLocalDeviceFields(into: &merged)
-            childDevices = merged
+            if merged != childDevices { childDevices = merged }
         } else if let heartbeats = fetchedHeartbeats {
-            latestHeartbeats = heartbeats
+            if heartbeats != latestHeartbeats { latestHeartbeats = heartbeats }
             // Re-merge into existing devices.
             for heartbeat in heartbeats {
                 if let idx = childDevices.firstIndex(where: { $0.id == heartbeat.deviceID }) {
@@ -1142,10 +1158,10 @@ final class AppState {
             }
         }
 
-        // Publish remaining data.
-        childProfiles = fetchedProfiles
-        if let hbp = fetchedHBProfiles { heartbeatProfiles = hbp }
-        if let sp = fetchedScheduleProfiles { scheduleProfiles = sp }
+        // Publish remaining data — only assign if changed to avoid unnecessary SwiftUI re-renders.
+        if fetchedProfiles != childProfiles { childProfiles = fetchedProfiles }
+        if let hbp = fetchedHBProfiles, hbp != heartbeatProfiles { heartbeatProfiles = hbp }
+        if let sp = fetchedScheduleProfiles, sp != scheduleProfiles { scheduleProfiles = sp }
 
         // Cache for instant display on next launch.
         persistDashboardCache()
@@ -1626,6 +1642,8 @@ final class AppState {
             Task {
                 try? await self.commandProcessor?.processIncomingCommands()
                 await MainActor.run { self.refreshLocalState() }
+                // Send heartbeat after processing commands so parent sees mode confirmation quickly.
+                try? await self.heartbeatService?.sendNow(force: false)
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -1637,6 +1655,8 @@ final class AppState {
             #endif
             try? await commandProcessor?.processIncomingCommands()
             refreshLocalState()
+            // Send immediate heartbeat so parent sees confirmed mode without waiting 5 min.
+            try? await heartbeatService?.sendNow(force: false)
         }
     }
 

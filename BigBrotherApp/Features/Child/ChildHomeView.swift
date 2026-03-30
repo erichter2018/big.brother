@@ -224,7 +224,7 @@ struct ChildHomeView: View {
                         .font(.subheadline)
                         .fontWeight(.semibold)
                         .foregroundStyle(.orange)
-                    Text("This device will stay in essential mode until all permissions are granted. Tap the orange button below to fix.")
+                    Text("This device will stay locked until all permissions are granted. Tap the orange button below to fix.")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.6))
                         .multilineTextAlignment(.center)

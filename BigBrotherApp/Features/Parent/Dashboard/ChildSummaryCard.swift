@@ -57,13 +57,17 @@ struct ChildSummaryCard: View {
         let builds = childHeartbeats.compactMap(\.appBuildNumber)
         let onOldBuild = (builds.min() ?? AppConstants.appBuildNumber) < AppConstants.appBuildNumber
 
-        // isShieldMismatch
+        // isShieldMismatch — only flag when shields are genuinely down.
+        // shieldsActive covers individual app tokens, shieldCategoryActive covers the catch-all.
+        // Either being true means the device is protected. Also ignore stale heartbeats (>5 min old).
         var shieldMismatch = false
         if countdown == nil && dominantMode != .unlocked {
             for device in devices {
                 if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
                    hb.currentMode != .unlocked,
-                   hb.shieldsActive == false {
+                   hb.shieldsActive == false,
+                   hb.shieldCategoryActive != true,
+                   hb.timestamp.timeIntervalSinceNow > -300 {
                     if let expires = hb.temporaryUnlockExpiresAt, expires > Date() { continue }
                     shieldMismatch = true
                     break
@@ -87,7 +91,7 @@ struct ChildSummaryCard: View {
         for device in devices {
             if let hb = heartbeats.first(where: { $0.deviceID == device.id }) {
                 heartbeatAge = Date().timeIntervalSince(hb.timestamp)
-                heartbeatIsTunnel = hb.heartbeatSource == "vpnExtension"
+                heartbeatIsTunnel = hb.heartbeatSource == "vpnTunnel"
                 break
             }
         }
@@ -689,7 +693,7 @@ struct ChildSummaryCard: View {
             if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
                let minutes = hb.screenTimeMinutes,
                hb.timestamp >= todayStart,
-               hb.heartbeatSource != "vpnExtension" {
+               hb.heartbeatSource != "vpnTunnel" {
                 return minutes
             }
         }

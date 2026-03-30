@@ -21,24 +21,27 @@ struct ScreenTimeTrendChart: View {
                     .frame(height: 60)
                     .frame(maxWidth: .infinity)
             } else {
+                let daysWithData = dailyMinutes.filter { $0.minutes > 0 }
+                let avg = daysWithData.isEmpty ? 0 : daysWithData.map(\.minutes).reduce(0, +) / daysWithData.count
+                let maxMins = dailyMinutes.map(\.minutes).max() ?? 0
+
                 Chart {
                     ForEach(dailyMinutes, id: \.date) { entry in
                         BarMark(
                             x: .value("Day", entry.date, unit: .day),
                             y: .value("Minutes", entry.minutes)
                         )
-                        .foregroundStyle(Calendar.current.isDateInToday(entry.date) ? Color.orange : Color.orange.opacity(0.4))
-                        .cornerRadius(3)
+                        .foregroundStyle(Calendar.current.isDateInToday(entry.date) ? Color.orange : Color.orange.opacity(0.35))
+                        .cornerRadius(4)
                     }
-                    if !dailyMinutes.isEmpty {
-                        let avg = dailyMinutes.map(\.minutes).reduce(0, +) / max(1, dailyMinutes.count)
+                    if avg > 0 {
                         RuleMark(y: .value("Average", avg))
-                            .foregroundStyle(.orange.opacity(0.5))
-                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4]))
-                            .annotation(position: .top, alignment: .trailing) {
+                            .foregroundStyle(.orange)
+                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                            .annotation(position: avg < maxMins / 2 ? .top : .bottom, alignment: .leading) {
                                 Text("avg \(Self.formatMinutes(avg))")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.orange)
                             }
                     }
                 }
@@ -47,22 +50,25 @@ struct ScreenTimeTrendChart: View {
                         AxisValueLabel {
                             if let date = value.as(Date.self) {
                                 Text(Self.weekdayLabel(date))
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Calendar.current.isDateInToday(date) ? .primary : .secondary)
                             }
                         }
                     }
                 }
                 .chartYAxis {
                     AxisMarks { value in
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3))
+                            .foregroundStyle(.secondary.opacity(0.3))
                         AxisValueLabel {
                             if let mins = value.as(Int.self) {
                                 Text(Self.formatMinutes(mins))
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 10))
                             }
                         }
                     }
                 }
-                .frame(height: 120)
+                .frame(height: 140)
             }
         }
         .padding(12)

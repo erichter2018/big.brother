@@ -259,10 +259,11 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
                     self.logDiag("Movement started: \(activityDesc) → high-frequency tracking ON")
                 }
 
-                // Notify driving monitor of automotive start
-                if activity.automotive && self.drivingMonitor?.isDriving != true {
+                // Notify driving monitor of automotive start — require high confidence
+                // to avoid false positives from walking near traffic.
+                if activity.automotive && activity.confidence == .high && self.drivingMonitor?.isDriving != true {
                     self.drivingMonitor?.onDrivingStarted()
-                    self.logDiag("Driving started (CoreMotion automotive)")
+                    self.logDiag("Driving started (CoreMotion automotive, high confidence)")
                 }
             } else if activity.stationary, self.isMoving,
                       let lastMove = self.lastMovementAt,

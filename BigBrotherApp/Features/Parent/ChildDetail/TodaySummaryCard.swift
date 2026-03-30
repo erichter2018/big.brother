@@ -37,7 +37,7 @@ struct TodaySummaryCard: View {
                 )
                 Divider().frame(height: 30)
                 statCell(
-                    icon: heartbeatSource == "vpnExtension" ? "shield.fill" : "heart.fill",
+                    icon: heartbeatSource == "vpnTunnel" ? "shield.fill" : "heart.fill",
                     iconColor: .pink,
                     value: lastSeenText,
                     label: "Last Seen"

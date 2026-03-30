@@ -59,8 +59,14 @@ final class ChildDetailViewModel: CommandSendable {
     var timeline: [TimelineEntry] = []
     /// Daily screen time for the last 7 days (date → minutes). Loaded from CloudKit heartbeats.
     var weeklyScreenTime: [(date: Date, minutes: Int)] = []
-    /// DNS-based online activity snapshot for this child.
+    /// Per-day screen time slot data keyed by "yyyy-MM-dd" (slot index → seconds).
+    var screenTimeByDay: [String: [Int: Int]] = [:]
+    /// DNS-based online activity snapshot for this child (today only, with slot data for timeline scrubbing).
     var onlineActivity: DomainActivitySnapshot?
+    /// DNS-based online activity merged across last 7 days (aggregate counts, no slot data).
+    var onlineActivityWeek: DomainActivitySnapshot?
+    /// Per-day DNS snapshots keyed by date string ("2026-03-29"), for timeline day-by-day scrubbing.
+    var onlineActivityByDay: [String: DomainActivitySnapshot] = [:]
     private var refreshTimer: Timer?
 
     /// Parent-side restriction state for this child (persisted in UserDefaults).
@@ -213,12 +219,27 @@ final class ChildDetailViewModel: CommandSendable {
         }
     }
 
-    /// Poll CloudKit for updated heartbeats every 10s so device status stays current.
+    /// Loads data eagerly on first access — not dependent on view lifecycle.
+    private var hasLoadedInitialData = false
+
+    func ensureDataLoaded() {
+        guard !hasLoadedInitialData else { return }
+        hasLoadedInitialData = true
+        Task { @MainActor in
+            async let e: () = loadEvents()
+            async let s: () = loadWeeklyScreenTime()
+            async let o: () = loadOnlineActivity()
+            _ = await (e, s, o)
+        }
+    }
+
     func startAutoRefresh() {
         guard refreshTimer == nil else { return }
-        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+        ensureDataLoaded()
+
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             Task { [weak self] in
-                try? await self?.appState.refreshDashboard()
+                await self?.loadEvents()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -446,9 +467,21 @@ final class ChildDetailViewModel: CommandSendable {
 
     // MARK: - Timeline
 
-    /// Event types that are internal housekeeping and clutter the timeline.
-    private static let filteredEventTypes: Set<EventType> = [
-        .heartbeatSent, .policyReconciled
+    /// Event types to show in the child detail "Recent Activity" feed.
+    /// Only high-signal events that warrant parent attention.
+    private static let visibleEventTypes: Set<EventType> = [
+        .unlockRequested,
+        .selfUnlockUsed,
+        .speedingDetected,
+        .phoneWhileDriving,
+        .hardBrakingDetected,
+        .tripCompleted,
+        .namedPlaceArrival,
+        .namedPlaceDeparture,
+        .authorizationLost,
+        .enforcementDegraded,
+        .enrollmentRevoked,
+        .sosAlert,
     ]
 
     /// Parse event details for display, stripping TOKEN payloads and truncating.
@@ -501,7 +534,7 @@ final class ChildDetailViewModel: CommandSendable {
         var entries: [TimelineEntry] = allEvents
             .filter { event in
                 childDeviceIDs.contains(event.deviceID) &&
-                !Self.filteredEventTypes.contains(event.eventType)
+                Self.visibleEventTypes.contains(event.eventType)
             }
             .map { event in
                 // Extract app name from "Requesting access to AppName\nTOKEN:..." details.
@@ -534,24 +567,18 @@ final class ChildDetailViewModel: CommandSendable {
                 eventTimestamps.contains(cmdEpoch + offset)
             })
 
-            if !hasCoveringEvent || cmd.status == .pending {
-                let statusLabel: String
-                switch cmd.status {
-                case .applied: statusLabel = ""
-                case .pending: statusLabel = " (pending)"
-                case .delivered: statusLabel = " (delivered)"
-                case .failed: statusLabel = " (failed)"
-                case .expired: statusLabel = " (expired)"
-                }
+            // Only show pending commands less than 1 hour old.
+            // Older pending commands either succeeded silently or are stuck.
+            guard cmd.status == .pending,
+                  cmd.issuedAt.timeIntervalSinceNow > -3600 else { continue }
 
-                entries.append(TimelineEntry(
-                    id: cmd.id,
-                    label: "Sent: \(cmd.action.displayDescription)\(statusLabel)",
-                    timestamp: cmd.issuedAt,
-                    isCommand: true,
-                    status: cmd.status
-                ))
-            }
+            entries.append(TimelineEntry(
+                id: cmd.id,
+                label: "Sent: \(cmd.action.displayDescription) (pending)",
+                timestamp: cmd.issuedAt,
+                isCommand: true,
+                status: cmd.status
+            ))
         }
 
         // Sort newest first.
@@ -577,35 +604,80 @@ final class ChildDetailViewModel: CommandSendable {
         await loadOnlineActivity()
     }
 
-    /// Fetch heartbeats from the last 7 days to build daily screen time trend.
+    /// Fetch daily screen time snapshots for the last 7 days.
     func loadWeeklyScreenTime() async {
         guard let cloudKit = appState.cloudKit,
               let familyID = appState.parentState?.familyID else { return }
 
         let deviceIDs = Set(devices.map(\.id))
-        guard !deviceIDs.isEmpty else {
-            #if DEBUG
-            print("[BigBrother] loadWeeklyScreenTime: no devices for \(child.name), skipping")
-            #endif
-            return
-        }
+        guard !deviceIDs.isEmpty else { return }
+
+        let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
+        let db = container.publicCloudDatabase
         let today = Calendar.current.startOfDay(for: Date())
-        let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: today) ?? today
 
-        let allHeartbeats = (try? await cloudKit.fetchHeartbeats(familyID: familyID, since: sevenDaysAgo)) ?? []
-
-        // Filter to this child's devices, extract max screen time per day
-        let childHeartbeats = allHeartbeats.filter { deviceIDs.contains($0.deviceID) }
-
-        var dailyMax: [String: Int] = [:]
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
 
-        for hb in childHeartbeats {
-            guard let mins = hb.screenTimeMinutes, mins > 0,
-                  hb.heartbeatSource != "vpnExtension" else { continue }
-            let key = fmt.string(from: hb.timestamp)
-            dailyMax[key] = max(dailyMax[key] ?? 0, mins)
+        // Build date strings for last 7 days
+        let dateStrings: [String] = (0..<7).compactMap { daysAgo in
+            guard let date = Calendar.current.date(byAdding: .day, value: -daysAgo, to: Date()) else { return nil }
+            return fmt.string(from: date)
+        }
+
+        // Fetch BBScreenTime records for all devices x all days in parallel
+        var dailyMax: [String: Int] = [:]
+        var slotsByDay: [String: [Int: Int]] = [:]
+
+        await withTaskGroup(of: (String, Int, [Int: Int])?.self) { group in
+            for deviceID in deviceIDs {
+                for dateStr in dateStrings {
+                    group.addTask {
+                        let recordID = CKRecord.ID(recordName: "BBScreenTime_\(deviceID.rawValue)_\(dateStr)")
+                        do {
+                            let record = try await db.record(for: recordID)
+                            let minutes = (record["minutes"] as? Int) ?? 0
+
+                            // Parse slot data
+                            var slots: [Int: Int] = [:]
+                            if let json = record["slotsJSON"] as? String,
+                               let data = json.data(using: .utf8),
+                               let parsed = try? JSONDecoder().decode([String: Int].self, from: data) {
+                                for (k, v) in parsed {
+                                    if let idx = Int(k) { slots[idx] = v }
+                                }
+                            }
+
+                            return minutes > 0 ? (dateStr, minutes, slots) : nil
+                        } catch {
+                            return nil
+                        }
+                    }
+                }
+            }
+
+            for await result in group {
+                guard let (dateStr, minutes, slots) = result else { continue }
+                dailyMax[dateStr] = max(dailyMax[dateStr] ?? 0, minutes)
+                // Merge slots across devices
+                if !slots.isEmpty {
+                    var merged = slotsByDay[dateStr] ?? [:]
+                    for (s, secs) in slots { merged[s, default: 0] += secs }
+                    slotsByDay[dateStr] = merged
+                }
+            }
+        }
+
+        // Fallback: if no BBScreenTime records found, try the legacy heartbeat approach
+        if dailyMax.isEmpty {
+            let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: today) ?? today
+            let allHeartbeats = (try? await cloudKit.fetchHeartbeats(familyID: familyID, since: sevenDaysAgo)) ?? []
+            let childHeartbeats = allHeartbeats.filter { deviceIDs.contains($0.deviceID) }
+            for hb in childHeartbeats {
+                guard let mins = hb.screenTimeMinutes, mins > 0 else { continue }
+                let key = fmt.string(from: hb.timestamp)
+                dailyMax[key] = max(dailyMax[key] ?? 0, mins)
+            }
         }
 
         // Build sorted array for last 7 days
@@ -616,6 +688,7 @@ final class ChildDetailViewModel: CommandSendable {
             result.append((date: date, minutes: dailyMax[key] ?? 0))
         }
         weeklyScreenTime = result
+        screenTimeByDay = slotsByDay
     }
 
     /// Fetch DNS activity from CloudKit for this child's devices.
@@ -631,28 +704,118 @@ final class ChildDetailViewModel: CommandSendable {
 
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
-        let today = fmt.string(from: Date())
+        let now = Date()
+        let today = fmt.string(from: now)
 
-        // Try to fetch today's activity for each device
-        for deviceID in deviceIDs {
-            let recordID = CKRecord.ID(recordName: "BBDNSActivity_\(deviceID.rawValue)_\(today)")
-            do {
-                let record = try await db.record(for: recordID)
-                if let json = record["domainsJSON"] as? String,
-                   let data = json.data(using: .utf8),
-                   let domains = try? JSONDecoder().decode([DomainHit].self, from: data) {
-                    onlineActivity = DomainActivitySnapshot(
-                        deviceID: deviceID,
-                        familyID: familyID,
-                        date: today,
-                        timestamp: record["timestamp"] as? Date ?? Date(),
-                        domains: domains,
-                        totalQueries: (record["totalQueries"] as? Int) ?? domains.reduce(0) { $0 + $1.count }
-                    )
+        // Build date strings for last 7 days
+        let dateStrings: [String] = (0..<7).compactMap { daysAgo in
+            guard let date = Calendar.current.date(byAdding: .day, value: -daysAgo, to: now) else { return nil }
+            return fmt.string(from: date)
+        }
+
+        // Fetch all days for all devices in parallel
+        var allDomainsByName: [String: DomainHit] = [:]
+        var weekTotalQueries = 0
+        // Per-day: merge multiple devices into one snapshot per date
+        var dayDomains: [String: [String: DomainHit]] = [:]  // date → (domain → hit)
+        var dayTotals: [String: Int] = [:]
+
+        await withTaskGroup(of: (String, DeviceID, [DomainHit], Int)?.self) { group in
+            for deviceID in deviceIDs {
+                for dateStr in dateStrings {
+                    group.addTask {
+                        let recordID = CKRecord.ID(recordName: "BBDNSActivity_\(deviceID.rawValue)_\(dateStr)")
+                        do {
+                            let record = try await db.record(for: recordID)
+                            guard let json = record["domainsJSON"] as? String,
+                                  let data = json.data(using: .utf8),
+                                  let domains = try? JSONDecoder().decode([DomainHit].self, from: data) else {
+                                return nil
+                            }
+                            let total = (record["totalQueries"] as? Int) ?? domains.reduce(0) { $0 + $1.count }
+                            return (dateStr, deviceID, domains, total)
+                        } catch {
+                            return nil
+                        }
+                    }
                 }
-            } catch {
-                // No activity record for today — normal if device just started
             }
+
+            for await result in group {
+                guard let (dateStr, _, domains, total) = result else { continue }
+
+                // Per-day accumulation (merge multiple devices for same day)
+                dayTotals[dateStr, default: 0] += total
+                var dayMap = dayDomains[dateStr] ?? [:]
+                for hit in domains {
+                    if var existing = dayMap[hit.domain] {
+                        existing.count += hit.count
+                        if hit.firstSeen < existing.firstSeen { existing.firstSeen = hit.firstSeen }
+                        if hit.lastSeen > existing.lastSeen { existing.lastSeen = hit.lastSeen }
+                        if hit.flagged && !existing.flagged {
+                            existing.flagged = true
+                            existing.category = hit.category
+                        }
+                        // Merge slot counts across devices
+                        if let newSlots = hit.slotCounts {
+                            var merged = existing.slotCounts ?? [:]
+                            for (s, c) in newSlots { merged[s, default: 0] += c }
+                            existing.slotCounts = merged
+                        }
+                        dayMap[hit.domain] = existing
+                    } else {
+                        dayMap[hit.domain] = hit
+                    }
+                }
+                dayDomains[dateStr] = dayMap
+
+                // Merge into 7-day aggregate (sum counts, drop slot data)
+                weekTotalQueries += total
+                for hit in domains {
+                    if var existing = allDomainsByName[hit.domain] {
+                        existing.count += hit.count
+                        if hit.firstSeen < existing.firstSeen { existing.firstSeen = hit.firstSeen }
+                        if hit.lastSeen > existing.lastSeen { existing.lastSeen = hit.lastSeen }
+                        if hit.flagged && !existing.flagged {
+                            existing.flagged = true
+                            existing.category = hit.category
+                        }
+                        allDomainsByName[hit.domain] = existing
+                    } else {
+                        var weekHit = hit
+                        weekHit.slotCounts = nil
+                        allDomainsByName[hit.domain] = weekHit
+                    }
+                }
+            }
+        }
+
+        // Build per-day snapshots
+        var byDay: [String: DomainActivitySnapshot] = [:]
+        for (dateStr, domainMap) in dayDomains {
+            byDay[dateStr] = DomainActivitySnapshot(
+                deviceID: deviceIDs.first!,
+                familyID: familyID,
+                date: dateStr,
+                timestamp: now,
+                domains: Array(domainMap.values),
+                totalQueries: dayTotals[dateStr] ?? 0
+            )
+        }
+        onlineActivityByDay = byDay
+        onlineActivity = byDay[today]
+
+        if !allDomainsByName.isEmpty {
+            onlineActivityWeek = DomainActivitySnapshot(
+                deviceID: deviceIDs.first!,
+                familyID: familyID,
+                date: "7-day",
+                timestamp: now,
+                domains: Array(allDomainsByName.values),
+                totalQueries: weekTotalQueries
+            )
+        } else {
+            onlineActivityWeek = nil
         }
     }
 

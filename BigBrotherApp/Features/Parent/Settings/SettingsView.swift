@@ -86,6 +86,15 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Dashboard") {
+                Toggle(isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: "familyPauseEnabled") },
+                    set: { UserDefaults.standard.set($0, forKey: "familyPauseEnabled") }
+                )) {
+                    Label("Show Pause All Button", systemImage: "pause.circle")
+                }
+            }
+
             Section("Monitoring") {
                 NavigationLink {
                     HeartbeatProfileListView(

@@ -327,6 +327,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         do {
             switch command.action {
             case .setMode(let mode):
+                // Don't let setMode override an active temporary unlock.
+                // If a parent explicitly gave the kid 2 hours, a stray restrict
+                // command shouldn't kill it. The parent can explicitly cancel
+                // the temp unlock if they want to re-lock.
+                if mode != .unlocked,
+                   let tempState = storage.readTemporaryUnlockState(),
+                   tempState.expiresAt > Date() {
+                    let remaining = Int(tempState.expiresAt.timeIntervalSinceNow / 60)
+                    eventLogger.log(.commandApplied, details: "Mode \(mode.rawValue) skipped — temp unlock active (\(remaining)min remaining)")
+                    return .applied
+                }
                 try applyMode(mode, enrollment: enrollment, commandID: command.id)
                 UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(false, forKey: "scheduleDrivenMode")
                 eventLogger.log(.commandApplied, details: "Mode set to \(mode.rawValue)")

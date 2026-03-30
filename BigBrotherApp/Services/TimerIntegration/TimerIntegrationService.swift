@@ -210,9 +210,15 @@ final class TimerIntegrationService {
             let snapshot = try await kidRef.getDocument()
             guard let data = snapshot.data(),
                   let penaltySeconds = (data["penaltySeconds"] as? NSNumber)?.intValue,
-                  penaltySeconds > 0,
-                  data["timerEndTime"] == nil || data["timerEndTime"] is NSNull
+                  penaltySeconds > 0
             else { return }
+
+            // Start (or restart) the timer — even if timerEndTime was previously set
+            // and has since expired. The timer should animate from now.
+            let existingEnd = (data["timerEndTime"] as? Timestamp)?.dateValue()
+            if let existingEnd, existingEnd.timeIntervalSinceNow > 0 {
+                return // Timer is actively running — don't restart
+            }
 
             let timerEndTime = Date().addingTimeInterval(TimeInterval(penaltySeconds))
             try await kidRef.updateData([
