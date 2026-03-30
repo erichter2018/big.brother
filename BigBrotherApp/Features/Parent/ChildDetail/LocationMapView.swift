@@ -942,8 +942,13 @@ struct LocationMapView: View {
                             Image(systemName: followDot ? "scope" : "map")
                                 .font(.body)
                                 .padding(10)
-                                .background(.ultraThinMaterial)
-                                .clipShape(Circle())
+                                .background {
+                                    if #available(iOS 26, *) {
+                                        Circle().fill(.clear).glassEffect(.regular.interactive(), in: .circle)
+                                    } else {
+                                        Circle().fill(.ultraThinMaterial)
+                                    }
+                                }
                         }
                         .padding(12)
                     }
@@ -1518,7 +1523,13 @@ struct LocationMapView: View {
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(.blue)
                     .padding(10)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .background {
+                        if #available(iOS 26, *) {
+                            RoundedRectangle(cornerRadius: 8).fill(.clear).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 8))
+                        } else {
+                            RoundedRectangle(cornerRadius: 8).fill(.ultraThinMaterial)
+                        }
+                    }
             }
             .disabled(isLocating)
             .padding(.trailing, 12)

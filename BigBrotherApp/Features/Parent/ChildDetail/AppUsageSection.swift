@@ -54,23 +54,21 @@ struct AppUsageSection: View {
                         ForEach(usage, id: \.appName) { item in
                             HStack(spacing: 8) {
                                 Text(item.appName)
-                                    .font(.caption)
-                                    .fontWeight(.medium)
+                                    .font(.subheadline.weight(.medium))
                                     .lineLimit(1)
 
                                 Spacer()
 
                                 GeometryReader { geo in
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(.indigo.opacity(0.4))
-                                        .frame(width: max(4, geo.size.width * CGFloat(item.minutes / maxMinutes)))
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(.indigo.opacity(0.6))
+                                        .frame(width: max(6, geo.size.width * CGFloat(item.minutes / maxMinutes)))
                                 }
-                                .frame(width: 60, height: 8)
+                                .frame(width: 80, height: 12)
 
                                 Text(Self.formatMinutes(item.minutes))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 42, alignment: .trailing)
+                                    .font(.caption.weight(.medium))
+                                    .frame(width: 48, alignment: .trailing)
                             }
                         }
                     }
@@ -79,7 +77,7 @@ struct AppUsageSection: View {
                         Spacer()
                         Text("Estimated from DNS activity while screen is on")
                             .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.secondary)
                     }
                 }
             } else {

@@ -106,8 +106,7 @@ struct DeviceDetailView: View {
         }
         .frame(maxWidth: .infinity)
         .padding()
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     @ViewBuilder

@@ -81,8 +81,7 @@ struct PermissionFixerView: View {
                     }
                 }
                 .padding()
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .secondary)
                 .padding(.horizontal, 24)
             }
 

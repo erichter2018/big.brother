@@ -80,8 +80,7 @@ struct PaywallView: View {
             featureRow(icon: "person.3", color: .teal, text: "Unlimited devices included")
         }
         .padding(16)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     @ViewBuilder

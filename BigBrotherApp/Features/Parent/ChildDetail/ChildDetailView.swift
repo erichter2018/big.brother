@@ -906,70 +906,44 @@ struct ChildDetailView: View {
     @ViewBuilder
     private var dashboardLayoutSection: some View {
         Section {
-            ForEach(Array(sectionOrder.enumerated()), id: \.element) { index, section in
-                dashboardLayoutRow(section: section, index: index)
+            ForEach(sectionOrder, id: \.self) { section in
+                HStack(spacing: 12) {
+                    Image(systemName: section.icon)
+                        .font(.system(size: 14))
+                        .foregroundColor(hiddenSections.contains(section) ? .gray.opacity(0.4) : .blue)
+                        .frame(width: 22)
+
+                    Text(section.displayName)
+                        .font(.subheadline)
+                        .foregroundStyle(hiddenSections.contains(section) ? .secondary : .primary)
+
+                    Spacer()
+
+                    Toggle("", isOn: Binding(
+                        get: { !hiddenSections.contains(section) },
+                        set: { visible in
+                            if visible {
+                                hiddenSections.remove(section)
+                            } else {
+                                hiddenSections.insert(section)
+                            }
+                            ChildDetailSection.saveHidden(hiddenSections, for: viewModel.child.id)
+                        }
+                    ))
+                    .labelsHidden()
+                    .tint(.blue)
+                }
+            }
+            .onMove { from, to in
+                sectionOrder.move(fromOffsets: from, toOffset: to)
+                ChildDetailSection.saveOrder(sectionOrder, for: viewModel.child.id)
             }
         } header: {
             Text("Dashboard Layout")
         } footer: {
-            Text("Use arrows to reorder. Tap the eye to show or hide sections.")
+            Text("Drag to reorder. Toggle to show or hide sections.")
         }
-    }
-
-    @ViewBuilder
-    private func dashboardLayoutRow(section: ChildDetailSection, index: Int) -> some View {
-        HStack(spacing: 10) {
-            VStack(spacing: 0) {
-                Button {
-                    guard index > 0 else { return }
-                    sectionOrder.swapAt(index, index - 1)
-                    ChildDetailSection.saveOrder(sectionOrder, for: viewModel.child.id)
-                } label: {
-                    Image(systemName: "chevron.up")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(index > 0 ? .blue : .secondary.opacity(0.3))
-                }
-                .disabled(index == 0)
-
-                Button {
-                    guard index < sectionOrder.count - 1 else { return }
-                    sectionOrder.swapAt(index, index + 1)
-                    ChildDetailSection.saveOrder(sectionOrder, for: viewModel.child.id)
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(index < sectionOrder.count - 1 ? .blue : .secondary.opacity(0.3))
-                }
-                .disabled(index == sectionOrder.count - 1)
-            }
-            .buttonStyle(.plain)
-            .frame(width: 18)
-
-            Image(systemName: section.icon)
-                .font(.system(size: 13))
-                .foregroundColor(hiddenSections.contains(section) ? .gray.opacity(0.4) : .blue)
-                .frame(width: 20)
-
-            Text(section.displayName)
-                .font(.subheadline)
-                .foregroundColor(hiddenSections.contains(section) ? .secondary : .primary)
-
-            Spacer()
-
-            Button {
-                if hiddenSections.contains(section) {
-                    hiddenSections.remove(section)
-                } else {
-                    hiddenSections.insert(section)
-                }
-                ChildDetailSection.saveHidden(hiddenSections, for: viewModel.child.id)
-            } label: {
-                Image(systemName: hiddenSections.contains(section) ? "eye.slash" : "eye")
-                    .font(.system(size: 14))
-                    .foregroundColor(hiddenSections.contains(section) ? .gray.opacity(0.4) : .blue)
-            }
-            .buttonStyle(.plain)
-        }
+        .environment(\.editMode, .constant(.active))
     }
 
     // MARK: - Settings Sheet (Restrictions + Web Filter + Location Mode + Permissions)

@@ -34,11 +34,7 @@ struct SkeletonChildCard: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.ultraThinMaterial)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .secondary)
         .overlay(
             shimmerOverlay
                 .clipShape(RoundedRectangle(cornerRadius: 16))

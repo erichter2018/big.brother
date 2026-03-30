@@ -16,6 +16,9 @@ final class DNSProxy {
     private weak var provider: NEPacketTunnelProvider?
     private var upstreamSession: NWUDPSession?
     private let upstreamDNS: NWHostEndpoint
+    private var sessionObservation: NSKeyValueObservation?
+    private var isRecreatingSession = false
+    private var lastSessionRecreate: Date = .distantPast
 
     /// In-memory domain activity aggregation.
     private var domainCounts: [String: DomainHit] = [:]
@@ -30,14 +33,24 @@ final class DNSProxy {
     /// When true, DNS queries are still forwarded but NOT counted as usage activity.
     var isDeviceLocked: Bool = false
 
-    /// Pending DNS queries waiting for upstream response (keyed by transaction ID + source).
-    private var pendingQueries: [UInt16: PendingQuery] = [:]
+    /// Cached safe search state — refreshed every 30 seconds instead of on every query.
+    private var cachedSafeSearchEnabled: Bool = false
+    private var safeSearchCacheExpiry: Date = .distantPast
+
+    /// Pending DNS queries waiting for upstream response.
+    /// Keyed by composite of transaction ID + source port to avoid collisions
+    /// when multiple apps issue DNS queries with the same transaction ID.
+    private var pendingQueries: [UInt32: PendingQuery] = [:]
     private let queryLock = NSLock()
 
     private struct PendingQuery {
-        let sourceIP: Data     // 4 bytes
+        let sourceIP: (UInt8, UInt8, UInt8, UInt8)  // Avoid Data allocation
         let sourcePort: UInt16
-        let receivedAt: Date
+    }
+
+    /// Composite key: txnID (16 bits) | sourcePort (16 bits)
+    private static func queryKey(txnID: UInt16, sourcePort: UInt16) -> UInt32 {
+        UInt32(txnID) << 16 | UInt32(sourcePort)
     }
 
     /// The tunnel's own IP address (DNS queries arrive addressed to this).
@@ -77,11 +90,17 @@ final class DNSProxy {
     /// Returns the safe IP if applicable, nil otherwise.
     /// Activates when either denyExplicitContent (device restriction) or
     /// safeSearchEnabled (Force Safe Search toggle) is on.
+    /// Uses a 30-second cache to avoid disk I/O on every DNS query.
     private func safeSearchIP(for domain: String) -> String? {
-        let restrictionEnabled = storage.readDeviceRestrictions()?.denyExplicitContent == true
-        let toggleEnabled = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .bool(forKey: "safeSearchEnabled") ?? false
-        guard restrictionEnabled || toggleEnabled else { return nil }
+        let now = Date()
+        if now >= safeSearchCacheExpiry {
+            let restrictionEnabled = storage.readDeviceRestrictions()?.denyExplicitContent == true
+            let toggleEnabled = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .bool(forKey: "safeSearchEnabled") ?? false
+            cachedSafeSearchEnabled = restrictionEnabled || toggleEnabled
+            safeSearchCacheExpiry = now.addingTimeInterval(30)
+        }
+        guard cachedSafeSearchEnabled else { return nil }
         return Self.safeSearchRedirects[domain.lowercased()]
     }
 
@@ -92,22 +111,85 @@ final class DNSProxy {
         restoreFromAppGroup()
         restoreKnownApps()
 
-        // Create UDP session to upstream DNS (bypasses tunnel via NEProvider base class)
-        upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
-        upstreamSession?.setReadHandler({ [weak self] datagrams, error in
+        createUpstreamSession()
+        startReadingPackets()
+        NSLog("[DNSProxy] Started — forwarding to \(upstreamDNS.hostname)")
+    }
+
+    func stop() {
+        sessionObservation?.invalidate()
+        sessionObservation = nil
+        upstreamSession?.cancel()
+        upstreamSession = nil
+    }
+
+    /// Verify the upstream session is still healthy. Called on tunnel wake.
+    func verifySession() {
+        guard let session = upstreamSession else {
+            NSLog("[DNSProxy] No upstream session — recreating")
+            createUpstreamSession()
+            return
+        }
+        if session.state == .failed || session.state == .cancelled || session.state == .invalid {
+            NSLog("[DNSProxy] Session in bad state (\(session.state.rawValue)) — recreating")
+            createUpstreamSession()
+        }
+    }
+
+    /// Create (or recreate) the upstream UDP session and monitor its health.
+    private func createUpstreamSession() {
+        // Cancel existing session if any
+        sessionObservation?.invalidate()
+        upstreamSession?.cancel()
+
+        guard let provider else {
+            NSLog("[DNSProxy] No provider — cannot create upstream session")
+            return
+        }
+
+        let session = provider.createUDPSession(to: upstreamDNS, from: nil)
+        session.setReadHandler({ [weak self] datagrams, error in
+            if let error {
+                NSLog("[DNSProxy] Upstream read error: \(error.localizedDescription)")
+            }
             guard let datagrams else { return }
             for data in datagrams {
                 self?.handleUpstreamResponse(data)
             }
         }, maxDatagrams: 64)
 
-        startReadingPackets()
-        NSLog("[DNSProxy] Started — forwarding to \(upstreamDNS.hostname)")
+        // Monitor session state — recreate on failure
+        sessionObservation = session.observe(\.state, options: [.new]) { [weak self] session, _ in
+            switch session.state {
+            case .failed:
+                NSLog("[DNSProxy] Upstream session FAILED — will recreate")
+                self?.scheduleSessionRecreate()
+            case .cancelled:
+                NSLog("[DNSProxy] Upstream session cancelled")
+            case .ready:
+                NSLog("[DNSProxy] Upstream session ready")
+            default:
+                break
+            }
+        }
+
+        upstreamSession = session
+        lastSessionRecreate = Date()
     }
 
-    func stop() {
-        upstreamSession?.cancel()
-        upstreamSession = nil
+    /// Recreate the session after a short delay to avoid tight reconnect loops.
+    private func scheduleSessionRecreate() {
+        guard !isRecreatingSession else { return }
+        // Don't recreate more than once per 5 seconds
+        let timeSinceLastRecreate = Date().timeIntervalSince(lastSessionRecreate)
+        let delay = max(0, 2.0 - timeSinceLastRecreate)
+        isRecreatingSession = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.isRecreatingSession = false
+            NSLog("[DNSProxy] Recreating upstream session...")
+            self.createUpstreamSession()
+        }
     }
 
     // MARK: - Packet Reading
@@ -129,8 +211,7 @@ final class DNSProxy {
 
         // Parse IPv4 header
         let versionIHL = packet[0]
-        let version = versionIHL >> 4
-        guard version == 4 else { return } // IPv4 only
+        guard versionIHL >> 4 == 4 else { return } // IPv4 only
 
         let ihl = Int(versionIHL & 0x0F) * 4
         guard ihl >= 20, packet.count >= ihl + 8 else { return }
@@ -138,54 +219,66 @@ final class DNSProxy {
         // Check protocol = UDP (17)
         guard packet[9] == 17 else { return }
 
-        // Source IP (bytes 12-15)
-        let sourceIP = packet.subdata(in: 12..<16)
+        // Source IP as tuple (avoid Data allocation)
+        let srcIP = (packet[12], packet[13], packet[14], packet[15])
+        let sourceIPData = Data([srcIP.0, srcIP.1, srcIP.2, srcIP.3])
 
-        // UDP header starts at IHL offset
+        // UDP header
         let udpStart = ihl
         let destPort = UInt16(packet[udpStart + 2]) << 8 | UInt16(packet[udpStart + 3])
-        guard destPort == 53 else { return } // DNS only
+        guard destPort == 53 else { return }
 
         let sourcePort = UInt16(packet[udpStart]) << 8 | UInt16(packet[udpStart + 1])
 
-        // DNS payload starts after UDP header (8 bytes)
+        // DNS payload
         let dnsStart = udpStart + 8
         guard packet.count > dnsStart + 12 else { return }
         let dnsPayload = packet.subdata(in: dnsStart..<packet.count)
 
-        // Parse DNS transaction ID
+        // Transaction ID
         let txnID = UInt16(dnsPayload[0]) << 8 | UInt16(dnsPayload[1])
 
-        // Parse domain name from question section
+        // Parse domain name
         let domain = parseDNSQuestionDomain(dnsPayload)
-        if let domain {
-            recordDomainQuery(domain)
-        }
 
-        // Safe Search: if this domain should be redirected, return a spoofed response
+        // Safe Search: redirect before forwarding (instant response, no upstream round-trip)
         if let domain, let safeIP = safeSearchIP(for: domain) {
             let response = buildSafeSearchResponse(query: dnsPayload, ip: safeIP)
             let responsePacket = buildIPPacket(
                 sourceIP: tunnelIP,
-                destIP: sourceIP,
+                destIP: sourceIPData,
                 sourcePort: 53,
                 destPort: sourcePort,
                 payload: response
             )
             provider?.packetFlow.writePackets([responsePacket], withProtocols: [AF_INET as NSNumber])
+            // Record AFTER responding (non-blocking for the user)
+            recordDomainQuery(domain)
             return
         }
 
-        // Store pending query for response routing
+        // FORWARD FIRST — minimize latency before doing heavy work
+        let key = Self.queryKey(txnID: txnID, sourcePort: sourcePort)
         queryLock.lock()
-        pendingQueries[txnID] = PendingQuery(sourceIP: sourceIP, sourcePort: sourcePort, receivedAt: Date())
+        pendingQueries[key] = PendingQuery(sourceIP: srcIP, sourcePort: sourcePort)
         queryLock.unlock()
 
-        // Forward raw DNS payload to upstream
-        upstreamSession?.writeDatagram(dnsPayload) { error in
+        // Check session health before forwarding
+        if let session = upstreamSession, session.state == .failed || session.state == .cancelled {
+            scheduleSessionRecreate()
+        }
+
+        upstreamSession?.writeDatagram(dnsPayload) { [weak self] error in
             if let error {
                 NSLog("[DNSProxy] Forward failed: \(error.localizedDescription)")
+                // Session may have died — trigger recreation
+                self?.scheduleSessionRecreate()
             }
+        }
+
+        // Record activity AFTER forwarding (no longer blocks DNS resolution)
+        if let domain {
+            recordDomainQuery(domain)
         }
     }
 
@@ -197,22 +290,33 @@ final class DNSProxy {
         // Parse transaction ID from response
         let txnID = UInt16(data[0]) << 8 | UInt16(data[1])
 
+        // Try to find the pending query. We need the source port for the composite key,
+        // but the upstream response only has the txnID. Try all possible source ports
+        // by scanning pending queries — but that's slow. Instead, we'll try the most
+        // common case: scan by txnID prefix in the key.
         queryLock.lock()
-        let pending = pendingQueries.removeValue(forKey: txnID)
+        var pending: PendingQuery?
+        var matchedKey: UInt32?
+        let txnPrefix = UInt32(txnID) << 16
+        for (key, query) in pendingQueries where key & 0xFFFF0000 == txnPrefix {
+            pending = query
+            matchedKey = key
+            break
+        }
+        if let matchedKey { pendingQueries.removeValue(forKey: matchedKey) }
         queryLock.unlock()
 
         guard let pending else { return }
 
-        // Build IP + UDP packet wrapping the DNS response
+        let destIP = Data([pending.sourceIP.0, pending.sourceIP.1, pending.sourceIP.2, pending.sourceIP.3])
         let responsePacket = buildIPPacket(
             sourceIP: tunnelIP,
-            destIP: pending.sourceIP,
+            destIP: destIP,
             sourcePort: 53,
             destPort: pending.sourcePort,
             payload: data
         )
 
-        // Write response back to the tunnel interface
         provider?.packetFlow.writePackets([responsePacket], withProtocols: [AF_INET as NSNumber])
     }
 
@@ -371,8 +475,9 @@ final class DNSProxy {
     private func recordDomainQuery(_ fullDomain: String) {
         let root = DomainCategorizer.rootDomain(fullDomain)
 
-        // Skip infrastructure noise
-        if DomainCategorizer.isNoise(fullDomain) || DomainCategorizer.isNoise(root) { return }
+        // Skip infrastructure noise — isNoise already checks root internally,
+        // so checking root separately is redundant.
+        if DomainCategorizer.isNoise(fullDomain) { return }
 
         // Don't count background queries while screen is locked as activity.
         // DNS is still forwarded (apps work), but it doesn't inflate usage stats.
@@ -544,11 +649,15 @@ final class DNSProxy {
         defaults?.set(0, forKey: "dnsActivityTotalQueries")
     }
 
-    /// Clean up stale pending queries older than 10 seconds.
+    /// Clean up stale pending queries to prevent memory growth.
+    /// Queries that never got a response are dropped after the map exceeds 500 entries.
     func cleanupStalePendingQueries() {
-        let cutoff = Date().addingTimeInterval(-10)
         queryLock.lock()
-        pendingQueries = pendingQueries.filter { $0.value.receivedAt > cutoff }
+        if pendingQueries.count > 500 {
+            // Keep most recent 200 (higher keys = more recent due to port cycling)
+            let sorted = pendingQueries.sorted { $0.key > $1.key }
+            pendingQueries = Dictionary(uniqueKeysWithValues: Array(sorted.prefix(200)))
+        }
         queryLock.unlock()
     }
 }

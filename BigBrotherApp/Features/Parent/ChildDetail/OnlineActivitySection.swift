@@ -60,11 +60,10 @@ struct OnlineActivitySection: View {
         VStack(alignment: .leading, spacing: 12) {
             // Header
             HStack {
-                Text(flaggedOnly ? "Flagged Activity" : "Online Activity")
-                    .font(.caption)
-                    .fontWeight(.semibold)
+                Label(flaggedOnly ? "FLAGGED ACTIVITY" : "ONLINE ACTIVITY",
+                      systemImage: flaggedOnly ? "exclamationmark.triangle.fill" : "globe")
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(flaggedOnly ? .red : .secondary)
-                    .textCase(.uppercase)
                     .onTapGesture {
                         guard let snapshot = effectiveSnapshot else { return }
                         let visible = snapshot.domains
@@ -110,6 +109,13 @@ struct OnlineActivitySection: View {
                             .padding(.vertical, 8)
                     }
                 } else {
+                    // Hero stats + sparkline + domain list
+                    heroStatsRow(effectiveActivity)
+
+                    if let daySnap = activity, timeMode == .day {
+                        miniSparkline(daySnap)
+                    }
+
                     if showFlagged {
                         let flagged = effectiveActivity.flaggedDomains
                         if !flagged.isEmpty {
@@ -117,6 +123,7 @@ struct OnlineActivitySection: View {
                             Divider()
                         }
                     }
+
                     topDomainsSection(effectiveActivity)
                 }
             } else {
@@ -140,11 +147,83 @@ struct OnlineActivitySection: View {
         case .day:
             return activity
         case .scrub:
-            // For timeline, show content if ANY day has data
             return selectedDaySnapshot ?? weekActivity ?? activity
         case .week:
             return weekActivity ?? activity
         }
+    }
+
+    // MARK: - Hero Stats
+
+    @ViewBuilder
+    private func heroStatsRow(_ activity: DomainActivitySnapshot) -> some View {
+        let visibleDomains = activity.domains.filter { !DomainCategorizer.isNoise($0.domain) }
+        let siteCount = visibleDomains.count
+        let activeSlotCount = activity.activeSlots.count
+        let activeHours = Double(activeSlotCount) / 4.0
+
+        HStack(spacing: 0) {
+            heroStat(value: "\(siteCount)", label: "sites")
+            Spacer()
+            heroStat(value: "\(activity.totalQueries)", label: "lookups")
+            Spacer()
+            heroStat(value: String(format: "%.1f", activeHours), label: "hrs active")
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func heroStat(value: String, label: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.primary)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // MARK: - Mini Sparkline
+
+    @ViewBuilder
+    private func miniSparkline(_ activity: DomainActivitySnapshot) -> some View {
+        VStack(spacing: 2) {
+            let currentSlot: Int = {
+                let comps = Calendar.current.dateComponents([.hour, .minute], from: Date())
+                return DomainHit.slotIndex(hour: comps.hour ?? 0, minute: comps.minute ?? 0)
+            }()
+            let maxCount = max(1, (0..<96).map { activity.totalQueries(forSlot: $0) }.max() ?? 1)
+
+            HStack(spacing: 0.5) {
+                ForEach(0..<96, id: \.self) { s in
+                    let count = activity.totalQueries(forSlot: s)
+                    let height: CGFloat = count > 0 ? max(2, 16 * CGFloat(count) / CGFloat(maxCount)) : 0
+                    let isFuture = s > currentSlot
+
+                    RoundedRectangle(cornerRadius: 0.5)
+                        .fill(count > 0 ? Color.blue.opacity(0.5) : Color.clear)
+                        .frame(height: height)
+                        .frame(maxHeight: 16, alignment: .bottom)
+                        .opacity(isFuture ? 0.15 : 1)
+                }
+            }
+            .frame(height: 16)
+
+            HStack {
+                Text("12a").font(.system(size: 7)).foregroundStyle(.tertiary)
+                Spacer()
+                Text("6a").font(.system(size: 7)).foregroundStyle(.tertiary)
+                Spacer()
+                Text("12p").font(.system(size: 7)).foregroundStyle(.tertiary)
+                Spacer()
+                Text("6p").font(.system(size: 7)).foregroundStyle(.tertiary)
+                Spacer()
+                Text("12a").font(.system(size: 7)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.bottom, 4)
     }
 
     // MARK: - Day Navigation + Time Label (combined row)
@@ -351,14 +430,15 @@ struct OnlineActivitySection: View {
 
     @ViewBuilder
     private func topDomainsSection(_ activity: DomainActivitySnapshot) -> some View {
+        let top = activity.domains
+            .sorted { $0.count > $1.count }
+            .filter { !$0.flagged && !DomainCategorizer.isNoise($0.domain) }
+
         VStack(alignment: .leading, spacing: 6) {
             Text("Most Visited")
-                .font(.caption)
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            let top = activity.domains
-                .sorted { $0.count > $1.count }
-                .filter { !$0.flagged && !DomainCategorizer.isNoise($0.domain) }
             if top.isEmpty {
                 Text("No activity recorded")
                     .font(.caption2)
@@ -366,37 +446,52 @@ struct OnlineActivitySection: View {
             } else {
                 let maxCount = top.first?.count ?? 1
                 ScrollView {
-                    VStack(spacing: 4) {
+                    VStack(spacing: 6) {
                         ForEach(top, id: \.domain) { hit in
                             HStack(spacing: 8) {
-                                Text(hit.domain)
-                                    .font(.caption)
-                                    .lineLimit(1)
+                                // App name badge if recognized
+                                let root = DomainCategorizer.rootDomain(hit.domain)
+                                let appName = DomainCategorizer.appName(for: root)
+
+                                VStack(alignment: .leading, spacing: 1) {
+                                    if let appName {
+                                        Text(appName)
+                                            .font(.subheadline.weight(.medium))
+                                        Text(hit.domain)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text(hit.domain)
+                                            .font(.subheadline)
+                                    }
+                                }
+                                .lineLimit(1)
 
                                 Spacer()
 
+                                // Bar
                                 GeometryReader { geo in
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(.blue.opacity(0.3))
-                                        .frame(width: max(4, geo.size.width * CGFloat(hit.count) / CGFloat(maxCount)))
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(appName != nil ? Color.indigo.opacity(0.6) : Color.blue.opacity(0.4))
+                                        .frame(width: max(6, geo.size.width * CGFloat(hit.count) / CGFloat(maxCount)))
                                 }
-                                .frame(width: 60, height: 8)
+                                .frame(width: 80, height: 12)
 
                                 Text("\(hit.count)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 30, alignment: .trailing)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                    .frame(width: 40, alignment: .trailing)
                             }
                         }
                     }
                 }
-                .frame(maxHeight: 300)
+                .frame(maxHeight: 320)
             }
         }
 
         HStack {
             Spacer()
-            let visibleSites = activity.domains.filter { !DomainCategorizer.isNoise($0.domain) }.count
+            let visibleSites = top.count
             Text("\(visibleSites) sites visited")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)

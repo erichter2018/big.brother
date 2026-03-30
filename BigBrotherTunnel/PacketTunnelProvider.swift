@@ -122,6 +122,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler()
     }
 
+    /// Called when the tunnel wakes from sleep or after a network change.
+    /// Verify the DNS upstream session is still healthy.
+    override func wake() {
+        NSLog("[Tunnel] wake() — verifying DNS upstream session")
+        dnsProxy?.verifySession()
+    }
+
     // MARK: - IPC (Main App Communication)
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
@@ -571,6 +578,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         )
         let query = CKQuery(recordType: "BBRemoteCommand", predicate: predicate)
 
+        // Track processed command IDs to prevent re-execution.
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        var processedByTunnel = Set(defaults?.stringArray(forKey: "tunnelProcessedCommandIDs") ?? [])
+
         do {
             let (results, _) = try await db.records(matching: query, resultsLimit: 10)
             for (_, result) in results {
@@ -579,6 +590,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let commandID = record.recordID.recordName
                 let targetType = record["targetType"] as? String ?? ""
                 let targetID = record["targetID"] as? String ?? ""
+
+                // Skip commands already processed by this tunnel instance
+                guard !processedByTunnel.contains(commandID) else { continue }
+
+                // Skip stale commands (older than 30 minutes)
+                if let issuedAt = record["issuedAt"] as? Date,
+                   Date().timeIntervalSince(issuedAt) > 1800 {
+                    // Mark as applied to prevent future re-processing
+                    record["status"] = "applied"
+                    _ = try? await db.save(record)
+                    processedByTunnel.insert(commandID)
+                    NSLog("[Tunnel] Skipping stale command \(commandID) (issued \(Int(Date().timeIntervalSince(issuedAt)))s ago)")
+                    continue
+                }
 
                 // Check if this command targets our device
                 let deviceIDStr = enrollment.deviceID.rawValue
@@ -591,6 +616,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 default:        isTargeted = false
                 }
                 guard isTargeted else { continue }
+
+                processedByTunnel.insert(commandID)
 
                 // Handle simple commands from the tunnel
                 if actionJSON.contains("requestHeartbeat") {
@@ -619,6 +646,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         } catch {
             // Silently fail — command polling is best-effort
         }
+
+        // Persist processed IDs (cap at 200 to prevent unbounded growth)
+        if processedByTunnel.count > 200 {
+            processedByTunnel = Set(processedByTunnel.suffix(200))
+        }
+        defaults?.set(Array(processedByTunnel), forKey: "tunnelProcessedCommandIDs")
     }
 
     /// Collect a lightweight diagnostic report from the tunnel (less complete than main app).

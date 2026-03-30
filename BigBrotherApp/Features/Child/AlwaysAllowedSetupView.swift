@@ -32,8 +32,7 @@ struct AlwaysAllowedSetupView: View {
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
-                        .background(.regularMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .blue)
                 }
 
                 if !selection.applicationTokens.isEmpty {

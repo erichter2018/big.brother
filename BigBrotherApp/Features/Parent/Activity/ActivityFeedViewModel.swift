@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import CloudKit
 import BigBrotherCore
 
 /// View model for the Activity feed tab on the parent dashboard.
@@ -12,7 +13,7 @@ final class ActivityFeedViewModel {
     var events: [ActivityEvent] = []
     var isLoading = false
     var selectedChildID: ChildProfileID?
-    var selectedFilter: EventFilter = .all
+    var selectedFilter: EventFilter = .report
     var unreadCount: Int = 0
     var weeklySummary: WeeklySummary?
 
@@ -78,6 +79,7 @@ final class ActivityFeedViewModel {
     // MARK: - Filtering
 
     enum EventFilter: String, CaseIterable {
+        case report = "Report"
         case all = "All"
         case driving = "Driving"
         case places = "Places"
@@ -97,6 +99,7 @@ final class ActivityFeedViewModel {
 
     private func matchesFilter(_ type: EventType) -> Bool {
         switch selectedFilter {
+        case .report: return false
         case .all: return true
         case .driving:
             return [.speedingDetected, .phoneWhileDriving, .hardBrakingDetected, .tripCompleted].contains(type)
@@ -159,7 +162,8 @@ final class ActivityFeedViewModel {
             }
 
             // Compute weekly summary (unfiltered — always shows full picture)
-            weeklySummary = computeWeeklySummary(events: rawEvents, profiles: profiles, devices: devices)
+            // Use ordered profiles so children appear in the same order as the dashboard
+            weeklySummary = await computeWeeklySummary(events: rawEvents, profiles: sortedChildProfiles, devices: devices)
 
             // Weekly digest push notification (fires at most once per 6 days)
             var heartbeatsByChild: [ChildProfileID: [DeviceHeartbeat]] = [:]
@@ -209,7 +213,61 @@ final class ActivityFeedViewModel {
 
     // MARK: - Weekly Summary
 
-    private func computeWeeklySummary(events: [EventLogEntry], profiles: [ChildProfile], devices: [ChildDevice]) -> WeeklySummary {
+    /// Fetch and merge DNS snapshots for a child across all devices for the last 7 days.
+    private func fetchWeekDNSSnapshot(for childID: ChildProfileID, devices: [ChildDevice]) async -> DomainActivitySnapshot? {
+        guard let cloudKit = appState.cloudKit else { return nil }
+        let childDevices = devices.filter { $0.childProfileID == childID }
+        guard !childDevices.isEmpty else { return nil }
+
+        let dateFmt = DateFormatter()
+        dateFmt.dateFormat = "yyyy-MM-dd"
+        let dates = (0..<7).compactMap { Calendar.current.date(byAdding: .day, value: -$0, to: Date()) }.map { dateFmt.string(from: $0) }
+
+        var allHits: [String: DomainHit] = [:]
+        var totalQueries = 0
+
+        for device in childDevices {
+            for dateStr in dates {
+                let recordName = "BBDNSActivity_\(device.id.rawValue)_\(dateStr)"
+                do {
+                    let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
+                    let record = try await db.record(for: CKRecord.ID(recordName: recordName))
+                    guard let json = record["domainsJSON"] as? String,
+                          let data = json.data(using: .utf8),
+                          let hits = try? JSONDecoder().decode([DomainHit].self, from: data) else { continue }
+                    let recTotal = (record["totalQueries"] as? Int64).map { Int($0) } ?? hits.reduce(0) { $0 + $1.count }
+                    totalQueries += recTotal
+                    for hit in hits {
+                        if var existing = allHits[hit.domain] {
+                            existing.count += hit.count
+                            if let sc = hit.slotCounts {
+                                var merged = existing.slotCounts ?? [:]
+                                for (s, c) in sc { merged[s, default: 0] += c }
+                                existing.slotCounts = merged
+                            }
+                            if hit.flagged { existing.flagged = true; existing.category = hit.category }
+                            allHits[hit.domain] = existing
+                        } else {
+                            allHits[hit.domain] = hit
+                        }
+                    }
+                } catch {
+                    continue // Record may not exist for this date
+                }
+            }
+        }
+
+        guard !allHits.isEmpty else { return nil }
+        return DomainActivitySnapshot(
+            deviceID: childDevices.first!.id,
+            familyID: childDevices.first!.familyID,
+            date: dateFmt.string(from: Date()),
+            domains: Array(allHits.values),
+            totalQueries: totalQueries
+        )
+    }
+
+    private func computeWeeklySummary(events: [EventLogEntry], profiles: [ChildProfile], devices: [ChildDevice]) async -> WeeklySummary {
         var childSummaries: [WeeklySummary.ChildWeek] = []
 
         for profile in profiles {
@@ -217,8 +275,7 @@ final class ActivityFeedViewModel {
             let childEvents = events.filter { deviceIDs.contains($0.deviceID) }
 
             let safetyCount = childEvents.filter {
-                [.speedingDetected, .phoneWhileDriving, .hardBrakingDetected, .sosAlert,
-                 .authorizationLost, .enforcementDegraded].contains($0.eventType)
+                [.speedingDetected, .phoneWhileDriving, .hardBrakingDetected, .sosAlert].contains($0.eventType)
             }.count
 
             let unlockRequests = childEvents.filter { $0.eventType == .unlockRequested }.count
@@ -229,12 +286,37 @@ final class ActivityFeedViewModel {
                 .filter { $0.eventType == .newAppDetected }
                 .compactMap { $0.details?.replacingOccurrences(of: "New app activity: ", with: "") }
 
-            // Screen time from heartbeats
+            // Heartbeat data
             let heartbeats = appState.latestHeartbeats(for: profile.id)
+
             let avgScreenTime: Int? = {
                 let values = heartbeats.compactMap(\.screenTimeMinutes).filter { $0 > 0 }
                 guard !values.isEmpty else { return nil }
                 return values.reduce(0, +) / values.count
+            }()
+
+            let avgUnlocks: Int? = {
+                let values = heartbeats.compactMap(\.screenUnlockCount).filter { $0 > 0 }
+                guard !values.isEmpty else { return nil }
+                return values.reduce(0, +) / values.count
+            }()
+
+            // DNS activity — fetch week snapshot from CloudKit
+            let weekSnap = await fetchWeekDNSSnapshot(for: profile.id, devices: devices)
+            let topApps: [(name: String, minutes: Double)] = weekSnap?.estimatedAppUsage().prefix(5).map { $0 } ?? []
+            let flaggedCount = weekSnap?.flaggedDomains.count ?? 0
+            let flaggedDomains = weekSnap?.flaggedDomains.prefix(5).map(\.domain) ?? []
+            let sitesVisited = weekSnap?.domains.filter { !DomainCategorizer.isNoise($0.domain) }.count ?? 0
+
+            // Most active time of day
+            let peakHour: String? = {
+                guard let snap = weekSnap else { return nil }
+                let slots = (0..<96).map { (slot: $0, count: snap.totalQueries(forSlot: $0)) }
+                guard let peak = slots.max(by: { $0.count < $1.count }), peak.count > 0 else { return nil }
+                let hour = peak.slot / 4
+                let ampm = hour < 12 ? "AM" : "PM"
+                let displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour)
+                return "\(displayHour) \(ampm)"
             }()
 
             childSummaries.append(WeeklySummary.ChildWeek(
@@ -245,7 +327,13 @@ final class ActivityFeedViewModel {
                 selfUnlocks: selfUnlocks,
                 trips: trips,
                 newApps: newApps,
-                avgScreenTimeMinutes: avgScreenTime
+                avgScreenTimeMinutes: avgScreenTime,
+                avgDailyUnlocks: avgUnlocks,
+                topApps: topApps,
+                flaggedAttempts: flaggedCount,
+                flaggedDomains: flaggedDomains,
+                sitesVisited: sitesVisited,
+                peakHour: peakHour
             ))
         }
 
@@ -267,6 +355,12 @@ struct WeeklySummary {
         let trips: Int
         let newApps: [String]
         let avgScreenTimeMinutes: Int?
+        let avgDailyUnlocks: Int?
+        let topApps: [(name: String, minutes: Double)]
+        let flaggedAttempts: Int
+        let flaggedDomains: [String]
+        let sitesVisited: Int
+        let peakHour: String?
     }
 }
 

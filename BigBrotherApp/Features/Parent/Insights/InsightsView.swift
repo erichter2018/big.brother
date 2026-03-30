@@ -123,8 +123,7 @@ struct InsightsView: View {
             }
         }
         .padding()
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     @ViewBuilder
@@ -224,8 +223,7 @@ struct InsightsView: View {
             }
         }
         .padding()
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     // MARK: - Schedule Precision
@@ -311,8 +309,7 @@ struct InsightsView: View {
             }
         }
         .padding()
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     private func formatDrift(_ seconds: Double) -> String {
@@ -394,8 +391,7 @@ struct InsightsView: View {
             .frame(height: 140)
         }
         .padding()
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     // MARK: - Per-Child Section
@@ -439,8 +435,7 @@ struct InsightsView: View {
             }
         }
         .padding()
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     @ViewBuilder
@@ -619,8 +614,7 @@ struct InsightsView: View {
             }
         }
         .padding()
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .if_iOS26GlassEffect(fallbackMaterial: .regularMaterial, borderColor: .secondary)
     }
 
     @ViewBuilder

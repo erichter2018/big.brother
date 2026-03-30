@@ -76,7 +76,7 @@ struct MiniMapCard: View {
             .padding(.vertical, 6)
             .background(.ultraThinMaterial)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .secondary)
         .contentShape(Rectangle())
     }
 
@@ -105,7 +105,6 @@ struct MiniMapPlaceholder: View {
         }
         .padding(12)
         .frame(height: 60)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .secondary)
     }
 }
