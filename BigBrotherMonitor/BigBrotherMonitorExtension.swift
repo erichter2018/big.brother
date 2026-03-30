@@ -202,6 +202,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("freeWindowStart", forKey: "lastShieldChangeReason")
 
+        // Temporary unlock or timed unlock active — don't override with schedule.
+        if hasActiveTemporaryMode() { return }
+
         // Manual mode override — skip schedule-driven changes.
         let freeStartDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let freeStartScheduleDriven = freeStartDefaults?.object(forKey: "scheduleDrivenMode") == nil
@@ -252,6 +255,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("freeWindowEnd", forKey: "lastShieldChangeReason")
 
+        // Temporary unlock or timed unlock active — don't override with schedule.
+        if hasActiveTemporaryMode() { return }
+
         // Manual mode override — skip schedule-driven changes.
         let freeEndDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let freeEndScheduleDriven = freeEndDefaults?.object(forKey: "scheduleDrivenMode") == nil
@@ -297,6 +303,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("essentialStart", forKey: "lastShieldChangeReason")
 
+        // Temporary unlock or timed unlock active — don't override with schedule.
+        if hasActiveTemporaryMode() { return }
+
         // Manual mode override — skip schedule-driven changes.
         let essStartDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let essStartScheduleDriven = essStartDefaults?.object(forKey: "scheduleDrivenMode") == nil
@@ -337,6 +346,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private func handleLockedWindowEnd(_ activity: DeviceActivityName) {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("essentialEnd", forKey: "lastShieldChangeReason")
+
+        // Temporary unlock or timed unlock active — don't override with schedule.
+        if hasActiveTemporaryMode() { return }
 
         // Manual mode override — skip schedule-driven changes.
         let essEndDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
@@ -470,6 +482,22 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             title: mode == .unlocked ? "Free Time Started" : "Lock Period Ended",
             body: mode == .unlocked ? "All apps are now accessible." : "\(mode.displayName) mode active."
         )
+    }
+
+    // MARK: - Temporary Mode Guard
+
+    /// Check if a temporary mode (temp unlock, timed unlock) is currently active.
+    /// Schedule window transitions should NOT override active temporary modes —
+    /// the parent's explicit command takes priority over the schedule.
+    private func hasActiveTemporaryMode() -> Bool {
+        let now = Date()
+        if let temp = storage.readTemporaryUnlockState(), temp.expiresAt > now {
+            return true
+        }
+        if let timed = storage.readTimedUnlockInfo(), now < timed.lockAt {
+            return true
+        }
+        return false
     }
 
     // MARK: - Reconciliation
