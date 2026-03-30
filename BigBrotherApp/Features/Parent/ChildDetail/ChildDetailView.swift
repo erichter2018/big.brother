@@ -417,6 +417,12 @@ struct ChildDetailView: View {
 
                     if let mode = dominantMode ?? device.confirmedMode {
                         ModeBadge(mode: mode)
+                        // Grey clock if heartbeat doesn't confirm the expected mode
+                        if let hbMode = hb?.currentMode, hbMode != mode {
+                            Image(systemName: "clock")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.gray)
+                        }
                     }
 
                     if let battery = hb?.batteryLevel {

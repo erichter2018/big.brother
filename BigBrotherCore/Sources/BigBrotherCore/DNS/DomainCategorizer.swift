@@ -473,6 +473,10 @@ public enum DomainCategorizer {
         "tidal.com": "Tidal",
         "soundcloud.com": "SoundCloud",
         "pandora.com": "Pandora",
+        // Sports & Disney
+        "espn.com": "ESPN",
+        "espncdn.com": "ESPN",
+        "disney.com": "Disney/ESPN",
         // Gaming
         "roblox.com": "Roblox",
         "minecraft.net": "Minecraft",
