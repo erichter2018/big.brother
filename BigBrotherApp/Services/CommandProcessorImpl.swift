@@ -642,20 +642,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 eventLogger.log(.commandApplied, details: "Safe search \(enabled ? "enabled" : "disabled")")
                 return .applied
 
-            case .blockInternet(let durationSeconds):
-                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-                if durationSeconds > 0 {
-                    let unblockAt = Date().addingTimeInterval(Double(durationSeconds))
-                    defaults?.set(unblockAt.timeIntervalSince1970, forKey: "internetBlockedUntil")
-                    eventLogger.log(.commandApplied, details: "Internet blocked for \(durationSeconds / 60) minutes")
-                } else {
-                    defaults?.removeObject(forKey: "internetBlockedUntil")
-                    eventLogger.log(.commandApplied, details: "Internet unblocked")
-                }
-                // Restart VPN tunnel to apply DNS change immediately
+            case .blockInternet:
+                // Legacy: internet blocking is now inherent to .lockedDown mode.
+                // The tunnel reads mode from App Group and applies DNS blackhole automatically.
+                // Just restart the tunnel to re-evaluate.
                 DispatchQueue.main.async { [weak self] in
                     self?.onRestartVPNTunnel?()
                 }
+                eventLogger.log(.commandApplied, details: "Internet block state synced (mode-driven)")
                 return .applied
             }
 
@@ -719,6 +713,15 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             if output.modeChanged {
                 eventLogger.log(.modeChanged, details: "Mode changed from \(output.previousMode?.rawValue ?? "none") to \(effectiveMode.rawValue)")
+
+                // If transitioning to/from .lockedDown, restart VPN tunnel to apply/remove DNS blackhole.
+                let wasLockedDown = output.previousMode == .lockedDown
+                let isLockedDown = effectiveMode == .lockedDown
+                if wasLockedDown != isLockedDown {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onRestartVPNTunnel?()
+                    }
+                }
             }
         }
     }
@@ -981,11 +984,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             try center.startMonitoring(activityName, during: schedule)
 
             // Store timed unlock info so the monitor extension knows to unlock/lock.
+            let priorMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
             let info = TimedUnlockInfo(
                 commandID: commandID,
                 activityName: activityName.rawValue,
                 unlockAt: unlockAt,
-                lockAt: lockAt
+                lockAt: lockAt,
+                previousMode: priorMode
             )
             try storage.writeTimedUnlockInfo(info)
 
@@ -1050,7 +1055,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Lock the device immediately and register a DeviceActivitySchedule to
     /// return to schedule at the target date.
     private func applyLockUntil(date: Date, enrollment: ChildEnrollmentState, commandID: UUID) throws {
-        // lockUntil is temporary — it pushes onto the stack and returns to schedule at expiry.
+        // lockUntil is temporary — it pushes onto the stack and restores prior mode at expiry.
+        // Save prior mode for restoration.
+        let priorMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(priorMode.rawValue, forKey: "lockUntilPreviousMode")
+
         // Apply lock immediately.
         try applyMode(.restricted, enrollment: enrollment, commandID: commandID)
 

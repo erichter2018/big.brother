@@ -382,8 +382,8 @@ final class ParentDashboardViewModel: CommandSendable {
             try? await appState.sendCommand(target: .child(child.id), action: commandAction)
         }
         trackPendingCommand(commandAction, target: .child(child.id))
-        // Restore internet in case device was locked down.
-        try? await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: 0))
+        // Internet is now mode-driven — no separate blockInternet command needed.
+        // Tunnel auto-unblocks when mode changes away from .lockedDown.
         // Stop Firebase penalty timer on any lock action.
         await stopPenaltyTimer(for: child)
     }
@@ -411,8 +411,8 @@ final class ParentDashboardViewModel: CommandSendable {
         let action: CommandAction = .temporaryUnlock(durationSeconds: durationFromNow)
         trackPendingCommand(action, target: .child(child.id))
         await performCommand(action, target: .child(child.id))
-        // Restore internet in case device was locked down.
-        try? await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: 0))
+        // Internet is now mode-driven — no separate blockInternet command needed.
+        // Tunnel auto-unblocks when mode changes away from .lockedDown.
         startConfirmationPolling()
     }
 
@@ -482,8 +482,8 @@ final class ParentDashboardViewModel: CommandSendable {
         let action: CommandAction = .setMode(.locked)
         trackPendingCommand(action, target: .child(child.id))
         await performCommand(action, target: .child(child.id))
-        // Restore internet in case device was locked down.
-        try? await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: 0))
+        // Internet is now mode-driven — no separate blockInternet command needed.
+        // Tunnel auto-unblocks when mode changes away from .lockedDown.
         startConfirmationPolling()
     }
 
@@ -504,11 +504,10 @@ final class ParentDashboardViewModel: CommandSendable {
         } else {
             lockDownExpiries.removeValue(forKey: child.id)
         }
-        // Send lockedDown mode + internet block as two commands.
+        // Send lockedDown mode — internet blocking is inherent to the mode.
         isSendingCommand = true
         do {
             try await appState.sendCommand(target: .child(child.id), action: .setMode(.lockedDown))
-            try await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: blockDuration))
             let name = appState.childProfiles.first(where: { $0.id == child.id })?.name ?? ""
             commandFeedback = "Locked Down sent to \(name)."
         } catch {
@@ -559,8 +558,8 @@ final class ParentDashboardViewModel: CommandSendable {
         let action: CommandAction = .returnToSchedule
         trackPendingCommand(action, target: .child(child.id))
         await performCommand(action, target: .child(child.id))
-        // Restore internet in case device was locked down.
-        try? await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: 0))
+        // Internet is now mode-driven — no separate blockInternet command needed.
+        // Tunnel auto-unblocks when mode changes away from .lockedDown.
         startConfirmationPolling()
     }
 

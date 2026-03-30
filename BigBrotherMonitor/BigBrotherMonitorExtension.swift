@@ -374,11 +374,18 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         sendModeNotification(title: "Penalty Complete", body: "All apps are now accessible.")
     }
 
-    /// Timed unlock window ended — re-lock the device.
+    /// Timed unlock window ended — re-lock the device using saved previousMode.
+    /// Falls back to schedule or .restricted if previousMode not available.
     private func handleTimedUnlockEnd(_ activity: DeviceActivityName) {
+        let timedInfo = storage.readTimedUnlockInfo()
+        let isScheduleDriven = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .bool(forKey: "scheduleDrivenMode") ?? true
+
         let mode: LockMode
-        if let profile = storage.readActiveScheduleProfile() {
+        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
+        } else if let saved = timedInfo?.previousMode {
+            mode = saved
         } else {
             mode = .restricted
         }
@@ -431,21 +438,25 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     // MARK: - Lock Until Expiry
 
-    /// Lock-until timer expired — return to schedule-driven mode.
+    /// Lock-until timer expired — restore prior mode from stack.
+    /// Uses schedule if schedule-driven, saved previousMode if manual, or .restricted as fallback.
     private func handleLockUntilExpired(_ activity: DeviceActivityName) {
-        // Manual mode override — skip schedule-driven changes.
-        let lockUntilDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let lockUntilScheduleDriven = lockUntilDefaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (lockUntilDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-        if !lockUntilScheduleDriven { return }
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let isScheduleDriven = defaults?.object(forKey: "scheduleDrivenMode") == nil
+            || (defaults?.bool(forKey: "scheduleDrivenMode") ?? true)
 
         let mode: LockMode
-        if let profile = storage.readActiveScheduleProfile() {
+        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
+        } else if let savedRaw = defaults?.string(forKey: "lockUntilPreviousMode"),
+                  let saved = LockMode(rawValue: savedRaw) {
+            mode = saved
         } else {
-            // No schedule — stay locked.
             mode = .restricted
         }
+
+        // Clean up saved state
+        defaults?.removeObject(forKey: "lockUntilPreviousMode")
 
         if mode == .unlocked {
             clearAllShieldStores()

@@ -410,13 +410,23 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         reapplyNetworkSettings()
     }
 
-    /// Check if internet is currently blocked (called during settings application).
+    /// Check if internet should be blocked based on current enforcement mode.
+    /// Internet is blocked when the device is in .lockedDown mode.
+    /// Also checks legacy internetBlockedUntil for backward compatibility.
     private var isInternetBlocked: Bool {
+        // Primary: check current mode from policy snapshot or extension shared state
+        if let extState = storage.readExtensionSharedState(), extState.currentMode == .lockedDown {
+            return true
+        }
+        if let snap = storage.readPolicySnapshot(),
+           snap.effectivePolicy.resolvedMode == .lockedDown {
+            return true
+        }
+        // Legacy: check explicit internetBlockedUntil flag
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         guard let unblockTimestamp = defaults?.double(forKey: "internetBlockedUntil"),
               unblockTimestamp > 0 else { return false }
         if Date().timeIntervalSince1970 >= unblockTimestamp {
-            // Block expired — clean up
             defaults?.removeObject(forKey: "internetBlockedUntil")
             return false
         }
@@ -624,15 +634,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     _ = try? await db.save(record)
                     NSLog("[Tunnel] Processed requestDiagnostics command: \(commandID)")
                 } else if actionJSON.contains("blockInternet") {
-                    // Parse duration from actionJSON
-                    if let data = actionJSON.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let duration = (json["blockInternet"] as? [String: Any])?["durationSeconds"] as? Int {
-                        applyInternetBlock(durationSeconds: duration)
-                    }
+                    // Legacy: internet blocking is now mode-driven.
+                    // Just reapply network settings — tunnel reads mode from App Group.
+                    reapplyNetworkSettings()
                     record["status"] = "applied"
                     _ = try? await db.save(record)
-                    NSLog("[Tunnel] Processed blockInternet command: \(commandID)")
+                    NSLog("[Tunnel] Processed blockInternet (mode-driven): \(commandID)")
                 }
                 // Other commands are left for the main app
             }

@@ -11,12 +11,15 @@ public struct TimedUnlockInfo: Codable, Sendable {
     public let unlockAt: Date
     /// When the device should re-lock (end of total window).
     public let lockAt: Date
+    /// The mode that was active before this timed unlock — restored on expiry.
+    public let previousMode: LockMode?
 
-    public init(commandID: UUID, activityName: String, unlockAt: Date, lockAt: Date) {
+    public init(commandID: UUID, activityName: String, unlockAt: Date, lockAt: Date, previousMode: LockMode? = nil) {
         self.commandID = commandID
         self.activityName = activityName
         self.unlockAt = unlockAt
         // Graceful fallback: if lockAt is not after unlockAt, default to 60s after unlock
         self.lockAt = lockAt > unlockAt ? lockAt : unlockAt.addingTimeInterval(60)
+        self.previousMode = previousMode
     }
 }

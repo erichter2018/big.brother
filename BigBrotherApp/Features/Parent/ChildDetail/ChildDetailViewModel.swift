@@ -367,7 +367,6 @@ final class ChildDetailViewModel: CommandSendable {
         isSendingCommand = true
         do {
             try await appState.sendCommand(target: .child(child.id), action: .setMode(.lockedDown))
-            try await appState.sendCommand(target: .child(child.id), action: .blockInternet(durationSeconds: blockDuration))
             commandFeedback = "Locked Down sent."
         } catch {
             commandFeedback = "Failed: \(error.localizedDescription)"
