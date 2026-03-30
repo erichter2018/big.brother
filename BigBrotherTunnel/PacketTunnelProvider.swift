@@ -123,10 +123,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Called when the tunnel wakes from sleep or after a network change.
-    /// Verify the DNS upstream session is still healthy.
     override func wake() {
-        NSLog("[Tunnel] wake() — verifying DNS upstream session")
-        dnsProxy?.verifySession()
+        NSLog("[Tunnel] wake()")
+        dnsProxy?.recreateSession()
     }
 
     // MARK: - IPC (Main App Communication)
