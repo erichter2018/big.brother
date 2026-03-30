@@ -474,193 +474,38 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     // MARK: - Reconciliation
 
-    /// Verify enforcement matches the current policy snapshot.
-    /// Must work even if the main app was force-killed before writing ExtensionSharedState.
-    /// Falls back to PolicySnapshot + ScheduleProfile when ExtensionSharedState is nil.
+    /// Verify enforcement matches the mode stack.
+    /// Uses ModeStackResolver for deterministic mode resolution from App Group files.
+    /// Also cleans up expired temporary state as a side effect.
     private func reconcile() {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("reconcile", forKey: "lastShieldChangeReason")
-        let extState = storage.readExtensionSharedState()
 
-        // --- Temporary unlock checks (only if ExtensionSharedState exists) ---
-
-        if let extState {
-            // If temporary unlock is active and not expired, ensure all stores are clear.
-            if extState.isTemporaryUnlock,
-               let expires = extState.temporaryUnlockExpiresAt, expires > Date() {
-                clearAllShieldStores()
-                updateSharedState(mode: .unlocked, isTemporaryUnlock: true, temporaryUnlockExpiresAt: expires)
-                return
-            }
-
-            // If temporary unlock has expired, re-lock using the previous mode.
-            if extState.isTemporaryUnlock,
-               let expires = extState.temporaryUnlockExpiresAt, expires <= Date() {
-                let unlockState = storage.readTemporaryUnlockState()
-                let previousMode = unlockState?.previousMode ?? .restricted
-                let mode: LockMode
-                let reconcileDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-                let reconcileScheduleDriven = reconcileDefaults?.object(forKey: "scheduleDrivenMode") == nil
-                    || (reconcileDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-                if reconcileScheduleDriven, let profile = storage.readActiveScheduleProfile() {
-                    mode = profile.resolvedMode(at: Date())
-                } else {
-                    mode = previousMode
-                }
-                let policy = storage.readPolicySnapshot()?.effectivePolicy
-                applyShieldingToAllStores(mode: mode, policy: policy)
-                updateSharedState(mode: mode)
-                try? storage.clearTemporaryUnlockState()
-                logEvent(.temporaryUnlockExpired, details: "Reconciliation: temp unlock expired, locked to \(mode.rawValue)")
-                sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
-                return
-            }
-
-            // If enforcement is degraded, nothing we can do from the extension.
-            if extState.enforcementDegraded { return }
-        }
-
-        // --- Check TemporaryUnlockState directly (survives force-close) ---
-
-        if let unlockState = storage.readTemporaryUnlockState() {
-            if unlockState.expiresAt > Date() {
-                // Active temp unlock — keep stores clear.
-                clearAllShieldStores()
-                updateSharedState(mode: .unlocked, isTemporaryUnlock: true, temporaryUnlockExpiresAt: unlockState.expiresAt)
-                return
-            } else {
-                // Expired temp unlock the monitor never caught — re-lock now.
-                let mode: LockMode
-                let staleDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-                let staleScheduleDriven = staleDefaults?.object(forKey: "scheduleDrivenMode") == nil
-                    || (staleDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-                if staleScheduleDriven, let profile = storage.readActiveScheduleProfile() {
-                    mode = profile.resolvedMode(at: Date())
-                } else {
-                    mode = unlockState.previousMode
-                }
-                let policy = storage.readPolicySnapshot()?.effectivePolicy
-                applyShieldingToAllStores(mode: mode, policy: policy)
-                updateSharedState(mode: mode)
-                try? storage.clearTemporaryUnlockState()
-                logEvent(.temporaryUnlockExpired, details: "Reconciliation: stale temp unlock cleaned up, locked to \(mode.rawValue)")
-                sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
-                return
-            }
-        }
-
-        // --- Timed unlock check (penalty-offset unlocks survive force-close) ---
-
-        if let timedInfo = storage.readTimedUnlockInfo() {
-            let now = Date()
-            if now < timedInfo.unlockAt {
-                // Still in penalty phase — ensure device is locked.
-                let penaltyMode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .restricted
-                let policy = storage.readPolicySnapshot()?.effectivePolicy
-                applyShieldingToAllStores(mode: penaltyMode, policy: policy)
-                updateSharedState(mode: penaltyMode)
-                return
-            } else if now >= timedInfo.unlockAt && now < timedInfo.lockAt {
-                // In the free phase — device should be unlocked.
-                clearAllShieldStores()
-                updateSharedState(mode: .unlocked)
-                return
-            } else {
-                // Past lockAt — the schedule should have re-locked, but clean up in case it didn't.
-                let mode: LockMode
-                if let profile = storage.readActiveScheduleProfile() {
-                    mode = profile.resolvedMode(at: Date())
-                } else {
-                    mode = .restricted
-                }
-                if mode == .unlocked {
-                    clearAllShieldStores()
-                } else {
-                    let policy = storage.readPolicySnapshot()?.effectivePolicy
-                    applyShieldingToAllStores(mode: mode, policy: policy)
-                }
-                updateSharedState(mode: mode)
-                try? storage.clearTimedUnlockInfo()
-                logEvent(.policyReconciled, details: "Reconciliation: stale timed unlock cleaned up, mode \(mode.rawValue)")
-                return
-            }
-        }
-
-        // --- Check if parent overrode the schedule with a manual mode command ---
-
-        let reconcileDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let isScheduleDriven = reconcileDefaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (reconcileDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-
-        // --- Schedule profile window check (free > essential > lockedMode) ---
-        // Only apply schedule-driven modes if scheduleDrivenMode is true.
-        // When a parent sends a manual setMode command, scheduleDrivenMode is set to false
-        // and the manual mode should persist until the parent sends returnToSchedule.
-
-        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
-            let scheduleMode = profile.resolvedMode(at: Date())
-            if scheduleMode == .unlocked || scheduleMode == .locked {
-                // Block scheduled UNLOCKS if the main app was force-closed (security).
-                // But NEVER block essential mode — tightening restrictions is always safe
-                // and should happen regardless of app state.
-                if scheduleMode == .unlocked && shouldTreatMainAppAsUnavailable() {
-                    sendForceCloseEnforcement(nagNotification: true)
-                    logEvent(.policyReconciled, details: "Reconciliation: unlock blocked — app dead, essential mode")
-                    return
-                } else if scheduleMode == .unlocked {
-                    clearAllShieldStores()
-                    updateSharedState(mode: .unlocked)
-                    logEvent(.policyReconciled, details: "Reconciliation: in unlocked window, stores cleared")
-                    return
-                } else {
-                    let policy = storage.readPolicySnapshot()?.effectivePolicy
-                    applyShieldingToAllStores(mode: .locked, policy: policy)
-                    updateSharedState(mode: .locked)
-                    logEvent(.policyReconciled, details: "Reconciliation: in locked window, locked mode applied")
-                    return
-                }
-            }
-            // lockedMode falls through to default enforcement below
-        }
-
-        // --- Force-close check (regardless of schedule profile) ---
-        // Don't nag the kid when the device is already locked down — shields are
-        // enforced by ManagedSettingsStore independently of the main app.
-        // Only apply locked mode silently; nag only when an unlocked window is blocked.
-
-        if shouldTreatMainAppAsUnavailable() {
-            sendForceCloseEnforcement(nagNotification: false)
-            logEvent(.policyReconciled, details: "Reconciliation: app dead — essential mode applied silently")
-            return
-        }
-
-        // --- Final temp unlock safety check ---
-        // If a temp unlock is active in storage, always clear shields regardless of
-        // what the snapshot or shared state says. This catches cases where the snapshot
-        // was overwritten by a non-unlock command but the unlock is still active.
-        if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
-            clearAllShieldStores()
-            updateSharedState(mode: .unlocked, isTemporaryUnlock: true, temporaryUnlockExpiresAt: tempState.expiresAt)
-            logEvent(.policyReconciled, details: "Reconciliation: temp unlock active, shields cleared")
-            return
-        }
-
-        // --- Default: apply the current mode from ExtensionSharedState or PolicySnapshot ---
-
-        let resolvedMode: LockMode
-        if let extState {
-            resolvedMode = extState.currentMode
-        } else if let snapshot = storage.readPolicySnapshot() {
-            resolvedMode = snapshot.effectivePolicy.resolvedMode
-        } else {
-            // No state at all — nothing to enforce.
-            return
-        }
-
+        let resolution = ModeStackResolver.resolve(storage: storage)
         let policy = storage.readPolicySnapshot()?.effectivePolicy
-        applyShieldingToAllStores(mode: resolvedMode, policy: policy)
-        updateSharedState(mode: resolvedMode)
-        logEvent(.policyReconciled, details: "Reconciliation check from extension")
+
+        // Security: block scheduled unlocks if main app is force-closed.
+        // Tightening restrictions is always safe, but loosening when app is dead is risky.
+        if resolution.mode == .unlocked && shouldTreatMainAppAsUnavailable() {
+            sendForceCloseEnforcement(nagNotification: true)
+            logEvent(.policyReconciled, details: "Reconciliation: unlock blocked — app dead (\(resolution.reason))")
+            return
+        }
+
+        // Apply the resolved mode
+        if resolution.mode == .unlocked {
+            clearAllShieldStores()
+            updateSharedState(
+                mode: .unlocked,
+                isTemporaryUnlock: resolution.isTemporary,
+                temporaryUnlockExpiresAt: resolution.expiresAt
+            )
+        } else {
+            applyShieldingToAllStores(mode: resolution.mode, policy: policy)
+            updateSharedState(mode: resolution.mode)
+        }
+
+        logEvent(.policyReconciled, details: "Reconciliation: \(resolution.reason)")
     }
 
     // MARK: - All-Store Shield Management

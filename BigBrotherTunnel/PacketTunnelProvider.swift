@@ -389,6 +389,101 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             NSLog("[Tunnel] Internet block expired — traffic restored")
             tunnelOwnsHeartbeat = false
         }
+
+        // Emergency enforcement: if both app and Monitor are dead, screen is unlocked,
+        // and device should be restricted/locked — activate DNS blackhole as fallback.
+        checkEmergencyEnforcement()
+    }
+
+    /// Consecutive checks where emergency enforcement conditions are met.
+    /// Requires multiple checks to avoid false positives from normal iOS process lifecycle.
+    private var emergencyCheckCount: Int = 0
+    private var emergencyBlackholeActive: Bool = false
+
+    /// Check if the tunnel should activate emergency DNS blackhole enforcement.
+    /// Only triggers when: screen is unlocked, both app and Monitor are dead for
+    /// multiple consecutive checks, and the device should be in a restricted state.
+    private func checkEmergencyEnforcement() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+
+        // Only act when screen is unlocked (kid is actively using the phone)
+        guard !(dnsProxy?.isDeviceLocked ?? true) else {
+            emergencyCheckCount = 0
+            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
+            return
+        }
+
+        // Resolve what mode the device should be in
+        let resolution = ModeStackResolver.resolve(storage: storage)
+
+        // If device should be unlocked, no emergency needed
+        guard resolution.mode != .unlocked else {
+            emergencyCheckCount = 0
+            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
+            return
+        }
+
+        // Check if Monitor is alive (wrote monitorLastActiveAt recently)
+        let monitorLastActive = defaults?.double(forKey: "monitorLastActiveAt") ?? 0
+        let monitorAge = monitorLastActive > 0 ? Date().timeIntervalSince1970 - monitorLastActive : 999
+        let monitorDead = monitorAge > 1200 // 20 minutes
+
+        // Both main app and Monitor must be dead
+        guard !mainAppAlive && monitorDead else {
+            emergencyCheckCount = 0
+            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
+            return
+        }
+
+        // Require 3 consecutive checks (liveness timer fires every ~60s = 3 minutes)
+        emergencyCheckCount += 1
+        guard emergencyCheckCount >= 3 else { return }
+
+        // Activate emergency blackhole
+        if !emergencyBlackholeActive {
+            NSLog("[Tunnel] EMERGENCY: App dead \(!mainAppAlive), Monitor dead (\(Int(monitorAge))s), screen unlocked, mode should be \(resolution.mode.rawValue) — activating DNS blackhole")
+            emergencyBlackholeActive = true
+            reapplyNetworkSettings()
+
+            // Notify parent via CloudKit event
+            Task { await sendEmergencyAlert(resolution: resolution, monitorAge: Int(monitorAge)) }
+        }
+    }
+
+    private func deactivateEmergencyBlackhole() {
+        guard emergencyBlackholeActive else { return }
+        emergencyBlackholeActive = false
+        emergencyCheckCount = 0
+        reapplyNetworkSettings()
+        NSLog("[Tunnel] Emergency blackhole deactivated — normal enforcement resumed")
+    }
+
+    private func sendEmergencyAlert(resolution: ModeStackResolver.Resolution, monitorAge: Int) async {
+        guard let enrollment = try? keychain.get(ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState) else { return }
+        let details = "EMERGENCY: Shields down, DNS blackhole activated. Mode should be \(resolution.mode.rawValue) (\(resolution.reason)). App dead, Monitor last active \(monitorAge)s ago."
+        let entry = EventLogEntry(
+            deviceID: enrollment.deviceID,
+            familyID: enrollment.familyID,
+            eventType: .enforcementDegraded,
+            details: details
+        )
+        try? storage.appendEventLog(entry)
+        // Also try direct CloudKit upload
+        do {
+            let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
+            let recordID = CKRecord.ID(recordName: "eventLog_\(entry.id.uuidString)")
+            let record = CKRecord(recordType: "BBEventLog", recordID: recordID)
+            record["eventID"] = entry.id.uuidString
+            record["deviceID"] = entry.deviceID.rawValue
+            record["familyID"] = entry.familyID.rawValue
+            record["eventType"] = entry.eventType.rawValue
+            record["details"] = details
+            record["timestamp"] = entry.timestamp as NSDate
+            try await db.save(record)
+            NSLog("[Tunnel] Emergency alert uploaded to CloudKit")
+        } catch {
+            NSLog("[Tunnel] Failed to upload emergency alert: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Internet Block
@@ -411,9 +506,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Check if internet should be blocked based on current enforcement mode.
-    /// Internet is blocked when the device is in .lockedDown mode.
-    /// Also checks legacy internetBlockedUntil for backward compatibility.
+    /// Internet is blocked when: device is in .lockedDown mode, emergency blackhole is active,
+    /// or legacy internetBlockedUntil flag is set.
     private var isInternetBlocked: Bool {
+        // Emergency blackhole (tunnel last-resort enforcement)
+        if emergencyBlackholeActive { return true }
         // Primary: check current mode from policy snapshot or extension shared state
         if let extState = storage.readExtensionSharedState(), extState.currentMode == .lockedDown {
             return true

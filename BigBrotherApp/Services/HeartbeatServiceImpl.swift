@@ -419,19 +419,33 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     // MARK: - Enforcement Reconciliation
 
     /// Re-apply enforcement as a safety net after each heartbeat.
-    /// Skips during schedule-managed windows (free or essential) to avoid fighting the monitor extension.
+    /// Uses ModeStackResolver to compute the correct mode from the stack files,
+    /// then applies it if shields don't match. This is idempotent — if the Monitor
+    /// already applied the correct state, this is a no-op.
     private func reconcileEnforcement() {
         guard let enforcement else { return }
-        // Don't re-enforce during schedule-managed windows — Monitor handles this.
-        if let profile = storage.readActiveScheduleProfile() {
-            let scheduleMode = profile.resolvedMode(at: Date())
-            if scheduleMode != profile.lockedMode {
-                // In a schedule-managed window (free or essential) — Monitor handles this.
-                return
-            }
-        }
+        let resolution = ModeStackResolver.resolve(storage: storage)
         guard let snapshot = storage.readPolicySnapshot() else { return }
-        try? enforcement.apply(snapshot.effectivePolicy)
+
+        // Check if shields match the resolved mode
+        let diagnostic = enforcement.shieldDiagnostic()
+        let shouldBeShielded = resolution.mode != .unlocked
+        let isShielded = diagnostic.shieldsActive
+
+        if shouldBeShielded != isShielded {
+            // Mismatch — apply the correct state
+            try? enforcement.apply(snapshot.effectivePolicy)
+
+            #if DEBUG
+            print("[BigBrother] Heartbeat reconciliation: shields were \(isShielded ? "up" : "DOWN"), should be \(shouldBeShielded ? "up" : "down") (mode: \(resolution.mode.rawValue), reason: \(resolution.reason))")
+            #endif
+
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Heartbeat reconciled shields",
+                details: "Mode: \(resolution.mode.rawValue), reason: \(resolution.reason)"
+            ))
+        }
     }
 
     // MARK: - New App Detection
