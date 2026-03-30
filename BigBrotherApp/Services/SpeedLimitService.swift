@@ -37,15 +37,6 @@ actor SpeedLimitService {
     private var needsSave = false
 
     init() {
-        // Flush cache when build number changes (geometry-aware queries produce different results)
-        let buildKey = "speedLimitCacheBuild"
-        let defaults = UserDefaults.standard
-        let lastBuild = defaults.integer(forKey: buildKey)
-        if lastBuild != AppConstants.appBuildNumber {
-            try? FileManager.default.removeItem(at: Self.diskCacheURL)
-            defaults.set(AppConstants.appBuildNumber, forKey: buildKey)
-        }
-
         // Load disk cache
         if let data = try? Data(contentsOf: Self.diskCacheURL),
            let loaded = try? JSONDecoder().decode([String: CachedLimit].self, from: data) {
