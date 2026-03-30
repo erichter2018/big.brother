@@ -390,9 +390,47 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             tunnelOwnsHeartbeat = false
         }
 
+        // Build mismatch: app was updated but hasn't launched yet on the new build.
+        // Block internet until the kid opens the app (triggers restoration on new code).
+        checkBuildMismatchEnforcement()
+
         // Emergency enforcement: if both app and Monitor are dead, screen is unlocked,
         // and device should be restricted/locked — activate DNS blackhole as fallback.
         checkEmergencyEnforcement()
+    }
+
+    private var buildMismatchBlackholeActive: Bool = false
+
+    private func checkBuildMismatchEnforcement() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let mainAppBuild = defaults?.integer(forKey: "mainAppLastLaunchedBuild") ?? 0
+        let tunnelBuild = AppConstants.appBuildNumber
+
+        if mainAppBuild > 0 && mainAppBuild < tunnelBuild {
+            if !buildMismatchBlackholeActive {
+                NSLog("[Tunnel] Build mismatch: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — blocking internet until app launches")
+                buildMismatchBlackholeActive = true
+                reapplyNetworkSettings()
+
+                // Notify the kid to open the app
+                let content = UNMutableNotificationContent()
+                content.title = "Big Brother Update"
+                content.body = "Open Big Brother to restore internet access."
+                content.sound = .default
+                let request = UNNotificationRequest(
+                    identifier: "build-mismatch",
+                    content: content,
+                    trigger: nil
+                )
+                UNUserNotificationCenter.current().add(request)
+            }
+        } else if buildMismatchBlackholeActive {
+            // App has launched on new build — restore internet
+            NSLog("[Tunnel] Build mismatch resolved: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — restoring internet")
+            buildMismatchBlackholeActive = false
+            reapplyNetworkSettings()
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["build-mismatch"])
+        }
     }
 
     /// Consecutive checks where emergency enforcement conditions are met.
@@ -509,6 +547,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Internet is blocked when: device is in .lockedDown mode, emergency blackhole is active,
     /// or legacy internetBlockedUntil flag is set.
     private var isInternetBlocked: Bool {
+        // Build mismatch blackhole (app needs to launch on new build)
+        if buildMismatchBlackholeActive { return true }
         // Emergency blackhole (tunnel last-resort enforcement)
         if emergencyBlackholeActive { return true }
         // Primary: check current mode from policy snapshot or extension shared state
