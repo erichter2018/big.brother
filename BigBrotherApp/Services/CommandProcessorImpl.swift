@@ -327,17 +327,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         do {
             switch command.action {
             case .setMode(let mode):
-                // Don't let setMode override an active temporary unlock.
-                // If a parent explicitly gave the kid 2 hours, a stray restrict
-                // command shouldn't kill it. The parent can explicitly cancel
-                // the temp unlock if they want to re-lock.
-                if mode != .unlocked,
-                   let tempState = storage.readTemporaryUnlockState(),
-                   tempState.expiresAt > Date() {
-                    let remaining = Int(tempState.expiresAt.timeIntervalSinceNow / 60)
-                    eventLogger.log(.commandApplied, details: "Mode \(mode.rawValue) skipped — temp unlock active (\(remaining)min remaining)")
-                    return .applied
-                }
+                // Indefinite mode command: clears the entire stack.
+                // Last parent command always wins — if parent says Lock,
+                // any active temp unlock, timed unlock, or schedule is overridden.
+                try? storage.clearTemporaryUnlockState()
+                try? storage.clearTimedUnlockInfo()
+                cancelNonScheduleActivities()
                 try applyMode(mode, enrollment: enrollment, commandID: command.id)
                 UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(false, forKey: "scheduleDrivenMode")
                 eventLogger.log(.commandApplied, details: "Mode set to \(mode.rawValue)")
@@ -1055,7 +1050,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Lock the device immediately and register a DeviceActivitySchedule to
     /// return to schedule at the target date.
     private func applyLockUntil(date: Date, enrollment: ChildEnrollmentState, commandID: UUID) throws {
-        // Apply dailyMode lock immediately.
+        // lockUntil is temporary — it pushes onto the stack and returns to schedule at expiry.
+        // Apply lock immediately.
         try applyMode(.restricted, enrollment: enrollment, commandID: commandID)
 
         // Register a one-shot DeviceActivitySchedule that fires at the target date.
