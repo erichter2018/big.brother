@@ -311,7 +311,11 @@ enum DiagnosticCollector {
             isMoving: locationService?.isMoving ?? false,
             isDriving: appState.drivingMonitor?.isDriving ?? false,
             vpnTunnelStatus: vpnStatus,
-            familyControlsAuth: authStatus?.rawValue ?? "unknown",
+            familyControlsAuth: {
+                let status = authStatus?.rawValue ?? "unknown"
+                let authType = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "fr.bigbrother.authorizationType") ?? "unknown"
+                return "\(status) (\(authType))"
+            }(),
             currentMode: snapshot?.effectivePolicy.resolvedMode.rawValue ?? "unknown",
             shieldsActive: shieldDiag?.shieldsActive ?? false,
             shieldedAppCount: shieldDiag?.appCount ?? 0,

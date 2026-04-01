@@ -10,6 +10,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     public let currentMode: LockMode
     public let policyVersion: Int64
     public let familyControlsAuthorized: Bool
+    /// "child" (strong — requires Family Sharing, parent can't revoke) or "individual" (weak — user can revoke)
+    public let familyControlsAuthType: String?
     public let batteryLevel: Double?
     public let isCharging: Bool?
 
@@ -158,6 +160,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         currentMode: LockMode,
         policyVersion: Int64,
         familyControlsAuthorized: Bool,
+        familyControlsAuthType: String? = nil,
         batteryLevel: Double? = nil,
         isCharging: Bool? = nil,
         appBlockingConfigured: Bool? = nil,
@@ -218,6 +221,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.currentMode = currentMode
         self.policyVersion = policyVersion
         self.familyControlsAuthorized = familyControlsAuthorized
+        self.familyControlsAuthType = familyControlsAuthType
         self.batteryLevel = batteryLevel
         self.isCharging = isCharging
         self.appBlockingConfigured = appBlockingConfigured
@@ -277,7 +281,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case deviceID, familyID, timestamp, currentMode, policyVersion
-        case familyControlsAuthorized, batteryLevel, isCharging
+        case familyControlsAuthorized, familyControlsAuthType, batteryLevel, isCharging
         case appBlockingConfigured, blockedCategoryCount, blockedAppCount
         case blockedAppNames, blockedCategoryNames
         case installID, heartbeatSeq, cloudKitStatus
@@ -319,6 +323,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         currentMode = try container.decode(LockMode.self, forKey: .currentMode)
         policyVersion = try container.decode(Int64.self, forKey: .policyVersion)
         familyControlsAuthorized = try container.decode(Bool.self, forKey: .familyControlsAuthorized)
+        familyControlsAuthType = try container.decodeIfPresent(String.self, forKey: .familyControlsAuthType)
         batteryLevel = try container.decodeIfPresent(Double.self, forKey: .batteryLevel)
         isCharging = try container.decodeIfPresent(Bool.self, forKey: .isCharging)
         appBlockingConfigured = try container.decodeIfPresent(Bool.self, forKey: .appBlockingConfigured)

@@ -1217,6 +1217,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         record["hbSource"] = "vpnTunnel"
         record["hbTunnel"] = 1 as NSNumber
 
+        // FC auth type from App Group (written by main app)
+        if let authType = defaults?.string(forKey: "fr.bigbrother.authorizationType") {
+            record["hbFCAuthType"] = authType
+        }
+
         // Enforcement state — use ModeStackResolver for ground truth
         let policyVersion = storage.readPolicySnapshot()?.effectivePolicy.policyVersion ?? 0
         let modeResolution = ModeStackResolver.resolve(storage: storage)

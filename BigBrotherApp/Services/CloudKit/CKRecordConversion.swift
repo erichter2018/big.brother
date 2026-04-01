@@ -338,6 +338,7 @@ enum CKRecordConversion {
         record[CKFieldName.currentMode] = hb.currentMode.rawValue
         record[CKFieldName.policyVersion] = hb.policyVersion as NSNumber
         record[CKFieldName.fcAuthorized] = (hb.familyControlsAuthorized ? 1 : 0) as NSNumber
+        record[CKFieldName.hbFCAuthType] = hb.familyControlsAuthType
         record[CKFieldName.batteryLevel] = hb.batteryLevel.map { $0 as NSNumber }
         record[CKFieldName.isCharging] = hb.isCharging.map { ($0 ? 1 : 0) as NSNumber }
         record[CKFieldName.appBlockingConfigured] = hb.appBlockingConfigured.map { ($0 ? 1 : 0) as NSNumber }
@@ -419,6 +420,7 @@ enum CKRecordConversion {
             currentMode: mode,
             policyVersion: pv,
             familyControlsAuthorized: fc != 0,
+            familyControlsAuthType: record[CKFieldName.hbFCAuthType] as? String,
             batteryLevel: record[CKFieldName.batteryLevel] as? Double,
             isCharging: (record[CKFieldName.isCharging] as? Int64).map { $0 != 0 },
             appBlockingConfigured: (record[CKFieldName.appBlockingConfigured] as? Int64).map { $0 != 0 },

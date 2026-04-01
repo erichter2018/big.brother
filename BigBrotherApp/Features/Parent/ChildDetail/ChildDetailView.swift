@@ -153,6 +153,22 @@ struct ChildDetailView: View {
         .onDisappear { viewModel.stopAutoRefresh() }
     }
 
+    // MARK: - Auth Type Badge
+
+    @ViewBuilder
+    private func authTypeBadge(heartbeat hb: DeviceHeartbeat?) -> some View {
+        if let authType = hb?.familyControlsAuthType {
+            let isChild = authType == "child"
+            HStack(spacing: 2) {
+                Image(systemName: isChild ? "lock.shield.fill" : "shield")
+                    .font(.system(size: 8))
+                Text(isChild ? "Family" : "Individual")
+            }
+            .font(.caption2)
+            .foregroundStyle(isChild ? .green : .orange)
+        }
+    }
+
     // MARK: - Device Issue Panel
 
     @ViewBuilder
@@ -568,6 +584,7 @@ struct ChildDetailView: View {
                     .foregroundStyle(.pink.opacity(0.6))
                 }
                 buildBadge(childBuild: hb?.appBuildNumber, heartbeat: hb)
+                authTypeBadge(heartbeat: hb)
             }
             .font(.caption2)
 
@@ -1198,6 +1215,16 @@ struct ChildDetailView: View {
                             deviceToRevokeAll = device
                         } label: {
                             Label("Revoke All Allowed Apps", systemImage: "xmark.circle")
+                        }
+
+                        // Re-authorize as .child if currently .individual
+                        if let hb = viewModel.heartbeat(for: device),
+                           hb.familyControlsAuthType != "child" {
+                            Button {
+                                Task { await viewModel.requestReauthorization(for: device) }
+                            } label: {
+                                Label("Upgrade to Family Auth", systemImage: "lock.shield")
+                            }
                         }
 
                         Button(role: .destructive) {

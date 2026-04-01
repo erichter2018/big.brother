@@ -1053,6 +1053,13 @@ final class ChildDetailViewModel: CommandSendable {
         await performCommand(.requestPermissions, target: .device(device.id))
     }
 
+    /// Request a device to re-authorize FamilyControls, attempting .child first.
+    /// Use this to upgrade from .individual to .child after adding the kid to Family Sharing.
+    /// Parent must be physically at the child device to approve the .child authorization.
+    func requestReauthorization(for device: ChildDevice) async {
+        await performCommand(.requestPermissions, target: .device(device.id))
+    }
+
     // MARK: - Home Geofence
 
     /// Whether a home geofence is configured for any of this child's devices.
