@@ -1230,9 +1230,7 @@ final class AppState {
         do {
             fetchedHeartbeats = try await cloudKit.fetchLatestHeartbeats(familyID: familyID)
         } catch {
-            #if DEBUG
-            print("[BigBrother] Failed to fetch heartbeats: \(error.localizedDescription)")
-            #endif
+            NSLog("[BigBrother] Failed to fetch heartbeats: \(error.localizedDescription)")
         }
 
         do {

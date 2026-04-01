@@ -996,11 +996,8 @@ final class ParentDashboardViewModel: CommandSendable {
                     if !self.appState.childProfiles.isEmpty {
                         self.loadingState = .loaded(self.appState.childProfiles)
                     }
-                    // Auto-ping stale devices: if any child device hasn't sent a heartbeat
-                    // in 15+ minutes, send a requestHeartbeat command. This triggers a
-                    // silent push that wakes the app, which checks permissions, reinstalls
-                    // VPN if missing, and sends a fresh heartbeat.
-                    await self.autoPingStaleDevices()
+                    // Auto-ping stale devices in the background — don't block the refresh cycle.
+                    Task { await self.autoPingStaleDevices() }
                 }
 
                 // When penalty phase ends (transitioning to unlock), clear the Firebase timer.

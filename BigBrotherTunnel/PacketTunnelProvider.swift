@@ -1229,10 +1229,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if let permJSON = defaults?.string(forKey: "permissionSnapshot") {
             record["hbPermissions"] = permJSON
         }
-        // allPermissionsGranted flag
-        let permOK = defaults?.object(forKey: "allPermissionsGranted") == nil
-            || defaults?.bool(forKey: "allPermissionsGranted") == true
-        record["fcAuthorized"] = (permOK ? 1 : 0) as NSNumber
 
         // Enforcement state — use ModeStackResolver for ground truth
         let policyVersion = storage.readPolicySnapshot()?.effectivePolicy.policyVersion ?? 0
