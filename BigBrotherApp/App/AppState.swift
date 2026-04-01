@@ -921,7 +921,10 @@ final class AppState {
                 }
             }
 
-            // 5. Send heartbeat so parent sees updated state immediately
+            // 5. Verify enforcement matches ModeStackResolver (catches missed Monitor callbacks)
+            verifyAndFixEnforcement()
+
+            // 6. Send heartbeat so parent sees updated state immediately
             try? await heartbeatService?.sendNow(force: true)
 
             // 6. Ping the VPN tunnel to clear any stale blackholes
@@ -1960,6 +1963,10 @@ final class AppState {
             Task {
                 await self.syncScheduleProfile()
                 await self.syncTimeLimits()
+                // Every 60 seconds: verify enforcement matches ModeStackResolver.
+                // This catches missed Monitor callbacks, stale ManagedSettingsStore,
+                // and any other drift. If shields are wrong, re-apply immediately.
+                self.verifyAndFixEnforcement()
             }
         }
         RunLoop.main.add(schTimer, forMode: .common)
@@ -1968,6 +1975,51 @@ final class AppState {
         Task {
             await syncScheduleProfile()
             await syncTimeLimits()
+        }
+    }
+
+    /// Every-60-second enforcement verification.
+    /// Compares ModeStackResolver (what SHOULD be enforced) against actual
+    /// ManagedSettingsStore state. If they disagree, re-applies enforcement.
+    /// This is the safety net for missed Monitor callbacks.
+    private func verifyAndFixEnforcement() {
+        guard deviceRole == .child, let enforcement else { return }
+
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let diag = enforcement.shieldDiagnostic()
+        let shouldBeShielded = resolution.mode != .unlocked
+        let isShielded = diag.shieldsActive || diag.categoryActive
+
+        if shouldBeShielded != isShielded {
+            // Mismatch — fix it
+            let corrected = EffectivePolicy(
+                resolvedMode: resolution.mode,
+                isTemporaryUnlock: resolution.isTemporary,
+                temporaryUnlockExpiresAt: resolution.expiresAt,
+                shieldedCategoriesData: snapshotStore?.loadCurrentSnapshot()?.effectivePolicy.shieldedCategoriesData,
+                allowedAppTokensData: snapshotStore?.loadCurrentSnapshot()?.effectivePolicy.allowedAppTokensData,
+                warnings: [],
+                policyVersion: (snapshotStore?.loadCurrentSnapshot()?.effectivePolicy.policyVersion ?? 0) + 1
+            )
+            try? enforcement.apply(corrected)
+
+            // Update snapshot so it matches reality
+            let snap = PolicySnapshot(
+                source: .restoration,
+                trigger: "60s enforcement check: shields were \(isShielded ? "UP" : "DOWN"), should be \(shouldBeShielded ? "UP" : "DOWN") (mode: \(resolution.mode.rawValue))",
+                effectivePolicy: corrected
+            )
+            try? storage.writePolicySnapshot(snap)
+
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "60s enforcement fix",
+                details: "Shields \(isShielded ? "UP" : "DOWN") → \(shouldBeShielded ? "UP" : "DOWN") (mode: \(resolution.mode.rawValue), reason: \(resolution.reason))"
+            ))
+
+            // Write mainAppLastActiveAt so tunnel knows we're alive and fixing things
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
         }
     }
 
