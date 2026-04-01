@@ -64,28 +64,31 @@ struct AppUsageSection: View {
                         .padding(.vertical, 8)
                 } else {
                     let maxMinutes = usage.first?.minutes ?? 1
-                    VStack(spacing: 4) {
-                        ForEach(usage, id: \.appName) { item in
-                            HStack(spacing: 8) {
-                                Text(item.appName)
-                                    .font(.subheadline.weight(.medium))
-                                    .lineLimit(1)
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(usage, id: \.appName) { item in
+                                HStack(spacing: 8) {
+                                    Text(item.appName)
+                                        .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
 
-                                Spacer()
+                                    Spacer()
 
-                                GeometryReader { geo in
-                                    RoundedRectangle(cornerRadius: 3)
-                                        .fill(.indigo.opacity(0.6))
-                                        .frame(width: max(6, geo.size.width * CGFloat(item.minutes / maxMinutes)))
+                                    GeometryReader { geo in
+                                        RoundedRectangle(cornerRadius: 3)
+                                            .fill(.indigo.opacity(0.6))
+                                            .frame(width: max(6, geo.size.width * CGFloat(item.minutes / maxMinutes)))
+                                    }
+                                    .frame(width: 80, height: 12)
+
+                                    Text(Self.formatMinutes(item.minutes))
+                                        .font(.caption.weight(.medium))
+                                        .frame(width: 48, alignment: .trailing)
                                 }
-                                .frame(width: 80, height: 12)
-
-                                Text(Self.formatMinutes(item.minutes))
-                                    .font(.caption.weight(.medium))
-                                    .frame(width: 48, alignment: .trailing)
                             }
                         }
                     }
+                    .frame(maxHeight: 320)
 
                     HStack {
                         Spacer()

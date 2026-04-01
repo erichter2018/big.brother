@@ -1071,6 +1071,9 @@ final class AppState {
 
         if newStatus == .denied || newStatus == .notDetermined {
             eventLogger.log(.familyControlsAuthChanged, details: "Authorization revoked")
+            // Signal tunnel to block internet immediately
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(false, forKey: "allPermissionsGranted")
 
             // Generate a degraded snapshot if we have a current policy.
             if let snapshot = currentSnapshot {
@@ -1109,6 +1112,13 @@ final class AppState {
             }
         } else if newStatus == .authorized {
             eventLogger.log(.authorizationRestored, details: "Authorization restored")
+            // Signal tunnel to unblock internet
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(true, forKey: "allPermissionsGranted")
+
+            // After FC auth is restored, ManagedSettingsStore may be corrupted.
+            // Nuke all stores first, then re-apply from scratch.
+            try? enforcement.clearAllRestrictions()
 
             // Re-apply enforcement now that authorization is available.
             if let snapshot = currentSnapshot {

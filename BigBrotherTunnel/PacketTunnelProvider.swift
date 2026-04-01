@@ -416,6 +416,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // and nudge the kid to open the app (which triggers AppLaunchRestorer).
         checkExpiredTempUnlock()
 
+        // FC auth revoked: if the kid turned off FamilyControls, block internet immediately.
+        // This is our only enforcement when ManagedSettingsStore can't be written.
+        checkPermissionsEnforcement()
+
         // Build mismatch: app was updated but hasn't launched yet on the new build.
         // Block internet until the kid opens the app (triggers restoration on new code).
         checkBuildMismatchEnforcement()
@@ -423,6 +427,70 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Emergency enforcement: if both app and Monitor are dead, screen is unlocked,
         // and device should be restricted/locked — activate DNS blackhole as fallback.
         checkEmergencyEnforcement()
+    }
+
+    private var permissionsBlackholeActive: Bool = false
+
+    /// Block internet when FamilyControls authorization is not granted.
+    /// Without FC auth, ManagedSettingsStore writes fail silently — DNS blackhole
+    /// is the only enforcement available.
+    private func checkPermissionsEnforcement() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let fcAuth = defaults?.string(forKey: "familyControlsAuthStatus")
+        let permissionsOK = defaults?.object(forKey: "allPermissionsGranted") == nil
+            || defaults?.bool(forKey: "allPermissionsGranted") == true
+
+        // FC auth not authorized OR permissions flag explicitly set to false — block internet
+        let authOK = permissionsOK && (fcAuth == "approved" || fcAuth == "authorized" || fcAuth == nil)
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let shouldBeRestricted = resolution.mode != .unlocked
+
+        if !authOK && shouldBeRestricted {
+            if !permissionsBlackholeActive {
+                permissionsBlackholeActive = true
+                NSLog("[Tunnel] FC auth revoked (\(fcAuth ?? "nil")) + device should be \(resolution.mode.rawValue) — blocking internet")
+                reapplyNetworkSettings()
+
+                // Notify kid
+                let content = UNMutableNotificationContent()
+                content.title = "Big Brother"
+                content.body = "Parental controls were disabled. Internet blocked until restored."
+                content.sound = .default
+                let request = UNNotificationRequest(identifier: "fc-auth-revoked", content: content, trigger: nil)
+                UNUserNotificationCenter.current().add(request)
+
+                // Alert parent via CloudKit
+                Task { await sendPermissionRevokedAlert() }
+            }
+        } else if permissionsBlackholeActive && authOK {
+            permissionsBlackholeActive = false
+            NSLog("[Tunnel] FC auth restored — unblocking internet")
+            reapplyNetworkSettings()
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["fc-auth-revoked"])
+        }
+    }
+
+    private func sendPermissionRevokedAlert() async {
+        guard let enrollment = try? keychain.get(ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState) else { return }
+        let entry = EventLogEntry(
+            deviceID: enrollment.deviceID,
+            familyID: enrollment.familyID,
+            eventType: .authorizationLost,
+            details: "ALERT: FamilyControls authorization was REVOKED — all shields disabled, internet blocked by tunnel"
+        )
+        let storage = AppGroupStorage()
+        try? storage.appendEventLog(entry)
+
+        // Also try to sync immediately so parent sees it fast
+        let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
+        let db = container.publicCloudDatabase
+        let record = CKRecord(recordType: "BBEventLog", recordID: CKRecord.ID(recordName: "BBEventLog_\(entry.id.uuidString)"))
+        record["deviceID"] = enrollment.deviceID.rawValue
+        record["familyID"] = enrollment.familyID.rawValue
+        record["eventType"] = "authorizationLost"
+        record["details"] = entry.details
+        record["timestamp"] = Date() as NSDate
+        _ = try? await db.save(record)
     }
 
     /// Detect stale enforcement state — the PolicySnapshot or ExtensionSharedState
@@ -706,6 +774,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Internet is blocked when: device is in .lockedDown mode, emergency blackhole is active,
     /// or legacy internetBlockedUntil flag is set.
     private var isInternetBlocked: Bool {
+        // Permissions blackhole (FC auth revoked)
+        if permissionsBlackholeActive { return true }
         // Build mismatch blackhole (app needs to launch on new build)
         if buildMismatchBlackholeActive { return true }
         // Emergency blackhole (tunnel last-resort enforcement)
@@ -1152,6 +1222,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let modeResolution = ModeStackResolver.resolve(storage: storage)
         record["currentMode"] = modeResolution.mode.rawValue
         record["policyVersion"] = policyVersion as NSNumber
+
+        // Schedule resolved mode — compute fresh so parent sees current state,
+        // not the stale value from when the main app last sent a heartbeat.
+        if let profile = storage.readActiveScheduleProfile() {
+            let now = Date()
+            let mode = profile.resolvedMode(at: now)
+            let inFree = profile.isInUnlockedWindow(at: now)
+            let inLocked = profile.isInLockedWindow(at: now)
+            let detail: String
+            if inFree { detail = "\(mode.rawValue) (in unlocked window)" }
+            else if inLocked { detail = "\(mode.rawValue) (in locked window)" }
+            else { detail = mode.rawValue }
+            record["hbScheduleResolvedMode"] = detail
+        }
 
         // Screen time + unlock count (tunnel tracks this when main app is dead)
         record["hbScreenTimeMins"] = defaults?.integer(forKey: screenTimeMinutesKey) as NSNumber?

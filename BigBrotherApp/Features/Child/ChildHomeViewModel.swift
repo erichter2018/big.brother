@@ -163,12 +163,16 @@ final class ChildHomeViewModel {
     var vpnConfigured: Bool = true
 
     /// True when any required permission is missing. Drives the floating "Permissions" button.
+    /// Cached notification authorization status, refreshed periodically.
+    var notificationsAuthorized: Bool = true
+
     var hasPermissionIssues: Bool {
         if needsReauthorization { return true }
         if cachedLocationAuthStatus != .authorizedAlways { return true }
         if CMMotionActivityManager.isActivityAvailable(),
            CMMotionActivityManager.authorizationStatus() != .authorized { return true }
         if !vpnConfigured { return true }
+        if !notificationsAuthorized { return true }
         return false
     }
 
@@ -514,7 +518,15 @@ final class ChildHomeViewModel {
                 await MainActor.run { vpnConfigured = configured }
             }
         }
-        // Write permission status to App Group so Monitor extension can check it.
+        // Refresh notification authorization
+        Task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            await MainActor.run {
+                notificationsAuthorized = settings.authorizationStatus == .authorized
+            }
+        }
+
+        // Write permission status to App Group so tunnel blocks internet when permissions are wrong.
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set(!hasPermissionIssues, forKey: "allPermissionsGranted")
     }

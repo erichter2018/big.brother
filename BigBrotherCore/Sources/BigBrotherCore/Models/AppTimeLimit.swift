@@ -15,6 +15,9 @@ public struct AppTimeLimit: Codable, Sendable, Identifiable, Equatable {
     public let fingerprint: String
     /// Daily time budget in minutes. 0 = not yet configured by parent.
     public var dailyLimitMinutes: Int
+    /// Whether this token was already in the always-allowed list before the time limit was added.
+    /// If true, deleting the time limit should leave it in the allowed list.
+    public var wasAlreadyAllowed: Bool
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -25,6 +28,7 @@ public struct AppTimeLimit: Codable, Sendable, Identifiable, Equatable {
         bundleID: String? = nil,
         fingerprint: String,
         dailyLimitMinutes: Int = 0,
+        wasAlreadyAllowed: Bool = false,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -34,6 +38,7 @@ public struct AppTimeLimit: Codable, Sendable, Identifiable, Equatable {
         self.bundleID = bundleID
         self.fingerprint = fingerprint
         self.dailyLimitMinutes = dailyLimitMinutes
+        self.wasAlreadyAllowed = wasAlreadyAllowed
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

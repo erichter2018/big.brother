@@ -1194,12 +1194,6 @@ struct ChildDetailView: View {
                             Label("Set Always-Allowed Apps", systemImage: "checkmark.circle")
                         }
 
-                        Button {
-                            Task { await viewModel.requestAppConfiguration(for: device) }
-                        } label: {
-                            Label("Configure App Blocking", systemImage: "shield")
-                        }
-
                         Button(role: .destructive) {
                             deviceToRevokeAll = device
                         } label: {
@@ -1263,13 +1257,15 @@ struct ChildDetailView: View {
     private func shieldDiagnosticRow(_ hb: DeviceHeartbeat) -> some View {
         let shieldsOK = hb.shieldsActive ?? true
         let reportedMode = hb.currentMode
-        // Use the CHILD's reported schedule mode to detect if the child has stale data.
-        // If this disagrees with what the parent expects, the child's schedule is wrong.
+        // Compare the child's reported schedule mode against what the parent's schedule
+        // says RIGHT NOW (not at heartbeat send time, which can be stale).
+        // This detects if the child has a different/stale schedule profile.
         let childScheduleMode: LockMode? = hb.scheduleResolvedMode.flatMap { detail in
-            // Parse mode from enriched string like "essentialOnly (in essential window)"
             let raw = detail.components(separatedBy: " ").first ?? detail
             return LockMode.from(raw)
         }
+        // Parent's schedule computed fresh for comparison
+        let parentScheduleMode: LockMode? = viewModel.scheduleProfile.map { $0.resolvedMode(at: Date()) }
         // Use parent's expectation as the canonical "expected" mode
         let expectedMode = dominantMode
 
@@ -1329,8 +1325,9 @@ struct ChildDetailView: View {
                 }
             }
 
-            // Row 2b: Child schedule data mismatch (child's local schedule disagrees with parent)
-            if let childMode = childScheduleMode, let parentMode = expectedMode,
+            // Row 2b: Child schedule data mismatch (child's local schedule disagrees with parent's
+            // schedule computed NOW — not at heartbeat time, which can be stale)
+            if let childMode = childScheduleMode, let parentMode = parentScheduleMode,
                childMode != parentMode, !inTempUnlock {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.triangle.2.circlepath")

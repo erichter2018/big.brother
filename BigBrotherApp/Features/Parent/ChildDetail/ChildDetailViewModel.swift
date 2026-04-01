@@ -299,6 +299,16 @@ final class ChildDetailViewModel: CommandSendable {
         appState.latestHeartbeats.first { $0.deviceID == device.id }
     }
 
+    /// The schedule profile assigned to this child (from any of their devices).
+    var scheduleProfile: ScheduleProfile? {
+        for dev in devices {
+            if let profileID = dev.scheduleProfileID {
+                return appState.scheduleProfiles.first { $0.id == profileID }
+            }
+        }
+        return nil
+    }
+
     // MARK: - Device Issue Detection
 
     struct DeviceIssue: Identifiable {
