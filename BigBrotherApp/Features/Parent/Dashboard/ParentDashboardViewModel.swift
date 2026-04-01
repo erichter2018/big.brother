@@ -638,17 +638,22 @@ final class ParentDashboardViewModel: CommandSendable {
     /// If the parent sent a temporary unlock that should have expired by now,
     /// show "Locked" even if the heartbeat hasn't confirmed it yet (child app
     /// may be terminated by iOS memory pressure).
-    func dominantMode(for child: ChildProfile) -> (mode: LockMode, isTemp: Bool, confirmed: Bool) {
-        // Compute mode first, then check if heartbeat agrees.
+    /// Returns the dominant mode plus which device types have mismatches (empty = all confirmed).
+    func dominantMode(for child: ChildProfile) -> (mode: LockMode, isTemp: Bool, confirmed: Bool, mismatchedDeviceTypes: [String]) {
         let result = computeMode(for: child)
         let devs = devices(for: child)
-        // No devices enrolled → nothing to confirm, treat as confirmed.
-        if devs.isEmpty { return (result.mode, result.isTemp, true) }
-        let heartbeatAgrees = devs.allSatisfy { dev in
-            guard let hb = heartbeat(for: dev) else { return false }
-            return hb.currentMode == result.mode
+        if devs.isEmpty { return (result.mode, result.isTemp, true, []) }
+        var mismatched: [String] = []
+        for dev in devs {
+            guard let hb = heartbeat(for: dev) else {
+                mismatched.append(dev.modelIdentifier.lowercased().contains("ipad") ? "ipad" : "iphone")
+                continue
+            }
+            if hb.currentMode != result.mode {
+                mismatched.append(dev.modelIdentifier.lowercased().contains("ipad") ? "ipad" : "iphone")
+            }
         }
-        return (result.mode, result.isTemp, heartbeatAgrees)
+        return (result.mode, result.isTemp, mismatched.isEmpty, mismatched)
     }
 
     private func computeMode(for child: ChildProfile) -> (mode: LockMode, isTemp: Bool) {
@@ -727,16 +732,20 @@ final class ParentDashboardViewModel: CommandSendable {
             }
         }
 
-        // 3. Check heartbeat-reported expiry.
+        // 3. Check heartbeat-reported expiry — but NOT if the parent just sent
+        //    returnToSchedule. The heartbeat is stale and still shows the old temp
+        //    unlock; trust the schedule instead until the child confirms.
         let devs = devices(for: child)
-        for dev in devs {
-            if let hb = heartbeat(for: dev),
-               let expiry = hb.temporaryUnlockExpiresAt,
-               hb.currentMode == .unlocked {
-                if expiry > now {
-                    return (.unlocked, true)
-                } else {
-                    return (lastKnownLockedMode(for: child), false)
+        if !scheduleActiveChildren.contains(child.id) {
+            for dev in devs {
+                if let hb = heartbeat(for: dev),
+                   let expiry = hb.temporaryUnlockExpiresAt,
+                   hb.currentMode == .unlocked {
+                    if expiry > now {
+                        return (.unlocked, true)
+                    } else {
+                        return (lastKnownLockedMode(for: child), false)
+                    }
                 }
             }
         }
@@ -1112,57 +1121,99 @@ final class ParentDashboardViewModel: CommandSendable {
     // MARK: - Timer Integration
 
     /// Returns the AllowanceTracker penalty timer state for a child, if integration is enabled.
+    // MARK: - Penalty Timer (Firebase with CloudKit fallback)
+
+    /// Returns Firebase timer state if available, otherwise builds state from CloudKit device data.
     func penaltyTimer(for child: ChildProfile) -> TimerIntegrationService.KidTimerState? {
+        // Try Firebase first
+        if let service = appState.timerService {
+            let config = TimerIntegrationConfig.load()
+            if let state = service.timerState(for: child.id, config: config) {
+                return state
+            }
+        }
+        // Fallback: build from CloudKit device data
+        let devs = appState.childDevices.filter { $0.childProfileID == child.id }
+        guard let dev = devs.first else { return nil }
+        let seconds = dev.penaltySeconds ?? 0
+        let endTime = dev.penaltyTimerEndTime
+        guard seconds > 0 || endTime != nil else { return nil }
+        return TimerIntegrationService.KidTimerState(
+            firestoreKidID: "",
+            name: child.name,
+            avatarColor: child.avatarColor,
+            avatarUrl: nil,
+            penaltySeconds: seconds,
+            timerEndTime: endTime
+        )
+    }
+
+    private var hasFirebaseTimer: Bool { appState.timerService != nil }
+
+    private func firebaseMapping(for child: ChildProfile) -> (service: TimerIntegrationService, familyID: String, kidID: String)? {
         guard let service = appState.timerService else { return nil }
         let config = TimerIntegrationConfig.load()
-        return service.timerState(for: child.id, config: config)
+        guard let mapping = config.kidMappings.first(where: { $0.childProfileID == child.id }),
+              let familyID = config.firebaseFamilyID else { return nil }
+        return (service, familyID, mapping.firestoreKidID)
     }
 
     func startPenaltyTimer(for child: ChildProfile) async {
-        guard let service = appState.timerService else { return }
-        let config = TimerIntegrationConfig.load()
-        guard let mapping = config.kidMappings.first(where: { $0.childProfileID == child.id }),
-              let familyID = config.firebaseFamilyID else { return }
-        await service.startTimer(familyID: familyID, kidID: mapping.firestoreKidID)
+        if let fb = firebaseMapping(for: child) {
+            await fb.service.startTimer(familyID: fb.familyID, kidID: fb.kidID)
+        } else {
+            // CloudKit-native: start countdown from banked seconds
+            let devs = appState.childDevices.filter { $0.childProfileID == child.id }
+            let seconds = devs.first?.penaltySeconds ?? 0
+            guard seconds > 0 else { return }
+            let endTime = Date().addingTimeInterval(Double(seconds))
+            await updatePenaltyOnDevices(child: child, seconds: seconds, endTime: endTime)
+        }
     }
 
     func stopPenaltyTimer(for child: ChildProfile) async {
-        guard let service = appState.timerService else { return }
-        let config = TimerIntegrationConfig.load()
-        guard let mapping = config.kidMappings.first(where: { $0.childProfileID == child.id }),
-              let familyID = config.firebaseFamilyID else { return }
-        await service.stopTimer(familyID: familyID, kidID: mapping.firestoreKidID)
+        if let fb = firebaseMapping(for: child) {
+            await fb.service.stopTimer(familyID: fb.familyID, kidID: fb.kidID)
+        } else {
+            // CloudKit-native: save remaining seconds, clear endTime
+            let timer = penaltyTimer(for: child)
+            let remaining = timer?.remainingSeconds ?? 0
+            await updatePenaltyOnDevices(child: child, seconds: remaining, endTime: nil)
+        }
     }
 
     func addPenaltyTime(for child: ChildProfile, minutes: Int) async {
-        guard let service = appState.timerService else { return }
-        let config = TimerIntegrationConfig.load()
-        guard let mapping = config.kidMappings.first(where: { $0.childProfileID == child.id }),
-              let familyID = config.firebaseFamilyID else { return }
-        await service.addTime(familyID: familyID, kidID: mapping.firestoreKidID, minutes: minutes)
+        if let fb = firebaseMapping(for: child) {
+            await fb.service.addTime(familyID: fb.familyID, kidID: fb.kidID, minutes: minutes)
+        } else {
+            // CloudKit-native: add to banked or extend running timer
+            let timer = penaltyTimer(for: child)
+            let addSeconds = minutes * 60
+            if let endTime = timer?.timerEndTime, endTime > Date() {
+                let newEnd = endTime.addingTimeInterval(Double(addSeconds))
+                let newSeconds = (timer?.penaltySeconds ?? 0) + addSeconds
+                await updatePenaltyOnDevices(child: child, seconds: newSeconds, endTime: newEnd)
+            } else {
+                let newSeconds = (timer?.penaltySeconds ?? 0) + addSeconds
+                await updatePenaltyOnDevices(child: child, seconds: newSeconds, endTime: nil)
+            }
+        }
     }
 
-    /// Deducts consumed penalty time and stops the Firebase timer.
-    /// Uses the pre-computed deduction from when the timed unlock was issued,
-    /// so the remaining value is correct regardless of how long the Firebase timer ran.
     func deductAndStopPenalty(for child: ChildProfile) async {
-        guard let timerService = appState.timerService else { return }
-        let config = TimerIntegrationConfig.load()
-        guard let mapping = config.kidMappings.first(where: { $0.childProfileID == child.id }),
-              let familyID = config.firebaseFamilyID else { return }
-
         let timer = penaltyTimer(for: child)
         let originalPenalty = timer?.penaltySeconds ?? 0
         let consumed = timedUnlockPenaltyDeductions[child.id] ?? 0
         let remaining = max(0, originalPenalty - consumed)
 
-        if remaining > 0 {
-            await timerService.setPenalty(familyID: familyID, kidID: mapping.firestoreKidID, seconds: remaining)
-        } else {
-            await timerService.clearTimer(familyID: familyID, kidID: mapping.firestoreKidID)
+        if let fb = firebaseMapping(for: child) {
+            if remaining > 0 {
+                await fb.service.setPenalty(familyID: fb.familyID, kidID: fb.kidID, seconds: remaining)
+            } else {
+                await fb.service.clearTimer(familyID: fb.familyID, kidID: fb.kidID)
+            }
         }
-
-        // Also send to child via CloudKit.
+        // Always send to child via CloudKit
         await performCommand(
             .setPenaltyTimer(seconds: remaining > 0 ? remaining : nil, endTime: nil),
             target: .child(child.id)
@@ -1170,24 +1221,30 @@ final class ParentDashboardViewModel: CommandSendable {
     }
 
     func clearPenaltyTimer(for child: ChildProfile) async {
-        guard let service = appState.timerService else { return }
-        let config = TimerIntegrationConfig.load()
-        guard let mapping = config.kidMappings.first(where: { $0.childProfileID == child.id }),
-              let familyID = config.firebaseFamilyID else { return }
-        await service.clearTimer(familyID: familyID, kidID: mapping.firestoreKidID)
-        // Clear in-memory penalty data so the display updates immediately
-        // and the relay doesn't re-send stale values.
+        if let fb = firebaseMapping(for: child) {
+            await fb.service.clearTimer(familyID: fb.familyID, kidID: fb.kidID)
+        }
+        // Clear via CloudKit
         appState.lastRelayedPenalty[child.id] = (nil, nil)
+        await updatePenaltyOnDevices(child: child, seconds: nil, endTime: nil)
+    }
+
+    /// Update penalty on all CloudKit device records for a child + send command.
+    private func updatePenaltyOnDevices(child: ChildProfile, seconds: Int?, endTime: Date?) async {
         let devices = appState.childDevices.filter { $0.childProfileID == child.id }
         for device in devices {
             if let idx = appState.childDevices.firstIndex(where: { $0.id == device.id }) {
-                appState.childDevices[idx].penaltySeconds = nil
-                appState.childDevices[idx].penaltyTimerEndTime = nil
+                appState.childDevices[idx].penaltySeconds = seconds
+                appState.childDevices[idx].penaltyTimerEndTime = endTime
             }
         }
+        await performCommand(
+            .setPenaltyTimer(seconds: seconds, endTime: endTime),
+            target: .child(child.id)
+        )
     }
 
-    /// Formatted penalty timer display for a child. Nil if no timer or integration disabled.
+    /// Formatted penalty timer display for a child.
     func penaltyTimerString(for child: ChildProfile) -> String? {
         guard let timer = penaltyTimer(for: child) else { return nil }
         let display = timer.displayString

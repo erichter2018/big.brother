@@ -104,4 +104,8 @@ public enum EventType: String, Codable, Sendable, Equatable {
     case sosAlert
     case selfUnlockUsed
     case newAppDetected
+    // App time limits
+    case timeLimitExhausted
+    case timeLimitExtended
+    case timeLimitSetupCompleted
 }

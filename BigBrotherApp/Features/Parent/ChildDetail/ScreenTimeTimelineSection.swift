@@ -143,19 +143,22 @@ struct ScreenTimeTimelineSection: View {
                 .font(.system(size: 8))
                 .foregroundStyle(.secondary)
 
-                // Breakdown: show active periods as ranges
-                let ranges = buildActiveRanges(slots)
-                if !ranges.isEmpty {
+                // Hourly breakdown: 4 columns (12a-noon + time, noon-midnight + time)
+                let hourlyMinutes = hourlyBreakdown(slots)
+                if hourlyMinutes.contains(where: { $0 > 0 }) {
                     Divider()
-                    ForEach(ranges, id: \.startSlot) { range in
-                        HStack {
-                            Text(slotRangeLabel(range.startSlot, range.endSlot))
-                                .font(.caption)
-                            Spacer()
-                            let mins = range.totalSeconds / 60
-                            Text(mins > 0 ? "\(mins)m" : "<1m")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                    HStack(alignment: .top, spacing: 12) {
+                        // AM column (12am - 11am)
+                        VStack(spacing: 2) {
+                            ForEach(0..<12, id: \.self) { h in
+                                hourRow(hour: h, minutes: hourlyMinutes[h])
+                            }
+                        }
+                        // PM column (12pm - 11pm)
+                        VStack(spacing: 2) {
+                            ForEach(12..<24, id: \.self) { h in
+                                hourRow(hour: h, minutes: hourlyMinutes[h])
+                            }
                         }
                     }
                 }
@@ -167,44 +170,40 @@ struct ScreenTimeTimelineSection: View {
 
     // MARK: - Helpers
 
-    private struct ActiveRange {
-        let startSlot: Int
-        let endSlot: Int
-        let totalSeconds: Int
+    /// Aggregate 15-min slots into 24 hourly buckets (minutes per hour).
+    private func hourlyBreakdown(_ slots: [Int: Int]) -> [Int] {
+        var hours = [Int](repeating: 0, count: 24)
+        for (slot, secs) in slots {
+            let h = min(slot / 4, 23)
+            hours[h] += secs
+        }
+        return hours.map { $0 / 60 } // convert seconds to minutes
     }
 
-    /// Merge consecutive active slots into ranges.
-    private func buildActiveRanges(_ slots: [Int: Int]) -> [ActiveRange] {
-        let sorted = slots.keys.sorted()
-        guard !sorted.isEmpty else { return [] }
-
-        var ranges: [ActiveRange] = []
-        var rangeStart = sorted[0]
-        var rangeSecs = slots[sorted[0]] ?? 0
-
-        for i in 1..<sorted.count {
-            let slot = sorted[i]
-            if slot == sorted[i - 1] + 1 {
-                // Consecutive — extend range
-                rangeSecs += slots[slot] ?? 0
-            } else {
-                // Gap — close current range, start new
-                ranges.append(ActiveRange(startSlot: rangeStart, endSlot: sorted[i - 1] + 1, totalSeconds: rangeSecs))
-                rangeStart = slot
-                rangeSecs = slots[slot] ?? 0
+    /// Single hour row: "9 AM  12m" with a subtle bar
+    @ViewBuilder
+    private func hourRow(hour: Int, minutes: Int) -> some View {
+        let label: String = {
+            if hour == 0 { return "12a" }
+            if hour < 12 { return "\(hour)a" }
+            if hour == 12 { return "12p" }
+            return "\(hour - 12)p"
+        }()
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, alignment: .trailing)
+            if minutes > 0 {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.orange.opacity(min(1, Double(minutes) / 60 * 1.5 + 0.2)))
+                    .frame(width: max(4, CGFloat(minutes) / 60 * 60), height: 10)
+                Text("\(minutes)m")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
             }
+            Spacer(minLength: 0)
         }
-        ranges.append(ActiveRange(startSlot: rangeStart, endSlot: sorted.last! + 1, totalSeconds: rangeSecs))
-        return ranges
-    }
-
-    private func slotRangeLabel(_ startSlot: Int, _ endSlot: Int) -> String {
-        let fmt: (Int) -> String = { slot in
-            let h = slot / 4, m = (slot % 4) * 15
-            let h12 = h == 0 ? 12 : (h > 12 ? h - 12 : h)
-            let ampm = h < 12 ? "AM" : "PM"
-            return m == 0 ? "\(h12) \(ampm)" : "\(h12):\(String(format: "%02d", m)) \(ampm)"
-        }
-        return "\(fmt(startSlot)) – \(fmt(endSlot))"
+        .frame(height: 14)
     }
 }

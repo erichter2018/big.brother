@@ -1,5 +1,6 @@
 import Foundation
 import DeviceActivity
+import ManagedSettings
 import BigBrotherCore
 
 /// Registers DeviceActivity schedules on the child device based on the
@@ -91,13 +92,14 @@ enum ScheduleRegistrar {
     private static func register(_ name: DeviceActivityName, schedule: DeviceActivitySchedule, label: String, center: DeviceActivityCenter) {
         do {
             try center.startMonitoring(name, during: schedule)
-            #if DEBUG
-            print("[BigBrother] Registered \(label) activity: \(name.rawValue)")
-            #endif
         } catch {
-            #if DEBUG
-            print("[BigBrother] Failed to register \(label) activity: \(error.localizedDescription)")
-            #endif
+            // Log in all builds — silent registration failures cause enforcement gaps.
+            let storage = AppGroupStorage()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Schedule registration FAILED",
+                details: "\(label): \(name.rawValue) — \(error.localizedDescription)"
+            ))
         }
     }
 
@@ -178,6 +180,70 @@ enum ScheduleRegistrar {
             #if DEBUG
             print("[BigBrother] Failed to register usage tracking: \(error.localizedDescription)")
             #endif
+        }
+    }
+
+    // MARK: - Per-App Time Limits
+
+    static let timeLimitPrefix = "bigbrother.timelimit."
+
+    /// Register DeviceActivityEvent for each per-app time limit.
+    /// Each app gets its own schedule + event so thresholds are independent.
+    /// Clears previously registered time limit activities first.
+    static func registerTimeLimitEvents(limits: [AppTimeLimit]) {
+        let center = DeviceActivityCenter()
+
+        // Clear existing time limit activities.
+        for activity in center.activities {
+            if activity.rawValue.hasPrefix(timeLimitPrefix) {
+                center.stopMonitoring([activity])
+            }
+        }
+
+        let decoder = JSONDecoder()
+
+        for limit in limits where limit.dailyLimitMinutes > 0 {
+            guard let appToken = try? decoder.decode(ApplicationToken.self, from: limit.tokenData) else {
+                #if DEBUG
+                print("[BigBrother] Failed to decode token for time limit: \(limit.appName)")
+                #endif
+                continue
+            }
+
+            let activityName = DeviceActivityName(rawValue: "\(timeLimitPrefix)\(limit.id.uuidString)")
+
+            // All-day schedule, repeats daily. Midnight reset clears exhausted status.
+            let schedule = DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: 0, minute: 0),
+                intervalEnd: DateComponents(hour: 23, minute: 59),
+                repeats: true
+            )
+
+            // Single event: fires when this app's foreground usage reaches the threshold.
+            let hours = limit.dailyLimitMinutes / 60
+            let mins = limit.dailyLimitMinutes % 60
+            var threshold = DateComponents()
+            threshold.hour = hours
+            threshold.minute = mins
+
+            let eventName = DeviceActivityEvent.Name(rawValue: "timelimit.exhausted")
+            let event = DeviceActivityEvent(
+                applications: [appToken],
+                categories: [],
+                webDomains: [],
+                threshold: threshold
+            )
+
+            do {
+                try center.startMonitoring(activityName, during: schedule, events: [eventName: event])
+                #if DEBUG
+                print("[BigBrother] Registered time limit: \(limit.appName) = \(limit.dailyLimitMinutes) min/day")
+                #endif
+            } catch {
+                #if DEBUG
+                print("[BigBrother] Failed to register time limit for \(limit.appName): \(error.localizedDescription)")
+                #endif
+            }
         }
     }
 }

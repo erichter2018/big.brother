@@ -80,6 +80,9 @@ final class ChildDetailViewModel: CommandSendable {
     /// Bedtime compliance results keyed by "yyyy-MM-dd".
     var bedtimeCompliance: [String: BedtimeComplianceResult] = [:]
 
+    /// Per-app time limit configs from CloudKit.
+    var timeLimitConfigs: [TimeLimitConfig] = []
+
     /// DNS-based online activity snapshot for this child (today only, with slot data for timeline scrubbing).
     var onlineActivity: DomainActivitySnapshot?
     /// DNS-based online activity merged across last 7 days (aggregate counts, no slot data).
@@ -216,6 +219,18 @@ final class ChildDetailViewModel: CommandSendable {
 
     private func sendRestrictions(_ r: DeviceRestrictions) async {
         await performCommand(.setRestrictions(r), target: .child(child.id))
+        // Also write restrictions to CloudKit device records so the child can
+        // pull them during periodic sync — commands can fail silently.
+        guard let cloudKit = appState.cloudKit else { return }
+        let devices = appState.childDevices.filter { $0.childProfileID == child.id }
+        guard let json = try? JSONEncoder().encode(r),
+              let str = String(data: json, encoding: .utf8) else { return }
+        for device in devices {
+            try? await cloudKit.updateDeviceFields(
+                deviceID: device.id,
+                fields: [CKFieldName.restrictionsJSON: str as CKRecordValue]
+            )
+        }
     }
 
     // MARK: - Restriction Persistence (parent-side, per child)
@@ -283,6 +298,65 @@ final class ChildDetailViewModel: CommandSendable {
     func heartbeat(for device: ChildDevice) -> DeviceHeartbeat? {
         appState.latestHeartbeats.first { $0.deviceID == device.id }
     }
+
+    // MARK: - Device Issue Detection
+
+    struct DeviceIssue: Identifiable {
+        let id: DeviceID
+        let deviceName: String
+        let isIPad: Bool
+        let shieldsDown: Bool
+        let internetBlocked: Bool
+        let reason: String
+    }
+
+    /// Active issues across all devices for this child.
+    var deviceIssues: [DeviceIssue] {
+        var issues: [DeviceIssue] = []
+        for device in devices {
+            guard let hb = heartbeat(for: device) else { continue }
+            // Skip stale heartbeats (>10 min old)
+            guard hb.timestamp.timeIntervalSinceNow > -600 else { continue }
+            let isIPad = device.modelIdentifier.lowercased().contains("ipad")
+
+            // Shields down when they shouldn't be
+            let shouldBeShielded = hb.currentMode != .unlocked
+            let shieldsDown = shouldBeShielded && hb.shieldsActive == false && hb.shieldCategoryActive != true
+            // Skip if temp unlock is still active
+            if shieldsDown, let exp = hb.temporaryUnlockExpiresAt, exp > Date() { continue }
+
+            // Internet blocked
+            let internetBlocked = hb.internetBlocked == true
+
+            if shieldsDown || internetBlocked {
+                var reasons: [String] = []
+                if shieldsDown {
+                    reasons.append("Shields down — mode is \(hb.currentMode.rawValue) but ManagedSettings empty")
+                    if hb.heartbeatSource == "vpnTunnel" {
+                        reasons.append("App not running (heartbeat from tunnel)")
+                    }
+                    if let reason = hb.lastShieldChangeReason {
+                        reasons.append("Last shield change: \(reason)")
+                    }
+                }
+                if internetBlocked {
+                    reasons.append("DNS blocked by tunnel")
+                }
+                issues.append(DeviceIssue(
+                    id: device.id,
+                    deviceName: device.displayName,
+                    isIPad: isIPad,
+                    shieldsDown: shieldsDown,
+                    internetBlocked: internetBlocked,
+                    reason: reasons.joined(separator: "\n")
+                ))
+            }
+        }
+        return issues
+    }
+
+    /// Whether any device has an active issue (for dashboard red name indicator).
+    var hasDeviceIssues: Bool { !deviceIssues.isEmpty }
 
     /// Temporarily unlocked app names from heartbeats for this child's devices.
     var temporaryAllowedAppsForChild: [String] {
@@ -616,11 +690,71 @@ final class ChildDetailViewModel: CommandSendable {
         }
     }
 
+    /// Save the child profile to CloudKit (used for avatar changes, name edits, etc.).
+    func saveProfile(_ profile: ChildProfile) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        do {
+            try await cloudKit.saveChildProfile(profile)
+            // Update in-memory state so dashboard refreshes immediately
+            if let idx = appState.childProfiles.firstIndex(where: { $0.id == profile.id }) {
+                appState.childProfiles[idx] = profile
+            }
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Failed to save profile: \(error)")
+            #endif
+        }
+    }
+
     func refresh() async {
         try? await appState.refreshDashboard()
         await loadEvents()
         await loadWeeklyScreenTime()
         await loadOnlineActivity()
+        await loadTimeLimits()
+    }
+
+    // MARK: - App Time Limits
+
+    func loadTimeLimits() async {
+        guard let cloudKit = appState.cloudKit else { return }
+        if let configs = try? await cloudKit.fetchTimeLimitConfigs(childProfileID: child.id) {
+            timeLimitConfigs = configs.sorted { $0.appName < $1.appName }
+        }
+    }
+
+    func requestTimeLimitSetup(for device: ChildDevice) async {
+        await performCommand(.requestTimeLimitSetup, target: .device(device.id))
+    }
+
+    func setTimeLimit(config: TimeLimitConfig, minutes: Int) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        var updated = config
+        updated.dailyLimitMinutes = minutes
+        updated.updatedAt = Date()
+        try? await cloudKit.saveTimeLimitConfig(updated)
+        if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
+            timeLimitConfigs[idx] = updated
+        }
+    }
+
+    func removeTimeLimit(config: TimeLimitConfig) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        try? await cloudKit.deleteTimeLimitConfig(config.id)
+        timeLimitConfigs.removeAll { $0.id == config.id }
+        // Send command to all child devices to stop monitoring
+        await performCommand(.removeTimeLimit(appFingerprint: config.appFingerprint), target: .child(config.childProfileID))
+    }
+
+    func grantExtraTime(config: TimeLimitConfig, minutes: Int) async {
+        await performCommand(.grantExtraTime(appFingerprint: config.appFingerprint, extraMinutes: minutes), target: .child(config.childProfileID))
+    }
+
+    /// Estimated app usage in minutes from DNS data for today.
+    func estimatedAppUsage(for appName: String) -> Double {
+        guard let activity = onlineActivity else { return 0 }
+        let usage = activity.estimatedAppUsage()
+        return usage.first(where: { $0.appName == appName })?.minutes ?? 0
     }
 
     /// Fetch daily screen time snapshots for the last 7 days.

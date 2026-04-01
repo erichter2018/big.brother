@@ -69,6 +69,10 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// Manual build number from AppConstants, carried via heartbeat so parent can compare.
     public let appBuildNumber: Int?
 
+    /// The build number the main app last launched with (from App Group).
+    /// When heartbeat comes from tunnel, this may differ from appBuildNumber.
+    public let mainAppLastLaunchedBuild: Int?
+
     /// Last enforcement error message (nil = no recent errors).
     public let enforcementError: String?
 
@@ -85,6 +89,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
 
     /// Whether a VPN tunnel interface was detected on the device.
     public let vpnDetected: Bool?
+
+    /// Whether the VPN tunnel is actively blackholing DNS (internet blocked).
+    public let internetBlocked: Bool?
 
     /// The device's current time zone identifier (e.g. "America/New_York").
     public let timeZoneIdentifier: String?
@@ -173,11 +180,13 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         osVersion: String? = nil,
         modelIdentifier: String? = nil,
         appBuildNumber: Int? = nil,
+        mainAppLastLaunchedBuild: Int? = nil,
         enforcementError: String? = nil,
         activeScheduleWindowName: String? = nil,
         lastCommandProcessedAt: Date? = nil,
         monitorLastActiveAt: Date? = nil,
         vpnDetected: Bool? = nil,
+        internetBlocked: Bool? = nil,
         timeZoneIdentifier: String? = nil,
         timeZoneOffsetSeconds: Int? = nil,
         screenTimeMinutes: Int? = nil,
@@ -231,11 +240,13 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.osVersion = osVersion
         self.modelIdentifier = modelIdentifier
         self.appBuildNumber = appBuildNumber
+        self.mainAppLastLaunchedBuild = mainAppLastLaunchedBuild
         self.enforcementError = enforcementError
         self.activeScheduleWindowName = activeScheduleWindowName
         self.lastCommandProcessedAt = lastCommandProcessedAt
         self.monitorLastActiveAt = monitorLastActiveAt
         self.vpnDetected = vpnDetected
+        self.internetBlocked = internetBlocked
         self.timeZoneIdentifier = timeZoneIdentifier
         self.timeZoneOffsetSeconds = timeZoneOffsetSeconds
         self.screenTimeMinutes = screenTimeMinutes
@@ -279,12 +290,12 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case temporaryUnlockOrigin
         case osVersion
         case modelIdentifier
-        case appBuildNumber
+        case appBuildNumber, mainAppLastLaunchedBuild
         case enforcementError
         case activeScheduleWindowName
         case lastCommandProcessedAt
         case monitorLastActiveAt
-        case vpnDetected
+        case vpnDetected, internetBlocked
         case timeZoneIdentifier
         case timeZoneOffsetSeconds
         case screenTimeMinutes
@@ -330,11 +341,13 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         osVersion = try container.decodeIfPresent(String.self, forKey: .osVersion)
         modelIdentifier = try container.decodeIfPresent(String.self, forKey: .modelIdentifier)
         appBuildNumber = try container.decodeIfPresent(Int.self, forKey: .appBuildNumber)
+        mainAppLastLaunchedBuild = try container.decodeIfPresent(Int.self, forKey: .mainAppLastLaunchedBuild)
         enforcementError = try container.decodeIfPresent(String.self, forKey: .enforcementError)
         activeScheduleWindowName = try container.decodeIfPresent(String.self, forKey: .activeScheduleWindowName)
         lastCommandProcessedAt = try container.decodeIfPresent(Date.self, forKey: .lastCommandProcessedAt)
         monitorLastActiveAt = try container.decodeIfPresent(Date.self, forKey: .monitorLastActiveAt)
         vpnDetected = try container.decodeIfPresent(Bool.self, forKey: .vpnDetected)
+        internetBlocked = try container.decodeIfPresent(Bool.self, forKey: .internetBlocked)
         timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
         timeZoneOffsetSeconds = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetSeconds)
         screenTimeMinutes = try container.decodeIfPresent(Int.self, forKey: .screenTimeMinutes)

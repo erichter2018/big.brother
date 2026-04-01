@@ -260,10 +260,16 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
                 }
 
                 // Notify driving monitor of automotive start — require high confidence
-                // to avoid false positives from walking near traffic.
+                // AND recent GPS speed >10mph to avoid false positives from vibrations,
+                // being near traffic, or riding in a stopped car.
                 if activity.automotive && activity.confidence == .high && self.drivingMonitor?.isDriving != true {
-                    self.drivingMonitor?.onDrivingStarted()
-                    self.logDiag("Driving started (CoreMotion automotive, high confidence)")
+                    let recentSpeed = self.locationManager.location?.speed ?? -1
+                    if recentSpeed > 4.5 { // ~10 mph — actually moving
+                        self.drivingMonitor?.onDrivingStarted()
+                        self.logDiag("Driving started (CoreMotion automotive high + GPS \(String(format: "%.0f", recentSpeed * 2.237))mph)")
+                    } else {
+                        self.logDiag("Driving suppressed (CoreMotion automotive high but GPS speed \(String(format: "%.0f", recentSpeed * 2.237))mph < 10mph)")
+                    }
                 }
             } else if activity.stationary, self.isMoving,
                       let lastMove = self.lastMovementAt,

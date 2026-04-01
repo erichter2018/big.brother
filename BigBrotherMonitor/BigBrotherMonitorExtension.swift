@@ -61,6 +61,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
+        // Per-app time limit daily reset — new day, clear exhausted status.
+        if activity.rawValue.hasPrefix("bigbrother.timelimit.") {
+            handleTimeLimitDayReset(activity: activity)
+            return
+        }
+
         // Schedule profile unlocked window — unlock if today matches.
         if activity.rawValue.hasPrefix(scheduleProfilePrefix) {
             handleUnlockedWindowStart(activity)
@@ -89,18 +95,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Legacy / other schedule activity — apply current policy mode.
-        let mode: LockMode
-        let policy: EffectivePolicy?
-        if let extState = storage.readExtensionSharedState() {
-            mode = extState.currentMode
-            policy = storage.readPolicySnapshot()?.effectivePolicy
-        } else if let snapshot = storage.readPolicySnapshot() {
-            mode = snapshot.effectivePolicy.resolvedMode
-            policy = snapshot.effectivePolicy
-        } else {
-            return
-        }
+        // Legacy / other schedule activity — use ModeStackResolver for ground truth.
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let mode = resolution.mode
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
 
         applyShielding(mode: mode, policy: policy)
         updateSharedState(mode: mode)
@@ -151,13 +149,21 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
             updateSharedState(mode: mode)
         } else {
-            // No profile — original behavior: just clear the schedule store.
+            // No profile — clear the schedule store and default to restricted.
             store.clearAllSettings()
+            updateSharedState(mode: .restricted)
         }
         logEvent(.scheduleEnded, details: "Schedule ended: \(activity.rawValue)")
     }
 
     override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name, activity: DeviceActivityName) {
+        // Handle per-app time limit exhaustion.
+        if activity.rawValue.hasPrefix("bigbrother.timelimit."),
+           event.rawValue == "timelimit.exhausted" {
+            handleTimeLimitExhausted(activity: activity)
+            return
+        }
+
         // Only handle usage tracking events.
         guard activity.rawValue.hasPrefix("bigbrother.usagetracking"),
               event.rawValue.hasPrefix("usage.") else { return }
@@ -206,10 +212,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if hasActiveTemporaryMode() { return }
 
         // Manual mode override — skip schedule-driven changes.
-        let freeStartDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let freeStartScheduleDriven = freeStartDefaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (freeStartDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-        if !freeStartScheduleDriven { return }
+        if !AppConstants.isScheduleDriven() { return }
 
         guard let profile = storage.readActiveScheduleProfile() else { return }
 
@@ -259,10 +262,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if hasActiveTemporaryMode() { return }
 
         // Manual mode override — skip schedule-driven changes.
-        let freeEndDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let freeEndScheduleDriven = freeEndDefaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (freeEndDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-        if !freeEndScheduleDriven { return }
+        if !AppConstants.isScheduleDriven() { return }
 
         guard let profile = storage.readActiveScheduleProfile() else { return }
 
@@ -307,10 +307,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if hasActiveTemporaryMode() { return }
 
         // Manual mode override — skip schedule-driven changes.
-        let essStartDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let essStartScheduleDriven = essStartDefaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (essStartDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-        if !essStartScheduleDriven { return }
+        if !AppConstants.isScheduleDriven() { return }
 
         guard let profile = storage.readActiveScheduleProfile() else { return }
 
@@ -351,10 +348,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if hasActiveTemporaryMode() { return }
 
         // Manual mode override — skip schedule-driven changes.
-        let essEndDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let essEndScheduleDriven = essEndDefaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (essEndDefaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-        if !essEndScheduleDriven { return }
+        if !AppConstants.isScheduleDriven() { return }
 
         guard let profile = storage.readActiveScheduleProfile() else { return }
 
@@ -390,17 +384,36 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Falls back to schedule or .restricted if previousMode not available.
     private func handleTimedUnlockEnd(_ activity: DeviceActivityName) {
         let timedInfo = storage.readTimedUnlockInfo()
-        let isScheduleDriven = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .bool(forKey: "scheduleDrivenMode") ?? true
 
         let mode: LockMode
-        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
+        if AppConstants.isScheduleDriven(), let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
         } else if let saved = timedInfo?.previousMode {
             mode = saved
         } else {
             mode = .restricted
         }
+
+        // Update PolicySnapshot so all processes see the correct post-unlock mode.
+        if let existingSnapshot = storage.readPolicySnapshot() {
+            let existingPolicy = existingSnapshot.effectivePolicy
+            let correctedPolicy = EffectivePolicy(
+                resolvedMode: mode,
+                isTemporaryUnlock: false,
+                temporaryUnlockExpiresAt: nil,
+                shieldedCategoriesData: existingPolicy.shieldedCategoriesData,
+                allowedAppTokensData: existingPolicy.allowedAppTokensData,
+                warnings: existingPolicy.warnings,
+                policyVersion: existingPolicy.policyVersion + 1
+            )
+            let correctedSnapshot = PolicySnapshot(
+                source: .temporaryUnlockExpired,
+                trigger: "Monitor: timed unlock ended, reverted to \(mode.rawValue)",
+                effectivePolicy: correctedPolicy
+            )
+            try? storage.writePolicySnapshot(correctedSnapshot)
+        }
+
         if mode == .unlocked {
             clearAllShieldStores()
         } else {
@@ -409,6 +422,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
         updateSharedState(mode: mode)
         try? storage.clearTimedUnlockInfo()
+        try? storage.clearTemporaryUnlockState()
         if mode != .unlocked {
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
                 .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
@@ -428,19 +442,41 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         let mode: LockMode
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let isScheduleDriven = defaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (defaults?.bool(forKey: "scheduleDrivenMode") ?? true)
 
-        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
+        if AppConstants.isScheduleDriven(), let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
         } else {
             mode = previousMode
+        }
+
+        // CRITICAL: Update the PolicySnapshot so the main app sees the correct mode.
+        // Without this, the snapshot remains stale with isTemporaryUnlock=true and
+        // resolvedMode=.unlocked, causing the app to think shields should be down.
+        if let existingSnapshot = storage.readPolicySnapshot() {
+            let existingPolicy = existingSnapshot.effectivePolicy
+            let correctedPolicy = EffectivePolicy(
+                resolvedMode: mode,
+                isTemporaryUnlock: false,
+                temporaryUnlockExpiresAt: nil,
+                shieldedCategoriesData: existingPolicy.shieldedCategoriesData,
+                allowedAppTokensData: existingPolicy.allowedAppTokensData,
+                warnings: existingPolicy.warnings,
+                policyVersion: existingPolicy.policyVersion + 1
+            )
+            let correctedSnapshot = PolicySnapshot(
+                source: .temporaryUnlockExpired,
+                trigger: "Monitor: temp unlock expired, reverted to \(mode.rawValue)",
+                effectivePolicy: correctedPolicy
+            )
+            try? storage.writePolicySnapshot(correctedSnapshot)
         }
 
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: mode, policy: policy)
         updateSharedState(mode: mode)
         try? storage.clearTemporaryUnlockState()
+        // Also clear any lingering timed unlock info to prevent conflicts.
+        try? storage.clearTimedUnlockInfo()
         // Record when the device naturally re-locked so force-close detection
         // gives extra grace time (the app may be suspended from a game).
         defaults?.set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
@@ -454,11 +490,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Uses schedule if schedule-driven, saved previousMode if manual, or .restricted as fallback.
     private func handleLockUntilExpired(_ activity: DeviceActivityName) {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let isScheduleDriven = defaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (defaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-
         let mode: LockMode
-        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
+        if AppConstants.isScheduleDriven(), let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
         } else if let savedRaw = defaults?.string(forKey: "lockUntilPreviousMode"),
                   let saved = LockMode(rawValue: savedRaw) {
@@ -482,6 +515,87 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             title: mode == .unlocked ? "Free Time Started" : "Lock Period Ended",
             body: mode == .unlocked ? "All apps are now accessible." : "\(mode.displayName) mode active."
         )
+    }
+
+    // MARK: - Per-App Time Limits
+
+    /// An app's daily time limit was reached. Block it via shield.applications
+    /// so the shield shows the app name and "Request More Time" button.
+    private func handleTimeLimitExhausted(activity: DeviceActivityName) {
+        let idString = String(activity.rawValue.dropFirst("bigbrother.timelimit.".count))
+        let limits = storage.readAppTimeLimits()
+        guard let limit = limits.first(where: { $0.id.uuidString == idString }) else { return }
+
+        // Write exhausted entry
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        let today = Self.todayDateString()
+        // Don't duplicate
+        guard !exhausted.contains(where: { $0.timeLimitID == limit.id && $0.dateString == today }) else { return }
+
+        let entry = TimeLimitExhaustedApp(
+            timeLimitID: limit.id,
+            appName: limit.appName,
+            tokenData: limit.tokenData,
+            fingerprint: limit.fingerprint,
+            dateString: today
+        )
+        exhausted.append(entry)
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+
+        // Block the app's web domains at the DNS level (prevents Safari bypass).
+        updateTimeLimitBlockedDomains()
+
+        // Re-apply enforcement (adds to shield.applications, removes from allowed)
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShieldingToAllStores(mode: policy?.resolvedMode ?? .restricted, policy: policy)
+
+        // Notify kid
+        sendModeNotification(
+            title: "\(limit.appName) — Time's Up",
+            body: "Daily limit of \(limit.dailyLimitMinutes) minutes reached."
+        )
+
+        // Log event
+        logEvent(.timeLimitExhausted, details: "\(limit.appName): \(limit.dailyLimitMinutes) min limit reached")
+
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+    }
+
+    /// Daily reset: a time limit schedule restarted (midnight). Clear exhausted status
+    /// for this app so it's usable again today.
+    private func handleTimeLimitDayReset(activity: DeviceActivityName) {
+        let idString = String(activity.rawValue.dropFirst("bigbrother.timelimit.".count))
+
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        let before = exhausted.count
+        exhausted.removeAll { $0.timeLimitID.uuidString == idString }
+        guard exhausted.count != before else { return }
+
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+
+        // Update DNS blocklist (removes cleared app's domains).
+        updateTimeLimitBlockedDomains()
+
+        // Re-apply enforcement to unblock the app
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShieldingToAllStores(mode: policy?.resolvedMode ?? .restricted, policy: policy)
+
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+    }
+
+    /// Update the DNS blocklist with domains of all currently-exhausted apps.
+    /// The VPN tunnel reads this and blocks DNS queries for these domains.
+    private func updateTimeLimitBlockedDomains() {
+        let today = Self.todayDateString()
+        let exhausted = storage.readTimeLimitExhaustedApps().filter { $0.dateString == today }
+        var blockedDomains = Set<String>()
+        for app in exhausted {
+            let domains = DomainCategorizer.domainsForApp(app.appName)
+            blockedDomains.formUnion(domains)
+        }
+        try? storage.writeTimeLimitBlockedDomains(blockedDomains)
     }
 
     // MARK: - Temporary Mode Guard
@@ -569,9 +683,18 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private static let maxShieldApplications = 50
 
     private func applyShieldingToAllStores(mode: LockMode, policy: EffectivePolicy?) {
+        // Check if the main app applied enforcement very recently (within 5 seconds).
+        // If so, defer to the main app to avoid a race where Monitor overwrites
+        // what the main app just wrote (ManagedSettings merges across stores with OR).
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let mainAppEnforcedAt = defaults?.double(forKey: "mainAppEnforcementAt") ?? 0
+        if mainAppEnforcedAt > 0 && Date().timeIntervalSince1970 - mainAppEnforcedAt < 5 {
+            logEvent(.policyReconciled, details: "Monitor deferred to main app (enforced \(Int(Date().timeIntervalSince1970 - mainAppEnforcedAt))s ago)")
+            return
+        }
+
         // Force essential mode if permissions are missing.
         let effectiveMode: LockMode
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         if defaults?.bool(forKey: "allPermissionsGranted") == false && mode != .locked {
             effectiveMode = .locked
         } else {
@@ -591,8 +714,21 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         case .restricted, .locked, .lockedDown:
             let allowExemptions = effectiveMode == .restricted
-            let allowedTokens = allowExemptions ? collectAllowedTokens() : []
+            var allowedTokens = allowExemptions ? collectAllowedTokens() : []
             let pickerTokens = loadPickerTokens()
+
+            // Remove time-exhausted apps from the allowed set and collect their tokens
+            // for shield.applications (enables "Request More Time" on the shield).
+            let decoder = JSONDecoder()
+            let today = Self.todayDateString()
+            let exhaustedApps = storage.readTimeLimitExhaustedApps().filter { $0.dateString == today }
+            var exhaustedTokens = Set<ApplicationToken>()
+            for app in exhaustedApps {
+                if let token = try? decoder.decode(ApplicationToken.self, from: app.tokenData) {
+                    allowedTokens.remove(token)
+                    exhaustedTokens.insert(token)
+                }
+            }
 
             // Check if web blocking is enabled in device restrictions,
             // respecting parent-configured allowed web domains.
@@ -601,12 +737,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
             if !pickerTokens.isEmpty && allowExemptions {
                 let tokensToBlock = pickerTokens.subtracting(allowedTokens)
-                let perAppTokens: Set<ApplicationToken>
+                var perAppTokens: Set<ApplicationToken>
                 if tokensToBlock.count <= Self.maxShieldApplications {
                     perAppTokens = tokensToBlock
                 } else {
-                    perAppTokens = Set(tokensToBlock.prefix(Self.maxShieldApplications))
+                    let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
+                    perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
                 }
+                // Add exhausted tokens to shield.applications for "Request More Time"
+                perAppTokens.formUnion(exhaustedTokens)
                 // Apply to both base and schedule stores for full coverage.
                 for s in [baseStore, store] {
                     s.shield.applications = perAppTokens
@@ -620,7 +759,11 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     }
                 }
             } else {
-                let apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
+                var apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
+                // Add exhausted tokens to shield.applications
+                if !exhaustedTokens.isEmpty {
+                    apps = (apps ?? Set()).union(exhaustedTokens)
+                }
                 for s in [baseStore, store] {
                     s.shield.applications = apps
                     if allowedTokens.isEmpty {
@@ -735,10 +878,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
         let ackToken = defaults?.string(forKey: "extensionHeartbeatAcknowledgedToken")
 
-        // Keep a single unresolved liveness request outstanding until the main
-        // app positively acknowledges it. Rewriting the timestamp every
-        // reconciliation cycle prevents the request from ever going stale.
+        // Don't issue a new request if one is already outstanding and unacked.
         if let requestToken, !requestToken.isEmpty, ackToken != requestToken {
+            return
+        }
+
+        // Debounce: don't issue a new request within 60 seconds of the last one.
+        // This prevents the race where Monitor sets a new token before the app
+        // finishes acking the old one, which looks like force-close.
+        let lastRequestAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt") ?? 0
+        if lastRequestAt > 0 && Date().timeIntervalSince1970 - lastRequestAt < 60 {
             return
         }
 
@@ -809,7 +958,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
         let heartbeatAge = Date().timeIntervalSince1970 - lastHeartbeatAt
 
-        let currentMode = storage.readExtensionSharedState()?.currentMode ?? .restricted
+        // Use ModeStackResolver for ground truth — ExtensionSharedState can be stale.
+        let currentMode = ModeStackResolver.resolve(storage: storage).mode
         let threshold = currentMode == .unlocked
             ? AppConstants.forceCloseThresholdUnlocked
             : AppConstants.forceCloseThresholdLocked

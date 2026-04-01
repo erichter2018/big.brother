@@ -3,7 +3,7 @@ import BigBrotherCore
 
 /// Time range for insights queries.
 enum InsightsTimeRange: String, CaseIterable, Identifiable {
-    case day = "24h"
+    case day = "Today"
     case week = "7d"
     case month = "30d"
 

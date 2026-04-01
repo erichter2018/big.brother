@@ -513,6 +513,24 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             .sorted { $0.timestamp > $1.timestamp }
     }
 
+    // MARK: - Time Limit Configs
+
+    func fetchTimeLimitConfigs(childProfileID: ChildProfileID) async throws -> [TimeLimitConfig] {
+        let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
+        return try await query(CKRecordType.timeLimitConfig, predicate: predicate)
+            .compactMap(CKRecordConversion.timeLimitConfig)
+    }
+
+    func saveTimeLimitConfig(_ config: TimeLimitConfig) async throws {
+        let record = CKRecordConversion.toCKRecord(config)
+        try await save(record)
+    }
+
+    func deleteTimeLimitConfig(_ id: UUID) async throws {
+        let recordID = CKRecordConversion.recordID(id.uuidString, type: CKRecordType.timeLimitConfig)
+        try await delete(recordID)
+    }
+
     // MARK: - Subscriptions
 
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws {

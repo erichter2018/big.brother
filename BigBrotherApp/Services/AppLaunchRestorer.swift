@@ -51,6 +51,43 @@ struct AppLaunchRestorer {
         let temporaryUnlockState = storage.readTemporaryUnlockState()
         let authHealth = storage.readAuthorizationHealth()
 
+        // Cross-check with ModeStackResolver — the snapshot may be stale in EITHER direction:
+        // 1. Snapshot says unlocked but device should be locked (temp unlock expired while app dead)
+        // 2. Snapshot says locked/restricted but device should be unlocked (temp unlock active but
+        //    something overwrote the snapshot, e.g., Monitor schedule transition)
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let snapshotMode = currentSnapshot?.effectivePolicy.resolvedMode
+        if let snapshot = currentSnapshot, snapshotMode != resolution.mode {
+            let correctMode = resolution.mode
+            let currentVersion = snapshot.effectivePolicy.policyVersion
+            let policy = Policy(
+                targetDeviceID: enrollment.deviceID,
+                mode: correctMode,
+                temporaryUnlockUntil: resolution.expiresAt,
+                version: currentVersion + 1
+            )
+            let capabilities = DeviceCapabilities(
+                familyControlsAuthorized: enforcement.authorizationStatus == .authorized,
+                isOnline: false
+            )
+            let source: SnapshotSource = resolution.mode == .unlocked ? .temporaryUnlockStarted : .temporaryUnlockExpired
+            let inputs = PolicyPipelineCoordinator.Inputs(
+                basePolicy: policy,
+                capabilities: capabilities,
+                temporaryUnlockState: temporaryUnlockState,
+                authorizationHealth: authHealth,
+                deviceID: enrollment.deviceID,
+                source: source,
+                trigger: "Stale snapshot on launch: was \(snapshotMode?.rawValue ?? "nil"), ModeStackResolver says \(correctMode.rawValue) (\(resolution.reason))"
+            )
+            let output = PolicyPipelineCoordinator.generateSnapshot(
+                from: inputs, previousSnapshot: currentSnapshot
+            )
+            commitAndApply(output.snapshot)
+            eventLogger.log(.policyReconciled, details: "Launch: snapshot corrected \(snapshotMode?.rawValue ?? "nil") → \(correctMode.rawValue) via ModeStackResolver")
+            return
+        }
+
         // Determine last applied mode from snapshot (appliedAt set = was applied).
         let lastAppliedMode = currentSnapshot?.appliedAt != nil
             ? currentSnapshot?.effectivePolicy.resolvedMode

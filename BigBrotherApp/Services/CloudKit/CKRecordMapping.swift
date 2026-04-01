@@ -22,6 +22,7 @@ enum CKRecordType {
     static let deviceLocation = "BBDeviceLocation"
     static let namedPlace = "BBNamedPlace"
     static let diagnosticReport = "BBDiagnosticReport"
+    static let timeLimitConfig = "BBTimeLimitConfig"
 }
 
 /// Field names used in CloudKit records.
@@ -35,6 +36,9 @@ enum CKFieldName {
     static let profileID = "profileID"
     static let name = "name"
     static let avatarName = "avatarName"
+    static let avatarEmoji = "avatarEmoji"
+    static let avatarColor = "avatarColor"
+    static let avatarPhotoBase64 = "avatarPhotoBase64"
     static let alwaysAllowedCategoriesJSON = "alwaysAllowedCategoriesJSON"
     static let createdAt = "createdAt"
     static let updatedAt = "updatedAt"
@@ -128,6 +132,7 @@ enum CKFieldName {
     static let penaltyTimerEndTime = "penaltyTimerEndTime"
     static let selfUnlocksPerDay = "selfUnlocksPerDay"
     static let scheduleProfileVersion = "scheduleProfileVersion"
+    static let restrictionsJSON = "restrictionsJSON"
 
     // BBHeartbeat (self-unlock reporting)
     static let selfUnlocksUsedToday = "selfUnlocksUsedToday"
@@ -173,7 +178,9 @@ enum CKFieldName {
     static let hbTunnelConnected = "hbTunnel"
     static let hbMotionAuthorized = "hbMotionAuth"
     static let hbNotificationsAuthorized = "hbNotifAuth"
+    static let hbMainAppBuild = "hbMainAppBuild"
     static let hbDeviceLocked = "hbLocked"
+    static let hbInternetBlocked = "hbInetBlocked"
 
     // BBDeviceLocation (speed)
     static let locSpeed = "locSpeed"
@@ -189,6 +196,12 @@ enum CKFieldName {
 
     // BBDiagnosticReport
     static let diagReportJSON = "diagJSON"
+
+    // BBTimeLimitConfig
+    static let appFingerprint = "appFingerprint"
+    static let appName = "appName"
+    static let dailyLimitMinutes = "dailyLimitMinutes"
+    static let timeLimitIsActive = "isActive"
 
     // BBRemoteCommand (signing)
     static let signatureBase64 = "signatureBase64"

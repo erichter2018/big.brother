@@ -21,6 +21,7 @@ struct ChildSummaryCard: View {
     let avatarImageUrl: String?
     let unlockOrigin: TemporaryUnlockOrigin?
     let isHeartbeatConfirmed: Bool
+    let mismatchedDeviceTypes: [String]  // "iphone", "ipad" — which devices have mode mismatch
     let isInPenaltyPhase: Bool
     let penaltyWindowCountdown: String?  // countdown of full unlock window during penalty
     let isScheduleActive: Bool
@@ -100,6 +101,9 @@ struct ChildSummaryCard: View {
         let jailbreakReasons = devices.compactMap { dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakReason }
         let hasJailbreak = !jailbreakReasons.isEmpty || devices.compactMap({ dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakDetected }).contains(true)
 
+        // Internet blocked — any device with DNS blackhole active
+        let internetBlocked = childHeartbeats.contains { $0.internetBlocked == true }
+
         return PrecomputedValues(
             hasAnyPermissionIssue: permissionIssue,
             isOnOldBuild: onOldBuild,
@@ -108,7 +112,8 @@ struct ChildSummaryCard: View {
             latestHeartbeatAge: heartbeatAge,
             isTunnelHeartbeat: heartbeatIsTunnel,
             jailbreakReasons: jailbreakReasons,
-            hasJailbreak: hasJailbreak
+            hasJailbreak: hasJailbreak,
+            isInternetBlocked: internetBlocked
         )
     }
 
@@ -121,6 +126,7 @@ struct ChildSummaryCard: View {
         let isTunnelHeartbeat: Bool
         let jailbreakReasons: [String]
         let hasJailbreak: Bool
+        let isInternetBlocked: Bool
     }
 
     var body: some View {
@@ -139,6 +145,7 @@ struct ChildSummaryCard: View {
                     }
                     Text(child.name + (cached.isOnOldBuild ? "…" : ""))
                         .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(cached.isInternetBlocked || cached.isShieldMismatch ? .red : .primary)
                         .lineLimit(1)
                 }
 
@@ -366,35 +373,53 @@ struct ChildSummaryCard: View {
 
     @ViewBuilder
     private var avatarContent: some View {
-        if let base64 = avatarImageUrl,
+        // Priority: CloudKit photo > CloudKit emoji > Firebase photo > initials
+        if let base64 = child.avatarPhotoBase64,
            let data = Data(base64Encoded: base64),
            let uiImage = UIImage(data: data) {
+            // CloudKit photo avatar
             Image(uiImage: uiImage)
                 .resizable()
                 .scaledToFill()
                 .frame(width: 72, height: 72)
                 .clipShape(Circle())
-        } else {
-            avatarFallback
-        }
-    }
-
-    @ViewBuilder
-    private var avatarFallback: some View {
-        let initials = String(child.name.prefix(1)).uppercased()
-        ZStack {
-            Circle()
-                .fill(avatarGradient)
+        } else if let base64 = avatarImageUrl,
+                  let data = Data(base64Encoded: base64),
+                  let uiImage = UIImage(data: data) {
+            // Firebase photo fallback
+            Image(uiImage: uiImage)
+                .resizable()
+                .scaledToFill()
                 .frame(width: 72, height: 72)
-            Text(initials)
-                .font(.title2)
-                .fontWeight(.bold)
-                .foregroundStyle(.white)
+                .clipShape(Circle())
+        } else if let emoji = child.avatarEmoji, !emoji.isEmpty {
+            // Emoji avatar on colored circle
+            ZStack {
+                Circle()
+                    .fill(avatarGradient)
+                    .frame(width: 72, height: 72)
+                Text(emoji)
+                    .font(.system(size: 36))
+            }
+        } else {
+            // Initials fallback
+            let initials = String(child.name.prefix(1)).uppercased()
+            ZStack {
+                Circle()
+                    .fill(avatarGradient)
+                    .frame(width: 72, height: 72)
+                Text(initials)
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.white)
+            }
         }
     }
 
     private var avatarGradient: LinearGradient {
-        if let hex = avatarHexColor, let color = Color(hex: hex) {
+        // Priority: CloudKit color > Firebase color > deterministic hash
+        let hex = child.avatarColor ?? avatarHexColor
+        if let hex, let color = Color(hex: hex) {
             return LinearGradient(colors: [color, color.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         let colors: [(Color, Color)] = [
@@ -435,11 +460,7 @@ struct ChildSummaryCard: View {
             modeBadge
         } else if let countdown {
             HStack(spacing: 4) {
-                if !isHeartbeatConfirmed {
-                    Image(systemName: "clock")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.gray)
-                }
+                mismatchIndicator
                 let label: String = {
                     switch unlockOrigin {
                     case .selfUnlock: return "Self-unlocked"
@@ -455,11 +476,7 @@ struct ChildSummaryCard: View {
             .accessibilityElement(children: .combine)
         } else if isScheduleActive {
             HStack(spacing: 3) {
-                if !isHeartbeatConfirmed {
-                    Image(systemName: "clock")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.gray)
-                }
+                mismatchIndicator
                 if let scheduleStatus {
                     let statusColor = scheduleStatusColor
                     Text(scheduleStatus)
@@ -475,11 +492,7 @@ struct ChildSummaryCard: View {
             .accessibilityElement(children: .combine)
         } else {
             HStack(spacing: 3) {
-                if !isHeartbeatConfirmed {
-                    Image(systemName: "clock")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.gray)
-                }
+                mismatchIndicator
                 Text(dominantMode.displayName)
                     .font(.system(size: 13))
                     .foregroundStyle(mutedModeColor)
@@ -859,6 +872,27 @@ struct ChildSummaryCard: View {
         }
 
         return parts.joined(separator: ", ")
+    }
+
+    // MARK: - Mismatch Indicator
+
+    /// Grey clock with optional device type icons showing which devices have a mode mismatch.
+    @ViewBuilder
+    private var mismatchIndicator: some View {
+        if !isHeartbeatConfirmed {
+            HStack(spacing: 1) {
+                Image(systemName: "clock")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.gray)
+                if devices.count > 1 && !mismatchedDeviceTypes.isEmpty {
+                    ForEach(Array(Set(mismatchedDeviceTypes)).sorted(), id: \.self) { type in
+                        Image(systemName: type == "ipad" ? "ipad" : "iphone")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.gray)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Helpers

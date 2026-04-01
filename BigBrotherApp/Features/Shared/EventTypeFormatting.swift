@@ -32,6 +32,9 @@ extension EventType {
         case .sosAlert: "SOS Alert"
         case .selfUnlockUsed: "Self-Unlock Used"
         case .newAppDetected: "New App Activity"
+        case .timeLimitExhausted: "Time Limit Reached"
+        case .timeLimitExtended: "Extra Time Granted"
+        case .timeLimitSetupCompleted: "Time Limits Configured"
         }
     }
 }

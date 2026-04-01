@@ -30,6 +30,9 @@ enum CKRecordConversion {
         record[CKFieldName.familyID] = profile.familyID.rawValue
         record[CKFieldName.name] = profile.name
         record[CKFieldName.avatarName] = profile.avatarName
+        record[CKFieldName.avatarEmoji] = profile.avatarEmoji
+        record[CKFieldName.avatarColor] = profile.avatarColor
+        record[CKFieldName.avatarPhotoBase64] = profile.avatarPhotoBase64
         do {
             let cats = try JSONEncoder().encode(profile.alwaysAllowedCategories)
             record[CKFieldName.alwaysAllowedCategoriesJSON] = String(data: cats, encoding: .utf8)
@@ -65,6 +68,9 @@ enum CKRecordConversion {
             familyID: FamilyID(rawValue: familyID),
             name: name,
             avatarName: record[CKFieldName.avatarName] as? String,
+            avatarEmoji: record[CKFieldName.avatarEmoji] as? String,
+            avatarColor: record[CKFieldName.avatarColor] as? String,
+            avatarPhotoBase64: record[CKFieldName.avatarPhotoBase64] as? String,
             alwaysAllowedCategories: categories,
             createdAt: createdAt,
             updatedAt: updatedAt
@@ -129,6 +135,7 @@ enum CKRecordConversion {
         let penaltyEnd = record[CKFieldName.penaltyTimerEndTime] as? Date
         let selfUnlocksPerDay = record[CKFieldName.selfUnlocksPerDay] as? Int
         let schProfileVersion = record[CKFieldName.scheduleProfileVersion] as? Date
+        let restrictionsJSON = record[CKFieldName.restrictionsJSON] as? String
 
         return ChildDevice(
             id: DeviceID(rawValue: deviceID),
@@ -144,7 +151,8 @@ enum CKRecordConversion {
             penaltySeconds: penaltySecs,
             penaltyTimerEndTime: penaltyEnd,
             selfUnlocksPerDay: selfUnlocksPerDay,
-            scheduleProfileVersion: schProfileVersion
+            scheduleProfileVersion: schProfileVersion,
+            restrictionsJSON: restrictionsJSON
         )
     }
 
@@ -352,6 +360,7 @@ enum CKRecordConversion {
         record[CKFieldName.hbOSVersion] = hb.osVersion
         record[CKFieldName.hbModelIdentifier] = hb.modelIdentifier
         record[CKFieldName.hbAppBuildNumber] = hb.appBuildNumber.map { $0 as NSNumber }
+        record[CKFieldName.hbMainAppBuild] = hb.mainAppLastLaunchedBuild.map { $0 as NSNumber }
         record[CKFieldName.hbEnforcementError] = hb.enforcementError
         record[CKFieldName.hbActiveScheduleWindow] = hb.activeScheduleWindowName
         record[CKFieldName.hbLastCommandProcessedAt] = hb.lastCommandProcessedAt.map { $0 as NSDate }
@@ -370,6 +379,7 @@ enum CKRecordConversion {
         record[CKFieldName.hbMotionAuthorized] = hb.motionAuthorized.map { NSNumber(value: $0) }
         record[CKFieldName.hbNotificationsAuthorized] = hb.notificationsAuthorized.map { NSNumber(value: $0) }
         record[CKFieldName.hbDeviceLocked] = hb.isDeviceLocked.map { NSNumber(value: $0) }
+        record[CKFieldName.hbInternetBlocked] = hb.internetBlocked.map { NSNumber(value: $0) }
         record[CKFieldName.hbShieldsActive] = hb.shieldsActive.map { NSNumber(value: $0) }
         record[CKFieldName.hbScheduleResolvedMode] = hb.scheduleResolvedMode
         record[CKFieldName.hbLastShieldChangeReason] = hb.lastShieldChangeReason
@@ -431,11 +441,13 @@ enum CKRecordConversion {
             osVersion: record[CKFieldName.hbOSVersion] as? String,
             modelIdentifier: record[CKFieldName.hbModelIdentifier] as? String,
             appBuildNumber: (record[CKFieldName.hbAppBuildNumber] as? Int64).map { Int($0) },
+            mainAppLastLaunchedBuild: (record[CKFieldName.hbMainAppBuild] as? Int64).map { Int($0) },
             enforcementError: record[CKFieldName.hbEnforcementError] as? String,
             activeScheduleWindowName: record[CKFieldName.hbActiveScheduleWindow] as? String,
             lastCommandProcessedAt: record[CKFieldName.hbLastCommandProcessedAt] as? Date,
             monitorLastActiveAt: record[CKFieldName.hbMonitorLastActiveAt] as? Date,
             vpnDetected: (record[CKFieldName.hbVPNDetected] as? Int64).map { $0 != 0 },
+            internetBlocked: (record[CKFieldName.hbInternetBlocked] as? Int64).map { $0 != 0 },
             timeZoneIdentifier: record[CKFieldName.hbTimeZoneID] as? String,
             timeZoneOffsetSeconds: (record[CKFieldName.hbTimeZoneOffset] as? Int64).map { Int($0) },
             screenTimeMinutes: (record[CKFieldName.hbScreenTimeMinutes] as? Int64).map { Int($0) },
@@ -842,6 +854,51 @@ enum CKRecordConversion {
               let report = try? JSONDecoder().decode(DiagnosticReport.self, from: data)
         else { return nil }
         return report
+    }
+
+    // MARK: - Time Limit Config
+
+    static func toCKRecord(_ config: TimeLimitConfig) -> CKRecord {
+        let id = recordID(config.id.uuidString, type: CKRecordType.timeLimitConfig)
+        let record = CKRecord(recordType: CKRecordType.timeLimitConfig, recordID: id)
+        record[CKFieldName.familyID] = config.familyID.rawValue
+        record[CKFieldName.profileID] = config.childProfileID.rawValue
+        record[CKFieldName.deviceID] = config.deviceID?.rawValue
+        record[CKFieldName.appFingerprint] = config.appFingerprint
+        record[CKFieldName.appName] = config.appName
+        record[CKFieldName.dailyLimitMinutes] = config.dailyLimitMinutes as NSNumber
+        record[CKFieldName.timeLimitIsActive] = (config.isActive ? 1 : 0) as NSNumber
+        record[CKFieldName.createdAt] = config.createdAt as NSDate
+        record[CKFieldName.updatedAt] = config.updatedAt as NSDate
+        return record
+    }
+
+    static func timeLimitConfig(from record: CKRecord) -> TimeLimitConfig? {
+        guard record.recordType == CKRecordType.timeLimitConfig,
+              let familyID = record[CKFieldName.familyID] as? String,
+              let childProfileID = record[CKFieldName.profileID] as? String,
+              let fingerprint = record[CKFieldName.appFingerprint] as? String,
+              let appName = record[CKFieldName.appName] as? String,
+              let minutes = record[CKFieldName.dailyLimitMinutes] as? Int,
+              let createdAt = record[CKFieldName.createdAt] as? Date,
+              let updatedAt = record[CKFieldName.updatedAt] as? Date
+        else { return nil }
+        let deviceID = record[CKFieldName.deviceID] as? String
+
+        let isActive = (record[CKFieldName.timeLimitIsActive] as? Int64 ?? 1) != 0
+
+        return TimeLimitConfig(
+            id: UUID(uuidString: record.recordID.recordName.replacingOccurrences(of: "BBTimeLimitConfig_", with: "")) ?? UUID(),
+            familyID: FamilyID(rawValue: familyID),
+            childProfileID: ChildProfileID(rawValue: childProfileID),
+            deviceID: deviceID.map { DeviceID(rawValue: $0) },
+            appFingerprint: fingerprint,
+            appName: appName,
+            dailyLimitMinutes: minutes,
+            isActive: isActive,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
     }
 
     // MARK: - Named Place

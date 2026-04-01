@@ -111,6 +111,9 @@ final class AppState {
     /// triggering the always-allowed apps picker on the child device.
     var showAlwaysAllowedSetup: Bool = false
 
+    /// Set to true when a requestTimeLimitSetup command is received.
+    var showTimeLimitSetup: Bool = false
+
     /// Expected mode per child, set when any view model sends a mode command.
     /// Used by the dashboard to show the correct mode before heartbeat confirms.
     /// Cleared when a heartbeat confirms the mode.
@@ -428,7 +431,14 @@ final class AppState {
             enforcementImpl = impl
             familyControlsAvailable = true
 
+            // Write FC auth status to App Group so the tunnel diagnostic can report it.
+            let authStatus = impl.authorizationStatus
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(authStatus.rawValue, forKey: "familyControlsAuthStatus")
+
             fcManager.observeAuthorizationChanges { [weak self] newStatus in
+                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                    .set(newStatus.rawValue, forKey: "familyControlsAuthStatus")
                 Task { @MainActor [weak self] in
                     self?.handleAuthorizationChange(newStatus)
                 }
@@ -459,6 +469,9 @@ final class AppState {
         }
         cmdProcessor.onRequestAlwaysAllowedSetup = { [weak self] in
             self?.showAlwaysAllowedSetup = true
+        }
+        cmdProcessor.onRequestTimeLimitSetup = { [weak self] in
+            self?.showTimeLimitSetup = true
         }
         self.commandProcessor = cmdProcessor
 
@@ -530,6 +543,18 @@ final class AppState {
             cmdProcessor.onRestartVPNTunnel = { [weak vpn] in
                 Task {
                     try? await vpn?.installAndStart()
+                }
+            }
+            cmdProcessor.onScheduleSyncNeeded = { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    await self.syncScheduleProfile()
+                    // Re-apply enforcement with the (potentially updated) schedule.
+                    // The returnToSchedule already applied with whatever was local;
+                    // if the sync changed the schedule, re-apply now.
+                    if let snapshot = self.snapshotStore?.loadCurrentSnapshot() {
+                        try? self.enforcement?.apply(snapshot.effectivePolicy)
+                    }
                 }
             }
             cmdProcessor.onRequestDiagnostics = { [weak self] in
@@ -783,6 +808,20 @@ final class AppState {
             return
         }
 
+        // One-time migration: denyWebWhenLocked used to default to true, which was wrong.
+        // Reset it to false on all existing devices so web isn't blocked unless the parent
+        // explicitly enables it. Future setRestrictions commands will set the correct value.
+        let migrationKey = "migration_denyWebWhenLocked_default_fixed"
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if defaults?.bool(forKey: migrationKey) != true {
+            var r = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+            if r.denyWebWhenLocked {
+                r.denyWebWhenLocked = false
+                try? storage.writeDeviceRestrictions(r)
+            }
+            defaults?.set(true, forKey: migrationKey)
+        }
+
         guard let enforcement, let eventLogger, let snapshotStore else {
             isRestored = true
             return
@@ -814,6 +853,74 @@ final class AppState {
         }
 
         isRestored = true
+    }
+
+    /// Immediate full sync when the child app comes to foreground.
+    /// Pulls latest schedule, restrictions, and pending commands from CloudKit,
+    /// applies enforcement, and sends a heartbeat so the parent sees current state.
+    /// This ensures that when a kid opens BB, everything is instantly up to date.
+    private var isForegroundSyncing = false
+
+    func performForegroundSync() {
+        guard deviceRole == .child else { return }
+        guard !isForegroundSyncing else { return } // Prevent concurrent syncs
+        isForegroundSyncing = true
+
+        // Detect stale binary: if the tunnel has a newer build than our in-memory
+        // constant, we're running old code after a devicectl install (the tunnel
+        // restarts with new code but the app process may be resumed stale).
+        // Force exit so iOS relaunches with the new binary.
+        let tunnelBuild = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .integer(forKey: "tunnelBuildNumber") ?? 0
+        if tunnelBuild > AppConstants.appBuildNumber {
+            exit(0)
+        }
+
+        Task {
+            // 1. Sync schedule + restrictions from CloudKit
+            await syncScheduleProfile()
+
+            // 2. Process any pending commands (mode changes, restrictions, etc.)
+            try? await commandProcessor?.processIncomingCommands()
+
+            // 3. Re-apply enforcement — but use ModeStackResolver as ground truth.
+            // The snapshot may be stale (e.g., says restricted but temp unlock is active).
+            let resolution = ModeStackResolver.resolve(storage: storage)
+            if let snapshot = snapshotStore?.loadCurrentSnapshot() {
+                if snapshot.effectivePolicy.resolvedMode != resolution.mode {
+                    // Snapshot is stale — build corrected policy
+                    let corrected = EffectivePolicy(
+                        resolvedMode: resolution.mode,
+                        isTemporaryUnlock: resolution.isTemporary,
+                        temporaryUnlockExpiresAt: resolution.expiresAt,
+                        shieldedCategoriesData: snapshot.effectivePolicy.shieldedCategoriesData,
+                        allowedAppTokensData: snapshot.effectivePolicy.allowedAppTokensData,
+                        warnings: snapshot.effectivePolicy.warnings,
+                        policyVersion: snapshot.effectivePolicy.policyVersion + 1
+                    )
+                    let correctedSnapshot = PolicySnapshot(
+                        source: .restoration,
+                        trigger: "Foreground sync: corrected \(snapshot.effectivePolicy.resolvedMode.rawValue) → \(resolution.mode.rawValue)",
+                        effectivePolicy: corrected
+                    )
+                    try? storage.writePolicySnapshot(correctedSnapshot)
+                    try? enforcement?.apply(corrected)
+                } else {
+                    try? enforcement?.apply(snapshot.effectivePolicy)
+                }
+            }
+
+            // 4. Send heartbeat so parent sees updated state immediately
+            try? await heartbeatService?.sendNow(force: true)
+
+            // 5. Ping the VPN tunnel to clear any stale blackholes
+            vpnManager?.sendPing()
+
+            await MainActor.run {
+                self.refreshLocalState()
+                self.isForegroundSyncing = false
+            }
+        }
     }
 
     /// Called when the child app proves it is running again after fail-safe mode.
@@ -1716,6 +1823,22 @@ final class AppState {
             // Cache self-unlock budget from CloudKit device record.
             cacheSelfUnlockBudget(from: myDevice)
 
+            // Sync restrictions from CloudKit — the parent writes restrictionsJSON
+            // to the device record when toggling. This ensures the child gets the
+            // correct restrictions even if the setRestrictions command was lost.
+            if let json = myDevice.restrictionsJSON,
+               let data = json.data(using: .utf8),
+               let synced = try? JSONDecoder().decode(DeviceRestrictions.self, from: data) {
+                let local = storage.readDeviceRestrictions()
+                if local != synced {
+                    try? storage.writeDeviceRestrictions(synced)
+                    // Re-apply enforcement so the change takes effect immediately.
+                    if let snapshot = snapshotStore?.loadCurrentSnapshot() {
+                        try? enforcement?.apply(snapshot.effectivePolicy)
+                    }
+                }
+            }
+
             guard let profileID = myDevice.scheduleProfileID else {
                 // No schedule profile assigned — clear any existing registration.
                 if familyControlsAvailable {
@@ -1769,17 +1892,64 @@ final class AppState {
         }
     }
 
+    /// Sync per-app time limit configs from CloudKit and re-register DeviceActivity events.
+    func syncTimeLimits() async {
+        guard deviceRole == .child,
+              let enrollment = enrollmentState,
+              let cloudKit else { return }
+
+        do {
+            let configs = try await cloudKit.fetchTimeLimitConfigs(childProfileID: enrollment.childProfileID)
+            var localLimits = storage.readAppTimeLimits()
+            var changed = false
+
+            for config in configs where config.isActive {
+                if let idx = localLimits.firstIndex(where: { $0.fingerprint == config.appFingerprint }) {
+                    if localLimits[idx].dailyLimitMinutes != config.dailyLimitMinutes {
+                        localLimits[idx].dailyLimitMinutes = config.dailyLimitMinutes
+                        localLimits[idx].appName = config.appName
+                        localLimits[idx].updatedAt = Date()
+                        changed = true
+                    }
+                }
+            }
+
+            // Remove limits whose config was deleted in CloudKit
+            let activeFingerprints = Set(configs.filter(\.isActive).map(\.appFingerprint))
+            let before = localLimits.count
+            localLimits.removeAll { $0.dailyLimitMinutes > 0 && !activeFingerprints.contains($0.fingerprint) }
+            if localLimits.count != before { changed = true }
+
+            if changed {
+                try? storage.writeAppTimeLimits(localLimits)
+                if familyControlsAvailable {
+                    ScheduleRegistrar.registerTimeLimitEvents(limits: localLimits)
+                }
+            }
+        } catch {
+            #if DEBUG
+            print("[BigBrother] Time limit sync failed: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
     /// Check for schedule profile changes every 60 seconds.
     private func startScheduleSync() {
         scheduleSyncTimer?.invalidate()
         let schTimer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             guard let self else { return }
-            Task { await self.syncScheduleProfile() }
+            Task {
+                await self.syncScheduleProfile()
+                await self.syncTimeLimits()
+            }
         }
         RunLoop.main.add(schTimer, forMode: .common)
         scheduleSyncTimer = schTimer
         // Fire immediately on startup.
-        Task { await syncScheduleProfile() }
+        Task {
+            await syncScheduleProfile()
+            await syncTimeLimits()
+        }
     }
 
     /// Re-read the current snapshot and update observable state so the UI refreshes.

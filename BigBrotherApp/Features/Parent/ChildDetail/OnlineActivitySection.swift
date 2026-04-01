@@ -18,7 +18,7 @@ struct OnlineActivitySection: View {
     @State private var dayOffset: Int = 0
 
     enum TimeMode: String, CaseIterable {
-        case day = "24h"
+        case day = "Today"
         case week = "7 days"
         case scrub = "Timeline"
     }

@@ -177,18 +177,96 @@ public struct DomainActivitySnapshot: Codable, Sendable, Equatable, Identifiable
             appDomains[name, default: []].append(hit)
         }
 
+        // Meta disambiguation: Instagram app makes heavy use of facebook.com API.
+        // If both "Instagram" and "Facebook" have activity, re-attribute facebook.com
+        // queries to Instagram for slots where both are active. Only count Facebook
+        // when there's no concurrent Instagram activity.
+        if appDomains["Instagram"] != nil, let fbHits = appDomains["Facebook"] {
+            let igHits = appDomains["Instagram"]!
+            let hasSlots = igHits.contains { $0.slotCounts != nil }
+            if hasSlots {
+                // Per-slot: check which slots have Instagram activity
+                var igSlots = Set<Int>()
+                for hit in igHits {
+                    if let sc = hit.slotCounts { for (s, c) in sc where c > 0 { igSlots.insert(s) } }
+                }
+                // Move facebook.com queries in Instagram-active slots to Instagram
+                var movedToIG: [DomainHit] = []
+                var remainFB: [DomainHit] = []
+                for var hit in fbHits {
+                    if let sc = hit.slotCounts {
+                        var igPart: [Int: Int] = [:]
+                        var fbPart: [Int: Int] = [:]
+                        for (s, c) in sc {
+                            if igSlots.contains(s) { igPart[s] = c } else { fbPart[s] = c }
+                        }
+                        if !igPart.isEmpty {
+                            var igHit = hit; igHit.slotCounts = igPart
+                            igHit.count = igPart.values.reduce(0, +)
+                            movedToIG.append(igHit)
+                        }
+                        if !fbPart.isEmpty {
+                            hit.slotCounts = fbPart; hit.count = fbPart.values.reduce(0, +)
+                            remainFB.append(hit)
+                        }
+                    } else {
+                        // No slot data — attribute all to Instagram if IG has more total queries
+                        let igTotal = igHits.reduce(0) { $0 + $1.count }
+                        let fbTotal = fbHits.reduce(0) { $0 + $1.count }
+                        if igTotal > fbTotal { movedToIG.append(hit) } else { remainFB.append(hit) }
+                    }
+                }
+                appDomains["Instagram"]!.append(contentsOf: movedToIG)
+                if remainFB.isEmpty {
+                    appDomains.removeValue(forKey: "Facebook")
+                } else {
+                    appDomains["Facebook"] = remainFB
+                }
+            } else {
+                // No slot data — if Instagram queries > Facebook, attribute all FB to IG
+                let igTotal = igHits.reduce(0) { $0 + $1.count }
+                _ = fbHits.reduce(0) { $0 + $1.count } // FB total unused but kept for clarity
+                if igTotal > 0 {
+                    appDomains["Instagram"]!.append(contentsOf: fbHits)
+                    appDomains.removeValue(forKey: "Facebook")
+                }
+            }
+        }
+
         guard !appDomains.isEmpty else { return [] }
 
-        // For each slot, compute proportional time per app
+        // Check if we have slot data (per-day snapshots) or just aggregate counts (7-day).
+        let hasSlotData = domains.contains { $0.slotCounts != nil && !($0.slotCounts?.isEmpty ?? true) }
+
         var appMinutes: [String: Double] = [:]
-        for slot in 0..<96 {
-            let slotTotal = totalQueries(forSlot: slot)
-            guard slotTotal > 0 else { continue }
+
+        if hasSlotData {
+            // Per-slot proportional allocation (accurate for single-day snapshots)
+            for slot in 0..<96 {
+                let slotTotal = totalQueries(forSlot: slot)
+                guard slotTotal > 0 else { continue }
+
+                for (appName, hits) in appDomains {
+                    let appQueries = hits.reduce(0) { $0 + ($1.slotCounts?[slot] ?? 0) }
+                    guard appQueries > 0 else { continue }
+                    let share = Double(appQueries) / Double(slotTotal) * 15.0
+                    appMinutes[appName, default: 0] += share
+                }
+            }
+        } else {
+            // Fallback for multi-day aggregates (no slot data): use query count proportions.
+            // Total recognized app queries determine each app's share of total screen time.
+            let totalAppQueries = appDomains.values.reduce(0) { $0 + $1.reduce(0) { $0 + $1.count } }
+            guard totalAppQueries > 0, totalQueries > 0 else { return [] }
+
+            // Estimate total screen-on minutes from active slots across all days in the snapshot.
+            // Each unique slot with activity ≈ 15 minutes of screen time.
+            // For multi-day, use totalQueries as a proxy: ~4 queries/min is typical.
+            let estimatedTotalMinutes = Double(totalQueries) / 4.0
 
             for (appName, hits) in appDomains {
-                let appQueries = hits.reduce(0) { $0 + ($1.slotCounts?[slot] ?? 0) }
-                guard appQueries > 0 else { continue }
-                let share = Double(appQueries) / Double(slotTotal) * 15.0
+                let appQueries = hits.reduce(0) { $0 + $1.count }
+                let share = Double(appQueries) / Double(totalQueries) * estimatedTotalMinutes
                 appMinutes[appName, default: 0] += share
             }
         }

@@ -95,6 +95,18 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             // Ping the VPN tunnel (IPC liveness signal).
             self.vpnManager?.sendPing()
 
+            // Detect hung tunnel: if tunnelLastActiveAt is stale while VPN is
+            // supposedly connected, the tunnel process is suspended. Restart it
+            // to restore DNS (all DNS routes through the tunnel).
+            let tunnelAge = Date().timeIntervalSince1970
+                - (UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                    .double(forKey: "tunnelLastActiveAt") ?? 0)
+            if tunnelAge > 300, self.vpnManager?.isConnected == true {
+                Task {
+                    try? await self.vpnManager?.installAndStart()
+                }
+            }
+
             // Extension heartbeat request.
             if self.acknowledgeExtensionHeartbeatRequest() {
                 Task { try? await self.sendNow(force: true) }
@@ -349,11 +361,14 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             osVersion: Self.currentOSVersion,
             modelIdentifier: Self.currentModelIdentifier,
             appBuildNumber: AppConstants.appBuildNumber,
+            mainAppLastLaunchedBuild: AppConstants.appBuildNumber,
             enforcementError: Self.lastEnforcementError(from: storage),
             activeScheduleWindowName: Self.activeScheduleWindowName(from: storage),
             lastCommandProcessedAt: Self.lastCommandProcessedAt(from: storage),
             monitorLastActiveAt: Self.monitorLastActiveAt(),
             vpnDetected: VPNDetector.isVPNActive(),
+            internetBlocked: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .bool(forKey: "tunnelInternetBlocked") == true ? true : nil,
             timeZoneIdentifier: TimeZone.current.identifier,
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
@@ -432,18 +447,48 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let shouldBeShielded = resolution.mode != .unlocked
         let isShielded = diagnostic.shieldsActive
 
-        if shouldBeShielded != isShielded {
-            // Mismatch — apply the correct state
-            try? enforcement.apply(snapshot.effectivePolicy)
+        // Also check if the snapshot's mode diverged from ModeStackResolver.
+        // This happens when a temp unlock expired while the app was dead —
+        // ModeStackResolver cleaned the temp state but nobody updated the snapshot.
+        let snapshotMode = snapshot.effectivePolicy.resolvedMode
+        let snapshotStale = snapshotMode != resolution.mode
+
+        if shouldBeShielded != isShielded || snapshotStale {
+            // Build a corrected policy with the right mode from ModeStackResolver
+            let policyToApply: EffectivePolicy
+            if snapshotStale {
+                let existing = snapshot.effectivePolicy
+                let corrected = EffectivePolicy(
+                    resolvedMode: resolution.mode,
+                    isTemporaryUnlock: resolution.isTemporary,
+                    temporaryUnlockExpiresAt: resolution.expiresAt,
+                    shieldedCategoriesData: existing.shieldedCategoriesData,
+                    allowedAppTokensData: existing.allowedAppTokensData,
+                    warnings: existing.warnings,
+                    policyVersion: existing.policyVersion + 1
+                )
+                // Update the snapshot so future reads are correct
+                let correctedSnapshot = PolicySnapshot(
+                    source: .restoration,
+                    trigger: "Heartbeat reconciliation: snapshot stale (\(snapshotMode.rawValue) → \(resolution.mode.rawValue))",
+                    effectivePolicy: corrected
+                )
+                try? storage.writePolicySnapshot(correctedSnapshot)
+                policyToApply = corrected
+            } else {
+                policyToApply = snapshot.effectivePolicy
+            }
+
+            try? enforcement.apply(policyToApply)
 
             #if DEBUG
-            print("[BigBrother] Heartbeat reconciliation: shields were \(isShielded ? "up" : "DOWN"), should be \(shouldBeShielded ? "up" : "down") (mode: \(resolution.mode.rawValue), reason: \(resolution.reason))")
+            print("[BigBrother] Heartbeat reconciliation: shields were \(isShielded ? "up" : "DOWN"), should be \(shouldBeShielded ? "up" : "down") (mode: \(resolution.mode.rawValue), reason: \(resolution.reason), snapshotStale: \(snapshotStale))")
             #endif
 
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "Heartbeat reconciled shields",
-                details: "Mode: \(resolution.mode.rawValue), reason: \(resolution.reason)"
+                details: "Mode: \(resolution.mode.rawValue), reason: \(resolution.reason)\(snapshotStale ? " [snapshot corrected from \(snapshotMode.rawValue)]" : "")"
             ))
         }
     }

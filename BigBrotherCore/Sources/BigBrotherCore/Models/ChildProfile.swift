@@ -8,6 +8,17 @@ public struct ChildProfile: Codable, Sendable, Identifiable, Equatable, Hashable
     public var name: String
     public var avatarName: String?
 
+    /// Emoji avatar (e.g., "🦊", "⚽"). Displayed on a colored circle.
+    public var avatarEmoji: String?
+
+    /// Hex color for the avatar background (e.g., "#0D9488").
+    /// Used for both emoji and photo avatar ring/fallback.
+    public var avatarColor: String?
+
+    /// Base64-encoded photo avatar image data.
+    /// Stored as CKAsset in CloudKit, cached locally as base64.
+    public var avatarPhotoBase64: String?
+
     /// Serialized FamilyControls ApplicationTokens for always-allowed apps.
     /// These are device-local opaque tokens. Stored as Data because
     /// BigBrotherCore does not import FamilyControls.
@@ -26,6 +37,9 @@ public struct ChildProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         familyID: FamilyID,
         name: String,
         avatarName: String? = nil,
+        avatarEmoji: String? = nil,
+        avatarColor: String? = nil,
+        avatarPhotoBase64: String? = nil,
         alwaysAllowedTokensData: Data? = nil,
         alwaysAllowedCategories: Set<String> = [],
         createdAt: Date = Date(),
@@ -35,6 +49,9 @@ public struct ChildProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         self.familyID = familyID
         self.name = name
         self.avatarName = avatarName
+        self.avatarEmoji = avatarEmoji
+        self.avatarColor = avatarColor
+        self.avatarPhotoBase64 = avatarPhotoBase64
         self.alwaysAllowedTokensData = alwaysAllowedTokensData
         self.alwaysAllowedCategories = alwaysAllowedCategories
         self.createdAt = createdAt
@@ -45,6 +62,7 @@ public struct ChildProfile: Codable, Sendable, Identifiable, Equatable, Hashable
 
     private enum CodingKeys: String, CodingKey {
         case id, familyID, name, avatarName
+        case avatarEmoji, avatarColor, avatarPhotoBase64
         case alwaysAllowedTokensData, alwaysAllowedCategories
         case createdAt, updatedAt
     }
@@ -55,6 +73,9 @@ public struct ChildProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         familyID = try container.decode(FamilyID.self, forKey: .familyID)
         name = try container.decode(String.self, forKey: .name)
         avatarName = try container.decodeIfPresent(String.self, forKey: .avatarName)
+        avatarEmoji = try container.decodeIfPresent(String.self, forKey: .avatarEmoji)
+        avatarColor = try container.decodeIfPresent(String.self, forKey: .avatarColor)
+        avatarPhotoBase64 = try container.decodeIfPresent(String.self, forKey: .avatarPhotoBase64)
         alwaysAllowedTokensData = try container.decodeIfPresent(Data.self, forKey: .alwaysAllowedTokensData)
         alwaysAllowedCategories = try container.decodeIfPresent(Set<String>.self, forKey: .alwaysAllowedCategories) ?? []
         createdAt = try container.decode(Date.self, forKey: .createdAt)

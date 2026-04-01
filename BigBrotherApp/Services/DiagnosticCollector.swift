@@ -157,6 +157,145 @@ enum DiagnosticCollector {
             }
         }
 
+        // === MODE STACK RESOLUTION (source of truth) ===
+        let modeResolution = ModeStackResolver.resolve(storage: storage)
+        flags["modeStack.expectedMode"] = modeResolution.mode.rawValue
+        flags["modeStack.reason"] = modeResolution.reason
+        flags["modeStack.isTemporary"] = "\(modeResolution.isTemporary)"
+        if let exp = modeResolution.expiresAt {
+            flags["modeStack.expiresAt"] = "\(exp)"
+        }
+
+        // === MODE MISMATCH DETECTION ===
+        let actualShieldsActive = shieldDiag?.shieldsActive ?? false
+        let shouldBeShielded = modeResolution.mode != .unlocked
+        if shouldBeShielded != actualShieldsActive {
+            flags["⚠️ MISMATCH"] = "Expected shields \(shouldBeShielded ? "UP" : "DOWN") but they are \(actualShieldsActive ? "UP" : "DOWN")"
+        }
+
+        // === TEMPORARY UNLOCK STATE ===
+        let tempUnlock = storage.readTemporaryUnlockState()
+        if let temp = tempUnlock {
+            flags["tempUnlock.origin"] = temp.origin.rawValue
+            flags["tempUnlock.previousMode"] = temp.previousMode.rawValue
+            flags["tempUnlock.expiresAt"] = "\(temp.expiresAt)"
+            flags["tempUnlock.isExpired"] = "\(temp.isExpired(at: Date()))"
+            flags["tempUnlock.commandID"] = temp.commandID?.uuidString.prefix(8).description ?? "nil"
+            let remaining = temp.expiresAt.timeIntervalSince(Date())
+            flags["tempUnlock.remainingSeconds"] = "\(Int(remaining))"
+        }
+
+        // === TIMED UNLOCK STATE ===
+        if let timed = storage.readTimedUnlockInfo() {
+            flags["timedUnlock.commandID"] = timed.commandID.uuidString.prefix(8).description
+            flags["timedUnlock.unlockAt"] = "\(timed.unlockAt)"
+            flags["timedUnlock.lockAt"] = "\(timed.lockAt)"
+            let now = Date()
+            if now < timed.unlockAt {
+                flags["timedUnlock.phase"] = "penalty (locks at \(timed.unlockAt))"
+            } else if now < timed.lockAt {
+                flags["timedUnlock.phase"] = "free (locks at \(timed.lockAt))"
+            } else {
+                flags["timedUnlock.phase"] = "EXPIRED (should have locked at \(timed.lockAt))"
+            }
+        }
+
+        // === POLICY SNAPSHOT METADATA ===
+        if let snap = snapshot {
+            flags["snapshot.generation"] = "\(snap.generation)"
+            flags["snapshot.source"] = snap.source.rawValue
+            flags["snapshot.trigger"] = snap.trigger ?? "nil"
+            flags["snapshot.createdAt"] = "\(snap.createdAt)"
+            flags["snapshot.appliedAt"] = snap.appliedAt.map { "\($0)" } ?? "never"
+            flags["snapshot.resolvedMode"] = snap.effectivePolicy.resolvedMode.rawValue
+            flags["snapshot.isTemporaryUnlock"] = "\(snap.effectivePolicy.isTemporaryUnlock)"
+            flags["snapshot.policyVersion"] = "\(snap.effectivePolicy.policyVersion)"
+            flags["snapshot.writerVersion"] = "b\(snap.writerVersion)"
+        }
+
+        // === EXTENSION SHARED STATE ===
+        let extState = storage.readExtensionSharedState()
+        if let ext = extState {
+            flags["extState.currentMode"] = ext.currentMode.rawValue
+            flags["extState.isTemporaryUnlock"] = "\(ext.isTemporaryUnlock)"
+            flags["extState.writtenAt"] = "\(ext.writtenAt)"
+            flags["extState.policyVersion"] = "\(ext.policyVersion)"
+            flags["extState.authAvailable"] = "\(ext.authorizationAvailable)"
+            flags["extState.degraded"] = "\(ext.enforcementDegraded)"
+            // Check freshness vs snapshot
+            if let snap = snapshot, ext.policyVersion < snap.effectivePolicy.policyVersion {
+                flags["⚠️ STALE_EXT_STATE"] = "Extension v\(ext.policyVersion) < snapshot v\(snap.effectivePolicy.policyVersion)"
+            }
+        }
+
+        // === PROCESSED COMMANDS ===
+        let processedIDs = storage.readProcessedCommandIDs()
+        flags["processedCommandCount"] = "\(processedIDs.count)"
+
+        // === TUNNEL LIVENESS ===
+        flags["mainAppAlive"] = defaults?.bool(forKey: "mainAppAlive") == true ? "true" : "false"
+        let tunnelBuild = defaults?.integer(forKey: "tunnelBuildNumber") ?? 0
+        if tunnelBuild > 0 {
+            flags["tunnelBuildNumber"] = "b\(tunnelBuild)"
+            if tunnelBuild != AppConstants.appBuildNumber {
+                flags["⚠️ BUILD_MISMATCH"] = "App=b\(AppConstants.appBuildNumber) Tunnel=b\(tunnelBuild)"
+            }
+        }
+
+        // === AUTO-DIAGNOSIS ===
+        var diagnosis: [String] = []
+        if shouldBeShielded != actualShieldsActive {
+            diagnosis.append("SHIELDS MISMATCH: Expected \(shouldBeShielded ? "UP" : "DOWN"), actual \(actualShieldsActive ? "UP" : "DOWN")")
+            if let temp = tempUnlock, temp.isExpired(at: Date()) {
+                diagnosis.append("  → Temp unlock expired \(Int(-temp.expiresAt.timeIntervalSinceNow))s ago but state not cleared")
+            }
+            if extState?.currentMode == .unlocked && modeResolution.mode != .unlocked {
+                diagnosis.append("  → ExtensionSharedState is stale (says unlocked, should be \(modeResolution.mode.rawValue))")
+            }
+            if snapshot?.effectivePolicy.resolvedMode == .unlocked && modeResolution.mode != .unlocked {
+                diagnosis.append("  → PolicySnapshot is stale (says unlocked, should be \(modeResolution.mode.rawValue))")
+            }
+        }
+        if !diagnosis.isEmpty {
+            flags["🔍 DIAGNOSIS"] = diagnosis.joined(separator: " | ")
+        }
+
+        // Device restrictions — show what the child device has locally
+        let restrictions = storage.readDeviceRestrictions()
+        if let r = restrictions {
+            flags["restrictions.denyAppRemoval"] = "\(r.denyAppRemoval)"
+            flags["restrictions.denyExplicitContent"] = "\(r.denyExplicitContent)"
+            flags["restrictions.lockAccounts"] = "\(r.lockAccounts)"
+            flags["restrictions.requireAutoDateTime"] = "\(r.requireAutomaticDateAndTime)"
+            flags["restrictions.denyWebWhenLocked"] = "\(r.denyWebWhenLocked)"
+        } else {
+            flags["restrictions"] = "nil (using defaults)"
+        }
+
+        // Schedule profile — show what the child device has locally vs resolved state
+        if let profile = storage.readActiveScheduleProfile() {
+            flags["schedule.name"] = profile.name
+            flags["schedule.id"] = profile.id.uuidString.prefix(8).description
+            flags["schedule.lockedMode"] = profile.lockedMode.rawValue
+            flags["schedule.updatedAt"] = "\(profile.updatedAt)"
+            let now = Date()
+            flags["schedule.resolvedMode"] = profile.resolvedMode(at: now).rawValue
+            flags["schedule.inUnlockedWindow"] = "\(profile.isInUnlockedWindow(at: now))"
+            flags["schedule.inLockedWindow"] = "\(profile.isInLockedWindow(at: now))"
+            flags["schedule.isExceptionDate"] = "\(profile.isExceptionDate(now))"
+            // Show all unlocked windows with their days/times
+            for (i, w) in profile.unlockedWindows.enumerated() {
+                let days = w.daysOfWeek.sorted { $0.rawValue < $1.rawValue }.map { $0.shortName }.joined(separator: ",")
+                flags["schedule.unlocked_\(i)"] = "\(days) \(w.startTime.hour):\(String(format: "%02d", w.startTime.minute))-\(w.endTime.hour):\(String(format: "%02d", w.endTime.minute))"
+            }
+            for (i, w) in profile.lockedWindows.enumerated() {
+                let days = w.daysOfWeek.sorted { $0.rawValue < $1.rawValue }.map { $0.shortName }.joined(separator: ",")
+                flags["schedule.locked_\(i)"] = "\(days) \(w.startTime.hour):\(String(format: "%02d", w.startTime.minute))-\(w.endTime.hour):\(String(format: "%02d", w.endTime.minute))"
+            }
+        } else {
+            flags["schedule"] = "none assigned"
+        }
+
         // Recent diagnostic log entries (last 200)
         let allLogs = storage.readDiagnosticEntries(category: nil)
         let recentLogs = Array(allLogs.suffix(200))

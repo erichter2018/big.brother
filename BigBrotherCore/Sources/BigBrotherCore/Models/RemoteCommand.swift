@@ -129,6 +129,12 @@ public enum CommandAction: Codable, Sendable, Equatable {
     /// Block all internet traffic for a duration (seconds). 0 = unblock immediately.
     /// Handled directly by the VPN tunnel — works even when the main app is dead.
     case blockInternet(durationSeconds: Int)
+    /// Open the time-limited apps picker on the child device.
+    case requestTimeLimitSetup
+    /// Grant extra time for an app that hit its daily limit.
+    case grantExtraTime(appFingerprint: String, extraMinutes: Int)
+    /// Remove a time limit from an app.
+    case removeTimeLimit(appFingerprint: String)
 
     // Thread-safe date formatting via Date.FormatStyle (replaces non-thread-safe static DateFormatter)
 
@@ -172,6 +178,9 @@ public enum CommandAction: Codable, Sendable, Equatable {
         case .setSafeSearch: return "setSafeSearch"
         case .setDrivingSettings: return "setDrivingSettings"
         case .blockInternet: return "blockInternet"
+        case .requestTimeLimitSetup: return "requestTimeLimitSetup"
+        case .grantExtraTime(let fp, _): return "grantExtraTime.\(fp)"
+        case .removeTimeLimit(let fp): return "removeTimeLimit.\(fp)"
         }
     }
 
@@ -290,6 +299,12 @@ public enum CommandAction: Codable, Sendable, Equatable {
             return "Request diagnostic report"
         case .setSafeSearch(let enabled):
             return enabled ? "Enable safe search" : "Disable safe search"
+        case .requestTimeLimitSetup:
+            return "Set up app time limits"
+        case .grantExtraTime(_, let mins):
+            return "Grant \(mins) extra minutes"
+        case .removeTimeLimit:
+            return "Remove app time limit"
         }
     }
 }

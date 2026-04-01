@@ -17,6 +17,7 @@ struct ChildDetailView: View {
     @State private var showSettings = false
     @State private var showApprovedApps = false
     @State private var showDiagnostics = false
+    @State private var showAvatarPicker = false
     @State private var showNamedPlaceEditor = false
     @State private var permissionsFeedback: String?
     @State private var sectionOrder: [ChildDetailSection] = ChildDetailSection.defaultOrder
@@ -36,6 +37,11 @@ struct ChildDetailView: View {
                     disabled: viewModel.isSendingCommand,
                     remainingSeconds: viewModel.remainingUnlockSeconds
                 )
+
+                // Issue alert — only visible when there's a problem
+                if !viewModel.deviceIssues.isEmpty {
+                    deviceIssuePanel
+                }
 
                 // Dynamic sections in user-configured order
                 ForEach(sectionOrder.filter { !hiddenSections.contains($0) }) { section in
@@ -70,6 +76,9 @@ struct ChildDetailView: View {
                         EnrollmentCodeView(appState: viewModel.appState, childProfile: viewModel.child)
                     } label: {
                         Label("Enroll New Device", systemImage: "plus.circle")
+                    }
+                    Button { showAvatarPicker = true } label: {
+                        Label("Change Avatar", systemImage: "person.crop.circle")
                     }
                     Button { showDiagnostics = true } label: {
                         Label("Diagnostics", systemImage: "stethoscope")
@@ -113,6 +122,11 @@ struct ChildDetailView: View {
         // Sheets
         .sheet(isPresented: $showMessageComposer) { messageSheet }
         .sheet(isPresented: $showSettings) { settingsSheet }
+        .sheet(isPresented: $showAvatarPicker) {
+            AvatarPickerSheet(child: viewModel.child) { updated in
+                await viewModel.saveProfile(updated)
+            }
+        }
         .navigationDestination(isPresented: $showDiagnostics) {
             RemoteDiagnosticsView(
                 appState: viewModel.appState,
@@ -139,6 +153,61 @@ struct ChildDetailView: View {
         .onDisappear { viewModel.stopAutoRefresh() }
     }
 
+    // MARK: - Device Issue Panel
+
+    @ViewBuilder
+    private var deviceIssuePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                Text("DEVICE ISSUES")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.red)
+            }
+
+            ForEach(viewModel.deviceIssues) { issue in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 4) {
+                        Image(systemName: issue.isIPad ? "ipad" : "iphone")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Text(issue.deviceName)
+                            .font(.caption.weight(.semibold))
+
+                        Spacer()
+
+                        if issue.shieldsDown {
+                            Label("Shields Down", systemImage: "shield.slash.fill")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.red)
+                        }
+                        if issue.internetBlocked {
+                            Label("No Internet", systemImage: "wifi.slash")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+
+                    Text(issue.reason)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+                .background(Color.red.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(12)
+        .background(Color.red.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.red.opacity(0.3), lineWidth: 1)
+        )
+    }
+
     // MARK: - Mini Map
 
     @State private var navigateToMap = false
@@ -158,12 +227,16 @@ struct ChildDetailView: View {
             BedtimeComplianceSection(compliance: viewModel.bedtimeCompliance, weeklyScreenTime: viewModel.weeklyScreenTime)
         case .appUsage:
             AppUsageSection(activity: viewModel.onlineActivity, weekActivity: viewModel.onlineActivityWeek, dailySnapshots: viewModel.onlineActivityByDay)
+        case .appTimeLimits:
+            AppTimeLimitsSection(viewModel: viewModel)
         case .onlineActivity:
             OnlineActivitySection(activity: viewModel.onlineActivity, weekActivity: viewModel.onlineActivityWeek, dailySnapshots: viewModel.onlineActivityByDay, showFlagged: false)
         case .flaggedActivity:
             let flagSource = viewModel.onlineActivityWeek ?? viewModel.onlineActivity
             if let activity = flagSource, !activity.flaggedDomains.isEmpty {
-                OnlineActivitySection(activity: activity, showFlagged: true, flaggedOnly: true)
+                DisclosureGroup("Flagged Activity (\(activity.flaggedDomains.count))") {
+                    OnlineActivitySection(activity: activity, showFlagged: true, flaggedOnly: true)
+                }
             }
         case .recentActivity:
             VStack(alignment: .leading, spacing: 0) {
@@ -494,7 +567,7 @@ struct ChildDetailView: View {
                     }
                     .foregroundStyle(.pink.opacity(0.6))
                 }
-                buildBadge(childBuild: hb?.appBuildNumber)
+                buildBadge(childBuild: hb?.appBuildNumber, heartbeat: hb)
             }
             .font(.caption2)
 
@@ -593,7 +666,7 @@ struct ChildDetailView: View {
                     }
                     .foregroundStyle(.pink.opacity(0.6))
                 }
-                buildBadge(childBuild: hb?.appBuildNumber)
+                buildBadge(childBuild: hb?.appBuildNumber, heartbeat: hb)
             }
             .font(.caption2)
 
@@ -1335,18 +1408,39 @@ struct ChildDetailView: View {
     }
 
     @ViewBuilder
-    private func buildBadge(childBuild: Int?) -> some View {
+    private func buildBadge(childBuild: Int?, heartbeat hb: DeviceHeartbeat? = nil) -> some View {
         if viewModel.appState.debugMode, let childBuild {
-            let matches = childBuild == AppConstants.appBuildNumber
-            HStack(spacing: 2) {
-                Text("b\(childBuild)")
-                if matches {
-                    Image(systemName: "checkmark")
-                        .foregroundStyle(.green)
+            let isTunnel = hb?.heartbeatSource == "vpnTunnel"
+            let appBuild = hb?.mainAppLastLaunchedBuild
+            let tunnelBuild = childBuild  // appBuildNumber = sender's build
+
+            // Show split view when tunnel and app have different builds
+            if isTunnel, let appBuild, appBuild != tunnelBuild {
+                HStack(spacing: 3) {
+                    HStack(spacing: 1) {
+                        Image(systemName: "iphone").font(.system(size: 7))
+                        Text("b\(appBuild)")
+                    }
+                    .foregroundStyle(appBuild == AppConstants.appBuildNumber ? Color.secondary : Color.orange)
+                    HStack(spacing: 1) {
+                        Image(systemName: "antenna.radiowaves.left.and.right").font(.system(size: 7))
+                        Text("b\(tunnelBuild)")
+                    }
+                    .foregroundStyle(tunnelBuild == AppConstants.appBuildNumber ? Color.secondary : Color.orange)
                 }
+                .font(.caption2)
+            } else {
+                let matches = childBuild == AppConstants.appBuildNumber
+                HStack(spacing: 2) {
+                    Text("b\(childBuild)")
+                    if matches {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.green)
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(matches ? Color.secondary : Color.orange)
             }
-            .font(.caption2)
-            .foregroundStyle(matches ? Color.secondary : Color.orange)
         }
     }
 

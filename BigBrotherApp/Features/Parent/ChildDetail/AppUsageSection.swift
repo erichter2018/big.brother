@@ -12,15 +12,23 @@ struct AppUsageSection: View {
     @State private var timeMode: TimeMode = .day
 
     enum TimeMode: String, CaseIterable {
-        case day = "24h"
+        case day = "Today"
         case week = "7 days"
     }
 
-    private var effectiveSnapshot: DomainActivitySnapshot? {
-        switch timeMode {
-        case .day: return activity
-        case .week: return weekActivity ?? activity
+    /// For the 7-day view, aggregate per-day app usage (each day has slot data
+    /// for accurate Meta disambiguation) instead of running on the slotless aggregate.
+    private var weeklyAppUsage: [(appName: String, minutes: Double)] {
+        var totals: [String: Double] = [:]
+        for (_, snapshot) in dailySnapshots {
+            for entry in snapshot.estimatedAppUsage() {
+                totals[entry.appName, default: 0] += entry.minutes
+            }
         }
+        return totals
+            .map { (appName: $0.key, minutes: $0.value) }
+            .filter { $0.minutes >= 1.0 }
+            .sorted { $0.minutes > $1.minutes }
     }
 
     var body: some View {
@@ -40,8 +48,14 @@ struct AppUsageSection: View {
                 .frame(width: 120)
             }
 
-            if let snapshot = effectiveSnapshot {
-                let usage = snapshot.estimatedAppUsage()
+            let usage: [(appName: String, minutes: Double)] = {
+                switch timeMode {
+                case .day: return activity?.estimatedAppUsage() ?? []
+                case .week: return weeklyAppUsage
+                }
+            }()
+
+            if !usage.isEmpty || (timeMode == .day && activity != nil) || (timeMode == .week && weekActivity != nil) {
                 if usage.isEmpty {
                     Text("No recognized app activity")
                         .font(.caption2)

@@ -62,6 +62,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     var onSyncNamedPlaces: (() -> Void)?
     var onRequestDiagnostics: (() -> Void)?
     var onRestartVPNTunnel: (() -> Void)?
+    var onScheduleSyncNeeded: (() -> Void)?
+    var onRequestTimeLimitSetup: (() -> Void)?
 
     init(
         cloudKit: any CloudKitServiceProtocol,
@@ -226,8 +228,20 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     status: receiptStatus,
                     reason: result == .applied ? nil : result.logReason
                 )
-                try? await cloudKit.saveReceipt(receipt)
-                try? await cloudKit.updateCommandStatus(command.id, status: receiptStatus)
+                // Retry receipt upload — parent needs confirmation the command was processed.
+                for attempt in 1...3 {
+                    do {
+                        try await cloudKit.saveReceipt(receipt)
+                        try await cloudKit.updateCommandStatus(command.id, status: receiptStatus)
+                        break
+                    } catch {
+                        if attempt == 3 {
+                            eventLogger.log(.commandFailed, details: "Receipt upload failed after 3 attempts for \(command.id): \(error.localizedDescription)")
+                        } else {
+                            try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+                        }
+                    }
+                }
             }
 
             try? storage.markCommandProcessed(command.id)
@@ -441,6 +455,11 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 try applyReturnToSchedule(enrollment: enrollment, commandID: command.id)
                 UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(true, forKey: "scheduleDrivenMode")
                 eventLogger.log(.commandApplied, details: "Returned to schedule-driven mode")
+                // Trigger immediate schedule sync from CloudKit — the child may have
+                // a stale schedule. After sync completes, re-apply enforcement.
+                DispatchQueue.main.async { [weak self] in
+                    self?.onScheduleSyncNeeded?()
+                }
                 return .applied
 
             case .lockUntil(let date):
@@ -651,6 +670,19 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 }
                 eventLogger.log(.commandApplied, details: "Internet block state synced (mode-driven)")
                 return .applied
+
+            case .requestTimeLimitSetup:
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRequestTimeLimitSetup?()
+                }
+                eventLogger.log(.commandApplied, details: "Time limit setup requested by parent")
+                return .applied
+
+            case .grantExtraTime(let fingerprint, let extraMinutes):
+                return handleGrantExtraTime(fingerprint: fingerprint, extraMinutes: extraMinutes)
+
+            case .removeTimeLimit(let fingerprint):
+                return handleRemoveTimeLimit(fingerprint: fingerprint)
             }
 
         } catch {
@@ -757,6 +789,11 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             return
         }
 
+        // Clear any existing timed unlock to prevent conflicts.
+        // If a penalty phase is active and parent sends a temp unlock,
+        // the timed unlock's scheduled free phase could later override this.
+        try? storage.clearTimedUnlockInfo()
+
         // Create durable temp unlock state.
         let unlockState = TemporaryUnlockState(
             origin: .remoteCommand,
@@ -793,18 +830,24 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             previousSnapshot: currentSnapshot
         )
 
+        // Register the re-lock schedule BEFORE applying enforcement.
+        // If this fails, we must NOT unlock — otherwise the device stays unlocked
+        // permanently with no mechanism to re-lock.
+        do {
+            try registerTempUnlockExpirySchedule(commandID: commandID, start: now, end: expiresAt)
+        } catch {
+            eventLogger.log(.commandFailed, details: "Temp unlock ABORTED: DeviceActivitySchedule registration failed: \(error.localizedDescription). Device NOT unlocked.")
+            try? storage.clearTemporaryUnlockState()
+            return
+        }
+
+        // Also schedule a BGProcessingTask as a second safety net.
+        AppDelegate.scheduleRelockTask(at: expiresAt)
+
         let result = try snapshotStore.commit(output.snapshot)
         if case .committed(let snapshot) = result {
             try enforcement?.apply(snapshot.effectivePolicy)
             try snapshotStore.markApplied()
-
-            // Register a DeviceActivitySchedule so the monitor extension re-locks
-            // when the unlock expires — works even if the main app is terminated.
-            // This MUST succeed — without it, a force-close during unlock = permanent unlock.
-            try registerTempUnlockExpirySchedule(commandID: commandID, start: now, end: expiresAt)
-
-            // Also schedule a BGProcessingTask as a second safety net.
-            AppDelegate.scheduleRelockTask(at: expiresAt)
 
             let durationStr = ModeChangeNotifier.formatDuration(durationSeconds)
             eventLogger.log(.temporaryUnlockStarted, details: "Unlocked for \(durationStr)")
@@ -1026,6 +1069,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Cancel any active temp/timed/lockuntil DeviceActivity schedules
         // so they don't interfere with the schedule-driven mode.
         cancelNonScheduleActivities()
+
+        // Invalidate cached schedule version so the next sync cycle (every 60s)
+        // forces a re-fetch from CloudKit. This catches stale schedules when
+        // the parent edited the profile but the child hasn't synced yet.
+        let versionKey = "scheduleProfileVersion.\(enrollment.deviceID.rawValue)"
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.removeObject(forKey: versionKey)
 
         // Read the active schedule profile from App Group storage.
         let mode: LockMode
@@ -1414,6 +1463,58 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         TokenFingerprint.fingerprint(for: data)
     }
 
+    // MARK: - App Time Limits
+
+    private func handleGrantExtraTime(fingerprint: String, extraMinutes: Int) -> CommandProcessingResult {
+        var limits = storage.readAppTimeLimits()
+        guard let idx = limits.firstIndex(where: { $0.fingerprint == fingerprint }) else {
+            return .failedExecution(reason: "No time limit found for fingerprint \(fingerprint)")
+        }
+
+        // Remove from exhausted list
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        exhausted.removeAll { $0.fingerprint == fingerprint }
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+
+        // Increase daily limit
+        limits[idx].dailyLimitMinutes += extraMinutes
+        limits[idx].updatedAt = Date()
+        try? storage.writeAppTimeLimits(limits)
+
+        // Re-register DeviceActivityEvent with new threshold
+        ScheduleRegistrar.registerTimeLimitEvents(limits: limits)
+
+        reapplyCurrentEnforcement()
+        eventLogger.log(.timeLimitExtended, details: "\(limits[idx].appName): +\(extraMinutes) min (now \(limits[idx].dailyLimitMinutes) min/day)")
+        return .applied
+    }
+
+    private func handleRemoveTimeLimit(fingerprint: String) -> CommandProcessingResult {
+        var limits = storage.readAppTimeLimits()
+        let removed = limits.first(where: { $0.fingerprint == fingerprint })
+        limits.removeAll { $0.fingerprint == fingerprint }
+        try? storage.writeAppTimeLimits(limits)
+
+        // Remove from exhausted list
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        exhausted.removeAll { $0.fingerprint == fingerprint }
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+
+        // Stop monitoring this app's activity and re-register remaining
+        if let removed {
+            let center = DeviceActivityCenter()
+            let activityName = DeviceActivityName(rawValue: "bigbrother.timelimit.\(removed.id.uuidString)")
+            center.stopMonitoring([activityName])
+        }
+
+        // Re-register remaining limits
+        ScheduleRegistrar.registerTimeLimitEvents(limits: limits)
+
+        reapplyCurrentEnforcement()
+        eventLogger.log(.commandApplied, details: "Time limit removed: \(removed?.appName ?? fingerprint)")
+        return .applied
+    }
+
     /// Re-apply enforcement so ManagedSettingsStore picks up changes.
     /// Called after any change to allowed app lists or device restrictions.
     /// Always applies — device restrictions are active even in unlocked mode.
@@ -1511,7 +1612,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         switch action {
         case .setMode, .temporaryUnlock, .timedUnlock, .lockUntil, .returnToSchedule,
              .allowApp, .revokeApp, .allowManagedApp, .blockManagedApp,
-             .temporaryUnlockApp, .revokeAllApps, .requestAlwaysAllowedSetup, .unenroll:
+             .temporaryUnlockApp, .revokeAllApps, .requestAlwaysAllowedSetup, .unenroll,
+             .requestTimeLimitSetup, .grantExtraTime, .removeTimeLimit:
             return true
         case .setSelfUnlockBudget, .setRestrictions, .nameApp, .syncPINHash,
              .setScheduleProfile, .clearScheduleProfile, .setHeartbeatProfile,

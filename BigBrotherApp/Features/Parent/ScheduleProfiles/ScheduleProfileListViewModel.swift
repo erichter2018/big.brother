@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CloudKit
 import BigBrotherCore
 
 @Observable
@@ -56,6 +57,20 @@ final class ScheduleProfileListViewModel {
 
         do {
             try await cloudKit.saveScheduleProfile(profile)
+
+            // Bump scheduleProfileVersion on all devices using this profile so
+            // child devices detect the change and re-fetch. Without this, edits
+            // to window times are invisible to children (version check skips fetch).
+            let affectedDevices = appState.childDevices.filter { $0.scheduleProfileID == profile.id }
+            for device in affectedDevices {
+                try? await cloudKit.updateDeviceFields(
+                    deviceID: device.id,
+                    fields: [
+                        CKFieldName.scheduleProfileVersion: profile.updatedAt as CKRecordValue
+                    ]
+                )
+            }
+
             await refresh()
         } catch {
             errorMessage = error.localizedDescription

@@ -1,7 +1,8 @@
 import SwiftUI
 import BigBrotherCore
 
-/// Parent view to request and display diagnostic reports from a child device.
+/// Parent view to request and display diagnostic reports from child devices.
+/// Supports per-device targeting and retains only the 5 most recent reports per device.
 struct RemoteDiagnosticsView: View {
     let appState: AppState
     let child: ChildProfile
@@ -10,33 +11,58 @@ struct RemoteDiagnosticsView: View {
     @State private var reports: [DiagnosticReport] = []
     @State private var isLoading = false
     @State private var isRequesting = false
+    @State private var requestingDeviceID: DeviceID?
     @State private var copyFeedback = false
 
     var body: some View {
         List {
-            // Request button
+            // Per-device request buttons
             Section {
+                // Request from all devices
                 Button {
-                    Task { await requestDiagnostics() }
+                    Task { await requestDiagnostics(target: .child(child.id)) }
                 } label: {
                     HStack {
-                        Label(isRequesting ? "Requesting..." : "Request Diagnostic Report",
+                        Label(isRequesting && requestingDeviceID == nil
+                              ? "Requesting..." : "All Devices",
                               systemImage: "stethoscope")
                         Spacer()
-                        if isRequesting {
+                        if isRequesting && requestingDeviceID == nil {
                             ProgressView()
                         }
                     }
                 }
                 .disabled(isRequesting)
 
+                // Per-device buttons
+                ForEach(devices, id: \.id) { device in
+                    Button {
+                        Task { await requestDiagnostics(target: .device(device.id), deviceID: device.id) }
+                    } label: {
+                        HStack {
+                            let name = DeviceIcon.displayName(for: device.modelIdentifier)
+                            let icon = device.modelIdentifier.lowercased().contains("ipad") ? "ipad" : "iphone"
+                            Label(isRequesting && requestingDeviceID == device.id
+                                  ? "Requesting..." : name,
+                                  systemImage: icon)
+                            Spacer()
+                            if isRequesting && requestingDeviceID == device.id {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(isRequesting)
+                }
+
                 Button {
                     Task { await loadReports() }
                 } label: {
                     Label("Refresh Reports", systemImage: "arrow.clockwise")
                 }
+            } header: {
+                Text("Request Diagnostic")
             } footer: {
-                Text("Sends a command to the child device. The report appears here once the device processes it (may take up to 5 minutes if backgrounded).")
+                Text("Request from a specific device or all at once. Reports appear once the device processes the command.")
             }
 
             // Reports
@@ -50,7 +76,7 @@ struct RemoteDiagnosticsView: View {
                 }
             } else if reports.isEmpty {
                 Section {
-                    Text("No diagnostic reports yet. Tap 'Request' above.")
+                    Text("No diagnostic reports yet.")
                         .foregroundStyle(.secondary)
                 }
             } else {
@@ -165,26 +191,29 @@ struct RemoteDiagnosticsView: View {
 
     // MARK: - Actions
 
-    private func requestDiagnostics() async {
+    private func requestDiagnostics(target: CommandTarget, deviceID: DeviceID? = nil) async {
         isRequesting = true
+        requestingDeviceID = deviceID
         guard let cloudKit = appState.cloudKit,
               let familyID = appState.parentState?.familyID else {
             isRequesting = false
+            requestingDeviceID = nil
             return
         }
 
         let command = RemoteCommand(
             familyID: familyID,
-            target: .child(child.id),
+            target: target,
             action: .requestDiagnostics,
             issuedBy: "Parent"
         )
         try? await cloudKit.pushCommand(command)
 
-        // Wait a few seconds then refresh
+        // Wait then refresh
         try? await Task.sleep(for: .seconds(5))
         await loadReports()
         isRequesting = false
+        requestingDeviceID = nil
     }
 
     private func loadReports() async {
@@ -196,11 +225,27 @@ struct RemoteDiagnosticsView: View {
 
         var allReports: [DiagnosticReport] = []
         for device in devices {
-            if let reports = try? await cloudKit.fetchDiagnosticReports(deviceID: device.id) {
-                allReports.append(contentsOf: reports)
+            if let deviceReports = try? await cloudKit.fetchDiagnosticReports(deviceID: device.id) {
+                // Keep only the 5 most recent per device
+                let sorted = deviceReports.sorted { $0.timestamp > $1.timestamp }
+                allReports.append(contentsOf: sorted.prefix(5))
+
+                // Delete older reports from CloudKit
+                if sorted.count > 5 {
+                    let staleIDs = sorted.dropFirst(5).map { $0.id.uuidString }
+                    for staleID in staleIDs {
+                        let predicate = NSPredicate(format: "recordID.recordName == %@",
+                                                    "BBDiagnosticReport_\(staleID)")
+                        _ = try? await cloudKit.deleteRecords(
+                            type: "BBDiagnosticReport",
+                            predicate: predicate,
+                            limit: 1
+                        )
+                    }
+                }
             }
         }
-        reports = allReports.sorted { $0.timestamp > $1.timestamp }.prefix(10).map { $0 }
+        reports = allReports.sorted { $0.timestamp > $1.timestamp }
         isLoading = false
     }
 

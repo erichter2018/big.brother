@@ -101,6 +101,12 @@ protocol CloudKitServiceProtocol: Sendable {
     func saveDiagnosticReport(_ report: DiagnosticReport) async throws
     func fetchDiagnosticReports(deviceID: DeviceID) async throws -> [DiagnosticReport]
 
+    // MARK: - Time Limit Configs
+
+    func fetchTimeLimitConfigs(childProfileID: ChildProfileID) async throws -> [TimeLimitConfig]
+    func saveTimeLimitConfig(_ config: TimeLimitConfig) async throws
+    func deleteTimeLimitConfig(_ id: UUID) async throws
+
     // MARK: - Cleanup
 
     /// Delete old records of the given type matching a predicate.

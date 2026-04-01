@@ -12,8 +12,8 @@ final class DNSProxy {
     private let tunnelIP: Data = Data([198, 18, 0, 1])
     private let storage: AppGroupStorage
 
-    // Pending queries: txnID → (sourceIP, sourcePort)
-    private var pending: [UInt16: (ip: Data, port: UInt16)] = [:]
+    // Pending queries: txnID → (sourceIP, sourcePort, timestamp)
+    private var pending: [UInt16: (ip: Data, port: UInt16, at: Date)] = [:]
     private let pendingLock = NSLock()
 
     // Safe search cache (avoid disk I/O per query)
@@ -48,7 +48,10 @@ final class DNSProxy {
         restoreFromAppGroup()
         restoreKnownApps()
         upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
-        upstreamSession?.setReadHandler({ [weak self] datagrams, _ in
+        upstreamSession?.setReadHandler({ [weak self] datagrams, error in
+            if let error {
+                NSLog("[DNSProxy] Upstream read error: \(error.localizedDescription)")
+            }
             guard let datagrams else { return }
             for d in datagrams { self?.onUpstreamResponse(d) }
         }, maxDatagrams: 64)
@@ -61,6 +64,24 @@ final class DNSProxy {
         upstreamSession = nil
     }
 
+    /// Recreate the upstream UDP session after a network change (WiFi↔cellular).
+    /// The old NWUDPSession becomes invalid when the network path changes.
+    func reconnectUpstream() {
+        upstreamSession?.cancel()
+        upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
+        upstreamSession?.setReadHandler({ [weak self] datagrams, error in
+            if let error {
+                NSLog("[DNSProxy] Upstream read error after reconnect: \(error.localizedDescription)")
+            }
+            guard let datagrams else { return }
+            for d in datagrams { self?.onUpstreamResponse(d) }
+        }, maxDatagrams: 64)
+        // Clear any stale pending queries
+        pendingLock.lock()
+        pending.removeAll()
+        pendingLock.unlock()
+        NSLog("[DNSProxy] Upstream reconnected → \(upstreamDNS.hostname)")
+    }
 
     // MARK: - Packet Loop
 
@@ -97,16 +118,33 @@ final class DNSProxy {
             return
         }
 
+        // Time-limit domain blocking: return localhost for exhausted app domains
+        if let domain, isTimeLimitBlocked(domain) {
+            let resp = buildDNSResponse(query: dns, ip: "127.0.0.1")
+            writeResponse(resp, destIP: srcIP, destPort: srcPort)
+            bgLog(domain)
+            return
+        }
+
         // Store pending, forward upstream
         pendingLock.lock()
-        pending[txn] = (ip: srcIP, port: srcPort)
-        // Cap pending to prevent unbounded growth
-        if pending.count > 300 { pending.removeAll() }
+        pending[txn] = (ip: srcIP, port: srcPort, at: Date())
+        // Evict queries older than 5 seconds (timed out) and cap at 300
+        let now = Date()
+        if pending.count > 100 {
+            pending = pending.filter { now.timeIntervalSince($0.value.at) < 5 }
+        }
+        if pending.count > 300 {
+            // Still over cap after timeout eviction — drop oldest half
+            let sorted = pending.sorted { $0.value.at < $1.value.at }
+            let keepFrom = sorted.count / 2
+            pending = Dictionary(uniqueKeysWithValues: sorted.suffix(from: keepFrom).map { ($0.key, $0.value) })
+        }
         pendingLock.unlock()
 
         upstreamSession?.writeDatagram(dns) { error in
-            if error != nil {
-                // Session might be dead — will be recreated on wake()
+            if let error {
+                NSLog("[DNSProxy] Upstream write failed: \(error.localizedDescription)")
             }
         }
 
@@ -131,6 +169,24 @@ final class DNSProxy {
     private func writeResponse(_ payload: Data, destIP: Data, destPort: UInt16) {
         let pkt = buildIPPacket(srcIP: tunnelIP, dstIP: destIP, srcPort: 53, dstPort: destPort, payload: payload)
         provider?.packetFlow.writePackets([pkt], withProtocols: [AF_INET as NSNumber])
+    }
+
+    // MARK: - Time Limit Domain Blocking
+
+    private var timeLimitBlockedDomains: Set<String> = []
+    private var timeLimitBlockedExpiry: Date = .distantPast
+
+    /// Check if a domain should be blocked because its app's time limit is exhausted.
+    private func isTimeLimitBlocked(_ domain: String) -> Bool {
+        // Refresh cache every 30 seconds
+        let now = Date()
+        if now >= timeLimitBlockedExpiry {
+            timeLimitBlockedDomains = storage.readTimeLimitBlockedDomains()
+            timeLimitBlockedExpiry = now.addingTimeInterval(30)
+        }
+        guard !timeLimitBlockedDomains.isEmpty else { return false }
+        let root = DomainCategorizer.rootDomain(domain)
+        return timeLimitBlockedDomains.contains(root)
     }
 
     // MARK: - Safe Search
@@ -313,7 +369,13 @@ final class DNSProxy {
 
     func cleanupStalePendingQueries() {
         pendingLock.lock()
-        if pending.count > 100 { pending.removeAll() }
+        let before = pending.count
+        let now = Date()
+        pending = pending.filter { now.timeIntervalSince($0.value.at) < 5 }
+        let after = pending.count
         pendingLock.unlock()
+        if before > after {
+            NSLog("[DNSProxy] Cleaned \(before - after) stale pending queries (\(after) remaining)")
+        }
     }
 }

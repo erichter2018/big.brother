@@ -47,8 +47,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     // MARK: - EnforcementServiceProtocol
 
     func apply(_ policy: EffectivePolicy) throws {
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set("apply", forKey: "lastShieldChangeReason")
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        defaults?.set("apply", forKey: "lastShieldChangeReason")
+        // Write enforcement version so Monitor can detect if main app wrote more recently.
+        // Monitor checks this before overwriting stores to avoid race conditions.
+        defaults?.set(Date().timeIntervalSince1970, forKey: "mainAppEnforcementAt")
 
         // Device restrictions apply ALWAYS, regardless of lock/unlock state.
         applyRestrictions()
@@ -91,6 +94,40 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             showRequestButton: policy.resolvedMode != .unlocked
         )
         try? storage.writeShieldConfiguration(config)
+
+        // Verify enforcement took effect — read back the store state.
+        // If it didn't stick, try a full reset: clear all stores, then re-apply.
+        // ManagedSettingsStore can get into a corrupted state where writes fail silently.
+        let diag = shieldDiagnostic()
+        let expectedShielded = policy.resolvedMode != .unlocked && !policy.isTemporaryUnlock
+        if expectedShielded != diag.shieldsActive {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Enforcement verification FAILED — attempting reset",
+                details: "Expected shields \(expectedShielded ? "UP" : "DOWN") but got \(diag.shieldsActive ? "UP" : "DOWN") (mode: \(policy.resolvedMode.rawValue))"
+            ))
+
+            // Nuclear option: clear everything, recreate stores, re-apply
+            clearAllShieldStores()
+            baseStore.clearAllSettings()
+            scheduleStore.clearAllSettings()
+            tempUnlockStore.clearAllSettings()
+
+            // Re-apply from scratch
+            if expectedShielded {
+                applyShield(allowExemptions: policy.resolvedMode == .restricted)
+                applyWebBlocking()
+            }
+
+            let retryDiag = shieldDiagnostic()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: retryDiag.shieldsActive == expectedShielded
+                    ? "Enforcement recovery SUCCEEDED after reset"
+                    : "Enforcement recovery FAILED — ManagedSettings may need App & Website Activity toggle",
+                details: "After reset: shields=\(retryDiag.shieldsActive), apps=\(retryDiag.appCount), cat=\(retryDiag.categoryActive)"
+            ))
+        }
     }
 
     /// Apply shields using per-app tokens from the picker selection.
@@ -104,28 +141,50 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
     /// - Parameter allowExemptions: When false (essentialOnly), blocks ALL apps with no exemptions.
     private func applyShield(allowExemptions: Bool) {
-        let allowedTokens = allowExemptions ? collectAllowedTokens() : []
+        var allowedTokens = allowExemptions ? collectAllowedTokens() : []
         let pickerTokens = loadPickerTokens()
+
+        // Remove time-exhausted apps from the allowed set and collect their tokens
+        // for shield.applications (enables "Request More Time" on the shield).
+        let decoder = JSONDecoder()
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
+        let today = fmt.string(from: Date())
+        let exhaustedApps = storage.readTimeLimitExhaustedApps().filter { $0.dateString == today }
+        var exhaustedTokens = Set<ApplicationToken>()
+        for app in exhaustedApps {
+            if let token = try? decoder.decode(ApplicationToken.self, from: app.tokenData) {
+                allowedTokens.remove(token)
+                exhaustedTokens.insert(token)
+            }
+        }
 
         if !pickerTokens.isEmpty && allowExemptions {
             // Per-app blocking for up to 50 apps (ShieldAction gets ApplicationToken).
             let tokensToBlock = pickerTokens.subtracting(allowedTokens)
-            let perAppTokens: Set<ApplicationToken>
+            var perAppTokens: Set<ApplicationToken>
             if tokensToBlock.count <= Self.maxShieldApplications {
                 perAppTokens = tokensToBlock
             } else {
-                perAppTokens = Set(tokensToBlock.prefix(Self.maxShieldApplications))
+                // Sort by hash for deterministic selection across reconciliation cycles.
+                let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
+                perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
             }
+            // Add exhausted tokens to shield.applications for "Request More Time"
+            perAppTokens.formUnion(exhaustedTokens)
             baseStore.shield.applications = perAppTokens
             baseStore.shield.applicationCategories = .all(except: allowedTokens)
             recordShieldedAppCount(perAppTokens.count)
             #if DEBUG
             let overflow = tokensToBlock.count - perAppTokens.count
-            print("[BigBrother] Shield applied — \(perAppTokens.count) apps via shield.applications\(overflow > 0 ? " (\(overflow) overflow to category)" : ""), category catch-all active")
+            print("[BigBrother] Shield applied — \(perAppTokens.count) apps via shield.applications\(overflow > 0 ? " (\(overflow) overflow to category)" : ""), category catch-all active, \(exhaustedTokens.count) time-exhausted")
             #endif
         } else {
             // No picker selection or essentialOnly — block everything.
-            let explicitApps: Set<ApplicationToken>? = allowExemptions ? nil : pickerTokens.isEmpty ? nil : pickerTokens
+            var explicitApps: Set<ApplicationToken>? = allowExemptions ? nil : pickerTokens.isEmpty ? nil : pickerTokens
+            // Add exhausted tokens
+            if !exhaustedTokens.isEmpty {
+                explicitApps = (explicitApps ?? Set()).union(exhaustedTokens)
+            }
             baseStore.shield.applications = explicitApps
             if allowedTokens.isEmpty {
                 baseStore.shield.applicationCategories = .all()
@@ -158,25 +217,12 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             return
         }
 
-        if let data = storage.readRawData(forKey: StorageKeys.allowedWebDomains),
-           let domains = try? JSONDecoder().decode([String].self, from: data),
-           !domains.isEmpty {
-            // Block all web categories. Per-domain exceptions require WebDomainTokens
-            // (picker-selected), so domain allowlist is enforced at the VPN/DNS layer.
-            for store in [baseStore, scheduleStore] {
-                store.shield.webDomainCategories = .all()
-            }
-            #if DEBUG
-            print("[BigBrother] Web blocking: all domains blocked (allowlist enforced via VPN/DNS)")
-            #endif
-        } else {
-            // Block on all stores to ensure coverage after schedule transitions.
-            for store in [baseStore, scheduleStore] {
-                store.shield.webDomainCategories = .all()
-            }
-            #if DEBUG
-            print("[BigBrother] Web blocking: all domains blocked")
-            #endif
+        // Block web on ALL stores to ensure coverage after schedule/unlock transitions.
+        // ManagedSettings merges across stores — a stale nil on any store won't
+        // override .all() on another, but consistency prevents confusion.
+        let allStores = [baseStore, scheduleStore, tempUnlockStore]
+        for store in allStores {
+            store.shield.webDomainCategories = .all()
         }
     }
 

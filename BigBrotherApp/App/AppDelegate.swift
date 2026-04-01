@@ -436,13 +436,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         do {
             try BGTaskScheduler.shared.submit(request)
-            #if DEBUG
-            print("[BGTask] Scheduled re-lock task at \(date)")
-            #endif
         } catch {
-            #if DEBUG
-            print("[BGTask] Failed to schedule re-lock task: \(error.localizedDescription)")
-            #endif
+            // Log in all builds — failed BGTask = no safety net for re-lock.
+            let storage = AppGroupStorage()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "BGTask re-lock schedule FAILED",
+                details: "Target: \(date) — \(error.localizedDescription)"
+            ))
         }
     }
 

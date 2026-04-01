@@ -224,6 +224,7 @@ struct ParentDashboardView: View {
             avatarImageUrl: viewModel.penaltyTimer(for: child)?.avatarUrl,
             unlockOrigin: viewModel.unlockOrigin(for: child),
             isHeartbeatConfirmed: dominant.confirmed,
+            mismatchedDeviceTypes: dominant.mismatchedDeviceTypes,
             isInPenaltyPhase: viewModel.isInPenaltyPhase(for: child),
             penaltyWindowCountdown: viewModel.penaltyWindowCountdown(for: child),
             isScheduleActive: viewModel.isScheduleActive(for: child),

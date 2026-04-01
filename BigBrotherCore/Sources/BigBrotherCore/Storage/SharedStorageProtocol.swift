@@ -192,6 +192,20 @@ public protocol SharedStorageProtocol: Sendable {
     /// Write the full temporary allowed apps list (replaces existing).
     func writeTemporaryAllowedApps(_ entries: [TemporaryAllowedAppEntry]) throws
 
+    // MARK: - App Time Limits
+
+    /// Read per-app time limits (child device).
+    func readAppTimeLimits() -> [AppTimeLimit]
+
+    /// Write per-app time limits (replaces existing).
+    func writeAppTimeLimits(_ limits: [AppTimeLimit]) throws
+
+    /// Read apps that have exhausted their daily time budget.
+    func readTimeLimitExhaustedApps() -> [TimeLimitExhaustedApp]
+
+    /// Write exhausted apps list (replaces existing).
+    func writeTimeLimitExhaustedApps(_ apps: [TimeLimitExhaustedApp]) throws
+
     // MARK: - Last Shielded App
 
     /// Read the last shielded app (written by ShieldConfiguration, read by ShieldAction).

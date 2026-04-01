@@ -37,6 +37,7 @@ struct LocationMapView: View {
     // Speed limit lookup for scrubbed position
     private var speedLimitService: SpeedLimitService { .shared }
     @State private var scrubbedSpeedLimit: Int?
+    @State private var scrubSpeedLimitTask: Task<Void, Never>?
 
     // MARK: - Trip Model
 
@@ -295,7 +296,20 @@ struct LocationMapView: View {
         let totalDist = cumDist.last ?? 0
         guard totalDist > 0 else { return nil }
 
-        let targetDist = fraction * totalDist
+        // Map the breadcrumb fraction to the sub-range of the polyline.
+        // If the segment spans breadcrumbs segStart..segEnd and we're between
+        // lower..upper, we need to find where (lower + fraction) falls proportionally
+        // within the segment's breadcrumb range.
+        let segStart = idx > 0 ? segmentToBreadcrumbIndex[idx - 1] : 0
+        let segEnd = segmentToBreadcrumbIndex[idx]
+        let segBreadcrumbSpan = Double(segEnd - segStart)
+        let positionInSegment: Double
+        if segBreadcrumbSpan > 0 {
+            positionInSegment = (Double(lower - segStart) + fraction) / segBreadcrumbSpan
+        } else {
+            positionInSegment = fraction
+        }
+        let targetDist = positionInSegment * totalDist
 
         for i in 1..<pointCount {
             if cumDist[i] >= targetDist {
@@ -730,7 +744,9 @@ struct LocationMapView: View {
     private static let poiCacheVersion = 3
 
     private static var poiCacheDir: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("poi-cache-v\(poiCacheVersion)", isDirectory: true)
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return caches.appendingPathComponent("poi-cache-v\(poiCacheVersion)", isDirectory: true)
     }
 
     /// Cache key from rounded coordinates (3 decimal places ~ 111m precision).
@@ -1327,19 +1343,29 @@ struct LocationMapView: View {
                             if followDot {
                                 position = .camera(MapCamera(centerCoordinate: coord, distance: 2000))
                             }
-                            // Try cache first, fall back to live query if cache misses
-                            Task {
-                                if let cached = await speedLimitService.cachedSpeedLimit(at: coord) {
-                                    scrubbedSpeedLimit = cached
-                                } else {
-                                    scrubbedSpeedLimit = await speedLimitService.speedLimit(at: coord)
-                                }
-                            }
                         }
                         if !isScrubbing {
                             scrubbedSpeedLimit = nil
                             if let coord = currentLocation {
                                 position = .camera(MapCamera(centerCoordinate: coord, distance: 2000))
+                            }
+                        }
+                    }
+                    // Debounce speed limit lookup — only fetch when scrubbing pauses
+                    .onReceive(
+                        NotificationCenter.default.publisher(for: .init("scrubberIdle"))
+                    ) { _ in }
+                    .onChange(of: scrubbedIndex) { _, _ in
+                        // Speed limit lookup on breadcrumb index change (not every pixel)
+                        guard isScrubbing, let coord = scrubbedCoord else { return }
+                        scrubSpeedLimitTask?.cancel()
+                        scrubSpeedLimitTask = Task {
+                            try? await Task.sleep(nanoseconds: 200_000_000) // 200ms debounce
+                            guard !Task.isCancelled else { return }
+                            if let cached = await speedLimitService.cachedSpeedLimit(at: coord) {
+                                scrubbedSpeedLimit = cached
+                            } else {
+                                scrubbedSpeedLimit = await speedLimitService.speedLimit(at: coord)
                             }
                         }
                     }
@@ -1579,10 +1605,24 @@ struct LocationMapView: View {
 
     // MARK: - Data Loading
 
+    // Shared breadcrumb cache — persists across view appearances.
+    // Key: sorted device IDs joined. Value: (breadcrumbs, fetchedAt).
+    private static var breadcrumbCache: [String: ([DeviceLocation], Date)] = [:]
+    private static let breadcrumbCacheTTL: TimeInterval = 300 // 5 minutes
+
     private func loadBreadcrumbs() async {
         guard let cloudKit else { return }
-        isLoading = true
         let deviceIDs = devices.map(\.id)
+        let cacheKey = deviceIDs.map(\.rawValue).sorted().joined(separator: ",")
+
+        // Return cached if fresh
+        if let (cached, fetchedAt) = Self.breadcrumbCache[cacheKey],
+           Date().timeIntervalSince(fetchedAt) < Self.breadcrumbCacheTTL {
+            breadcrumbs = cached
+            return
+        }
+
+        isLoading = true
         let since = Date().addingTimeInterval(-30 * 86400)
         var all: [DeviceLocation] = []
         for deviceID in deviceIDs {
@@ -1590,7 +1630,9 @@ struct LocationMapView: View {
                 all.append(contentsOf: crumbs)
             }
         }
-        breadcrumbs = all.sorted { $0.timestamp < $1.timestamp }
+        let sorted = all.sorted { $0.timestamp < $1.timestamp }
+        breadcrumbs = sorted
+        Self.breadcrumbCache[cacheKey] = (sorted, Date())
         isLoading = false
     }
 
@@ -1702,7 +1744,9 @@ struct LocationMapView: View {
     }
 
     private static var cacheDir: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("route-cache", isDirectory: true)
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return caches.appendingPathComponent("route-cache", isDirectory: true)
     }
 
     private static func cacheRoute(_ polyline: MKPolyline, key: String) {

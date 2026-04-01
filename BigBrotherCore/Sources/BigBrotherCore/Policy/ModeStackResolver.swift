@@ -65,9 +65,7 @@ public enum ModeStackResolver {
         }
 
         // 3. Schedule-driven mode?
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let isScheduleDriven = defaults?.object(forKey: "scheduleDrivenMode") == nil
-            || (defaults?.bool(forKey: "scheduleDrivenMode") ?? true)
+        let isScheduleDriven = AppConstants.isScheduleDriven()
 
         if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
             let mode = profile.resolvedMode(at: now)

@@ -19,7 +19,7 @@ public enum DomainCategorizer {
         "ggpht.com", "withgoogle.com", "adtrafficquality.google",
         "2mdn.net", "googlesource.com", "google.com",
         // CDNs
-        "akamaihd.net", "akamai.net", "akamaiedge.net", "akamaitechnologies.com",
+        "akamaihd.net", "akamai.net", "akamaiedge.net", "akamaized.net", "akamaitechnologies.com",
         "akadns.net", "akam.net", "akahost.net", "edgekey.net", "edgesuite.net",
         "cloudfront.net", "cloudflare.com", "cloudflare.net", "cloudflare-dns.com",
         "cdninstagram.com", "fbcdn.net",
@@ -280,6 +280,59 @@ public enum DomainCategorizer {
         "go-vip.net",
         // Unknown tracking
         "trustedstack.com", "puzztake.com", "wp.pl",
+        // Ad tech / tracking (from DNS logs 2026-03)
+        "bounceexchange.com", "bouncex.net", "postscript.io", "flashtalking.com",
+        "indexww.com", "rebuyengine.com", "heatmapcore.com", "heatmap.com",
+        "recart.com", "infolinks.com", "richpanel.com", "attn.tv",
+        "minute-ly.com", "vaultdcr.com", "everesttech.net", "okendo.io",
+        "kayzen.io", "strpst.com", "eizzih.com", "judge.me", "wknd.ai",
+        "krxd.net", "customily.com", "intelligems.io", "pdscrb.com",
+        "getfondue.com", "sendlane.com", "servedbyivo.com", "ipify.org",
+        "placed.com", "prreqcroab.icu", "redfastlabs.com", "redfast.com",
+        "viacomcbs.digital", "trustx.org", "snackly.co", "ketchjs.com",
+        "unablehope.com", "northbeam.io", "minutemedia-prebid.com",
+        "vdopia.com", "quantcount.com", "onlinestarten.net", "clipcentric.com",
+        "rtb-oveeo.com", "chapturist.com", "ststandard.com", "strpssts-ana.com",
+        "dashfi.dev", "wunderkind.co", "fpjs.io", "qprod2.net", "drrv.co",
+        "roeye.com", "pdqprod.link", "albss.com", "uxtweak.com",
+        "attainplatform.io", "ltmsphrcl.net", "jivox.com", "semasio.net",
+        "bc-solutions.net", "getsitectrl.com", "mathtag.com", "dotter.me",
+        "ghostmonitor.com", "consentmo.com", "attentivemobile.com",
+        "getelevar.com", "researchnow.com", "summerhamster.com",
+        "automizely.com", "thebrighttag.com", "rtactivate.com", "ortb.net",
+        "zeotap.com", "hrzn-nxt.com", "stickyadstv.com", "tubemogul.com",
+        "adition.com", "gcprivacy.id", "gcprivacy.net", "ninthdecimal.com",
+        "e-planning.net", "extremereach.io", "tremorhub.com", "mxptint.net",
+        "blueconic.net", "reson8.com", "ingage.tech", "tidaltv.com",
+        "device9.com", "basis.net", "statsigapi.net",
+        // Ad networks / mobile ads (from DNS logs)
+        "applovin.com", "applvn.com", "inner-active.mobi", "maxesads.com",
+        "afafb.com", "safedk.com", "adsappier.com", "dataseat.com",
+        "dataseat.tv", "tpbid.com", "zefrdata.com", "bytegle.tech",
+        "acobt.tech", "vaicore.site", "onegg.site", "mczbf.com",
+        "claspws.tv", "byteigtm-us.com", "survata.com", "clrt.ai",
+        "go-mpulse.net", "contentsquare.net",
+        // E-commerce / marketing infra (from DNS logs)
+        "shareasale.com", "affirm.com", "cbsi.com", "cbsivideo.com",
+        "cbsinteractive.com", "rise-ai.com", "wisepops.com", "wisepops.net",
+        "avada.io", "btloader.com", "btmessage.com",
+        "freeshipping-essential-apps.uk", "mezereon.net",
+        // Content/media infra
+        "cachefly.net", "jquery.com", "run.app", "on.aws",
+        "herokuapp.com", "vercel.app", "railway.app",
+        "fastly-insights.com", "datadome.co",
+        "browser-intake-datadoghq.com", "datadoghq-browser-agent.com",
+        "browser-intake-us3-datadoghq.com", "browser-intake-us5-datadoghq.com",
+        // Shopping infra / payment
+        "braintreegateway.com", "braintree-api.com", "paypalobjects.com",
+        "shopifynetwork.com", "vtex.com", "vtex.com.br", "vtexassets.com",
+        "heap-api.com", "amplience.net", "bigcontent.io",
+        "knotch.it", "knotch.com", "clinch.co",
+        // Misc noise
+        "acsbapp.com", "js7k.com", "lhmos.com", "sectigo.com",
+        "impassableretainerexplained.com", "loo3laej.com",
+        "sc-prod.net", "thinkingdata.cn", "ppassets.com",
+        "1a-1791.com", "cnstrc.com",
     ]
 
     /// Returns true if the domain is infrastructure noise (CDN, analytics, ads, OS services).
@@ -476,9 +529,13 @@ public enum DomainCategorizer {
         // Sports & Disney
         "espn.com": "ESPN",
         "espncdn.com": "ESPN",
+        "espn.net": "ESPN",
+        "247sports.com": "247Sports",
         "disney.com": "Disney/ESPN",
+        "disney-plus.net": "Disney+",
         // Gaming
         "roblox.com": "Roblox",
+        "rbxcdn.com": "Roblox",
         "minecraft.net": "Minecraft",
         "fortnite.com": "Fortnite",
         "epicgames.com": "Epic Games",
@@ -488,6 +545,16 @@ public enum DomainCategorizer {
         "supercell.com": "Supercell (Clash/Brawl Stars)",
         "mihoyo.com": "HoYoverse (Genshin)",
         "hoyoverse.com": "HoYoverse (Genshin)",
+        "boomlings.com": "Geometry Dash",
+        "ngfiles.com": "Newgrounds",
+        "rovio.com": "Angry Birds",
+        "devsisters.cloud": "Cookie Run",
+        "devsisters.com": "Cookie Run",
+        "devplay.com": "Cookie Run",
+        "ovensmash.com": "Cookie Run",
+        "sporcle.com": "Sporcle",
+        "clean.gg": "Clean (Gaming)",
+        "picsart.com": "Picsart",
         // Dating (concerning for minors)
         "tinder.com": "Tinder",
         "bumble.com": "Bumble",
@@ -500,10 +567,56 @@ public enum DomainCategorizer {
         "etsy.com": "Etsy",
         "shein.com": "SHEIN",
         "temu.com": "Temu",
+        "walmart.com": "Walmart",
+        "target.com": "Target",
+        "ulta.com": "Ulta",
+        "doordash.com": "DoorDash",
+        "starbucks.com": "Starbucks",
+        "shopify.com": "Shopify Store",
         // Productivity / AI
         "openai.com": "ChatGPT",
+        "chatgpt.com": "ChatGPT",
+        "oaiusercontent.com": "ChatGPT",
         "anthropic.com": "Claude",
         "character.ai": "Character.AI",
+        "grok.com": "Grok",
+        "sierra.chat": "Sierra AI",
+        // Messaging (additional)
+        "groupme.com": "GroupMe",
+        "giphy.com": "Giphy",
+        "tenor.com": "Tenor (GIFs)",
+        // Education
+        "powerschool.com": "PowerSchool",
+        "schoology.com": "Schoology",
+        "duolingo.com": "Duolingo",
+        "quizlet.com": "Quizlet",
+        "collegeboard.org": "College Board",
+        // News / Media
+        "nytimes.com": "NY Times",
+        "nyt.com": "NY Times",
+        "yahoo.com": "Yahoo",
+        "redd.it": "Reddit",
+        "redditmedia.com": "Reddit",
+        // Video / Streaming (additional)
+        "plex.tv": "Plex",
+        "plex.direct": "Plex",
+        "bilibili.com": "Bilibili",
+        "bilibili.tv": "Bilibili",
+        "dramabox.com": "DramaBox",
+        "dramaboxdb.com": "DramaBox",
+        "fandom.com": "Fandom Wiki",
+        "paramount.com": "Paramount+",
+        "paramount.tech": "Paramount+",
+        "fox.com": "Fox",
+        "nocookie.net": "YouTube (embedded)",
+        // Sports
+        "mlb.com": "MLB",
+        "mlbshop.com": "MLB",
+        // Other apps
+        "opera.com": "Opera Browser",
+        "linkedin.com": "LinkedIn",
+        "gmail.com": "Gmail",
+        "ourpact.com": "OurPact",
         // Content
         "wattpad.com": "Wattpad",
         "archiveofourown.org": "Archive of Our Own",
@@ -526,6 +639,16 @@ public enum DomainCategorizer {
     /// Returns the app name for a root domain, if it's a known app.
     public static func appName(for rootDomain: String) -> String? {
         appDomainCatalog[rootDomain.lowercased()]
+    }
+
+    /// Returns all known root domains for a given app name (reverse lookup).
+    /// Used to block web access when an app's time limit is exhausted.
+    public static func domainsForApp(_ appName: String) -> Set<String> {
+        var domains = Set<String>()
+        for (domain, name) in appDomainCatalog where name == appName {
+            domains.insert(domain)
+        }
+        return domains
     }
 
     // MARK: - Subdomain Intelligence

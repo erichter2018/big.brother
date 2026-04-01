@@ -83,6 +83,14 @@ public enum StorageKeys {
     /// Array of TemporaryAllowedAppEntry — written by CommandProcessor, read by Shield extensions.
     public static let temporaryAllowedApps = "temporaryAllowedApps"
 
+    /// Per-app time limits with device-local tokens (child only).
+    /// Array of AppTimeLimit — tokens + fingerprints + daily minutes.
+    public static let appTimeLimits = "appTimeLimits"
+
+    /// Apps that have exhausted their daily time budget today.
+    /// Array of TimeLimitExhaustedApp — written by Monitor, read by enforcement.
+    public static let timeLimitExhaustedApps = "timeLimitExhaustedApps"
+
     /// Enrollment IDs cached in App Group so extensions can create events
     /// without needing Keychain access (which can fail in extension context).
     public static let cachedEnrollmentIDs = "cachedEnrollmentIDs"

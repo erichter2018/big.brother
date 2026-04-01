@@ -50,6 +50,10 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
     /// preventing auto-update when a parent edits a template without re-assigning.
     public var scheduleProfileVersion: Date?
 
+    /// Parent-set device restrictions as JSON, synced via CloudKit so the child
+    /// can pull them during periodic sync (commands can fail silently).
+    public var restrictionsJSON: String?
+
     /// Heuristic: device is considered online if heartbeat is within 10 minutes.
     public var isOnline: Bool {
         guard let hb = lastHeartbeat else { return false }
@@ -73,7 +77,8 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         penaltySeconds: Int? = nil,
         penaltyTimerEndTime: Date? = nil,
         selfUnlocksPerDay: Int? = nil,
-        scheduleProfileVersion: Date? = nil
+        scheduleProfileVersion: Date? = nil,
+        restrictionsJSON: String? = nil
     ) {
         self.id = id
         self.childProfileID = childProfileID
@@ -92,6 +97,7 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         self.penaltyTimerEndTime = penaltyTimerEndTime
         self.selfUnlocksPerDay = selfUnlocksPerDay
         self.scheduleProfileVersion = scheduleProfileVersion
+        self.restrictionsJSON = restrictionsJSON
     }
 
     // MARK: - Backward-compatible Codable
@@ -102,7 +108,7 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         case confirmedPolicyVersion, familyControlsAuthorized
         case heartbeatProfileID, scheduleProfileID
         case penaltySeconds, penaltyTimerEndTime
-        case selfUnlocksPerDay, scheduleProfileVersion
+        case selfUnlocksPerDay, scheduleProfileVersion, restrictionsJSON
     }
 
     public init(from decoder: Decoder) throws {
@@ -124,5 +130,6 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         penaltyTimerEndTime = try container.decodeIfPresent(Date.self, forKey: .penaltyTimerEndTime)
         selfUnlocksPerDay = try container.decodeIfPresent(Int.self, forKey: .selfUnlocksPerDay)
         scheduleProfileVersion = try container.decodeIfPresent(Date.self, forKey: .scheduleProfileVersion)
+        restrictionsJSON = try container.decodeIfPresent(String.self, forKey: .restrictionsJSON)
     }
 }

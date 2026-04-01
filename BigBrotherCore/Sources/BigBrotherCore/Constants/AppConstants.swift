@@ -38,7 +38,7 @@ public enum AppConstants {
 
     /// Manual build number — bump each time you deploy new code during development.
     /// Both parent and child read this constant; matching numbers = same code.
-    public static let appBuildNumber = 222
+    public static let appBuildNumber = 242
 
     // MARK: - Enrollment
 
@@ -136,4 +136,15 @@ public enum AppConstants {
 
     /// Maximum number of snapshot transitions to retain in history buffer.
     public static let snapshotHistoryMaxEntries = 50
+
+    // MARK: - Schedule Mode
+
+    /// Whether the device is in schedule-driven mode (default: true).
+    /// Centralized check to avoid scattered UserDefaults reads with inconsistent nil handling.
+    public static func isScheduleDriven(defaults: UserDefaults? = UserDefaults(suiteName: appGroupIdentifier)) -> Bool {
+        // If the key was never set, default to schedule-driven.
+        guard let defaults else { return true }
+        return defaults.object(forKey: "scheduleDrivenMode") == nil
+            || defaults.bool(forKey: "scheduleDrivenMode")
+    }
 }

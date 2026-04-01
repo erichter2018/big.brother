@@ -9,6 +9,7 @@ struct ChildHomeView: View {
     @Bindable var viewModel: ChildHomeViewModel
     @State private var showAppBlockingSetup = false
     @State private var showAlwaysAllowedSetup = false
+    @State private var showTimeLimitSetup = false
     @State private var showPINUnlock = false
     @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
     @State private var showSOSConfirmation = false
@@ -130,12 +131,29 @@ struct ChildHomeView: View {
                 viewModel.appState.showAlwaysAllowedSetup = false
             }
         }
+        .sheet(isPresented: $showTimeLimitSetup) {
+            TimeLimitSetupView(appState: viewModel.appState)
+        }
+        .onChange(of: viewModel.appState.showTimeLimitSetup) { _, newValue in
+            if newValue {
+                showTimeLimitSetup = true
+                viewModel.appState.showTimeLimitSetup = false
+            }
+        }
         #endif
         .onAppear {
             viewModel.startTimer()
         }
         .onDisappear {
             viewModel.stopTimer()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                // Immediately sync with CloudKit when kid opens the app.
+                // Pulls latest schedule, restrictions, processes commands,
+                // re-applies enforcement, and sends heartbeat to parent.
+                viewModel.appState.performForegroundSync()
+            }
         }
     }
 

@@ -245,6 +245,39 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         try writeAtomically(entries, to: FileName.temporaryAllowedApps)
     }
 
+    // MARK: - App Time Limits
+
+    public func readAppTimeLimits() -> [AppTimeLimit] {
+        (read("app_time_limits.json") as [AppTimeLimit]?) ?? []
+    }
+
+    public func writeAppTimeLimits(_ limits: [AppTimeLimit]) throws {
+        try writeAtomically(limits, to: "app_time_limits.json")
+    }
+
+    public func readTimeLimitExhaustedApps() -> [TimeLimitExhaustedApp] {
+        (read("time_limit_exhausted.json") as [TimeLimitExhaustedApp]?) ?? []
+    }
+
+    public func writeTimeLimitExhaustedApps(_ apps: [TimeLimitExhaustedApp]) throws {
+        try writeAtomically(apps, to: "time_limit_exhausted.json")
+    }
+
+    /// Domains to block at the DNS level when time-limited apps are exhausted.
+    /// Written by Monitor/main app, read by VPN tunnel.
+    public func readTimeLimitBlockedDomains() -> Set<String> {
+        guard let data: Data = readRawData(forKey: "timeLimitBlockedDomains"),
+              let domains = try? JSONDecoder().decode(Set<String>.self, from: data) else {
+            return []
+        }
+        return domains
+    }
+
+    public func writeTimeLimitBlockedDomains(_ domains: Set<String>) throws {
+        let data = try JSONEncoder().encode(domains)
+        try writeRawData(data, forKey: "timeLimitBlockedDomains")
+    }
+
     // MARK: - Pre-create Shared Files
     //
     // Extensions cannot create new files in the App Group container (silent failure).
