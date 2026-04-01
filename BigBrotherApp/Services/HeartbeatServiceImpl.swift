@@ -338,6 +338,8 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             policyVersion: policyVersion,
             familyControlsAuthorized: enforcement?.authorizationStatus == .authorized,
             familyControlsAuthType: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "fr.bigbrother.authorizationType"),
+            childAuthFailReason: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "fr.bigbrother.childAuthFailReason"),
+            permissionDetails: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "permissionSnapshot"),
             batteryLevel: Self.batteryLevel,
             isCharging: Self.isCharging,
             appBlockingConfigured: blockingConfig?.isConfigured,

@@ -16,6 +16,7 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
 
     /// Persisted in UserDefaults so it survives app restarts.
     private static let authTypeKey = "fr.bigbrother.authorizationType"
+    private static let authFailReasonKey = "fr.bigbrother.childAuthFailReason"
 
     init(storage: (any SharedStorageProtocol)? = nil) {
         self.storage = storage
@@ -39,26 +40,43 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
     }
 
     func requestAuthorization() async throws {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)!
+
         // Try .child first (stronger — parent must authenticate, child can't revoke).
         do {
             try await AuthorizationCenter.shared.requestAuthorization(for: .child)
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)!.set("child", forKey: Self.authTypeKey)
-            #if DEBUG
-            print("[BigBrother] FamilyControls authorized as .child")
-            #endif
+            defaults.set("child", forKey: Self.authTypeKey)
+            defaults.removeObject(forKey: Self.authFailReasonKey)
             return
         } catch {
-            #if DEBUG
-            print("[BigBrother] .child auth failed (\(error.localizedDescription)), falling back to .individual")
-            #endif
+            // Map the error to a human-readable reason
+            let reason: String
+            let errorDesc = "\(error)"
+            if errorDesc.contains("authorizationConflict") || errorDesc.contains("conflict") {
+                reason = "Another parental control app holds Family auth (e.g., OurPact)"
+            } else if errorDesc.contains("invalidAccountType") || errorDesc.contains("invalid") {
+                reason = "Device not signed into a child/teen Apple ID in Family Sharing"
+            } else if errorDesc.contains("authorizationCanceled") || errorDesc.contains("cancel") {
+                reason = "Parent canceled the authorization prompt"
+            } else if errorDesc.contains("network") {
+                reason = "Network error during Family auth — will retry next launch"
+            } else {
+                reason = "Family auth failed: \(error.localizedDescription)"
+            }
+            defaults.set(reason, forKey: Self.authFailReasonKey)
+
+            try? storage?.appendDiagnosticEntry(DiagnosticEntry(
+                category: .auth,
+                message: "Child auth failed, falling back to Individual",
+                details: reason
+            ))
         }
 
         // Fall back to .individual (self-regulation — user can revoke).
         try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)!.set("individual", forKey: Self.authTypeKey)
-        #if DEBUG
-        print("[BigBrother] FamilyControls authorized as .individual")
-        #endif
+        // Store "individual" as the type. The fail reason is stored separately
+        // so the heartbeat authType stays clean for comparison.
+        defaults.set("individual", forKey: Self.authTypeKey)
     }
 
     func observeAuthorizationChanges(handler: @escaping @Sendable (FCAuthorizationStatus) -> Void) {

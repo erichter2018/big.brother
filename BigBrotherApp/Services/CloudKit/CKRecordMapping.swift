@@ -180,6 +180,8 @@ enum CKFieldName {
     static let hbNotificationsAuthorized = "hbNotifAuth"
     static let hbMainAppBuild = "hbMainAppBuild"
     static let hbFCAuthType = "hbFCAuthType"
+    static let hbFCChildFailReason = "hbFCChildFailReason"
+    static let hbPermissions = "hbPermissions"
     static let hbDeviceLocked = "hbLocked"
     static let hbInternetBlocked = "hbInetBlocked"
 

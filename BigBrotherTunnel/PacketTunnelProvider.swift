@@ -1221,6 +1221,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if let authType = defaults?.string(forKey: "fr.bigbrother.authorizationType") {
             record["hbFCAuthType"] = authType
         }
+        // Child auth fail reason (why .child wasn't granted)
+        if let failReason = defaults?.string(forKey: "fr.bigbrother.childAuthFailReason") {
+            record["hbFCChildFailReason"] = failReason
+        }
         // Per-permission status snapshot (written by main app ChildHomeViewModel)
         if let permJSON = defaults?.string(forKey: "permissionSnapshot") {
             record["hbPermissions"] = permJSON

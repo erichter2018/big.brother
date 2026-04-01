@@ -159,15 +159,32 @@ struct ChildDetailView: View {
     private func authTypeBadge(heartbeat hb: DeviceHeartbeat?) -> some View {
         if let authType = hb?.familyControlsAuthType {
             let isChild = authType == "child"
-            HStack(spacing: 2) {
-                Image(systemName: isChild ? "lock.shield.fill" : "shield")
-                    .font(.system(size: 8))
-                Text(isChild ? "Family" : "Individual")
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 2) {
+                    Image(systemName: isChild ? "lock.shield.fill" : "exclamationmark.shield")
+                        .font(.system(size: 8))
+                    Text(isChild ? "Family Auth" : "Individual Auth")
+                        .font(.caption2)
+                }
+                .foregroundStyle(isChild ? .green : .orange)
+
+                if !isChild {
+                    if let reason = hb?.childAuthFailReason {
+                        Text(reason)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    } else {
+                        Text("Weaker — kid can revoke in Settings with device passcode")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
             }
-            .font(.caption2)
-            .foregroundStyle(isChild ? .green : .orange)
         }
     }
+
 
     // MARK: - Device Issue Panel
 
