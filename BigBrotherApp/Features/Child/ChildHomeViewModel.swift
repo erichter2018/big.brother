@@ -527,8 +527,44 @@ final class ChildHomeViewModel {
         }
 
         // Write permission status to App Group so tunnel blocks internet when permissions are wrong.
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set(!hasPermissionIssues, forKey: "allPermissionsGranted")
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let wasOK = defaults?.bool(forKey: "allPermissionsGranted") ?? true
+        let isOK = !hasPermissionIssues
+        defaults?.set(isOK, forKey: "allPermissionsGranted")
+
+        // Write per-permission snapshot for parent visibility via heartbeat
+        var permStatus: [String: Bool] = [:]
+        permStatus["familyControls"] = !needsReauthorization
+        permStatus["vpn"] = vpnConfigured
+        permStatus["location"] = cachedLocationAuthStatus == .authorizedAlways
+        if CMMotionActivityManager.isActivityAvailable() {
+            permStatus["motion"] = CMMotionActivityManager.authorizationStatus() == .authorized
+        }
+        permStatus["notifications"] = notificationsAuthorized
+        if let data = try? JSONEncoder().encode(permStatus) {
+            defaults?.set(String(data: data, encoding: .utf8), forKey: "permissionSnapshot")
+        }
+
+        // Log tamper event when permissions change from OK → not OK
+        if wasOK && !isOK {
+            let problems = permStatus.filter { !$0.value }.map(\.key).sorted()
+            let storage = AppGroupStorage()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .auth,
+                message: "TAMPER DETECTED: permissions revoked",
+                details: "Revoked: \(problems.joined(separator: ", "))"
+            ))
+            // Create CloudKit event for immediate parent alert
+            if let enrollment = try? KeychainManager().get(ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState) {
+                let entry = EventLogEntry(
+                    deviceID: enrollment.deviceID,
+                    familyID: enrollment.familyID,
+                    eventType: .authorizationLost,
+                    details: "TAMPER: \(problems.joined(separator: ", ")) revoked"
+                )
+                try? storage.appendEventLog(entry)
+            }
+        }
     }
 
     /// Tracks which timed unlock phase we last saw, to detect transitions.

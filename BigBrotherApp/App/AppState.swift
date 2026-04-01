@@ -910,10 +910,21 @@ final class AppState {
                 }
             }
 
-            // 4. Send heartbeat so parent sees updated state immediately
+            // 4. Ensure VPN is installed — kid may have removed it
+            if let vpn = vpnManager {
+                if !(await vpn.isConfigured()) {
+                    try? await vpn.installAndStart()
+                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .enforcement,
+                        message: "VPN was missing — reinstalled during foreground sync"
+                    ))
+                }
+            }
+
+            // 5. Send heartbeat so parent sees updated state immediately
             try? await heartbeatService?.sendNow(force: true)
 
-            // 5. Ping the VPN tunnel to clear any stale blackholes
+            // 6. Ping the VPN tunnel to clear any stale blackholes
             vpnManager?.sendPing()
 
             await MainActor.run {

@@ -945,6 +945,34 @@ final class ParentDashboardViewModel: CommandSendable {
 
     private var lastHeartbeatRefresh = Date()
     private var isRefreshing = false
+    private var lastPingedDevices: [DeviceID: Date] = [:]
+
+    /// Auto-ping child devices whose heartbeat is stale (>15 min).
+    /// Sends requestHeartbeat command which triggers a silent push → wakes app → health check.
+    /// Throttled to once per 15 min per device to avoid spam.
+    private func autoPingStaleDevices() async {
+        let staleThreshold: TimeInterval = 900 // 15 minutes
+        let pingCooldown: TimeInterval = 900   // Don't re-ping within 15 min
+
+        for child in childProfiles {
+            let devs = devices(for: child)
+            for dev in devs {
+                guard let hb = heartbeat(for: dev) else { continue }
+                let age = Date().timeIntervalSince(hb.timestamp)
+                guard age > staleThreshold else { continue }
+
+                // Don't ping if we pinged recently
+                if let lastPing = lastPingedDevices[dev.id],
+                   Date().timeIntervalSince(lastPing) < pingCooldown { continue }
+
+                lastPingedDevices[dev.id] = Date()
+                try? await appState.sendCommand(
+                    target: .device(dev.id),
+                    action: .requestHeartbeat
+                )
+            }
+        }
+    }
 
     func startCountdownTimer() {
         guard countdownTimer == nil else { return }
@@ -968,6 +996,11 @@ final class ParentDashboardViewModel: CommandSendable {
                     if !self.appState.childProfiles.isEmpty {
                         self.loadingState = .loaded(self.appState.childProfiles)
                     }
+                    // Auto-ping stale devices: if any child device hasn't sent a heartbeat
+                    // in 15+ minutes, send a requestHeartbeat command. This triggers a
+                    // silent push that wakes the app, which checks permissions, reinstalls
+                    // VPN if missing, and sends a fresh heartbeat.
+                    await self.autoPingStaleDevices()
                 }
 
                 // When penalty phase ends (transitioning to unlock), clear the Firebase timer.
