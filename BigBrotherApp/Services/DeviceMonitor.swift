@@ -148,33 +148,8 @@ final class DeviceMonitor {
                 }
             }
 
-            // --- Location Authorization Detection (iPhone only) ---
-            if let hb = heartbeat, device.modelIdentifier.hasPrefix("iPhone") {
-                let childProfileID = device.childProfileID
-                let locMode = UserDefaults.standard.string(forKey: "locationMode.\(childProfileID.rawValue)")
-                let isLocationExpected = locMode != nil && locMode != "off"
-                let isOnline = Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds
-                if isLocationExpected && isOnline {
-                    let locAuth = hb.locationAuthorization
-                    if locAuth == "denied" || locAuth == "restricted" {
-                        let name = childName(for: device)
-                        sendThrottledNotification(
-                            id: "loc-disabled-\(key)",
-                            title: "Location Disabled",
-                            body: "\(name)'s \(device.displayName) has location permission \(locAuth ?? "unknown"). Change to Always in Settings.",
-                            throttleHours: 24
-                        )
-                    } else if locAuth == "whenInUse" {
-                        let name = childName(for: device)
-                        sendThrottledNotification(
-                            id: "loc-downgraded-\(key)",
-                            title: "Location Not Set to Always",
-                            body: "\(name)'s \(device.displayName) has location set to While Using App. Background tracking won't work.",
-                            throttleHours: 24
-                        )
-                    }
-                }
-            }
+            // Location authorization is visible in device detail view.
+            // No notification — location denied is not tampering and not urgent.
 
             // --- Time Zone Change Detection ---
             if let hb = heartbeat, let tz = hb.timeZoneIdentifier {
@@ -224,20 +199,8 @@ final class DeviceMonitor {
                 )
             }
 
-            // --- Auth Type Degradation ---
-            // Throttled heavily (7 days) — this is informational, not urgent.
-            // Fires for all devices with OurPact installed (individual auth).
-            if let hb = heartbeat,
-               hb.familyControlsAuthType == "individual",
-               Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds {
-                let name = childName(for: device)
-                sendThrottledNotification(
-                    id: "auth-individual-\(key)",
-                    title: "\(name) — Weak Protection",
-                    body: "\(name)'s \(device.displayName) uses Individual auth (revocable with device passcode). Remove OurPact to upgrade to Family auth.",
-                    throttleHours: 168
-                )
-            }
+            // Auth type degradation (individual auth) is visible in device detail view.
+            // No notification — it's informational, not actionable from the parent's phone.
 
             // --- Device Offline Detection + Auto-Ping ---
             if let hb = heartbeat {

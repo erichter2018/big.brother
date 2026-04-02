@@ -545,22 +545,25 @@ final class ChildHomeViewModel {
             defaults?.set(String(data: data, encoding: .utf8), forKey: "permissionSnapshot")
         }
 
-        // Log tamper event when permissions change from OK → not OK
-        if wasOK && !isOK {
-            let problems = permStatus.filter { !$0.value }.map(\.key).sorted()
+        // Only log authorizationLost for FamilyControls — that's actual tampering.
+        // Location, motion, notifications, and VPN are informational, not tamper events.
+        let fcWasOK = defaults?.bool(forKey: "familyControlsWasAuthorized") ?? true
+        let fcIsOK = !needsReauthorization
+        defaults?.set(fcIsOK, forKey: "familyControlsWasAuthorized")
+
+        if fcWasOK && !fcIsOK {
             let storage = AppGroupStorage()
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .auth,
-                message: "TAMPER DETECTED: permissions revoked",
-                details: "Revoked: \(problems.joined(separator: ", "))"
+                message: "FamilyControls authorization revoked",
+                details: "Screen Time permissions disabled"
             ))
-            // Create CloudKit event for immediate parent alert
             if let enrollment = try? KeychainManager().get(ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState) {
                 let entry = EventLogEntry(
                     deviceID: enrollment.deviceID,
                     familyID: enrollment.familyID,
                     eventType: .authorizationLost,
-                    details: "TAMPER: \(problems.joined(separator: ", ")) revoked"
+                    details: "FamilyControls authorization revoked — shields disabled"
                 )
                 try? storage.appendEventLog(entry)
             }
