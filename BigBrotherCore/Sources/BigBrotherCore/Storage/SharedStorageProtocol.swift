@@ -338,6 +338,10 @@ extension SharedStorageProtocol {
             )
             try writePolicySnapshot(snap)
 
+            // Derive scheduleDrivenMode from the snapshot's control authority.
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(snap.effectivePolicy.effectiveAuthority == .schedule, forKey: "scheduleDrivenMode")
+
             // Update extension shared state so all processes see the change.
             let extState = ExtensionSharedState(
                 currentMode: snap.effectivePolicy.resolvedMode,

@@ -10,6 +10,15 @@ public struct EffectivePolicy: Codable, Sendable, Equatable {
     /// temp unlock > schedule > base policy.
     public let resolvedMode: LockMode
 
+    /// Who is currently driving this mode (schedule, parent, temp unlock, etc.).
+    /// nil for backward compatibility with old snapshots (treated as .schedule).
+    public let controlAuthority: ControlAuthority?
+
+    /// Convenience: returns .schedule for nil (old snapshots).
+    public var effectiveAuthority: ControlAuthority {
+        controlAuthority ?? .schedule
+    }
+
     /// Whether this effective state is from a temporary unlock.
     public let isTemporaryUnlock: Bool
 
@@ -23,6 +32,10 @@ public struct EffectivePolicy: Codable, Sendable, Equatable {
     /// Serialized app tokens that are explicitly allowed (exceptions to shielding).
     public let allowedAppTokensData: Data?
 
+    /// Device-level restrictions (app removal, explicit content, etc.).
+    /// Carried in the snapshot so enforcement doesn't need to read live state.
+    public let deviceRestrictions: DeviceRestrictions?
+
     /// Warnings about enforcement limitations.
     public let warnings: [CapabilityWarning]
 
@@ -34,19 +47,23 @@ public struct EffectivePolicy: Codable, Sendable, Equatable {
 
     public init(
         resolvedMode: LockMode,
+        controlAuthority: ControlAuthority? = nil,
         isTemporaryUnlock: Bool = false,
         temporaryUnlockExpiresAt: Date? = nil,
         shieldedCategoriesData: Data? = nil,
         allowedAppTokensData: Data? = nil,
+        deviceRestrictions: DeviceRestrictions? = nil,
         warnings: [CapabilityWarning] = [],
         policyVersion: Int64,
         resolvedAt: Date = Date()
     ) {
         self.resolvedMode = resolvedMode
+        self.controlAuthority = controlAuthority
         self.isTemporaryUnlock = isTemporaryUnlock
         self.temporaryUnlockExpiresAt = temporaryUnlockExpiresAt
         self.shieldedCategoriesData = shieldedCategoriesData
         self.allowedAppTokensData = allowedAppTokensData
+        self.deviceRestrictions = deviceRestrictions
         self.warnings = warnings
         self.policyVersion = policyVersion
         self.resolvedAt = resolvedAt

@@ -425,10 +425,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             let existingPolicy = existingSnapshot.effectivePolicy
             let correctedPolicy = EffectivePolicy(
                 resolvedMode: mode,
+                controlAuthority: .schedule,
                 isTemporaryUnlock: false,
                 temporaryUnlockExpiresAt: nil,
                 shieldedCategoriesData: existingPolicy.shieldedCategoriesData,
                 allowedAppTokensData: existingPolicy.allowedAppTokensData,
+                deviceRestrictions: existingPolicy.deviceRestrictions,
                 warnings: existingPolicy.warnings,
                 policyVersion: existingPolicy.policyVersion + 1
             )
@@ -480,12 +482,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // resolvedMode=.unlocked, causing the app to think shields should be down.
         if let existingSnapshot = storage.readPolicySnapshot() {
             let existingPolicy = existingSnapshot.effectivePolicy
+            let authority: ControlAuthority = AppConstants.isScheduleDriven() ? .schedule : (existingPolicy.controlAuthority ?? .schedule)
             let correctedPolicy = EffectivePolicy(
                 resolvedMode: mode,
+                controlAuthority: authority,
                 isTemporaryUnlock: false,
                 temporaryUnlockExpiresAt: nil,
                 shieldedCategoriesData: existingPolicy.shieldedCategoriesData,
                 allowedAppTokensData: existingPolicy.allowedAppTokensData,
+                deviceRestrictions: existingPolicy.deviceRestrictions,
                 warnings: existingPolicy.warnings,
                 policyVersion: existingPolicy.policyVersion + 1
             )
@@ -983,15 +988,17 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Write a corrected PolicySnapshot so the main app, tunnel, and heartbeat
     /// all agree on the current mode after a schedule transition.
-    private func writeCorrectedSnapshot(mode: LockMode, trigger: String) {
+    private func writeCorrectedSnapshot(mode: LockMode, trigger: String, controlAuthority: ControlAuthority = .schedule) {
         let existing = storage.readPolicySnapshot()
         let basePolicy = existing?.effectivePolicy
         let corrected = EffectivePolicy(
             resolvedMode: mode,
+            controlAuthority: controlAuthority,
             isTemporaryUnlock: false,
             temporaryUnlockExpiresAt: nil,
             shieldedCategoriesData: basePolicy?.shieldedCategoriesData,
             allowedAppTokensData: basePolicy?.allowedAppTokensData,
+            deviceRestrictions: basePolicy?.deviceRestrictions,
             warnings: basePolicy?.warnings ?? [],
             policyVersion: (basePolicy?.policyVersion ?? 0) + 1
         )

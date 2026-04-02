@@ -34,6 +34,10 @@ public struct ExtensionSharedState: Codable, Sendable, Equatable {
     /// The policy version this state was derived from.
     public let policyVersion: Int64
 
+    /// Who is currently driving enforcement (schedule, parent, temp unlock, etc.).
+    /// nil for backward compatibility with old state files (treated as .schedule).
+    public let controlAuthority: ControlAuthority?
+
     public init(
         currentMode: LockMode,
         isTemporaryUnlock: Bool = false,
@@ -42,7 +46,8 @@ public struct ExtensionSharedState: Codable, Sendable, Equatable {
         enforcementDegraded: Bool = false,
         shieldConfig: ShieldConfig = ShieldConfig(),
         writtenAt: Date = Date(),
-        policyVersion: Int64 = 0
+        policyVersion: Int64 = 0,
+        controlAuthority: ControlAuthority? = nil
     ) {
         self.currentMode = currentMode
         self.isTemporaryUnlock = isTemporaryUnlock
@@ -52,6 +57,7 @@ public struct ExtensionSharedState: Codable, Sendable, Equatable {
         self.shieldConfig = shieldConfig
         self.writtenAt = writtenAt
         self.policyVersion = policyVersion
+        self.controlAuthority = controlAuthority
     }
 
     /// Build from available backend state.
@@ -71,7 +77,8 @@ public struct ExtensionSharedState: Codable, Sendable, Equatable {
             enforcementDegraded: !authAvailable && (policy?.resolvedMode ?? .restricted) != .unlocked,
             shieldConfig: shieldConfig ?? ShieldConfig(),
             writtenAt: Date(),
-            policyVersion: policy?.policyVersion ?? 0
+            policyVersion: policy?.policyVersion ?? 0,
+            controlAuthority: policy?.controlAuthority
         )
     }
 }

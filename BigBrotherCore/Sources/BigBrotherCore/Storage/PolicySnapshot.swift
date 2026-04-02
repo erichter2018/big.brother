@@ -113,7 +113,9 @@ public struct PolicySnapshot: Sendable, Equatable {
             resolvedMode: effectivePolicy.resolvedMode,
             policyVersion: effectivePolicy.policyVersion,
             isTemporaryUnlock: effectivePolicy.isTemporaryUnlock,
-            authorizationState: authorizationHealth?.currentState
+            authorizationState: authorizationHealth?.currentState,
+            controlAuthority: effectivePolicy.controlAuthority,
+            deviceRestrictions: effectivePolicy.deviceRestrictions
         )
         self.childProfile = childProfile
         self.writerVersion = writerVersion
@@ -122,18 +124,28 @@ public struct PolicySnapshot: Sendable, Equatable {
     // MARK: - Fingerprint
 
     /// Compute a deterministic fingerprint of the meaningful policy state.
+    /// Includes controlAuthority and deviceRestrictions so materially different
+    /// policies (e.g., same mode but different authority) don't collide.
     public static func computeFingerprint(
         resolvedMode: LockMode,
         policyVersion: Int64,
         isTemporaryUnlock: Bool,
-        authorizationState: AuthorizationState?
+        authorizationState: AuthorizationState?,
+        controlAuthority: ControlAuthority? = nil,
+        deviceRestrictions: DeviceRestrictions? = nil
     ) -> String {
-        [
+        var parts = [
             resolvedMode.rawValue,
             "\(policyVersion)",
             "\(isTemporaryUnlock)",
-            authorizationState?.rawValue ?? "unknown"
-        ].joined(separator: ":")
+            authorizationState?.rawValue ?? "unknown",
+            controlAuthority?.rawValue ?? "schedule"
+        ]
+        // Include restriction booleans so restriction changes trigger new snapshots.
+        if let r = deviceRestrictions {
+            parts.append("\(r.denyAppRemoval):\(r.lockAccounts):\(r.requireAutomaticDateAndTime):\(r.denyWebWhenLocked)")
+        }
+        return parts.joined(separator: ":")
     }
 }
 
@@ -189,7 +201,9 @@ extension PolicySnapshot: Codable {
                 resolvedMode: effectivePolicy.resolvedMode,
                 policyVersion: effectivePolicy.policyVersion,
                 isTemporaryUnlock: effectivePolicy.isTemporaryUnlock,
-                authorizationState: nil
+                authorizationState: nil,
+                controlAuthority: effectivePolicy.controlAuthority,
+                deviceRestrictions: effectivePolicy.deviceRestrictions
             )
         }
     }

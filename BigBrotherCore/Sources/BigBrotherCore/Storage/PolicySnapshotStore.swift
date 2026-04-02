@@ -81,6 +81,11 @@ public final class PolicySnapshotStore: @unchecked Sendable {
         // Persist the new snapshot
         try storage.writePolicySnapshot(snapshot)
 
+        // Derive scheduleDrivenMode from the snapshot's control authority.
+        // This keeps the UserDefaults flag consistent without producers writing it directly.
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(snapshot.effectivePolicy.effectiveAuthority == .schedule, forKey: "scheduleDrivenMode")
+
         // Record transition
         if let current {
             let transition = SnapshotTransition.between(from: current, to: snapshot)

@@ -13,6 +13,8 @@ public enum ModeStackResolver {
     public struct Resolution {
         /// The mode the device should be in right now.
         public let mode: LockMode
+        /// Who is driving this mode.
+        public let controlAuthority: ControlAuthority
         /// Whether this is a temporary mode (will revert when it expires).
         public let isTemporary: Bool
         /// If temporary, when it expires.
@@ -38,6 +40,7 @@ public enum ModeStackResolver {
                 } else {
                     return Resolution(
                         mode: .unlocked,
+                        controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
                         isTemporary: true,
                         expiresAt: temp.expiresAt,
                         reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
@@ -64,6 +67,7 @@ public enum ModeStackResolver {
                 // Penalty phase — device MUST be locked regardless of previousMode.
                 return Resolution(
                     mode: .restricted,
+                    controlAuthority: .timedUnlock,
                     isTemporary: true,
                     expiresAt: timed.unlockAt,
                     reason: "Timed unlock penalty phase, unlocks at \(shortTime(timed.unlockAt))"
@@ -72,6 +76,7 @@ public enum ModeStackResolver {
                 // Unlock phase — device is free
                 return Resolution(
                     mode: .unlocked,
+                    controlAuthority: .timedUnlock,
                     isTemporary: true,
                     expiresAt: timed.lockAt,
                     reason: "Timed unlock free phase, locks at \(shortTime(timed.lockAt))"
@@ -95,6 +100,7 @@ public enum ModeStackResolver {
                 } else {
                     return Resolution(
                         mode: .restricted,
+                        controlAuthority: .lockUntil,
                         isTemporary: true,
                         expiresAt: expiresAt,
                         reason: "lockUntil active until \(shortTime(expiresAt)) (reverts to \(lockUntilMode))"
@@ -107,6 +113,7 @@ public enum ModeStackResolver {
                 defaults?.set(failsafeExpiry.timeIntervalSince1970, forKey: "lockUntilExpiresAt")
                 return Resolution(
                     mode: .restricted,
+                    controlAuthority: .lockUntil,
                     isTemporary: true,
                     expiresAt: failsafeExpiry,
                     reason: "lockUntil active (reverts to \(lockUntilMode)), 24h failsafe applied"
@@ -121,6 +128,7 @@ public enum ModeStackResolver {
             let mode = profile.resolvedMode(at: now)
             return Resolution(
                 mode: mode,
+                controlAuthority: .schedule,
                 isTemporary: false,
                 expiresAt: nil,
                 reason: "Schedule: \(profile.name) → \(mode.rawValue)"
@@ -130,8 +138,10 @@ public enum ModeStackResolver {
         // 5. Explicit parent mode (non-schedule)
         if let snapshot = storage.readPolicySnapshot() {
             let mode = snapshot.effectivePolicy.resolvedMode
+            let authority = snapshot.effectivePolicy.controlAuthority ?? .parentManual
             return Resolution(
                 mode: mode,
+                controlAuthority: authority,
                 isTemporary: false,
                 expiresAt: nil,
                 reason: "Policy snapshot: \(mode.rawValue)"
@@ -141,6 +151,7 @@ public enum ModeStackResolver {
         // 6. No state at all — safe default
         return Resolution(
             mode: .restricted,
+            controlAuthority: .failSafe,
             isTemporary: false,
             expiresAt: nil,
             reason: "No state — defaulting to restricted"

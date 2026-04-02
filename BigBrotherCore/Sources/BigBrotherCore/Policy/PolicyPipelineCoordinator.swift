@@ -29,6 +29,8 @@ public struct PolicyPipelineCoordinator {
         public let deviceID: DeviceID?
         public let source: SnapshotSource
         public let trigger: String?
+        public let controlAuthority: ControlAuthority?
+        public let deviceRestrictions: DeviceRestrictions?
 
         public init(
             basePolicy: Policy,
@@ -42,7 +44,9 @@ public struct PolicyPipelineCoordinator {
             childProfile: ChildProfile? = nil,
             deviceID: DeviceID? = nil,
             source: SnapshotSource,
-            trigger: String? = nil
+            trigger: String? = nil,
+            controlAuthority: ControlAuthority? = nil,
+            deviceRestrictions: DeviceRestrictions? = nil
         ) {
             self.basePolicy = basePolicy
             self.schedule = schedule
@@ -56,6 +60,8 @@ public struct PolicyPipelineCoordinator {
             self.deviceID = deviceID
             self.source = source
             self.trigger = trigger
+            self.controlAuthority = controlAuthority
+            self.deviceRestrictions = deviceRestrictions
         }
     }
 
@@ -92,7 +98,9 @@ public struct PolicyPipelineCoordinator {
             currentTime: inputs.currentTime,
             alwaysAllowedTokensData: inputs.alwaysAllowedTokensData,
             alwaysAllowedCategories: inputs.alwaysAllowedCategories,
-            capabilities: inputs.capabilities
+            capabilities: inputs.capabilities,
+            controlAuthority: inputs.controlAuthority,
+            deviceRestrictions: inputs.deviceRestrictions
         )
 
         // 2. Compute generation

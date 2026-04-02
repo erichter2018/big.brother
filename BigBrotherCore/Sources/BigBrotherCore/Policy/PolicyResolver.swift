@@ -32,7 +32,9 @@ public struct PolicyResolver {
         currentTime: Date = Date(),
         alwaysAllowedTokensData: Data?,
         alwaysAllowedCategories: Set<String>,
-        capabilities: DeviceCapabilities
+        capabilities: DeviceCapabilities,
+        controlAuthority: ControlAuthority? = nil,
+        deviceRestrictions: DeviceRestrictions? = nil
     ) -> EffectivePolicy {
 
         var warnings: [CapabilityWarning] = []
@@ -101,10 +103,12 @@ public struct PolicyResolver {
 
         return EffectivePolicy(
             resolvedMode: resolvedMode,
+            controlAuthority: controlAuthority,
             isTemporaryUnlock: isTemporaryUnlock,
             temporaryUnlockExpiresAt: temporaryUnlockExpiresAt,
             shieldedCategoriesData: shieldedCategoriesData,
             allowedAppTokensData: allowedAppTokensData,
+            deviceRestrictions: deviceRestrictions,
             warnings: warnings,
             policyVersion: basePolicy.version,
             resolvedAt: currentTime

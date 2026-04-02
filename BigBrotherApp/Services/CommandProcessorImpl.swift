@@ -376,9 +376,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 try? storage.clearTimedUnlockInfo()
                 clearLockUntilState()
                 cancelNonScheduleActivities()
-                // Disable schedule BEFORE applying mode so enforcement.apply()
-                // doesn't consult the live schedule and override the parent command.
-                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(false, forKey: "scheduleDrivenMode")
+                // scheduleDrivenMode is now derived from controlAuthority in the snapshot commit.
                 try applyMode(mode, enrollment: enrollment, commandID: command.id)
                 eventLogger.log(.commandApplied, details: "Mode set to \(mode.rawValue)")
                 ModeChangeNotifier.notify(newMode: mode)
@@ -494,7 +492,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .returnToSchedule:
                 try applyReturnToSchedule(enrollment: enrollment, commandID: command.id)
-                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(true, forKey: "scheduleDrivenMode")
+                // scheduleDrivenMode is now derived from controlAuthority in the snapshot commit.
                 eventLogger.log(.commandApplied, details: "Returned to schedule-driven mode")
                 // Trigger immediate schedule sync from CloudKit — the child may have
                 // a stale schedule. After sync completes, re-apply enforcement.
@@ -504,7 +502,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return .applied
 
             case .lockUntil(let date):
-                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(false, forKey: "scheduleDrivenMode")
+                // scheduleDrivenMode is now derived from controlAuthority in the snapshot commit.
                 try applyLockUntil(date: date, enrollment: enrollment, commandID: command.id)
                 let formatter = DateFormatter()
                 formatter.dateFormat = "h:mm a"
@@ -733,7 +731,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     }
 
     /// Apply a mode change through the canonical snapshot pipeline.
-    private func applyMode(_ mode: LockMode, enrollment: ChildEnrollmentState, commandID: UUID) throws {
+    private func applyMode(_ mode: LockMode, enrollment: ChildEnrollmentState, commandID: UUID, controlAuthority: ControlAuthority = .parentManual) throws {
         // If permissions are missing, force essential mode regardless of requested mode.
         let effectiveMode: LockMode
         if hasPermissionDeficiency() && mode != .locked {
@@ -771,7 +769,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             authorizationHealth: storage.readAuthorizationHealth(),
             deviceID: enrollment.deviceID,
             source: .commandApplied,
-            trigger: "setMode(\(effectiveMode.rawValue)) command \(commandID)"
+            trigger: "setMode(\(effectiveMode.rawValue)) command \(commandID)",
+            controlAuthority: controlAuthority,
+            deviceRestrictions: storage.readDeviceRestrictions()
         )
 
         let output = PolicyPipelineCoordinator.generateSnapshot(
@@ -875,7 +875,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             authorizationHealth: storage.readAuthorizationHealth(),
             deviceID: enrollment.deviceID,
             source: .temporaryUnlockStarted,
-            trigger: "temporaryUnlock(\(durationSeconds)s) command \(commandID)"
+            trigger: "temporaryUnlock(\(durationSeconds)s) command \(commandID)",
+            controlAuthority: .temporaryUnlock,
+            deviceRestrictions: storage.readDeviceRestrictions()
         )
 
         let output = PolicyPipelineCoordinator.generateSnapshot(
@@ -1002,7 +1004,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             authorizationHealth: storage.readAuthorizationHealth(),
             deviceID: enrollment.deviceID,
             source: .temporaryUnlockStarted,
-            trigger: "selfUnlock(\(durationSeconds)s)"
+            trigger: "selfUnlock(\(durationSeconds)s)",
+            controlAuthority: .selfUnlock,
+            deviceRestrictions: storage.readDeviceRestrictions()
         )
 
         let output = PolicyPipelineCoordinator.generateSnapshot(
@@ -1115,7 +1119,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             // NOTE: applyMode() clears timedUnlockInfo, so we must re-write it after.
             let currentMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
             let lockedMode = currentMode == .unlocked ? .restricted : currentMode
-            try applyMode(lockedMode, enrollment: enrollment, commandID: commandID)
+            try applyMode(lockedMode, enrollment: enrollment, commandID: commandID, controlAuthority: .timedUnlock)
             // Re-write timed unlock info because applyMode() clears it.
             try storage.writeTimedUnlockInfo(info)
 
@@ -1154,7 +1158,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             mode = .restricted
         }
 
-        try applyMode(mode, enrollment: enrollment, commandID: commandID)
+        try applyMode(mode, enrollment: enrollment, commandID: commandID, controlAuthority: .schedule)
         ModeChangeNotifier.notify(newMode: mode)
     }
 
@@ -1204,7 +1208,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         lockDefaults?.set(date.timeIntervalSince1970, forKey: "lockUntilExpiresAt")
 
         // Apply lock immediately.
-        try applyMode(.restricted, enrollment: enrollment, commandID: commandID)
+        try applyMode(.restricted, enrollment: enrollment, commandID: commandID, controlAuthority: .lockUntil)
 
         // Schedule BGTask safety net (in case Monitor misses the callback).
         AppDelegate.scheduleRelockTask(at: date)
