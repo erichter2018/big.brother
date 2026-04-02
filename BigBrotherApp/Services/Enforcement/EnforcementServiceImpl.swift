@@ -27,6 +27,10 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     private let storage: any SharedStorageProtocol
     private let fcManager: any FamilyControlsManagerProtocol
 
+    /// Throttle nuclear resets to prevent infinite clear/re-apply loops.
+    private var nuclearResetCount = 0
+    private var nuclearResetWindowStart = Date()
+
     init(
         storage: any SharedStorageProtocol = AppGroupStorage(),
         fcManager: any FamilyControlsManagerProtocol
@@ -81,7 +85,15 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             message: shieldMessage(for: policy),
             showRequestButton: policy.resolvedMode != .unlocked
         )
-        try? storage.writeShieldConfiguration(config)
+        do {
+            try storage.writeShieldConfiguration(config)
+        } catch {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Failed to write shield config: \(error.localizedDescription)",
+                details: "source=app"
+            ))
+        }
 
         // Verify enforcement took effect — read back the store state.
         // Checks both shield presence AND mode-specific details (exemptions, web blocking).
@@ -111,6 +123,22 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 message: "Enforcement verification FAILED — attempting reset",
                 details: "Expected shields \(expectedShielded ? "UP" : "DOWN") but got \(diag.shieldsActive ? "UP" : "DOWN") (mode: \(policy.resolvedMode.rawValue))"
             ))
+
+            // Throttle nuclear resets to prevent infinite clear/re-apply loops.
+            let now = Date()
+            if now.timeIntervalSince(nuclearResetWindowStart) > 3600 {
+                nuclearResetCount = 0
+                nuclearResetWindowStart = now
+            }
+            nuclearResetCount += 1
+            if nuclearResetCount > 3 {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "THROTTLED: Nuclear reset exceeded 3x in 1 hour. Skipping to prevent loop.",
+                    details: "source=app"
+                ))
+                return
+            }
 
             // Nuclear option: clear everything, recreate stores, re-apply
             clearAllShieldStores()
@@ -174,17 +202,29 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             if tokensToBlock.count <= Self.maxShieldApplications {
                 perAppTokens = tokensToBlock
             } else {
-                // Sort by hash for deterministic selection across reconciliation cycles.
-                let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
-                perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
+                perAppTokens = Set(tokensToBlock.prefix(Self.maxShieldApplications))
             }
             // Add exhausted tokens to shield.applications for "Request More Time".
             // Re-enforce the 50-token cap after union — exceeding it causes Apple to
             // silently fail, dropping ALL shields.
+            // Priority: exhausted tokens (time-limited apps that MUST be shielded) always
+            // kept; picker tokens fill remaining slots. hashValue sort was non-deterministic
+            // across process restarts and could drop exhausted tokens entirely.
             perAppTokens.formUnion(exhaustedTokens)
             if perAppTokens.count > Self.maxShieldApplications {
-                let sorted = perAppTokens.sorted { $0.hashValue < $1.hashValue }
-                perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
+                let exhaustedCount = min(exhaustedTokens.count, Self.maxShieldApplications)
+                let remainingSlots = Self.maxShieldApplications - exhaustedCount
+                let pickerOnly = perAppTokens.subtracting(exhaustedTokens)
+                let keptPicker = Set(pickerOnly.prefix(remainingSlots))
+                perAppTokens = Set(exhaustedTokens.prefix(exhaustedCount)).union(keptPicker)
+                let dropped = pickerOnly.count + exhaustedTokens.count - perAppTokens.count
+                if dropped > 0 {
+                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .enforcement,
+                        message: "Token cap: \(dropped) apps dropped from shield.applications (50 limit). \(exhaustedTokens.count) exhausted kept.",
+                        details: "source=app"
+                    ))
+                }
             }
             baseStore.shield.applications = perAppTokens
             baseStore.shield.applicationCategories = .all(except: allowedTokens)
@@ -201,9 +241,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 explicitApps = (explicitApps ?? Set()).union(exhaustedTokens)
             }
             // Enforce 50-token cap — exceeding it silently drops ALL shields.
+            // Priority: exhausted tokens always kept, picker tokens fill remaining slots.
             if let apps = explicitApps, apps.count > Self.maxShieldApplications {
-                let sorted = apps.sorted { $0.hashValue < $1.hashValue }
-                explicitApps = Set(sorted.prefix(Self.maxShieldApplications))
+                let exhaustedCount = min(exhaustedTokens.count, Self.maxShieldApplications)
+                let remainingSlots = Self.maxShieldApplications - exhaustedCount
+                let nonExhausted = apps.subtracting(exhaustedTokens)
+                let keptNonExhausted = Set(nonExhausted.prefix(remainingSlots))
+                explicitApps = Set(exhaustedTokens.prefix(exhaustedCount)).union(keptNonExhausted)
             }
             baseStore.shield.applications = explicitApps
             if allowedTokens.isEmpty {
@@ -257,7 +301,15 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             blocked.formUnion(DomainCategorizer.webGamingDomains)
         }
 
-        try? storage.writeEnforcementBlockedDomains(blocked)
+        do {
+            try storage.writeEnforcementBlockedDomains(blocked)
+        } catch {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Failed to write enforcement blocked domains: \(error.localizedDescription)",
+                details: "source=app"
+            ))
+        }
 
         #if DEBUG
         print("[BigBrother] Enforcement DNS blocking: \(blocked.count) domains blocked (\(shieldedNames.count) shielded apps)\(restrictions.denyWebGamesWhenRestricted ? " +gaming" : "")")
@@ -294,11 +346,20 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
     /// Load app tokens from the saved FamilyActivitySelection.
     private func loadPickerTokens() -> Set<ApplicationToken> {
-        guard let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
-              let selection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: data) else {
+        guard let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection) else {
             return []
         }
-        return selection.applicationTokens
+        do {
+            let selection = try JSONDecoder().decode(FamilyActivitySelection.self, from: data)
+            return selection.applicationTokens
+        } catch {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Failed to decode FamilyActivitySelection (\(data.count) bytes): \(error.localizedDescription)",
+                details: "source=app"
+            ))
+            return []
+        }
     }
 
     /// Clear shield properties on ALL named stores.
@@ -319,8 +380,24 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
         // Clear BOTH DNS blocklists — enforcement AND time-limit.
         // Both must be cleared on unlock; the tunnel reads them with OR logic.
-        try? storage.writeEnforcementBlockedDomains([])
-        try? storage.writeTimeLimitBlockedDomains([])
+        do {
+            try storage.writeEnforcementBlockedDomains([])
+        } catch {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Failed to clear enforcement blocked domains: \(error.localizedDescription)",
+                details: "source=app"
+            ))
+        }
+        do {
+            try storage.writeTimeLimitBlockedDomains([])
+        } catch {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Failed to clear time-limit blocked domains: \(error.localizedDescription)",
+                details: "source=app"
+            ))
+        }
     }
 
     /// Collect tokens for apps that should NOT be shielded (parent-approved).

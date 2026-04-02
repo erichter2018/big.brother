@@ -59,66 +59,78 @@ public final class PolicySnapshotStore: @unchecked Sendable {
     /// - If fingerprints match and source doesn't force commit, returns `.unchanged`.
     /// - Records a SnapshotTransition on successful commit.
     ///
-    /// Thread-safe via internal lock.
+    /// Thread-safe via cross-process file lock (SnapshotFileLock).
     public func commit(_ snapshot: PolicySnapshot) throws -> SnapshotCommitResult {
-        lock.lock()
-        defer { lock.unlock() }
+        try SnapshotFileLock.withLock {
+            let current = storage.readPolicySnapshot()
 
-        let current = storage.readPolicySnapshot()
-
-        // Staleness check: generation must increase
-        if let current, snapshot.generation <= current.generation {
-            return .rejectedAsStale(currentGeneration: current.generation)
-        }
-
-        // No-op detection: skip if fingerprint matches and source is routine
-        if let current, current.policyFingerprint == snapshot.policyFingerprint {
-            if !Self.alwaysCommitSources.contains(snapshot.source) {
-                return .unchanged
+            // Staleness check: generation must increase
+            if let current, snapshot.generation <= current.generation {
+                return .rejectedAsStale(currentGeneration: current.generation)
             }
+
+            // No-op detection: skip if fingerprint matches and source is routine
+            if let current, current.policyFingerprint == snapshot.policyFingerprint {
+                if !Self.alwaysCommitSources.contains(snapshot.source) {
+                    return .unchanged
+                }
+            }
+
+            // Persist the new snapshot
+            try storage.writePolicySnapshot(snapshot)
+
+            // Derive scheduleDrivenMode from the snapshot's control authority.
+            // This keeps the UserDefaults flag consistent without producers writing it directly.
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(snapshot.effectivePolicy.effectiveAuthority == .schedule, forKey: "scheduleDrivenMode")
+
+            // Record transition
+            if let current {
+                let transition = SnapshotTransition.between(from: current, to: snapshot)
+                try? appendTransition(transition)
+            }
+
+            // Update extension shared state — but don't overwrite if the Monitor extension
+            // wrote a newer version (e.g., schedule transition applied after this snapshot).
+            // Use policyVersion instead of timestamps to avoid clock-skew races.
+            let existingExt = storage.readExtensionSharedState()
+            let monitorOwnsState: Bool
+            if let ext = existingExt {
+                monitorOwnsState = ext.policyVersion > snapshot.effectivePolicy.policyVersion
+            } else {
+                monitorOwnsState = false
+            }
+            // Version downgrade detection: warn if we're writing over a higher policyVersion.
+            // This can happen if Monitor or Tunnel committed a newer version between reads.
+            // Don't block the write (generation already increased), but make it visible.
+            if let current, current.effectivePolicy.policyVersion > snapshot.effectivePolicy.policyVersion {
+                #if DEBUG
+                print("[BigBrother] ⚠️ PolicySnapshotStore.commit: policyVersion downgrade \(current.effectivePolicy.policyVersion) → \(snapshot.effectivePolicy.policyVersion)")
+                #endif
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Snapshot policyVersion downgrade: \(current.effectivePolicy.policyVersion) → \(snapshot.effectivePolicy.policyVersion)"
+                ))
+            }
+
+            if !monitorOwnsState {
+                let extState = ExtensionSharedState(
+                    currentMode: snapshot.effectivePolicy.resolvedMode,
+                    isTemporaryUnlock: snapshot.effectivePolicy.isTemporaryUnlock,
+                    temporaryUnlockExpiresAt: snapshot.effectivePolicy.temporaryUnlockExpiresAt,
+                    authorizationAvailable: snapshot.authorizationHealth?.isAuthorized ?? true,
+                    enforcementDegraded: snapshot.authorizationHealth?.enforcementDegraded ?? false,
+                    shieldConfig: shieldConfig(for: snapshot),
+                    policyVersion: snapshot.effectivePolicy.policyVersion
+                )
+                try? storage.writeExtensionSharedState(extState)
+            }
+
+            // Update shield config
+            try? storage.writeShieldConfiguration(shieldConfig(for: snapshot))
+
+            return .committed(snapshot)
         }
-
-        // Persist the new snapshot
-        try storage.writePolicySnapshot(snapshot)
-
-        // Derive scheduleDrivenMode from the snapshot's control authority.
-        // This keeps the UserDefaults flag consistent without producers writing it directly.
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set(snapshot.effectivePolicy.effectiveAuthority == .schedule, forKey: "scheduleDrivenMode")
-
-        // Record transition
-        if let current {
-            let transition = SnapshotTransition.between(from: current, to: snapshot)
-            try? appendTransition(transition)
-        }
-
-        // Update extension shared state — but don't overwrite if the Monitor extension
-        // wrote a newer version (e.g., schedule transition applied after this snapshot).
-        // Use policyVersion instead of timestamps to avoid clock-skew races.
-        let existingExt = storage.readExtensionSharedState()
-        let monitorOwnsState: Bool
-        if let ext = existingExt {
-            monitorOwnsState = ext.policyVersion > snapshot.effectivePolicy.policyVersion
-        } else {
-            monitorOwnsState = false
-        }
-        if !monitorOwnsState {
-            let extState = ExtensionSharedState(
-                currentMode: snapshot.effectivePolicy.resolvedMode,
-                isTemporaryUnlock: snapshot.effectivePolicy.isTemporaryUnlock,
-                temporaryUnlockExpiresAt: snapshot.effectivePolicy.temporaryUnlockExpiresAt,
-                authorizationAvailable: snapshot.authorizationHealth?.isAuthorized ?? true,
-                enforcementDegraded: snapshot.authorizationHealth?.enforcementDegraded ?? false,
-                shieldConfig: shieldConfig(for: snapshot),
-                policyVersion: snapshot.effectivePolicy.policyVersion
-            )
-            try? storage.writeExtensionSharedState(extState)
-        }
-
-        // Update shield config
-        try? storage.writeShieldConfiguration(shieldConfig(for: snapshot))
-
-        return .committed(snapshot)
     }
 
     /// Generate the next generation number based on the current state.

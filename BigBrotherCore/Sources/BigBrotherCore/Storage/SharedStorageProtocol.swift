@@ -16,6 +16,10 @@ public enum StorageError: Error, Equatable {
 
     /// The App Group container URL could not be resolved.
     case containerUnavailable
+
+    /// POSIX flock() failed — another process may hold the lock or the system is under pressure.
+    /// Running the body without the lock would risk cross-process data corruption.
+    case fileLockFailed(lockName: String, errno: Int32)
 }
 
 /// Protocol for App Group shared storage.
@@ -278,7 +282,10 @@ public protocol SharedStorageProtocol: Sendable {
 /// File-based lock for cross-process snapshot commit coordination.
 /// NSLock only works within a single process; this uses POSIX flock()
 /// to coordinate between main app, Monitor, and Tunnel.
-private enum SnapshotFileLock {
+///
+/// - If `open()` fails: runs body without lock (lock file may not exist yet).
+/// - If `flock()` fails: throws an error to avoid silent race conditions.
+enum SnapshotFileLock {
     private static let lockFileName = "snapshot_commit.lock"
 
     static func withLock<T>(in groupID: String = AppConstants.appGroupIdentifier, body: () throws -> T) throws -> T {
@@ -291,10 +298,18 @@ private enum SnapshotFileLock {
             FileManager.default.createFile(atPath: lockURL.path, contents: nil)
         }
         let fd = open(lockURL.path, O_RDWR | O_CREAT, 0o666)
-        guard fd >= 0 else { return try body() }
+        guard fd >= 0 else {
+            // Lock file can't be opened — may be first boot.
+            #if DEBUG
+            print("[BigBrother] SnapshotFileLock: open() failed, errno=\(errno) — running unprotected")
+            #endif
+            return try body()
+        }
         defer { close(fd) }
-        // Blocking exclusive lock
-        guard flock(fd, LOCK_EX) == 0 else { return try body() }
+        // Blocking exclusive lock — do NOT fall through on failure
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw StorageError.fileLockFailed(lockName: lockFileName, errno: errno)
+        }
         defer { flock(fd, LOCK_UN) }
         return try body()
     }
@@ -312,12 +327,36 @@ extension SharedStorageProtocol {
     @discardableResult
     public func commitCorrectedSnapshot(_ snapshot: PolicySnapshot) throws -> PolicySnapshot {
         try SnapshotFileLock.withLock {
+            let current = readPolicySnapshot()
+
             // Ensure generation is higher than current to prevent staleness rejection.
             let nextGen: Int64
-            if let current = readPolicySnapshot(), snapshot.generation <= current.generation {
+            if let current, snapshot.generation <= current.generation {
                 nextGen = current.generation + 1
             } else {
                 nextGen = snapshot.generation
+            }
+
+            // Preserve authority: if the incoming snapshot has nil controlAuthority
+            // (callers like Monitor/HeartbeatService that build EffectivePolicy manually),
+            // carry forward the existing snapshot's authority so we don't lose it.
+            let finalPolicy: EffectivePolicy
+            if snapshot.effectivePolicy.controlAuthority == nil,
+               let existingAuthority = current?.effectivePolicy.controlAuthority {
+                finalPolicy = EffectivePolicy(
+                    resolvedMode: snapshot.effectivePolicy.resolvedMode,
+                    controlAuthority: existingAuthority,
+                    isTemporaryUnlock: snapshot.effectivePolicy.isTemporaryUnlock,
+                    temporaryUnlockExpiresAt: snapshot.effectivePolicy.temporaryUnlockExpiresAt,
+                    shieldedCategoriesData: snapshot.effectivePolicy.shieldedCategoriesData,
+                    allowedAppTokensData: snapshot.effectivePolicy.allowedAppTokensData,
+                    deviceRestrictions: snapshot.effectivePolicy.deviceRestrictions,
+                    warnings: snapshot.effectivePolicy.warnings,
+                    policyVersion: snapshot.effectivePolicy.policyVersion,
+                    resolvedAt: snapshot.effectivePolicy.resolvedAt
+                )
+            } else {
+                finalPolicy = snapshot.effectivePolicy
             }
 
             let snap = PolicySnapshot(
@@ -330,7 +369,7 @@ extension SharedStorageProtocol {
                 deviceID: snapshot.deviceID,
                 intendedMode: snapshot.intendedMode,
                 activeScheduleID: snapshot.activeScheduleID,
-                effectivePolicy: snapshot.effectivePolicy,
+                effectivePolicy: finalPolicy,
                 temporaryUnlockState: snapshot.temporaryUnlockState,
                 authorizationHealth: snapshot.authorizationHealth,
                 policyFingerprint: snapshot.policyFingerprint,

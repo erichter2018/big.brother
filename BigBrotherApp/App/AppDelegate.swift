@@ -283,6 +283,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - BGTaskScheduler
 
     private func registerBackgroundTasks() {
+        // BGTaskScheduler.register() returns Void but can fail silently if
+        // the identifier is not declared in Info.plist or if called too late.
+        // We wrap in a do/catch and verify by attempting an immediate submit.
+
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: AppConstants.bgTaskHeartbeat,
             using: nil
@@ -297,6 +301,33 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         ) { [weak self] task in
             guard let bgTask = task as? BGProcessingTask else { return }
             self?.handleRelockTask(bgTask)
+        }
+
+        // Verify registration succeeded by scheduling — submit() throws if
+        // the identifier was never registered (e.g., missing from Info.plist).
+        verifyBGTaskRegistration()
+    }
+
+    /// Attempt a test submit to confirm BGTask identifiers are properly registered.
+    /// Logs a diagnostic on failure so we can catch Info.plist mismatches early.
+    private func verifyBGTaskRegistration() {
+        let testRequest = BGAppRefreshTaskRequest(identifier: AppConstants.bgTaskHeartbeat)
+        testRequest.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
+        do {
+            try BGTaskScheduler.shared.submit(testRequest)
+            #if DEBUG
+            print("[BGTask] Heartbeat task registered and scheduled successfully")
+            #endif
+        } catch {
+            let storage = AppGroupStorage()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "BGTask heartbeat registration/submit FAILED",
+                details: "\(error.localizedDescription) — check Info.plist BGTaskSchedulerPermittedIdentifiers"
+            ))
+            #if DEBUG
+            print("[BGTask] WARNING: Heartbeat task submit failed: \(error.localizedDescription)")
+            #endif
         }
     }
 

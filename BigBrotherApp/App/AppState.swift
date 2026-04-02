@@ -2073,7 +2073,12 @@ final class AppState {
     /// Free time window ended — re-lock the device.
     func applyTimedUnlockEnd() {
         // Read previous mode BEFORE clearing state.
-        let previousMode = storage.readTemporaryUnlockState()?.previousMode ?? .restricted
+        // Prefer TimedUnlockInfo.previousMode (set when the timed unlock was created)
+        // over TemporaryUnlockState.previousMode (which may be stale if a schedule
+        // transition overwrote it while the free phase was active).
+        let timedPreviousMode = storage.readTimedUnlockInfo()?.previousMode
+        let tempPreviousMode = storage.readTemporaryUnlockState()?.previousMode
+        let previousMode = timedPreviousMode ?? tempPreviousMode ?? .restricted
         try? storage.clearTimedUnlockInfo()
         try? storage.clearTemporaryUnlockState()
         guard enforcement != nil else { return }

@@ -166,8 +166,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             print("[BigBrother] Skipping \(expiredCount) expired commands")
             #endif
             for cmd in unprocessed where cmd.expiresAt != nil && cmd.expiresAt! < now {
-                try? storage.markCommandProcessed(cmd.id)
+                // Always send explicit .expired status to CloudKit so parent dashboard shows it.
                 try? await cloudKit.updateCommandStatus(cmd.id, status: .expired)
+                do {
+                    try storage.markCommandProcessed(cmd.id)
+                } catch {
+                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .command,
+                        message: "Failed to mark expired command \(cmd.id) as processed: \(error.localizedDescription)"
+                    ))
+                }
+                eventLogger.log(.commandFailed, details: "Command \(cmd.id) expired before processing (issued: \(cmd.issuedAt), expired: \(cmd.expiresAt!))")
             }
         }
 
@@ -261,7 +270,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 }
             }
 
-            try? storage.markCommandProcessed(command.id)
+            do {
+                try storage.markCommandProcessed(command.id)
+            } catch {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "Failed to mark command \(command.id) as processed: \(error.localizedDescription)"
+                ))
+            }
 
             // Log diagnostic.
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -278,7 +294,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             #if DEBUG
             print("[BigBrother] Superseded mode command: \(cmd.action.displayDescription) (id=\(cmd.id))")
             #endif
-            try? storage.markCommandProcessed(cmd.id)
+            do {
+                try storage.markCommandProcessed(cmd.id)
+            } catch {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "Failed to mark superseded command \(cmd.id) as processed: \(error.localizedDescription)"
+                ))
+            }
             try? await cloudKit.updateCommandStatus(cmd.id, status: .expired)
         }
 
@@ -327,9 +350,11 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         _ command: RemoteCommand,
         enrollment: ChildEnrollmentState
     ) async -> CommandProcessingResult {
-        // Check expiration.
+        // Check expiration. Send explicit .expired status to CloudKit so the parent
+        // dashboard reflects it (ignoredExpired normally skips receipt posting).
         if let expiresAt = command.expiresAt, expiresAt < Date() {
-            eventLogger.log(.commandFailed, details: "Command \(command.id) expired")
+            try? await cloudKit.updateCommandStatus(command.id, status: .expired)
+            eventLogger.log(.commandFailed, details: "Command \(command.id) expired before processing (issued: \(command.issuedAt), expired: \(expiresAt))")
             return .ignoredExpired
         }
 
@@ -362,8 +387,16 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     try? await cloudKit.updateCommandStatus(command.id, status: .failed)
                     return .rejectedSignature
                 }
+            } else {
+                // Device is enrolled but has no trusted keys — Keychain may have been wiped
+                // or keys were never provisioned. Reject to prevent unsigned command injection.
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "SECURITY: Rejecting command \(command.id) — enrolled but no trusted public keys in Keychain"
+                ))
+                eventLogger.log(.commandFailed, details: "Rejected command \(command.id): enrolled device has no trusted signing keys")
+                return .rejectedSignature
             }
-            // If no public keys stored (pre-signing enrollment), accept with warning
         }
 
         do {
@@ -372,7 +405,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 // Indefinite mode command: clears the entire stack.
                 // Last parent command always wins — if parent says Lock,
                 // any active temp unlock, timed unlock, or schedule is overridden.
-                try? storage.clearTemporaryUnlockState()
+                do {
+                    try storage.clearTemporaryUnlockState()
+                } catch {
+                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .command,
+                        message: "Failed to clear temporary unlock state during setMode: \(error.localizedDescription)"
+                    ))
+                }
                 try? storage.clearTimedUnlockInfo()
                 clearLockUntilState()
                 cancelNonScheduleActivities()
@@ -419,7 +459,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .unenroll:
                 eventLogger.log(.enrollmentRevoked, details: "Remote unenroll command")
-                try? enforcement?.clearAllRestrictions()
+                do {
+                    try enforcement?.clearAllRestrictions()
+                } catch {
+                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .enforcement,
+                        message: "Failed to clear restrictions during unenroll: \(error.localizedDescription)"
+                    ))
+                }
                 // Clear enrollment state and reset to unconfigured.
                 DispatchQueue.main.async { [weak self] in
                     self?.onUnenroll?()
@@ -1074,10 +1121,15 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: unlockDuration)
         } else if adjustedPenalty >= adjustedTotal {
             // Penalty exceeds or equals total window — no free time at all.
-            // Device stays locked. Penalty timer (Firebase) ticks independently
-            // and will decrease by adjustedTotal over the window duration.
-            // No schedule needed — the device is already locked.
-            eventLogger.log(.commandApplied, details: "Timed unlock: penalty \(ModeChangeNotifier.formatDuration(adjustedPenalty)) >= total \(ModeChangeNotifier.formatDuration(adjustedTotal)), no free time — penalty consumed")
+            // Device must be actively locked for the entire duration.
+            // Penalty timer (Firebase) ticks independently and will decrease
+            // by adjustedTotal over the window duration.
+            // Actively enforce locked mode in case the device is in an ambiguous
+            // state (e.g., temp unlock was active before this command).
+            let currentMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
+            let lockedMode: LockMode = currentMode == .unlocked ? .restricted : currentMode
+            try applyMode(lockedMode, enrollment: enrollment, commandID: commandID, controlAuthority: .timedUnlock)
+            eventLogger.log(.commandApplied, details: "Timed unlock: penalty \(ModeChangeNotifier.formatDuration(adjustedPenalty)) >= total \(ModeChangeNotifier.formatDuration(adjustedTotal)), no free time — device locked")
             ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedTotal, unlockSeconds: 0)
         } else {
             // Penalty < total — lock during penalty, then unlock for remainder.

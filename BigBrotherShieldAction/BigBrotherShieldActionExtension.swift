@@ -118,7 +118,11 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         }
 
         // Always set picker pending — fallback path if Keychain bridge fails.
-        try? storage.writeUnlockPickerPending()
+        do {
+            try storage.writeUnlockPickerPending()
+        } catch {
+            diag(storage, "CRITICAL: Failed to write unlock picker pending flag: \(error.localizedDescription)")
+        }
 
         let identity = resolveAppIdentity(directToken: directToken, storage: storage)
         let hasToken = identity.tokenBase64 != nil
@@ -127,13 +131,17 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
 
         if hasToken, let tokenBase64 = identity.tokenBase64 {
             // --- Token available: create full unlock request ---
-            createUnlockRequest(
+            let success = createUnlockRequest(
                 storage: storage,
                 appName: identity.name,
                 tokenBase64: tokenBase64,
                 bundleID: identity.bundleID
             )
-            diag(storage, "Created unlock request WITH token via \(identity.source)")
+            if success {
+                diag(storage, "Created unlock request WITH token via \(identity.source)")
+            } else {
+                diag(storage, "Unlock request FAILED — child's request may not reach parent (src: \(identity.source))")
+            }
         } else {
             // --- No token: picker-only flow ---
             // Do NOT create an unlockRequested event (parent can't approve without token).
@@ -148,11 +156,12 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
 
     // MARK: - Create Unlock Request
 
-    private func createUnlockRequest(storage: AppGroupStorage, appName: String, tokenBase64: String, bundleID: String?) {
+    @discardableResult
+    private func createUnlockRequest(storage: AppGroupStorage, appName: String, tokenBase64: String, bundleID: String?) -> Bool {
         guard let data = storage.readRawData(forKey: StorageKeys.cachedEnrollmentIDs),
               let env = try? JSONDecoder().decode(CachedEnrollmentIDs.self, from: data) else {
             diag(storage, "Cannot create request: no enrollment IDs in App Group")
-            return
+            return false
         }
 
         let requestID = UUID()
@@ -170,9 +179,17 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
             eventType: .unlockRequested,
             details: details
         )
-        try? storage.appendEventLog(entry)
+
+        var eventLogOk = false
+        do {
+            try storage.appendEventLog(entry)
+            eventLogOk = true
+        } catch {
+            diag(storage, "CRITICAL: Failed to write event log for unlock request: \(error.localizedDescription)")
+        }
 
         // Pending unlock request (local, for CommandProcessor token lookup).
+        var pendingOk = false
         if let tokenData = Data(base64Encoded: tokenBase64) {
             let pending = PendingUnlockRequest(
                 id: requestID,
@@ -180,8 +197,25 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
                 tokenData: tokenData,
                 requestedAt: Date()
             )
-            try? storage.appendPendingUnlockRequest(pending)
+            do {
+                try storage.appendPendingUnlockRequest(pending)
+                pendingOk = true
+            } catch {
+                diag(storage, "CRITICAL: Failed to write pending unlock request: \(error.localizedDescription)")
+            }
         }
+
+        // If both writes failed, try writing a raw marker as a last resort.
+        if !eventLogOk && !pendingOk {
+            diag(storage, "CRITICAL: Both event log and pending request writes failed — writing fallback marker")
+            try? storage.writeRawData(
+                "unlock_request_\(requestID.uuidString)_\(appName)_\(Date().timeIntervalSince1970)".data(using: .utf8),
+                forKey: "pending_unlock_marker"
+            )
+            return false
+        }
+
+        return true
     }
 
     // MARK: - Allowed Check

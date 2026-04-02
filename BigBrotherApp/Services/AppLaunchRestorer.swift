@@ -104,8 +104,26 @@ struct AppLaunchRestorer {
 
         switch action {
         case .cannotEnforce:
-            // No snapshot exists — first run after enrollment.
-            let policy = Policy(targetDeviceID: enrollment.deviceID, mode: .unlocked)
+            // No snapshot exists — check local state to determine the correct mode.
+            // If any state files exist (temp unlock, timed unlock, ext state),
+            // use ModeStackResolver to derive the mode. Otherwise, default to
+            // .restricted (fail-safe) rather than .unlocked — an enrolled device
+            // with no snapshot should lock down, not open up.
+            let tempState = storage.readTemporaryUnlockState()
+            let timedInfo = storage.readTimedUnlockInfo()
+            let extState = storage.readExtensionSharedState()
+            let hasLocalState = tempState != nil || timedInfo != nil || extState != nil
+
+            let resolvedMode: LockMode
+            if hasLocalState {
+                let localResolution = ModeStackResolver.resolve(storage: storage)
+                resolvedMode = localResolution.mode
+            } else {
+                // Truly blank slate post-enrollment — default to restricted (fail-safe).
+                resolvedMode = .restricted
+            }
+
+            let policy = Policy(targetDeviceID: enrollment.deviceID, mode: resolvedMode)
             let capabilities = DeviceCapabilities(
                 familyControlsAuthorized: enforcement.authorizationStatus == .authorized,
                 isOnline: false
@@ -116,11 +134,13 @@ struct AppLaunchRestorer {
                 authorizationHealth: authHealth,
                 deviceID: enrollment.deviceID,
                 source: .initial,
-                trigger: "First launch after enrollment"
+                trigger: hasLocalState
+                    ? "First snapshot from local state: \(resolvedMode.rawValue)"
+                    : "First launch after enrollment — fail-safe restricted"
             )
             let output = PolicyPipelineCoordinator.generateSnapshot(from: inputs, previousSnapshot: nil)
             commitAndApply(output.snapshot)
-            eventLogger.log(.policyReconciled, details: "First launch: applied default unlocked policy")
+            eventLogger.log(.policyReconciled, details: "First launch: applied \(resolvedMode.rawValue) (localState: \(hasLocalState))")
 
         case .expireTemporaryUnlock(let previousMode):
             // Temp unlock expired while app was not running.

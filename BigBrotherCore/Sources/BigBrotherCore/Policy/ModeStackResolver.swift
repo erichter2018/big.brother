@@ -30,21 +30,46 @@ public enum ModeStackResolver {
         // 1. Active temporary unlock (parent-initiated, PIN, or self-unlock)?
         if let temp = storage.readTemporaryUnlockState() {
             if temp.expiresAt > now {
-                // Clock manipulation guard: if the unlock duration has passed
-                // based on monotonic uptime, treat as expired even if wall clock says otherwise.
-                let elapsed = ProcessInfo.processInfo.systemUptime - (temp.uptimeAtStart ?? ProcessInfo.processInfo.systemUptime)
+                let currentUptime = ProcessInfo.processInfo.systemUptime
                 let originalDuration = temp.expiresAt.timeIntervalSince(temp.startedAt)
-                if elapsed > originalDuration + 10 {
-                    // Monotonic clock says duration elapsed — clock was set back
-                    try? storage.clearTemporaryUnlockState()
+
+                // Reboot detection: if stored uptime is larger than current, the device
+                // was rebooted and the monotonic guard is invalidated. Fall back to wall clock
+                // but verify remaining time is reasonable.
+                if let storedUptime = temp.uptimeAtStart, currentUptime < storedUptime {
+                    let wallElapsed = now.timeIntervalSince(temp.startedAt)
+                    if wallElapsed > originalDuration + 60 {
+                        // Wall clock says well past expiry — clear it
+                        // (handles clock-forward-then-reboot scenario)
+                        try? storage.clearTemporaryUnlockState()
+                    } else {
+                        // Wall clock says still within duration — trust it.
+                        // Reboot alone shouldn't cancel a valid unlock.
+                        return Resolution(
+                            mode: .unlocked,
+                            controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
+                            isTemporary: true,
+                            expiresAt: temp.expiresAt,
+                            reason: "Temporary unlock (\(temp.origin.rawValue)) post-reboot, expires \(shortTime(temp.expiresAt))"
+                        )
+                    }
                 } else {
-                    return Resolution(
-                        mode: .unlocked,
-                        controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
-                        isTemporary: true,
-                        expiresAt: temp.expiresAt,
-                        reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
-                    )
+                    // Normal case: monotonic clock is valid.
+                    // Clock manipulation guard: if the unlock duration has passed
+                    // based on monotonic uptime, treat as expired even if wall clock says otherwise.
+                    let elapsed = currentUptime - (temp.uptimeAtStart ?? currentUptime)
+                    if elapsed > originalDuration + 3 {
+                        // Monotonic clock says duration elapsed — clock was set back
+                        try? storage.clearTemporaryUnlockState()
+                    } else {
+                        return Resolution(
+                            mode: .unlocked,
+                            controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
+                            isTemporary: true,
+                            expiresAt: temp.expiresAt,
+                            reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
+                        )
+                    }
                 }
             } else {
                 // Expired — clean up and fall through to previous mode
@@ -54,11 +79,26 @@ public enum ModeStackResolver {
 
         // 2. Active timed unlock (penalty + unlock phases)?
         if let timed = storage.readTimedUnlockInfo() {
-            // Clock manipulation guard: if monotonic uptime says the total window
-            // has elapsed, treat as fully expired even if wall clock disagrees.
+            let currentUptime = ProcessInfo.processInfo.systemUptime
             let totalDuration = timed.lockAt.timeIntervalSince(timed.createdAt ?? timed.unlockAt)
-            let monotonicElapsed = ProcessInfo.processInfo.systemUptime - (timed.uptimeAtStart ?? ProcessInfo.processInfo.systemUptime)
-            let clockManipulated = monotonicElapsed > totalDuration + 10
+            let timedCreatedAt = timed.createdAt ?? timed.unlockAt
+
+            // Reboot detection: if stored uptime is larger than current, the device
+            // was rebooted and the monotonic guard is invalidated.
+            var clockManipulated = false
+            if let storedUptime = timed.uptimeAtStart, currentUptime < storedUptime {
+                // Device was rebooted — fall back to wall clock only.
+                let wallElapsed = now.timeIntervalSince(timedCreatedAt)
+                if wallElapsed > totalDuration + 60 {
+                    // Wall clock says well past expiry — treat as manipulated/expired
+                    clockManipulated = true
+                }
+                // Otherwise trust wall clock for phase determination below
+            } else {
+                // Normal case: monotonic clock is valid.
+                let monotonicElapsed = currentUptime - (timed.uptimeAtStart ?? currentUptime)
+                clockManipulated = monotonicElapsed > totalDuration + 3
+            }
 
             if clockManipulated {
                 // Wall clock was set forward to skip penalty or extend free phase

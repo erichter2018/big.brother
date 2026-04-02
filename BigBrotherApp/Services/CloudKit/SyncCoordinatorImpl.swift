@@ -25,6 +25,14 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol, @unchecked Sendable {
     /// clear enrollment and reset to unconfigured.
     var onUnenroll: (() -> Void)?
 
+    // MARK: - Unenroll Strike Protection
+
+    /// Requires 3 consecutive "device not found" results over at least 15 minutes
+    /// before triggering self-unenrollment. Prevents a single transient CloudKit
+    /// failure from wiping all parental controls.
+    private let unenrollStrikeKey = "unenroll_strike_count"
+    private let unenrollFirstStrikeKey = "unenroll_first_strike_at"
+
     init(
         cloudKit: any CloudKitServiceProtocol,
         commandProcessor: any CommandProcessorProtocol,
@@ -48,6 +56,23 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol, @unchecked Sendable {
     // MARK: - SyncCoordinatorProtocol
 
     func performFullSync() async throws {
+        // Wrap entire sync in a 30-second timeout so a hung CloudKit call
+        // doesn't block background refresh indefinitely.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await Task.sleep(for: .seconds(30))
+                throw CancellationError()
+            }
+            group.addTask {
+                try await self._performFullSyncBody()
+            }
+            // Wait for first completion (either timeout or sync).
+            try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func _performFullSyncBody() async throws {
         let syncStartedAt = Date()
 
         // 1. Process incoming commands (must complete before heartbeat
@@ -89,27 +114,63 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol, @unchecked Sendable {
 
     /// Verify this device's record still exists in CloudKit.
     /// If the parent deleted the device, clear local enrollment and restrictions.
+    ///
+    /// Uses a 3-strike system: requires 3 consecutive "device not found" results
+    /// over at least 15 minutes before triggering unenrollment. A single transient
+    /// CloudKit empty result (network blip, index lag) must not wipe controls.
     private func checkDeviceExistence() async {
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self,
             forKey: StorageKeys.enrollmentState
         ) else { return }
 
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+
         do {
             let devices = try await cloudKit.fetchDevices(familyID: enrollment.familyID)
             let stillExists = devices.contains { $0.id == enrollment.deviceID }
             if !stillExists {
-                #if DEBUG
-                print("[BigBrother] Device record not found in CloudKit — self-unenrolling")
-                #endif
-                eventLogger.log(.enrollmentRevoked, details: "Device record deleted by parent — auto-unenrolling")
-                try? enforcement?.clearAllRestrictions()
-                Task { @MainActor [weak self] in
-                    self?.onUnenroll?()
+                // Device not found — record a strike.
+                let strikes = (defaults?.integer(forKey: unenrollStrikeKey) ?? 0) + 1
+                let firstStrike = defaults?.object(forKey: unenrollFirstStrikeKey) as? Date ?? Date()
+
+                if strikes == 1 {
+                    defaults?.set(Date(), forKey: unenrollFirstStrikeKey)
                 }
+                defaults?.set(strikes, forKey: unenrollStrikeKey)
+
+                // Require 3 strikes over at least 15 minutes before unenrolling.
+                let elapsed = Date().timeIntervalSince(firstStrike)
+                if strikes >= 3 && elapsed >= 900 {
+                    #if DEBUG
+                    print("[BigBrother] Device record not found in CloudKit (3 strikes over \(Int(elapsed))s) — self-unenrolling")
+                    #endif
+                    defaults?.removeObject(forKey: unenrollStrikeKey)
+                    defaults?.removeObject(forKey: unenrollFirstStrikeKey)
+                    eventLogger.log(.enrollmentRevoked, details: "Device record deleted by parent — auto-unenrolling (3 strikes over \(Int(elapsed))s)")
+                    do {
+                        try enforcement?.clearAllRestrictions()
+                    } catch {
+                        try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                            category: .enforcement,
+                            message: "Failed to clear restrictions during unenroll: \(error.localizedDescription)"
+                        ))
+                    }
+                    Task { @MainActor [weak self] in
+                        self?.onUnenroll?()
+                    }
+                } else {
+                    #if DEBUG
+                    print("[BigBrother] Device not found in CloudKit (strike \(strikes)/3, \(Int(elapsed))s elapsed). Not unenrolling yet.")
+                    #endif
+                }
+            } else {
+                // Device found — reset strikes.
+                defaults?.removeObject(forKey: unenrollStrikeKey)
+                defaults?.removeObject(forKey: unenrollFirstStrikeKey)
             }
         } catch {
-            // Network error — don't unenroll on transient failures.
+            // Network error — don't unenroll on transient failures, don't count as a strike.
             #if DEBUG
             print("[BigBrother] Device existence check failed (non-fatal): \(error.localizedDescription)")
             #endif

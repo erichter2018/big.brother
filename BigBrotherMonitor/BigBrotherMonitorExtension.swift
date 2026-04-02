@@ -205,6 +205,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Unlocked window started: check if today is a valid day, then unlock.
     private func handleUnlockedWindowStart(_ activity: DeviceActivityName) {
+        // Clear expired temporary unlock state to prevent stale restorer re-unlock on next app launch.
+        if let tempState = storage.readTemporaryUnlockState(),
+           tempState.expiresAt <= Date() {
+            try? storage.clearTemporaryUnlockState()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Cleared expired temporary unlock state during unlocked window start"
+            ))
+        }
+
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("freeWindowStart", forKey: "lastShieldChangeReason")
 
@@ -260,6 +270,28 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Unlocked window ended: re-apply the profile's locked mode.
     private func handleUnlockedWindowEnd(_ activity: DeviceActivityName) {
+        // Don't override an active temporary unlock — parent command takes precedence.
+        if let tempState = storage.readTemporaryUnlockState(),
+           tempState.expiresAt > Date() {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Skipping window-end lock — temporary unlock active until \(tempState.expiresAt)"
+            ))
+            return
+        }
+
+        // Don't override an active timed unlock free phase.
+        if let timedInfo = storage.readTimedUnlockInfo() {
+            let now = Date()
+            if now >= timedInfo.unlockAt && now < timedInfo.lockAt {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Skipping window-end lock — timed unlock free phase active until \(timedInfo.lockAt)"
+                ))
+                return
+            }
+        }
+
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("freeWindowEnd", forKey: "lastShieldChangeReason")
 
@@ -313,6 +345,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Locked window started: apply essential-only mode if today matches.
     private func handleLockedWindowStart(_ activity: DeviceActivityName) {
+        // Clear expired temporary unlock state to prevent stale restorer re-unlock on next app launch.
+        if let tempState = storage.readTemporaryUnlockState(),
+           tempState.expiresAt <= Date() {
+            try? storage.clearTemporaryUnlockState()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Cleared expired temporary unlock state during locked window start"
+            ))
+        }
+
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("essentialStart", forKey: "lastShieldChangeReason")
 
@@ -360,6 +402,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Locked window ended: return to the profile's locked mode.
     private func handleLockedWindowEnd(_ activity: DeviceActivityName) {
+        // Clear expired temporary unlock state to prevent stale restorer re-unlock on next app launch.
+        if let tempState = storage.readTemporaryUnlockState(),
+           tempState.expiresAt <= Date() {
+            try? storage.clearTemporaryUnlockState()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Cleared expired temporary unlock state during locked window end"
+            ))
+        }
+
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("essentialEnd", forKey: "lastShieldChangeReason")
 
@@ -663,6 +715,27 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // false emergency blackhole activation during quiet periods.
         reconcileDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
 
+        // Check VPN tunnel health — if the child deleted the VPN profile,
+        // DNS enforcement stops silently. Log it so it appears in heartbeat/diagnostics.
+        let tunnelLastActive = reconcileDefaults?.double(forKey: "tunnelLastActiveAt") ?? 0
+        if tunnelLastActive > 0 {
+            let tunnelAge = Date().timeIntervalSince1970 - tunnelLastActive
+            if tunnelAge > 600 { // Tunnel dead for 10+ minutes
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "WARNING: VPN tunnel inactive for \(Int(tunnelAge))s — may have been removed"
+                ))
+                // If device should be restricted/locked, note the DNS fallback is gone.
+                if let snapshot = storage.readPolicySnapshot(),
+                   snapshot.effectivePolicy.resolvedMode != .unlocked {
+                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .enforcement,
+                        message: "Tunnel dead during enforced mode — maintaining shields (DNS fallback unavailable)"
+                    ))
+                }
+            }
+        }
+
         let resolution = ModeStackResolver.resolve(storage: storage)
         let policy = storage.readPolicySnapshot()?.effectivePolicy
 
@@ -787,15 +860,27 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 if tokensToBlock.count <= Self.maxShieldApplications {
                     perAppTokens = tokensToBlock
                 } else {
-                    let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
-                    perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
+                    perAppTokens = Set(tokensToBlock.prefix(Self.maxShieldApplications))
                 }
                 // Add exhausted tokens to shield.applications for "Request More Time".
                 // Re-enforce 50-token cap — exceeding it silently drops ALL shields.
+                // Priority: exhausted tokens (time-limited apps that MUST be shielded) always
+                // kept; picker tokens fill remaining slots. hashValue sort was non-deterministic
+                // across process restarts and could drop exhausted tokens entirely.
                 perAppTokens.formUnion(exhaustedTokens)
                 if perAppTokens.count > Self.maxShieldApplications {
-                    let sorted = perAppTokens.sorted { $0.hashValue < $1.hashValue }
-                    perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
+                    let exhaustedCount = min(exhaustedTokens.count, Self.maxShieldApplications)
+                    let remainingSlots = Self.maxShieldApplications - exhaustedCount
+                    let pickerOnly = perAppTokens.subtracting(exhaustedTokens)
+                    let keptPicker = Set(pickerOnly.prefix(remainingSlots))
+                    perAppTokens = Set(exhaustedTokens.prefix(exhaustedCount)).union(keptPicker)
+                    let dropped = pickerOnly.count + exhaustedTokens.count - perAppTokens.count
+                    if dropped > 0 {
+                        try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                            category: .enforcement,
+                            message: "Monitor token cap: \(dropped) apps dropped from shield.applications (50 limit). \(exhaustedTokens.count) exhausted kept."
+                        ))
+                    }
                 }
                 // Apply to both base and schedule stores for full coverage.
                 for s in [baseStore, store] {
@@ -814,6 +899,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 // Add exhausted tokens to shield.applications
                 if !exhaustedTokens.isEmpty {
                     apps = (apps ?? Set()).union(exhaustedTokens)
+                }
+                // Enforce 50-token cap — exceeding it silently drops ALL shields.
+                // Priority: exhausted tokens always kept, picker tokens fill remaining slots.
+                if let currentApps = apps, currentApps.count > Self.maxShieldApplications {
+                    let exhaustedCount = min(exhaustedTokens.count, Self.maxShieldApplications)
+                    let remainingSlots = Self.maxShieldApplications - exhaustedCount
+                    let nonExhausted = currentApps.subtracting(exhaustedTokens)
+                    let keptNonExhausted = Set(nonExhausted.prefix(remainingSlots))
+                    apps = Set(exhaustedTokens.prefix(exhaustedCount)).union(keptNonExhausted)
                 }
                 for s in [baseStore, store] {
                     s.shield.applications = apps

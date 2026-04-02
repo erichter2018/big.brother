@@ -106,15 +106,31 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     /// Cross-process file lock using POSIX flock().
     /// NSLock only protects within a single process; this coordinates across
     /// main app, Monitor, Tunnel, and ShieldAction extensions.
+    ///
+    /// - If `open()` fails: runs body without lock (file may not exist yet on first boot
+    ///   before `ensureSharedFilesExist()`). Logs a diagnostic warning.
+    /// - If `flock()` fails: throws an error. Running without the lock risks a race
+    ///   condition between processes, so we refuse rather than silently corrupt.
     private func withFileLock<T>(name: String, body: () throws -> T) throws -> T {
         let lockURL = containerURL.appendingPathComponent(name)
         if !fileManager.fileExists(atPath: lockURL.path) {
             fileManager.createFile(atPath: lockURL.path, contents: nil)
         }
         let fd = open(lockURL.path, O_RDWR | O_CREAT, 0o666)
-        guard fd >= 0 else { return try body() } // Fallback: run without lock
+        guard fd >= 0 else {
+            // Lock file can't be opened — may be first boot before ensureSharedFilesExist().
+            // Run without lock but log warning so we can diagnose if this persists.
+            #if DEBUG
+            print("[BigBrother] ⚠️ withFileLock: open() failed for \(name), errno=\(errno) — running unprotected")
+            #endif
+            return try body()
+        }
         defer { close(fd) }
-        guard flock(fd, LOCK_EX) == 0 else { return try body() }
+        guard flock(fd, LOCK_EX) == 0 else {
+            // flock() failed — another process may hold the lock or something is wrong.
+            // Do NOT run the body without the lock; that's a silent race condition.
+            throw StorageError.fileLockFailed(lockName: name, errno: errno)
+        }
         defer { flock(fd, LOCK_UN) }
         return try body()
     }

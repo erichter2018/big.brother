@@ -104,6 +104,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Create DNS proxy with the selected upstream
         dnsProxy = DNSProxy(provider: self, upstreamDNSServer: upstreamDNS, storage: storage)
 
+        // Seed enforcement blocked domains from last-known fallback if the
+        // main list is empty (main app may not have written one yet after reboot).
+        let mainBlocklist = storage.readEnforcementBlockedDomains()
+        if mainBlocklist.isEmpty,
+           let lastKnownData = storage.readRawData(forKey: "tunnel_last_known_blocklist"),
+           let lastKnownDomains = try? JSONDecoder().decode(Set<String>.self, from: lastKnownData),
+           !lastKnownDomains.isEmpty {
+            try? storage.writeEnforcementBlockedDomains(lastKnownDomains)
+            NSLog("[Tunnel] Seeded enforcement blocklist from last-known fallback (\(lastKnownDomains.count) domains)")
+        }
+
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error {
                 NSLog("[Tunnel] Failed to set network settings: \(error.localizedDescription)")
@@ -138,6 +149,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         dnsProxy?.stop()
         flushScreenTimeSession()
         stopScreenLockMonitoring()
+
+        // Persist current blocklist so next tunnel start has a fallback
+        // if the main app hasn't written one yet.
+        persistCurrentBlocklist()
 
         writeTunnelStatus("stopped:\(reason.rawValue)")
         completionHandler()
@@ -211,6 +226,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                        repeating: AppConstants.vpnHeartbeatIntervalSeconds)
         timer.setEventHandler { [weak self] in
             guard let self, self.tunnelOwnsHeartbeat else { return }
+            // Re-check before sending — app may have recovered since we took over.
+            // A recent IPC ping (within 2 minutes) means the app is back.
+            if let lastPing = self.lastPingFromApp, Date().timeIntervalSince(lastPing) < 120 {
+                self.tunnelOwnsHeartbeat = false
+                self.mainAppAlive = true
+                NSLog("[Tunnel] App recovered (recent IPC ping) — handing back heartbeat duties")
+                return
+            }
             Task { await self.sendHeartbeatFromTunnel(reason: "timer") }
         }
         timer.resume()
@@ -350,6 +373,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self?.checkAppLiveness()
             self?.checkNetworkPathAndReconnect()
             self?.checkDNSDayRollover()
+            self?.persistCurrentBlocklist()
             Task {
                 await self?.pollAndProcessCommands()
                 await self?.syncScheduleProfileIfNeeded()
@@ -1034,6 +1058,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     record["status"] = "applied"
                     _ = try? await db.save(record)
                     NSLog("[Tunnel] Processed blockInternet (mode-driven): \(commandID)")
+                } else if !mainAppAlive, let tunnelAction,
+                          Self.isModeChangingAction(tunnelAction) {
+                    // Main app is dead — handle mode-changing commands from the tunnel.
+                    // The tunnel can't write to ManagedSettingsStore, but it CAN:
+                    // 1. Write state files to App Group (snapshot, ext state, temp unlock)
+                    // 2. Update DNS blocking immediately
+                    // 3. Send a notification to prompt the user to open the app
+                    await handleModeCommandFromTunnel(
+                        actionType: tunnelAction,
+                        actionJSON: actionJSON,
+                        record: record,
+                        enrollment: enrollment,
+                        db: db
+                    )
+                    NSLog("[Tunnel] Processed mode command \(tunnelAction) while app dead: \(commandID)")
                 }
                 // Other commands are left for the main app
             }
@@ -1061,6 +1100,185 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return key
         }
         return obj["type"] as? String
+    }
+
+    /// Whether the given action type is a mode-changing command that the tunnel
+    /// should handle when the main app is dead.
+    private static func isModeChangingAction(_ action: String) -> Bool {
+        switch action {
+        case "setMode", "temporaryUnlock", "timedUnlock", "lockUntil", "returnToSchedule":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Handle a mode-changing command from the tunnel when the main app is dead.
+    /// Writes state files to App Group and sends a notification to prompt the user
+    /// to open the app (which triggers AppLaunchRestorer for ManagedSettings).
+    private func handleModeCommandFromTunnel(
+        actionType: String,
+        actionJSON: String,
+        record: CKRecord,
+        enrollment: ChildEnrollmentState,
+        db: CKDatabase
+    ) async {
+        let jsonData = actionJSON.data(using: .utf8)
+        let jsonObj = jsonData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+
+        // Determine the target mode from the command.
+        let targetMode: LockMode?
+        var tempUnlockDuration: Int?
+
+        switch actionType {
+        case "setMode":
+            // JSON: { "setMode": { "mode": "locked" } } or { "setMode": "locked" }
+            if let params = jsonObj?["setMode"] {
+                if let modeStr = params as? String {
+                    targetMode = LockMode.from(modeStr)
+                } else if let dict = params as? [String: Any],
+                          let modeStr = dict["_0"] as? String ?? dict["mode"] as? String {
+                    targetMode = LockMode.from(modeStr)
+                } else {
+                    targetMode = nil
+                }
+            } else {
+                targetMode = nil
+            }
+
+        case "temporaryUnlock":
+            // JSON: { "temporaryUnlock": { "durationSeconds": 900 } }
+            targetMode = .unlocked
+            if let params = jsonObj?["temporaryUnlock"] as? [String: Any] {
+                tempUnlockDuration = params["durationSeconds"] as? Int
+            }
+
+        case "returnToSchedule":
+            // Use schedule to determine mode
+            if let profile = storage.readActiveScheduleProfile() {
+                targetMode = profile.resolvedMode(at: Date())
+            } else {
+                targetMode = .restricted
+            }
+
+        case "lockUntil":
+            targetMode = .locked
+
+        case "timedUnlock":
+            // Timed unlock has penalty + free phases — keep current lock mode during penalty.
+            // The tunnel can't register DeviceActivity, so just ensure locked state is set
+            // and let the main app handle the full timed unlock lifecycle.
+            targetMode = storage.readActiveScheduleProfile()?.lockedMode ?? .restricted
+
+        default:
+            targetMode = nil
+        }
+
+        guard let mode = targetMode else {
+            NSLog("[Tunnel] Could not determine target mode from \(actionType) command")
+            return
+        }
+
+        // 1. Write TemporaryUnlockState if this is a temporary unlock
+        if actionType == "temporaryUnlock", let duration = tempUnlockDuration, duration > 0 {
+            let now = Date()
+            let expiresAt = now.addingTimeInterval(Double(duration))
+            let currentMode = ModeStackResolver.resolve(storage: storage).mode
+            let unlockState = TemporaryUnlockState(
+                unlockID: UUID(),
+                origin: .remoteCommand,
+                previousMode: currentMode == .unlocked ? .restricted : currentMode,
+                startedAt: now,
+                expiresAt: expiresAt
+            )
+            try? storage.writeTemporaryUnlockState(unlockState)
+        } else if actionType != "temporaryUnlock" {
+            // Non-temporary command — clear any stale temp unlock state
+            try? storage.clearTemporaryUnlockState()
+        }
+
+        // 2. Write corrected PolicySnapshot
+        let existingSnapshot = storage.readPolicySnapshot()
+        let existingPolicy = existingSnapshot?.effectivePolicy
+        let isTemp = actionType == "temporaryUnlock"
+        let correctedPolicy = EffectivePolicy(
+            resolvedMode: mode,
+            isTemporaryUnlock: isTemp,
+            temporaryUnlockExpiresAt: isTemp ? storage.readTemporaryUnlockState()?.expiresAt : nil,
+            shieldedCategoriesData: existingPolicy?.shieldedCategoriesData,
+            allowedAppTokensData: existingPolicy?.allowedAppTokensData,
+            warnings: existingPolicy?.warnings ?? [],
+            policyVersion: (existingPolicy?.policyVersion ?? 0) + 1
+        )
+        let correctedSnapshot = PolicySnapshot(
+            source: .commandApplied,
+            trigger: "Tunnel: \(actionType) while app dead → \(mode.rawValue)",
+            effectivePolicy: correctedPolicy
+        )
+        try? storage.commitCorrectedSnapshot(correctedSnapshot)
+
+        // 3. Update ExtensionSharedState so the Monitor picks up the change
+        let extState = storage.readExtensionSharedState()
+        let newExtState = ExtensionSharedState(
+            currentMode: mode,
+            isTemporaryUnlock: isTemp,
+            temporaryUnlockExpiresAt: isTemp ? storage.readTemporaryUnlockState()?.expiresAt : nil,
+            authorizationAvailable: extState?.authorizationAvailable ?? true,
+            enforcementDegraded: extState?.enforcementDegraded ?? false,
+            shieldConfig: extState?.shieldConfig ?? ShieldConfig(),
+            writtenAt: Date(),
+            policyVersion: (extState?.policyVersion ?? 0) + 1
+        )
+        try? storage.writeExtensionSharedState(newExtState)
+
+        // 4. Update DNS blocking for lockedDown mode (immediate effect)
+        if mode == .lockedDown {
+            reapplyNetworkSettings()
+        } else if mode == .unlocked {
+            // Clear any emergency blackhole since we're unlocking
+            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
+            reapplyNetworkSettings()
+        }
+
+        // 5. Mark returnToSchedule flag
+        if actionType == "returnToSchedule" {
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(true, forKey: "scheduleDrivenMode")
+        } else if actionType == "setMode" {
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(false, forKey: "scheduleDrivenMode")
+        }
+
+        // 6. Mark command as applied in CloudKit
+        record["status"] = "applied"
+        _ = try? await db.save(record)
+
+        // 7. Also mark in App Group so main app doesn't re-process
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        var appProcessed = defaults?.stringArray(forKey: "tunnelAppliedCommandIDs") ?? []
+        appProcessed.append(record.recordID.recordName)
+        if appProcessed.count > 200 { appProcessed = Array(appProcessed.suffix(200)) }
+        defaults?.set(appProcessed, forKey: "tunnelAppliedCommandIDs")
+
+        // 8. Send a notification to prompt the child to open the app
+        //    (only the main app can write to ManagedSettingsStore)
+        requestAppLaunchNotification(reason: actionType)
+    }
+
+    /// Request a local notification to prompt the child to open the app
+    /// so ManagedSettings enforcement can be applied by the main process.
+    private func requestAppLaunchNotification(reason: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Parental Settings Updated"
+        content.body = "Tap to apply new settings."
+        content.interruptionLevel = .timeSensitive
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let request = UNNotificationRequest(
+            identifier: "tunnel-command-\(UUID().uuidString)",
+            content: content,
+            trigger: trigger
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     /// Collect a diagnostic report from the tunnel. Includes schedule + restriction
@@ -1412,6 +1630,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+
+    // MARK: - DNS Blocklist Persistence
+
+    /// Save the current enforcement blocklist to a last-known key so a future
+    /// tunnel start can fall back to it if the main app hasn't written one yet.
+    private func persistCurrentBlocklist() {
+        let current = storage.readEnforcementBlockedDomains()
+        guard !current.isEmpty else { return }
+        if let data = try? JSONEncoder().encode(current) {
+            try? storage.writeRawData(data, forKey: "tunnel_last_known_blocklist")
+        }
     }
 
     // MARK: - Status

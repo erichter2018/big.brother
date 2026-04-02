@@ -85,17 +85,19 @@ enum BackgroundRefreshHandler {
             }
         } else {
             // Brief debounce — but schedule a delayed reprocess instead of dropping.
+            // The delayed task goes through processIncomingCommands() which uses
+            // ProcessingGate, preventing uncoordinated concurrent syncs.
             let elapsed = Date().timeIntervalSince(lastPushSync)
             if elapsed < 2 {
                 #if DEBUG
-                print("[BigBrother] Push debounced (\(Int(elapsed * 1000))ms) — scheduling delayed sync")
+                print("[BigBrother] Push debounced (\(Int(elapsed * 1000))ms) — scheduling delayed command processing")
                 #endif
-                // Schedule a delayed sync so the command isn't lost.
+                // Schedule a delayed sync through the proper command processing gate.
                 Task {
                     try? await Task.sleep(for: .seconds(2 - elapsed + 0.5))
-                    _ = try? await appState.syncCoordinator?.performQuickSync()
+                    try? await appState.commandProcessor?.processIncomingCommands()
                 }
-                return .noData
+                return .newData
             }
             lastPushSync = Date()
 
