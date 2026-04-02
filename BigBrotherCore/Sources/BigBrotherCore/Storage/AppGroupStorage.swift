@@ -89,19 +89,34 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     // MARK: - Event Log Queue
 
     public func appendEventLog(_ entry: EventLogEntry) throws {
-        lock.lock()
-        defer { lock.unlock() }
+        try withFileLock(name: "eventlog.lock") {
+            var entries: [EventLogEntry] = read(FileName.eventLogQueue) ?? []
+            entries.append(entry)
 
-        var entries: [EventLogEntry] = read(FileName.eventLogQueue) ?? []
-        entries.append(entry)
+            // Prune oldest entries if queue exceeds max size
+            if entries.count > AppConstants.eventQueueMaxSize {
+                let overflow = entries.count - AppConstants.eventQueueMaxSize
+                entries.removeFirst(overflow)
+            }
 
-        // Prune oldest entries if queue exceeds max size
-        if entries.count > AppConstants.eventQueueMaxSize {
-            let overflow = entries.count - AppConstants.eventQueueMaxSize
-            entries.removeFirst(overflow)
+            try writeAtomically(entries, to: FileName.eventLogQueue)
         }
+    }
 
-        try writeAtomically(entries, to: FileName.eventLogQueue)
+    /// Cross-process file lock using POSIX flock().
+    /// NSLock only protects within a single process; this coordinates across
+    /// main app, Monitor, Tunnel, and ShieldAction extensions.
+    private func withFileLock<T>(name: String, body: () throws -> T) throws -> T {
+        let lockURL = containerURL.appendingPathComponent(name)
+        if !fileManager.fileExists(atPath: lockURL.path) {
+            fileManager.createFile(atPath: lockURL.path, contents: nil)
+        }
+        let fd = open(lockURL.path, O_RDWR | O_CREAT, 0o666)
+        guard fd >= 0 else { return try body() } // Fallback: run without lock
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { return try body() }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
     }
 
     public func readPendingEventLogs() -> [EventLogEntry] {
@@ -238,7 +253,15 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     // Single JSON array file, pre-created by the main app.
 
     public func readTemporaryAllowedApps() -> [TemporaryAllowedAppEntry] {
-        (read(FileName.temporaryAllowedApps) as [TemporaryAllowedAppEntry]?) ?? []
+        guard let entries: [TemporaryAllowedAppEntry] = read(FileName.temporaryAllowedApps), !entries.isEmpty else {
+            return []
+        }
+        // Prune expired entries on read to prevent unbounded file growth.
+        let valid = entries.filter(\.isValid)
+        if valid.count < entries.count {
+            try? writeAtomically(valid, to: FileName.temporaryAllowedApps)
+        }
+        return valid
     }
 
     public func writeTemporaryAllowedApps(_ entries: [TemporaryAllowedAppEntry]) throws {

@@ -651,8 +651,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Uses ModeStackResolver for deterministic mode resolution from App Group files.
     /// Also cleans up expired temporary state as a side effect.
     private func reconcile() {
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set("reconcile", forKey: "lastShieldChangeReason")
+        let reconcileDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        reconcileDefaults?.set("reconcile", forKey: "lastShieldChangeReason")
+        // Update Monitor heartbeat so the tunnel knows we're alive.
+        // Without this, the tunnel's 1-hour "Monitor dead" threshold triggers
+        // false emergency blackhole activation during quiet periods.
+        reconcileDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
 
         let resolution = ModeStackResolver.resolve(storage: storage)
         let policy = storage.readPolicySnapshot()?.effectivePolicy
@@ -686,11 +690,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Clear shield properties on ALL named stores + default store.
     /// ManagedSettings merges across stores with OR logic — if any store blocks, it's blocked.
     private func clearAllShieldStores() {
-        // Don't allow unlock if permissions are missing — stay in essential mode.
+        // Don't allow unlock if FamilyControls authorization is lost.
+        // Check the snapshot's auth health (more current than the allPermissionsGranted flag,
+        // which can be stale after transient permission loss).
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if defaults?.bool(forKey: "allPermissionsGranted") == false {
-            // Apply essential-only shielding instead of clearing
-            let policy = storage.readPolicySnapshot()?.effectivePolicy
+        let snapshot = storage.readPolicySnapshot()
+        let fcRevoked = snapshot?.authorizationHealth?.isAuthorized == false
+        let flagSaysMissing = defaults?.bool(forKey: "allPermissionsGranted") == false
+        if fcRevoked || (flagSaysMissing && snapshot?.authorizationHealth == nil) {
+            let policy = snapshot?.effectivePolicy
             applyShieldingToAllStores(mode: .locked, policy: policy)
             return
         }
@@ -708,8 +716,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         defaultStore.shield.webDomainCategories = nil
         defaultStore.shield.webDomains = nil
 
-        // Clear DNS-level enforcement blocking — device is unlocked.
+        // Clear BOTH DNS blocklists — enforcement AND time-limit.
         try? storage.writeEnforcementBlockedDomains([])
+        try? storage.writeTimeLimitBlockedDomains([])
     }
 
     /// Apply shields to BOTH base and schedule stores using the hybrid per-app + category strategy.
@@ -729,12 +738,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             effectiveMode = mode
         }
 
-        // Always clear tempUnlock store shields — schedule transitions supersede temp unlocks.
+        // Clear ALL stores before re-applying to prevent OR-merge of stale exceptions.
+        // Without this, baseStore's `.all(except: {A,B})` can merge with scheduleStore's
+        // `.all()` to block everything including A and B.
         let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
-        tempUnlockStore.shield.applications = nil
-        tempUnlockStore.shield.applicationCategories = nil
-        tempUnlockStore.shield.webDomainCategories = nil
-        tempUnlockStore.shield.webDomains = nil
+        for s in [baseStore, store, tempUnlockStore] {
+            s.shield.applications = nil
+            s.shield.applicationCategories = nil
+            s.shield.webDomainCategories = nil
+            s.shield.webDomains = nil
+        }
 
         switch effectiveMode {
         case .unlocked:
@@ -772,8 +785,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
                     perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
                 }
-                // Add exhausted tokens to shield.applications for "Request More Time"
+                // Add exhausted tokens to shield.applications for "Request More Time".
+                // Re-enforce 50-token cap — exceeding it silently drops ALL shields.
                 perAppTokens.formUnion(exhaustedTokens)
+                if perAppTokens.count > Self.maxShieldApplications {
+                    let sorted = perAppTokens.sorted { $0.hashValue < $1.hashValue }
+                    perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
+                }
                 // Apply to both base and schedule stores for full coverage.
                 for s in [baseStore, store] {
                     s.shield.applications = perAppTokens
@@ -1153,8 +1171,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let mainAppBuild = defaults?.integer(forKey: "mainAppLastLaunchedBuild") ?? 0
         let extensionBuild = AppConstants.appBuildNumber
 
-        // Main app has launched with this build — nothing to do.
-        guard mainAppBuild < extensionBuild else { return }
+        // Main app has launched with this build — clear any build-mismatch DNS block.
+        guard mainAppBuild < extensionBuild else {
+            // Mismatch resolved — remove the DNS block flag if we set it.
+            if defaults?.bool(forKey: "buildMismatchDNSBlock") == true {
+                defaults?.removeObject(forKey: "buildMismatchDNSBlock")
+                defaults?.removeObject(forKey: "internetBlockedUntil")
+            }
+            return
+        }
 
         // Don't lock during an active temp unlock — the kid is supposed to be using the device.
         if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
@@ -1168,7 +1193,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: .locked, policy: policy)
         updateSharedState(mode: .locked)
-        logEvent(.policyReconciled, details: "Post-update essential mode (main app build \(mainAppBuild) < extension build \(extensionBuild))")
+
+        // Block DNS via the tunnel's legacy internetBlockedUntil flag.
+        // This works even if the tunnel is still running OLD code — it already
+        // checks this flag every 30 seconds. Set expiry far in the future;
+        // it's cleared when the app launches and the mismatch resolves.
+        if defaults?.bool(forKey: "buildMismatchDNSBlock") != true {
+            defaults?.set(true, forKey: "buildMismatchDNSBlock")
+            // Block for 24 hours — cleared when app launches (guard clause above).
+            let blockUntil = Date().addingTimeInterval(86400).timeIntervalSince1970
+            defaults?.set(blockUntil, forKey: "internetBlockedUntil")
+        }
+
+        logEvent(.policyReconciled, details: "Post-update essential mode + DNS block (main app build \(mainAppBuild) < extension build \(extensionBuild))")
 
         // Re-register reconciliation schedule — DeviceActivity registrations
         // may have been lost during the update. This ensures the Monitor keeps

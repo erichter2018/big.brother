@@ -187,8 +187,14 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
                 perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
             }
-            // Add exhausted tokens to shield.applications for "Request More Time"
+            // Add exhausted tokens to shield.applications for "Request More Time".
+            // Re-enforce the 50-token cap after union — exceeding it causes Apple to
+            // silently fail, dropping ALL shields.
             perAppTokens.formUnion(exhaustedTokens)
+            if perAppTokens.count > Self.maxShieldApplications {
+                let sorted = perAppTokens.sorted { $0.hashValue < $1.hashValue }
+                perAppTokens = Set(sorted.prefix(Self.maxShieldApplications))
+            }
             baseStore.shield.applications = perAppTokens
             baseStore.shield.applicationCategories = .all(except: allowedTokens)
             recordShieldedAppCount(perAppTokens.count)
@@ -202,6 +208,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             // Add exhausted tokens
             if !exhaustedTokens.isEmpty {
                 explicitApps = (explicitApps ?? Set()).union(exhaustedTokens)
+            }
+            // Enforce 50-token cap — exceeding it silently drops ALL shields.
+            if let apps = explicitApps, apps.count > Self.maxShieldApplications {
+                let sorted = apps.sorted { $0.hashValue < $1.hashValue }
+                explicitApps = Set(sorted.prefix(Self.maxShieldApplications))
             }
             baseStore.shield.applications = explicitApps
             if allowedTokens.isEmpty {
@@ -314,8 +325,10 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         defaultStore.shield.webDomainCategories = nil
         defaultStore.shield.webDomains = nil
 
-        // Clear DNS-level enforcement blocking — device is unlocked, all web apps work.
+        // Clear BOTH DNS blocklists — enforcement AND time-limit.
+        // Both must be cleared on unlock; the tunnel reads them with OR logic.
         try? storage.writeEnforcementBlockedDomains([])
+        try? storage.writeTimeLimitBlockedDomains([])
     }
 
     /// Collect tokens for apps that should NOT be shielded (parent-approved).

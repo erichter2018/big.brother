@@ -259,6 +259,12 @@ public protocol SharedStorageProtocol: Sendable {
     /// Write the set of domains to DNS-block during enforcement.
     func writeEnforcementBlockedDomains(_ domains: Set<String>) throws
 
+    /// Read time-limit blocked domains.
+    func readTimeLimitBlockedDomains() -> Set<String>
+
+    /// Write the set of domains to DNS-block for exhausted time limits.
+    func writeTimeLimitBlockedDomains(_ domains: Set<String>) throws
+
     // MARK: - File Pre-creation
 
     /// Ensure all files that extensions need to modify already exist.
@@ -269,8 +275,34 @@ public protocol SharedStorageProtocol: Sendable {
 
 // MARK: - Extension-safe snapshot commit
 
+/// File-based lock for cross-process snapshot commit coordination.
+/// NSLock only works within a single process; this uses POSIX flock()
+/// to coordinate between main app, Monitor, and Tunnel.
+private enum SnapshotFileLock {
+    private static let lockFileName = "snapshot_commit.lock"
+
+    static func withLock<T>(in groupID: String = AppConstants.appGroupIdentifier, body: () throws -> T) throws -> T {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) else {
+            return try body() // Fallback: run without lock if container unavailable
+        }
+        let lockURL = container.appendingPathComponent(lockFileName)
+        // Create lock file if needed
+        if !FileManager.default.fileExists(atPath: lockURL.path) {
+            FileManager.default.createFile(atPath: lockURL.path, contents: nil)
+        }
+        let fd = open(lockURL.path, O_RDWR | O_CREAT, 0o666)
+        guard fd >= 0 else { return try body() }
+        defer { close(fd) }
+        // Blocking exclusive lock
+        guard flock(fd, LOCK_EX) == 0 else { return try body() }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
+    }
+}
+
 extension SharedStorageProtocol {
     /// Commit a corrected snapshot from an extension (Monitor, Tunnel).
+    /// Uses file-based locking to prevent cross-process generation collisions.
     /// Lightweight alternative to PolicySnapshotStore.commit() that:
     /// - Bumps generation number to avoid staleness rejection
     /// - Updates ExtensionSharedState for cross-process consistency
@@ -279,43 +311,45 @@ extension SharedStorageProtocol {
     /// Does NOT record SnapshotTransition history (only main app does).
     @discardableResult
     public func commitCorrectedSnapshot(_ snapshot: PolicySnapshot) throws -> PolicySnapshot {
-        // Ensure generation is higher than current to prevent staleness rejection.
-        let nextGen: Int64
-        if let current = readPolicySnapshot(), snapshot.generation <= current.generation {
-            nextGen = current.generation + 1
-        } else {
-            nextGen = snapshot.generation
+        try SnapshotFileLock.withLock {
+            // Ensure generation is higher than current to prevent staleness rejection.
+            let nextGen: Int64
+            if let current = readPolicySnapshot(), snapshot.generation <= current.generation {
+                nextGen = current.generation + 1
+            } else {
+                nextGen = snapshot.generation
+            }
+
+            let snap = PolicySnapshot(
+                snapshotID: UUID(),
+                generation: nextGen,
+                createdAt: Date(),
+                appliedAt: snapshot.appliedAt,
+                source: snapshot.source,
+                trigger: snapshot.trigger,
+                deviceID: snapshot.deviceID,
+                intendedMode: snapshot.intendedMode,
+                activeScheduleID: snapshot.activeScheduleID,
+                effectivePolicy: snapshot.effectivePolicy,
+                temporaryUnlockState: snapshot.temporaryUnlockState,
+                authorizationHealth: snapshot.authorizationHealth,
+                policyFingerprint: snapshot.policyFingerprint,
+                childProfile: snapshot.childProfile
+            )
+            try writePolicySnapshot(snap)
+
+            // Update extension shared state so all processes see the change.
+            let extState = ExtensionSharedState(
+                currentMode: snap.effectivePolicy.resolvedMode,
+                isTemporaryUnlock: snap.effectivePolicy.isTemporaryUnlock,
+                temporaryUnlockExpiresAt: snap.effectivePolicy.temporaryUnlockExpiresAt,
+                authorizationAvailable: snap.authorizationHealth?.isAuthorized ?? true,
+                enforcementDegraded: snap.authorizationHealth?.enforcementDegraded ?? false,
+                policyVersion: snap.effectivePolicy.policyVersion
+            )
+            try? writeExtensionSharedState(extState)
+            return snap
         }
-
-        let snap = PolicySnapshot(
-            snapshotID: UUID(),
-            generation: nextGen,
-            createdAt: Date(),
-            appliedAt: snapshot.appliedAt,
-            source: snapshot.source,
-            trigger: snapshot.trigger,
-            deviceID: snapshot.deviceID,
-            intendedMode: snapshot.intendedMode,
-            activeScheduleID: snapshot.activeScheduleID,
-            effectivePolicy: snapshot.effectivePolicy,
-            temporaryUnlockState: snapshot.temporaryUnlockState,
-            authorizationHealth: snapshot.authorizationHealth,
-            policyFingerprint: snapshot.policyFingerprint,
-            childProfile: snapshot.childProfile
-        )
-        try writePolicySnapshot(snap)
-
-        // Update extension shared state so all processes see the change.
-        let extState = ExtensionSharedState(
-            currentMode: snap.effectivePolicy.resolvedMode,
-            isTemporaryUnlock: snap.effectivePolicy.isTemporaryUnlock,
-            temporaryUnlockExpiresAt: snap.effectivePolicy.temporaryUnlockExpiresAt,
-            authorizationAvailable: snap.authorizationHealth?.isAuthorized ?? true,
-            enforcementDegraded: snap.authorizationHealth?.enforcementDegraded ?? false,
-            policyVersion: snap.effectivePolicy.policyVersion
-        )
-        try? writeExtensionSharedState(extState)
-        return snap
     }
 }
 

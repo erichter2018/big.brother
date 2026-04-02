@@ -1698,8 +1698,8 @@ final class AppState {
     }
 
     /// On child startup, if there's no local policy snapshot (e.g. fresh install
-    /// or app update that cleared storage), recover the intended mode from the
-    /// most recent CloudKit command. Default to dailyMode (locked) if nothing found.
+    /// or app update that cleared storage), recover the intended mode from local
+    /// state (ModeStackResolver) first, then fall back to CloudKit commands.
     func recoverModeIfNeeded() async {
         guard deviceRole == .child,
               let enrollment = enrollmentState,
@@ -1708,7 +1708,7 @@ final class AppState {
               snapshotStore?.loadCurrentSnapshot() == nil else { return }
 
         #if DEBUG
-        print("[BigBrother] No local snapshot — recovering mode from CloudKit")
+        print("[BigBrother] No local snapshot — recovering mode")
         #endif
 
         // First, process any pending commands (they take priority).
@@ -1718,60 +1718,17 @@ final class AppState {
         // If pending commands gave us a snapshot, we're done.
         if snapshotStore?.loadCurrentSnapshot() != nil { return }
 
-        // No pending commands — look at recent commands (last 24h) for the
-        // most recent mode command targeting this child/device.
-        do {
-            let since = Date().addingTimeInterval(-86400)
-            let recentCommands = try await cloudKit.fetchRecentCommands(
-                familyID: enrollment.familyID,
-                since: since
-            )
+        // Use ModeStackResolver as the local source of truth — it reads
+        // TemporaryUnlockState, TimedUnlockInfo, lockUntil, schedule profile,
+        // and cleans up expired state as a side effect.
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let recoveredMode = resolution.mode
 
-            // Filter to mode commands targeting this child or all devices.
-            let modeCommands = recentCommands.filter { cmd in
-                guard cmd.action.isModeCommand else { return false }
-                switch cmd.target {
-                case .child(let cid): return cid == enrollment.childProfileID
-                case .device(let did): return did == enrollment.deviceID
-                case .allDevices: return true
-                }
-            }
-
-            if let latest = modeCommands.max(by: { $0.issuedAt < $1.issuedAt }) {
-                // Extract the target mode from the command action.
-                let recoveredMode: LockMode
-                switch latest.action {
-                case .setMode(let mode): recoveredMode = mode
-                case .temporaryUnlock(let secs):
-                    // Only recover as unlocked if the unlock hasn't expired yet.
-                    let expiresAt = latest.issuedAt.addingTimeInterval(Double(secs))
-                    recoveredMode = Date() < expiresAt ? .unlocked : .restricted
-                case .timedUnlock: recoveredMode = .restricted // penalty phase = locked
-                case .lockUntil: recoveredMode = .restricted
-                case .returnToSchedule: recoveredMode = .restricted
-                default: recoveredMode = .restricted
-                }
-                #if DEBUG
-                print("[BigBrother] Recovering from latest command: \(latest.action.displayDescription) → \(recoveredMode.rawValue)")
-                #endif
-                try? commandProcessor.applyModeDirect(recoveredMode, enrollment: enrollment)
-                refreshLocalState()
-            } else {
-                // No commands found at all — apply dailyMode as safe default.
-                #if DEBUG
-                print("[BigBrother] No recent commands found — defaulting to dailyMode (locked)")
-                #endif
-                try? commandProcessor.applyModeDirect(.restricted, enrollment: enrollment)
-                refreshLocalState()
-            }
-        } catch {
-            // CloudKit unreachable — apply dailyMode as safe default.
-            #if DEBUG
-            print("[BigBrother] CloudKit unreachable during recovery — defaulting to dailyMode")
-            #endif
-            try? commandProcessor.applyModeDirect(.restricted, enrollment: enrollment)
-            refreshLocalState()
-        }
+        #if DEBUG
+        print("[BigBrother] Recovering from ModeStackResolver: \(recoveredMode.rawValue) (\(resolution.reason))")
+        #endif
+        try? commandProcessor.applyModeDirect(recoveredMode, enrollment: enrollment)
+        refreshLocalState()
     }
 
     /// Stop periodic sync.

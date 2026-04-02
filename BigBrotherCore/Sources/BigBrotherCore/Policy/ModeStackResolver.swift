@@ -32,7 +32,7 @@ public enum ModeStackResolver {
                 // based on monotonic uptime, treat as expired even if wall clock says otherwise.
                 let elapsed = ProcessInfo.processInfo.systemUptime - (temp.uptimeAtStart ?? ProcessInfo.processInfo.systemUptime)
                 let originalDuration = temp.expiresAt.timeIntervalSince(temp.startedAt)
-                if elapsed > originalDuration + 60 {
+                if elapsed > originalDuration + 10 {
                     // Monotonic clock says duration elapsed — clock was set back
                     try? storage.clearTemporaryUnlockState()
                 } else {
@@ -51,17 +51,24 @@ public enum ModeStackResolver {
 
         // 2. Active timed unlock (penalty + unlock phases)?
         if let timed = storage.readTimedUnlockInfo() {
-            if now < timed.unlockAt {
-                // Penalty phase — device should be locked
-                let penaltyMode = timed.previousMode ?? .restricted
+            // Clock manipulation guard: if monotonic uptime says the total window
+            // has elapsed, treat as fully expired even if wall clock disagrees.
+            let totalDuration = timed.lockAt.timeIntervalSince(timed.createdAt ?? timed.unlockAt)
+            let monotonicElapsed = ProcessInfo.processInfo.systemUptime - (timed.uptimeAtStart ?? ProcessInfo.processInfo.systemUptime)
+            let clockManipulated = monotonicElapsed > totalDuration + 10
+
+            if clockManipulated {
+                // Wall clock was set forward to skip penalty or extend free phase
+                try? storage.clearTimedUnlockInfo()
+            } else if now < timed.unlockAt {
+                // Penalty phase — device MUST be locked regardless of previousMode.
                 return Resolution(
-                    mode: penaltyMode,
+                    mode: .restricted,
                     isTemporary: true,
                     expiresAt: timed.unlockAt,
                     reason: "Timed unlock penalty phase, unlocks at \(shortTime(timed.unlockAt))"
                 )
-            }
-            if now < timed.lockAt {
+            } else if now < timed.lockAt {
                 // Unlock phase — device is free
                 return Resolution(
                     mode: .unlocked,
@@ -69,9 +76,10 @@ public enum ModeStackResolver {
                     expiresAt: timed.lockAt,
                     reason: "Timed unlock free phase, locks at \(shortTime(timed.lockAt))"
                 )
+            } else {
+                // Fully expired — clean up and fall through
+                try? storage.clearTimedUnlockInfo()
             }
-            // Fully expired — clean up and fall through
-            try? storage.clearTimedUnlockInfo()
         }
 
         // 3. Active lockUntil? (parent locked device until a specific time)

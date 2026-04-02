@@ -117,38 +117,20 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         let storage = AppGroupStorage()
 
-        // Check for active temporary unlock — device should be unlocked.
-        if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
-            #if DEBUG
-            print("[BigBrother][BgRestore] Temp unlock active — skipping shield restore")
-            #endif
-            return
-        }
+        // Use ModeStackResolver as the single source of truth — it handles
+        // temp unlocks, timed unlocks, lockUntil, schedule, and cleanup.
+        let resolution = ModeStackResolver.resolve(storage: storage)
 
-        // Determine the current enforcement mode.
-        let snapshotStore = PolicySnapshotStore(storage: storage)
-        let snapshot = snapshotStore.loadCurrentSnapshot()
-        let profile = storage.readActiveScheduleProfile()
-
-        let mode: LockMode
-        if let profile {
-            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-            let isScheduleDriven = defaults?.object(forKey: "scheduleDrivenMode") == nil
-                || (defaults?.bool(forKey: "scheduleDrivenMode") ?? true)
-            mode = isScheduleDriven
-                ? profile.resolvedMode(at: Date())
-                : (snapshot?.effectivePolicy.resolvedMode ?? .restricted)
-        } else {
-            mode = snapshot?.effectivePolicy.resolvedMode ?? .restricted
-        }
+        // If device should be unlocked (temp unlock, free window, etc.), clear shields.
+        // ModeStackResolver already checked expiry and cleaned up stale state.
 
         // Force essential mode if permissions are missing.
         let effectiveMode: LockMode
         let permDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if permDefaults?.bool(forKey: "allPermissionsGranted") == false && mode != .locked {
+        if permDefaults?.bool(forKey: "allPermissionsGranted") == false && resolution.mode != .locked {
             effectiveMode = .locked
         } else {
-            effectiveMode = mode
+            effectiveMode = resolution.mode
         }
 
         // Apply shields to ManagedSettingsStore.
@@ -214,7 +196,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 if tokensToBlock.count <= 50 {
                     perAppTokens = tokensToBlock
                 } else {
-                    perAppTokens = Set(tokensToBlock.prefix(50))
+                    let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
+                    perAppTokens = Set(sorted.prefix(50))
                 }
                 for s in [baseStore, scheduleStore] {
                     s.shield.applications = perAppTokens
@@ -261,7 +244,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         reregisterReconciliationSchedule()
 
         #if DEBUG
-        print("[BigBrother][BgRestore] Enforcement restored: mode=\(mode.rawValue)")
+        print("[BigBrother][BgRestore] Enforcement restored: mode=\(effectiveMode.rawValue) (\(resolution.reason))")
         #endif
     }
 

@@ -27,7 +27,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var livenessTimer: DispatchSourceTimer?
 
     /// Timestamp of last IPC ping from the main app.
-    private var lastPingFromApp: Date?
+    /// Initialized to tunnel start time to avoid false "app dead" during startup.
+    private var lastPingFromApp: Date? = Date()
 
     /// Whether the main app is considered alive.
     private var mainAppAlive = true
@@ -52,6 +53,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Set when `setTunnelNetworkSettings` fails — retried on the next liveness tick.
     private var networkSettingsNeedRetry = false
+
+    /// Backoff counter for persistent CloudKit heartbeat permission failures.
+    /// Prevents spamming delete-recreate on every heartbeat interval.
+    private var heartbeatPermissionFailures = 0
+    private var heartbeatPermissionBackoffUntil: Date?
 
     // MARK: - Tunnel Lifecycle
 
@@ -149,6 +155,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case "ping":
             // Main app is alive — hand off heartbeat duties (but tunnel keeps screen time tracking)
             lastPingFromApp = Date()
+            // Flush screen time so the main app reads current values for its heartbeat.
+            flushScreenTimeSession()
             if !mainAppAlive {
                 NSLog("[Tunnel] Main app came back alive")
                 mainAppAlive = true
@@ -967,7 +975,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         var processedByTunnel = Set(defaults?.stringArray(forKey: "tunnelProcessedCommandIDs") ?? [])
 
         do {
-            let (results, _) = try await db.records(matching: query, resultsLimit: 10)
+            let (results, _) = try await db.records(matching: query, resultsLimit: 25)
             for (_, result) in results {
                 guard let record = try? result.get() else { continue }
                 let actionJSON = record["actionJSON"] as? String ?? ""
@@ -1305,22 +1313,33 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         record["hbDriving"] = nil
         record["hbSpeed"] = nil
 
+        // Skip if in permission-failure backoff period.
+        if let backoffUntil = heartbeatPermissionBackoffUntil, Date() < backoffUntil {
+            NSLog("[Tunnel] Heartbeat skipped — permission backoff (\(heartbeatPermissionFailures) failures)")
+            return
+        }
+
         do {
             try await db.save(record)
+            heartbeatPermissionFailures = 0 // Reset on success
         } catch {
             // "WRITE operation not permitted" = record owned by a different iCloud account.
             // Delete the stale record and create a fresh one we own.
             let desc = error.localizedDescription.lowercased()
             if desc.contains("permission") || desc.contains("not permitted") {
-                NSLog("[Tunnel] Heartbeat permission denied — deleting stale record and recreating")
+                heartbeatPermissionFailures += 1
+                NSLog("[Tunnel] Heartbeat permission denied (attempt \(heartbeatPermissionFailures)) — deleting stale record and recreating")
                 try? await db.deleteRecord(withID: recordID)
                 let fresh = CKRecord(recordType: "BBHeartbeat", recordID: recordID)
-                // Copy all fields from the failed record to the fresh one
                 for key in record.allKeys() { fresh[key] = record[key] }
                 do {
                     try await db.save(fresh)
+                    heartbeatPermissionFailures = 0 // Recreate succeeded
                 } catch {
-                    NSLog("[Tunnel] Heartbeat recreate also failed: \(error.localizedDescription)")
+                    // Exponential backoff: 1min, 2min, 4min, 8min, max 30min
+                    let backoff = min(60.0 * pow(2.0, Double(heartbeatPermissionFailures - 1)), 1800)
+                    heartbeatPermissionBackoffUntil = Date().addingTimeInterval(backoff)
+                    NSLog("[Tunnel] Heartbeat recreate failed — backing off \(Int(backoff))s")
                     return
                 }
             } else {
@@ -1554,8 +1573,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Flush any in-progress unlock session (call before heartbeat or tunnel stop).
+    /// Safe to call from any context — checks that screen is actually unlocked.
     private func flushScreenTimeSession() {
         guard let unlockTime = lastUnlockAt else { return }
+        // Double-check screen state to prevent double-counting if lock handler
+        // already cleared lastUnlockAt on a different dispatch.
+        var lockState: UInt64 = 0
+        if lockNotifyToken != NOTIFY_TOKEN_INVALID {
+            notify_get_state(lockNotifyToken, &lockState)
+        }
+        guard lockState == 0 else {
+            // Screen is locked — lock handler already counted this session.
+            lastUnlockAt = nil
+            return
+        }
         let sessionSeconds = Int(Date().timeIntervalSince(unlockTime))
         guard sessionSeconds > 0 else { return }
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)

@@ -88,8 +88,14 @@ struct BigBrotherApp: App {
 
         // Record that the main app launched with this build number.
         // The Monitor extension checks this to prompt re-launch after updates.
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set(AppConstants.appBuildNumber, forKey: "mainAppLastLaunchedBuild")
+        let launchDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        launchDefaults?.set(AppConstants.appBuildNumber, forKey: "mainAppLastLaunchedBuild")
+
+        // Clear build-mismatch DNS block if the Monitor set it (update is now complete).
+        if launchDefaults?.bool(forKey: "buildMismatchDNSBlock") == true {
+            launchDefaults?.removeObject(forKey: "buildMismatchDNSBlock")
+            launchDefaults?.removeObject(forKey: "internetBlockedUntil")
+        }
 
         // Configure all services (creates ManagedSettingsStore, CloudKit, etc.).
         _LaunchLog.log("Calling configureServices (role=\(appState.deviceRole))")

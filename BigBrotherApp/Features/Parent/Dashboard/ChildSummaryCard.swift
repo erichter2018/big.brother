@@ -59,19 +59,25 @@ struct ChildSummaryCard: View {
         let onOldBuild = (builds.min() ?? AppConstants.appBuildNumber) < AppConstants.appBuildNumber
 
         // isShieldMismatch — only flag when shields are genuinely down.
-        // shieldsActive covers individual app tokens, shieldCategoryActive covers the catch-all.
-        // Either being true means the device is protected. Also ignore stale heartbeats (>5 min old).
+        // Brief shield-down during transitions (unlocked→locked) is normal and resolves
+        // within 1-2 heartbeats. Require the heartbeat to be at least 3 min old to avoid
+        // alarming the parent during transient states that self-correct.
         var shieldMismatch = false
         if countdown == nil && dominantMode != .unlocked {
             for device in devices {
                 if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
                    hb.currentMode != .unlocked,
                    hb.shieldsActive == false,
-                   hb.shieldCategoryActive != true,
-                   hb.timestamp.timeIntervalSinceNow > -300 {
+                   hb.shieldCategoryActive != true {
                     if let expires = hb.temporaryUnlockExpiresAt, expires > Date() { continue }
-                    shieldMismatch = true
-                    break
+                    // Only alert if heartbeat is 3-10 min old — gives transitions time to settle.
+                    // Very fresh heartbeats (<3 min) may catch mid-transition state.
+                    // Very old heartbeats (>10 min) are stale and not actionable.
+                    let age = -hb.timestamp.timeIntervalSinceNow
+                    if age >= 180 && age <= 600 {
+                        shieldMismatch = true
+                        break
+                    }
                 }
             }
         }
@@ -720,15 +726,19 @@ struct ChildSummaryCard: View {
     /// Only trusts values from app heartbeats (not tunnel), sent today.
     private var screenTimeMinutes: Int? {
         let todayStart = Calendar.current.startOfDay(for: Date())
+        // Accept screen time from ANY heartbeat source — the tunnel is now the
+        // sole screen time tracker, so tunnel heartbeats are authoritative.
+        // Pick the highest value across all devices (most accurate for multi-device kids).
+        var best: Int?
         for device in devices {
             if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
                let minutes = hb.screenTimeMinutes,
                hb.timestamp >= todayStart,
-               hb.heartbeatSource != "vpnTunnel" {
-                return minutes
+               minutes > (best ?? 0) {
+                best = minutes
             }
         }
-        return nil
+        return best
     }
 
     /// Whether the child's device is currently locked (preferring iPhone).

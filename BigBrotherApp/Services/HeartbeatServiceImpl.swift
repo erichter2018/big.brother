@@ -383,7 +383,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             screenUnlockCount: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "screenUnlockCount"),
             jailbreakDetected: JailbreakDetector.isJailbroken(),
             jailbreakReason: JailbreakDetector.detectedReason(),
-            isDriving: locationService?.isMoving == true ? true : nil,
+            isDriving: locationService?.drivingMonitor?.isDriving == true ? true : nil,
             currentSpeed: locationService?.lastLocation?.speed,
             heartbeatSource: "mainApp",
             tunnelConnected: vpnManager?.isConnected,

@@ -84,13 +84,17 @@ enum BackgroundRefreshHandler {
                 return .failed
             }
         } else {
-            // Reduced debounce — always sync on push unless we literally JUST synced.
-            // Commands can be lost if pushes are debounced too aggressively.
+            // Brief debounce — but schedule a delayed reprocess instead of dropping.
             let elapsed = Date().timeIntervalSince(lastPushSync)
-            guard elapsed >= 2 else {
+            if elapsed < 2 {
                 #if DEBUG
-                print("[BigBrother] Push debounced (\(Int(elapsed))s since last sync)")
+                print("[BigBrother] Push debounced (\(Int(elapsed * 1000))ms) — scheduling delayed sync")
                 #endif
+                // Schedule a delayed sync so the command isn't lost.
+                Task {
+                    try? await Task.sleep(for: .seconds(2 - elapsed + 0.5))
+                    _ = try? await appState.syncCoordinator?.performQuickSync()
+                }
                 return .noData
             }
             lastPushSync = Date()

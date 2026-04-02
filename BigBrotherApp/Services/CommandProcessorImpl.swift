@@ -181,26 +181,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         let modeCommands = enforcementCommands.filter { $0.action.isModeCommand }
         let perAppCommands = enforcementCommands.filter { !$0.action.isModeCommand }
 
+        // Select the latest mode command. Older ones are superseded AFTER the winner
+        // is successfully processed — this ensures we don't discard fallback commands
+        // if the winner fails (bad signature, expired, registration failure).
         var effectiveModeCommands: [RemoteCommand] = []
+        var supersededModeCommands: [RemoteCommand] = []
         if let latestMode = modeCommands.max(by: { $0.issuedAt < $1.issuedAt }) {
             effectiveModeCommands = [latestMode]
-            // Mark superseded mode commands as processed so they're never re-fetched.
-            for cmd in modeCommands where cmd.id != latestMode.id {
-                #if DEBUG
-                print("[BigBrother] Superseded mode command: \(cmd.action.displayDescription) (id=\(cmd.id))")
-                #endif
-                try? storage.markCommandProcessed(cmd.id)
-                // Post a receipt and update status so parent sees it was superseded.
-                let receipt = makeReceipt(
-                    commandID: cmd.id,
-                    deviceID: enrollment.deviceID,
-                    familyID: enrollment.familyID,
-                    status: .applied,
-                    reason: "Superseded by newer mode command"
-                )
-                try? await cloudKit.saveReceipt(receipt)
-                try? await cloudKit.updateCommandStatus(cmd.id, status: .applied)
-            }
+            supersededModeCommands = modeCommands.filter { $0.id != latestMode.id }
         }
         let skippedMode = modeCommands.count - effectiveModeCommands.count
 
@@ -281,6 +269,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 message: "\(command.action): \(result.logReason)",
                 details: "Command ID: \(command.id)"
             ))
+        }
+
+        // Now that the winning mode command has been processed, mark superseded ones.
+        // Deferred from earlier so that if the winner fails, we could fall back (not yet
+        // implemented, but this ordering is safer than pre-emptive superseding).
+        for cmd in supersededModeCommands {
+            #if DEBUG
+            print("[BigBrother] Superseded mode command: \(cmd.action.displayDescription) (id=\(cmd.id))")
+            #endif
+            try? storage.markCommandProcessed(cmd.id)
+            try? await cloudKit.updateCommandStatus(cmd.id, status: .expired)
         }
 
         // Prune processed IDs older than retention window.
@@ -781,7 +780,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         )
 
         let result = try snapshotStore.commit(output.snapshot)
-        if case .committed(let snapshot) = result {
+        switch result {
+        case .committed(let snapshot):
             try enforcement?.apply(snapshot.effectivePolicy)
             try snapshotStore.markApplied()
 
@@ -796,6 +796,16 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                         self?.onRestartVPNTunnel?()
                     }
                 }
+            }
+        case .unchanged:
+            // Policy fingerprint identical — still apply enforcement to ensure stores are correct.
+            if let snapshot = snapshotStore.loadCurrentSnapshot() {
+                try enforcement?.apply(snapshot.effectivePolicy)
+            }
+        case .rejectedAsStale:
+            // Another process wrote a newer snapshot — apply THAT instead.
+            if let snapshot = snapshotStore.loadCurrentSnapshot() {
+                try enforcement?.apply(snapshot.effectivePolicy)
             }
         }
     }
@@ -881,20 +891,26 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         } catch {
             eventLogger.log(.commandFailed, details: "Temp unlock ABORTED: DeviceActivitySchedule registration failed: \(error.localizedDescription). Device NOT unlocked.")
             try? storage.clearTemporaryUnlockState()
-            return
+            throw CommandError.permissionDeficiency
         }
 
         // Also schedule a BGProcessingTask as a second safety net.
         AppDelegate.scheduleRelockTask(at: expiresAt)
 
         let result = try snapshotStore.commit(output.snapshot)
-        if case .committed(let snapshot) = result {
+        switch result {
+        case .committed(let snapshot):
             try enforcement?.apply(snapshot.effectivePolicy)
             try snapshotStore.markApplied()
-
-            let durationStr = ModeChangeNotifier.formatDuration(durationSeconds)
-            eventLogger.log(.temporaryUnlockStarted, details: "Unlocked for \(durationStr)")
+        case .unchanged, .rejectedAsStale:
+            // Snapshot collision — still must apply enforcement so the unlock takes effect.
+            if let snapshot = snapshotStore.loadCurrentSnapshot() {
+                try enforcement?.apply(snapshot.effectivePolicy)
+            }
         }
+
+        let durationStr = ModeChangeNotifier.formatDuration(durationSeconds)
+        eventLogger.log(.temporaryUnlockStarted, details: "Unlocked for \(durationStr)")
     }
 
     /// Register a one-shot DeviceActivitySchedule that fires `intervalDidEnd`
@@ -1008,11 +1024,16 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         AppDelegate.scheduleRelockTask(at: expiresAt)
 
         let result = try snapshotStore.commit(output.snapshot)
-        if case .committed(let snapshot) = result {
+        switch result {
+        case .committed(let snapshot):
             try enforcement?.apply(snapshot.effectivePolicy)
             try snapshotStore.markApplied()
-            eventLogger.log(.temporaryUnlockStarted, details: "Self-unlock for \(ModeChangeNotifier.formatDuration(durationSeconds))")
+        case .unchanged, .rejectedAsStale:
+            if let snapshot = snapshotStore.loadCurrentSnapshot() {
+                try enforcement?.apply(snapshot.effectivePolicy)
+            }
         }
+        eventLogger.log(.temporaryUnlockStarted, details: "Self-unlock for \(ModeChangeNotifier.formatDuration(durationSeconds))")
     }
 
     // MARK: - Timed Unlock (Penalty Offset)
@@ -1161,9 +1182,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Lock the device immediately and register a DeviceActivitySchedule to
     /// return to schedule at the target date.
     private func applyLockUntil(date: Date, enrollment: ChildEnrollmentState, commandID: UUID) throws {
+        let now = Date()
+
+        // If the lockUntil date is already in the past (late delivery / bad signal),
+        // skip the lock entirely — don't over-lock the device with no expiry mechanism.
+        guard date > now else {
+            eventLogger.log(.commandApplied, details: "lockUntil skipped: target \(date) already past")
+            return
+        }
+
         // lockUntil is temporary — it pushes onto the stack and restores prior mode at expiry.
         // Clear any active temp/timed unlock — lockUntil overrides them.
-        // Without this, ModeStackResolver would see the temp unlock and override the lock.
         try? storage.clearTemporaryUnlockState()
         try? storage.clearTimedUnlockInfo()
         cancelNonScheduleActivities()
@@ -1177,10 +1206,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Apply lock immediately.
         try applyMode(.restricted, enrollment: enrollment, commandID: commandID)
 
-        // Register a one-shot DeviceActivitySchedule that fires at the target date.
-        // When it fires, the monitor extension will call returnToSchedule.
-        let now = Date()
-        guard date > now else { return }
+        // Schedule BGTask safety net (in case Monitor misses the callback).
+        AppDelegate.scheduleRelockTask(at: date)
 
         let cal = Calendar.current
         let startComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
@@ -1582,9 +1609,21 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Re-apply enforcement so ManagedSettingsStore picks up changes.
     /// Called after any change to allowed app lists or device restrictions.
     /// Always applies — device restrictions are active even in unlocked mode.
-    private func reapplyCurrentEnforcement() {
-        guard let snapshot = snapshotStore.loadCurrentSnapshot() else { return }
-        try? enforcement?.apply(snapshot.effectivePolicy)
+    /// Returns false if enforcement fails (caller should report failure).
+    @discardableResult
+    private func reapplyCurrentEnforcement() -> Bool {
+        guard let snapshot = snapshotStore.loadCurrentSnapshot() else { return false }
+        do {
+            try enforcement?.apply(snapshot.effectivePolicy)
+            return true
+        } catch {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "reapplyCurrentEnforcement failed",
+                details: error.localizedDescription
+            ))
+            return false
+        }
     }
 
     private func loadAllowedTokens() -> Set<ApplicationToken> {
