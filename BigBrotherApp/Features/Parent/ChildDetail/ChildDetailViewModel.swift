@@ -10,7 +10,7 @@ struct BedtimeComplianceResult {
     let totalSecondsAfter: Int    // screen time seconds after bedtime
     let violationSlots: [Int]     // which slots had activity after bedtime
 
-    var isCompliant: Bool { totalSecondsAfter == 0 }
+    var isCompliant: Bool { totalSecondsAfter < 60 }
     var minutesAfterBedtime: Int { totalSecondsAfter / 60 }
 
     /// Human-readable bedtime time (e.g. "9:30 PM").

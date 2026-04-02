@@ -653,17 +653,33 @@ final class AppState {
         }
 
         // Listen for iCloud account changes on child devices.
+        // CKAccountChanged fires spuriously (app launch, network reconnect, etc.)
+        // so we only log/notify when the account status actually changes.
         if deviceRole == .child {
             let observer = NotificationCenter.default.addObserver(
                 forName: Notification.Name.CKAccountChanged,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated {
+                Task { @MainActor in
                     guard let self else { return }
-                    self.eventLogger?.log(.familyControlsAuthChanged, details: "iCloud account changed (CKAccountChanged)")
+                    let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
+                    let status = try? await container.accountStatus()
+                    let statusKey = "lastCKAccountStatus"
+                    let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                    let previous = defaults?.integer(forKey: statusKey) ?? -1
+                    let current = status?.rawValue ?? -1
+                    defaults?.set(current, forKey: statusKey)
+
+                    guard previous != -1, current != previous else {
+                        #if DEBUG
+                        print("[BigBrother] CKAccountChanged — status unchanged (\(current)), ignoring")
+                        #endif
+                        return
+                    }
+                    self.eventLogger?.log(.familyControlsAuthChanged, details: "iCloud account status changed: \(previous) → \(current)")
                     #if DEBUG
-                    print("[BigBrother] CKAccountChanged notification received")
+                    print("[BigBrother] CKAccountChanged — real change: \(previous) → \(current)")
                     #endif
                 }
             }
@@ -903,7 +919,7 @@ final class AppState {
                         trigger: "Foreground sync: corrected \(snapshot.effectivePolicy.resolvedMode.rawValue) → \(resolution.mode.rawValue)",
                         effectivePolicy: corrected
                     )
-                    try? storage.writePolicySnapshot(correctedSnapshot)
+                    try? storage.commitCorrectedSnapshot(correctedSnapshot)
                     try? enforcement?.apply(corrected)
                 } else {
                     try? enforcement?.apply(snapshot.effectivePolicy)
@@ -2016,7 +2032,7 @@ final class AppState {
                 trigger: "60s enforcement check: shields were \(isShielded ? "UP" : "DOWN"), should be \(shouldBeShielded ? "UP" : "DOWN") (mode: \(resolution.mode.rawValue))",
                 effectivePolicy: corrected
             )
-            try? storage.writePolicySnapshot(snap)
+            try? storage.commitCorrectedSnapshot(snap)
 
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,

@@ -481,7 +481,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                     trigger: "Heartbeat reconciliation: snapshot stale (\(snapshotMode.rawValue) → \(resolution.mode.rawValue))",
                     effectivePolicy: corrected
                 )
-                try? storage.writePolicySnapshot(correctedSnapshot)
+                try? storage.commitCorrectedSnapshot(correctedSnapshot)
                 policyToApply = corrected
             } else {
                 policyToApply = snapshot.effectivePolicy

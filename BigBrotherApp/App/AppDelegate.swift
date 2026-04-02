@@ -265,18 +265,26 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         #endif
     }
 
-    /// Re-register the 15-minute reconciliation schedule.
+    /// Re-register the 5-minute reconciliation schedule.
     /// Mirrors ScheduleManagerImpl.registerReconciliationSchedule() but
     /// runs from AppDelegate without needing AppState.
     private func reregisterReconciliationSchedule() {
         let center = DeviceActivityCenter()
-        let quarters: [(name: String, minute: Int)] = [
+        let intervals: [(name: String, minute: Int)] = [
             ("bigbrother.reconciliation", 0),
-            ("bigbrother.reconciliation.q2", 15),
-            ("bigbrother.reconciliation.q3", 30),
-            ("bigbrother.reconciliation.q4", 45),
+            ("bigbrother.reconciliation.q2", 5),
+            ("bigbrother.reconciliation.q3", 10),
+            ("bigbrother.reconciliation.q4", 15),
+            ("bigbrother.reconciliation.q5", 20),
+            ("bigbrother.reconciliation.q6", 25),
+            ("bigbrother.reconciliation.q7", 30),
+            ("bigbrother.reconciliation.q8", 35),
+            ("bigbrother.reconciliation.q9", 40),
+            ("bigbrother.reconciliation.q10", 45),
+            ("bigbrother.reconciliation.q11", 50),
+            ("bigbrother.reconciliation.q12", 55),
         ]
-        for q in quarters {
+        for q in intervals {
             let activityName = DeviceActivityName(rawValue: q.name)
             let start = DateComponents(minute: q.minute)
             let end = DateComponents(minute: q.minute + 1)

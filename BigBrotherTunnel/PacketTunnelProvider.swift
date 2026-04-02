@@ -50,6 +50,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// during the startup grace period (app may still be launching after deploy).
     private var tunnelStartedAt: Date = Date()
 
+    /// Set when `setTunnelNetworkSettings` fails — retried on the next liveness tick.
+    private var networkSettingsNeedRetry = false
+
     // MARK: - Tunnel Lifecycle
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
@@ -144,11 +147,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         switch message {
         case "ping":
-            // Main app is alive — hand off screen time tracking
+            // Main app is alive — hand off heartbeat duties (but tunnel keeps screen time tracking)
             lastPingFromApp = Date()
             if !mainAppAlive {
-                flushScreenTimeSession()
-                lastUnlockAt = nil // Main app's DeviceLockMonitor takes over
                 NSLog("[Tunnel] Main app came back alive")
                 mainAppAlive = true
                 tunnelOwnsHeartbeat = false
@@ -425,6 +426,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Block internet until the kid opens the app (triggers restoration on new code).
         checkBuildMismatchEnforcement()
 
+        // Retry failed network settings application (DNS blackhole or proxy config).
+        if networkSettingsNeedRetry {
+            NSLog("[Tunnel] Retrying failed network settings application")
+            reapplyNetworkSettings()
+        }
+
         // Emergency enforcement: if both app and Monitor are dead, screen is unlocked,
         // and device should be restricted/locked — activate DNS blackhole as fallback.
         checkEmergencyEnforcement()
@@ -550,7 +557,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 trigger: "Tunnel: stale unlock state corrected to \(resolution.mode.rawValue)",
                 effectivePolicy: correctedPolicy
             )
-            try? storage.writePolicySnapshot(correctedSnapshot)
+            try? storage.commitCorrectedSnapshot(correctedSnapshot)
         }
 
         NSLog("[Tunnel] Stale unlock state detected — corrected to \(resolution.mode.rawValue) (ext:\(extStale) snap:\(snapshotStale)). App must launch to re-apply ManagedSettings.")
@@ -828,11 +835,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             dnsProxy?.reconnectUpstream()
         }
 
-        setTunnelNetworkSettings(settings) { error in
+        setTunnelNetworkSettings(settings) { [weak self] error in
             if let error {
-                NSLog("[Tunnel] Failed to reapply settings: \(error.localizedDescription)")
+                NSLog("[Tunnel] Failed to reapply settings: \(error.localizedDescription) — will retry on next liveness tick")
+                self?.networkSettingsNeedRetry = true
             } else {
                 NSLog("[Tunnel] Network settings reapplied")
+                self?.networkSettingsNeedRetry = false
             }
         }
     }
@@ -982,23 +991,27 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
                 guard isTargeted else { continue }
 
-                // Skip stale commands (older than 30 minutes) — only for OUR device.
+                // Skip expired commands — use the same 24-hour window as the main app.
+                // Previously 30 minutes, which caused commands valid for the app to be
+                // silently dropped when the app was dead for hours.
                 if let issuedAt = record["issuedAt"] as? Date,
-                   Date().timeIntervalSince(issuedAt) > 1800 {
+                   Date().timeIntervalSince(issuedAt) > AppConstants.defaultCommandExpirySeconds {
                     processedByTunnel.insert(commandID)
-                    NSLog("[Tunnel] Skipping stale command \(commandID) (issued \(Int(Date().timeIntervalSince(issuedAt)))s ago)")
+                    NSLog("[Tunnel] Skipping expired command \(commandID) (issued \(Int(Date().timeIntervalSince(issuedAt)))s ago)")
                     continue
                 }
 
                 processedByTunnel.insert(commandID)
 
-                // Handle simple commands from the tunnel
-                if actionJSON.contains("requestHeartbeat") {
+                // Handle simple commands from the tunnel.
+                // Parse the action type from JSON to match exactly (not substring).
+                let tunnelAction = Self.parseTunnelActionType(from: actionJSON)
+                if tunnelAction == "requestHeartbeat" {
                     await sendHeartbeatFromTunnel(reason: "command")
                     record["status"] = "applied"
                     _ = try? await db.save(record)
                     NSLog("[Tunnel] Processed requestHeartbeat command: \(commandID)")
-                } else if actionJSON.contains("requestDiagnostics") {
+                } else if tunnelAction == "requestDiagnostics" {
                     // Always handle from tunnel — the main app may be suspended
                     // even when mainAppAlive is true. Both tunnel and app can
                     // upload reports; the parent sees whichever arrives.
@@ -1006,7 +1019,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     record["status"] = "applied"
                     _ = try? await db.save(record)
                     NSLog("[Tunnel] Processed requestDiagnostics command: \(commandID)")
-                } else if actionJSON.contains("blockInternet") {
+                } else if tunnelAction == "blockInternet" {
                     // Legacy: internet blocking is now mode-driven.
                     // Just reapply network settings — tunnel reads mode from App Group.
                     reapplyNetworkSettings()
@@ -1025,6 +1038,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             processedByTunnel = Set(processedByTunnel.suffix(200))
         }
         defaults?.set(Array(processedByTunnel), forKey: "tunnelProcessedCommandIDs")
+    }
+
+    /// Parse the top-level action type from a command's JSON string.
+    /// Returns the exact action key (e.g. "requestHeartbeat") or nil if unparseable.
+    private static func parseTunnelActionType(from json: String) -> String? {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        // CommandAction encodes as { "actionType": { ...params } } or just "actionType"
+        // Try the single-key dictionary pattern first, then fall back to "type" field.
+        if obj.count == 1, let key = obj.keys.first {
+            return key
+        }
+        return obj["type"] as? String
     }
 
     /// Collect a diagnostic report from the tunnel. Includes schedule + restriction
@@ -1279,22 +1307,41 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         do {
             try await db.save(record)
-            defaults?.set(Date().timeIntervalSince1970, forKey: "lastHeartbeatSentAt")
-            NSLog("[Tunnel] Heartbeat sent (reason: \(reason))")
-
-            // Save daily screen time snapshot (one record per device per day)
-            let slotData = (defaults?.dictionary(forKey: screenTimeSlotKey) as? [String: Int]) ?? [:]
-            await saveDailyScreenTimeSnapshot(
-                db: db,
-                enrollment: enrollment,
-                minutes: defaults?.integer(forKey: screenTimeMinutesKey) ?? 0,
-                unlocks: defaults?.integer(forKey: screenTimeUnlockCountKey) ?? 0,
-                date: defaults?.string(forKey: screenTimeDateKey),
-                slotSeconds: slotData
-            )
         } catch {
-            NSLog("[Tunnel] Heartbeat failed: \(error.localizedDescription)")
+            // "WRITE operation not permitted" = record owned by a different iCloud account.
+            // Delete the stale record and create a fresh one we own.
+            let desc = error.localizedDescription.lowercased()
+            if desc.contains("permission") || desc.contains("not permitted") {
+                NSLog("[Tunnel] Heartbeat permission denied — deleting stale record and recreating")
+                try? await db.deleteRecord(withID: recordID)
+                let fresh = CKRecord(recordType: "BBHeartbeat", recordID: recordID)
+                // Copy all fields from the failed record to the fresh one
+                for key in record.allKeys() { fresh[key] = record[key] }
+                do {
+                    try await db.save(fresh)
+                } catch {
+                    NSLog("[Tunnel] Heartbeat recreate also failed: \(error.localizedDescription)")
+                    return
+                }
+            } else {
+                NSLog("[Tunnel] Heartbeat failed: \(error.localizedDescription)")
+                return
+            }
         }
+
+        defaults?.set(Date().timeIntervalSince1970, forKey: "lastHeartbeatSentAt")
+        NSLog("[Tunnel] Heartbeat sent (reason: \(reason))")
+
+        // Save daily screen time snapshot (one record per device per day)
+        let slotData = (defaults?.dictionary(forKey: screenTimeSlotKey) as? [String: Int]) ?? [:]
+        await saveDailyScreenTimeSnapshot(
+            db: db,
+            enrollment: enrollment,
+            minutes: defaults?.integer(forKey: screenTimeMinutesKey) ?? 0,
+            unlocks: defaults?.integer(forKey: screenTimeUnlockCountKey) ?? 0,
+            date: defaults?.string(forKey: screenTimeDateKey),
+            slotSeconds: slotData
+        )
     }
 
     private func saveDailyScreenTimeSnapshot(db: CKDatabase, enrollment: ChildEnrollmentState, minutes: Int, unlocks: Int, date: String?, slotSeconds: [String: Int]) async {
@@ -1428,9 +1475,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Update DNS proxy so it skips activity counting while screen is locked.
         dnsProxy?.isDeviceLocked = locked
 
-        // Only track screen time when the main app is dead.
-        // When both are running, DeviceLockMonitor in the main app handles this.
-        guard !mainAppAlive else { return }
+        // Always track screen time from the tunnel — it's the only process that
+        // reliably receives every lock/unlock transition. The main app's
+        // DeviceLockMonitor misses transitions when iOS suspends the app.
 
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let today = screenTimeTodayString()

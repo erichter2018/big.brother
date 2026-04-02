@@ -300,7 +300,24 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             return
         }
         CKRecordConversion.updateCKRecord(existing, from: heartbeat)
-        try await save(existing)
+        do {
+            try await save(existing)
+        } catch {
+            // "WRITE operation not permitted" means the record was created by a different
+            // iCloud account (e.g., after OurPact removal changed auth). Delete and recreate.
+            let desc = error.localizedDescription.lowercased()
+            if desc.contains("permission") || desc.contains("not permitted") {
+                #if DEBUG
+                print("[CloudKit] Heartbeat permission denied — deleting stale record and recreating")
+                #endif
+                try? await database.deleteRecord(withID: recordID)
+                let fresh = CKRecord(recordType: CKRecordType.heartbeat, recordID: recordID)
+                CKRecordConversion.updateCKRecord(fresh, from: heartbeat)
+                try await save(fresh)
+            } else {
+                throw error
+            }
+        }
     }
 
     func fetchLatestHeartbeats(familyID: FamilyID) async throws -> [DeviceHeartbeat] {

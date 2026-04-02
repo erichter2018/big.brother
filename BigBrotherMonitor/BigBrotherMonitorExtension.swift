@@ -437,7 +437,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 trigger: "Monitor: timed unlock ended, reverted to \(mode.rawValue)",
                 effectivePolicy: correctedPolicy
             )
-            try? storage.writePolicySnapshot(correctedSnapshot)
+            try? storage.commitCorrectedSnapshot(correctedSnapshot)
         }
 
         if mode == .unlocked {
@@ -494,7 +494,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 trigger: "Monitor: temp unlock expired, reverted to \(mode.rawValue)",
                 effectivePolicy: correctedPolicy
             )
-            try? storage.writePolicySnapshot(correctedSnapshot)
+            try? storage.commitCorrectedSnapshot(correctedSnapshot)
         }
 
         let policy = storage.readPolicySnapshot()?.effectivePolicy
@@ -815,33 +815,29 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     }
 
     /// Compute and write DNS-blocked domains when shields are up.
+    /// Only blocks web domains of apps that are actively shielded (picker minus allowed).
     /// Mirrors EnforcementServiceImpl.updateEnforcementBlockedDomains().
     private func updateEnforcementBlockedDomains(allowedTokens: Set<ApplicationToken>) {
         let encoder = JSONEncoder()
         let cache = storage.readAllCachedAppNames()
-        var allowedNames = Set<String>()
 
-        for token in allowedTokens {
+        // Only block domains for apps that are actually shielded.
+        let pickerTokens = loadPickerTokens()
+        let shieldedTokens = pickerTokens.subtracting(allowedTokens)
+        var shieldedNames = Set<String>()
+        for token in shieldedTokens {
             if let data = try? encoder.encode(token) {
                 let key = data.base64EncodedString()
                 if let name = cache[key], !name.hasPrefix("App ") {
-                    allowedNames.insert(name)
+                    shieldedNames.insert(name)
                 }
             }
         }
-        for limit in storage.readAppTimeLimits() {
-            allowedNames.insert(limit.appName)
-        }
-        for entry in storage.readTemporaryAllowedApps() where entry.isValid {
-            allowedNames.insert(entry.appName)
-        }
 
-        var allowedDomains = Set<String>()
-        for name in allowedNames {
-            allowedDomains.formUnion(DomainCategorizer.domainsForApp(name))
+        var blocked = Set<String>()
+        for name in shieldedNames {
+            blocked.formUnion(DomainCategorizer.domainsForApp(name))
         }
-
-        var blocked = DomainCategorizer.allAppDomains().subtracting(allowedDomains)
 
         // Always block DoH resolvers when enforcement is active.
         blocked.formUnion(DomainCategorizer.dohResolverDomains)
@@ -987,7 +983,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             effectivePolicy: corrected
         )
         do {
-            try storage.writePolicySnapshot(snapshot)
+            try storage.commitCorrectedSnapshot(snapshot)
         } catch {
             // Critical: snapshot write failed — main app may see stale state and undo enforcement.
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -1198,17 +1194,26 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         UNUserNotificationCenter.current().add(request)
     }
 
-    /// Re-register the 15-minute reconciliation schedule from the Monitor extension.
-    /// Called after an app update to ensure the Monitor keeps firing.
+    /// Re-register the 5-minute reconciliation schedule from the Monitor extension.
+    /// Tightened from 15-minute to reduce the window when Monitor is killed mid-operation
+    /// and shields are inconsistent with the policy snapshot.
     private func reregisterReconciliationSchedule() {
         let center = DeviceActivityCenter()
-        let quarters: [(name: String, minute: Int)] = [
+        let intervals: [(name: String, minute: Int)] = [
             ("bigbrother.reconciliation", 0),
-            ("bigbrother.reconciliation.q2", 15),
-            ("bigbrother.reconciliation.q3", 30),
-            ("bigbrother.reconciliation.q4", 45),
+            ("bigbrother.reconciliation.q2", 5),
+            ("bigbrother.reconciliation.q3", 10),
+            ("bigbrother.reconciliation.q4", 15),
+            ("bigbrother.reconciliation.q5", 20),
+            ("bigbrother.reconciliation.q6", 25),
+            ("bigbrother.reconciliation.q7", 30),
+            ("bigbrother.reconciliation.q8", 35),
+            ("bigbrother.reconciliation.q9", 40),
+            ("bigbrother.reconciliation.q10", 45),
+            ("bigbrother.reconciliation.q11", 50),
+            ("bigbrother.reconciliation.q12", 55),
         ]
-        for q in quarters {
+        for q in intervals {
             let activityName = DeviceActivityName(rawValue: q.name)
             let start = DateComponents(minute: q.minute)
             let end = DateComponents(minute: q.minute + 1)

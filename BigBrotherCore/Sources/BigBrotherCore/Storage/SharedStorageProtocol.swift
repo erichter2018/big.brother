@@ -267,6 +267,58 @@ public protocol SharedStorageProtocol: Sendable {
     func ensureSharedFilesExist()
 }
 
+// MARK: - Extension-safe snapshot commit
+
+extension SharedStorageProtocol {
+    /// Commit a corrected snapshot from an extension (Monitor, Tunnel).
+    /// Lightweight alternative to PolicySnapshotStore.commit() that:
+    /// - Bumps generation number to avoid staleness rejection
+    /// - Updates ExtensionSharedState for cross-process consistency
+    /// - Writes the snapshot atomically
+    ///
+    /// Does NOT record SnapshotTransition history (only main app does).
+    @discardableResult
+    public func commitCorrectedSnapshot(_ snapshot: PolicySnapshot) throws -> PolicySnapshot {
+        // Ensure generation is higher than current to prevent staleness rejection.
+        let nextGen: Int64
+        if let current = readPolicySnapshot(), snapshot.generation <= current.generation {
+            nextGen = current.generation + 1
+        } else {
+            nextGen = snapshot.generation
+        }
+
+        let snap = PolicySnapshot(
+            snapshotID: UUID(),
+            generation: nextGen,
+            createdAt: Date(),
+            appliedAt: snapshot.appliedAt,
+            source: snapshot.source,
+            trigger: snapshot.trigger,
+            deviceID: snapshot.deviceID,
+            intendedMode: snapshot.intendedMode,
+            activeScheduleID: snapshot.activeScheduleID,
+            effectivePolicy: snapshot.effectivePolicy,
+            temporaryUnlockState: snapshot.temporaryUnlockState,
+            authorizationHealth: snapshot.authorizationHealth,
+            policyFingerprint: snapshot.policyFingerprint,
+            childProfile: snapshot.childProfile
+        )
+        try writePolicySnapshot(snap)
+
+        // Update extension shared state so all processes see the change.
+        let extState = ExtensionSharedState(
+            currentMode: snap.effectivePolicy.resolvedMode,
+            isTemporaryUnlock: snap.effectivePolicy.isTemporaryUnlock,
+            temporaryUnlockExpiresAt: snap.effectivePolicy.temporaryUnlockExpiresAt,
+            authorizationAvailable: snap.authorizationHealth?.isAuthorized ?? true,
+            enforcementDegraded: snap.authorizationHealth?.enforcementDegraded ?? false,
+            policyVersion: snap.effectivePolicy.policyVersion
+        )
+        try? writeExtensionSharedState(extState)
+        return snap
+    }
+}
+
 /// Configuration for the shield (blocked app) screen.
 /// Read by BigBrotherShield extension.
 public struct ShieldConfig: Codable, Sendable, Equatable {

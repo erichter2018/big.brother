@@ -93,13 +93,15 @@ public enum ModeStackResolver {
                     )
                 }
             } else {
-                // Legacy: no expiry stored. Trust DeviceActivity schedule but
-                // include nil expiresAt so diagnostics can flag it.
+                // Legacy: no expiry stored. Apply a 24-hour failsafe so the device
+                // doesn't stay locked forever if the DeviceActivity schedule was lost.
+                let failsafeExpiry = now.addingTimeInterval(AppConstants.defaultCommandExpirySeconds)
+                defaults?.set(failsafeExpiry.timeIntervalSince1970, forKey: "lockUntilExpiresAt")
                 return Resolution(
                     mode: .restricted,
                     isTemporary: true,
-                    expiresAt: nil,
-                    reason: "lockUntil active (reverts to \(lockUntilMode)), no expiry stored"
+                    expiresAt: failsafeExpiry,
+                    reason: "lockUntil active (reverts to \(lockUntilMode)), 24h failsafe applied"
                 )
             }
         }

@@ -103,6 +103,7 @@ struct ChildSummaryCard: View {
 
         // Internet blocked — any device with DNS blackhole active
         let internetBlocked = childHeartbeats.contains { $0.internetBlocked == true }
+        let internetBlockedReason = childHeartbeats.first(where: { $0.internetBlocked == true })?.internetBlockedReason
 
         return PrecomputedValues(
             hasAnyPermissionIssue: permissionIssue,
@@ -113,7 +114,8 @@ struct ChildSummaryCard: View {
             isTunnelHeartbeat: heartbeatIsTunnel,
             jailbreakReasons: jailbreakReasons,
             hasJailbreak: hasJailbreak,
-            isInternetBlocked: internetBlocked
+            isInternetBlocked: internetBlocked,
+            internetBlockedReason: internetBlockedReason
         )
     }
 
@@ -127,6 +129,7 @@ struct ChildSummaryCard: View {
         let jailbreakReasons: [String]
         let hasJailbreak: Bool
         let isInternetBlocked: Bool
+        let internetBlockedReason: String?
     }
 
     var body: some View {
@@ -175,6 +178,21 @@ struct ChildSummaryCard: View {
                     infoRow(icon: "exclamationmark.shield.fill", color: .red) {
                         Text("jailbreak detected")
                             .foregroundStyle(.red)
+                    }
+                }
+                if cached.isInternetBlocked && dominantMode != .lockedDown {
+                    infoRow(icon: "wifi.slash", color: .red) {
+                        if let reason = cached.internetBlockedReason, !reason.isEmpty {
+                            Text(reason)
+                                .foregroundStyle(.red)
+                                .fontWeight(.semibold)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.8)
+                        } else {
+                            Text("internet blocked")
+                                .foregroundStyle(.red)
+                                .fontWeight(.semibold)
+                        }
                     }
                 }
 

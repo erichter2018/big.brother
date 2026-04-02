@@ -219,46 +219,32 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     }
 
     /// Compute and write DNS-blocked domains for web app bypass prevention.
-    /// When shields are up, blocks web versions of all known apps except allowed ones.
-    /// This prevents kids from using Safari web apps to bypass shield.applications.
+    /// Only blocks web domains of apps that are ACTIVELY SHIELDED (in the picker
+    /// selection), not the entire app catalog. This prevents overbroad DNS blocking
+    /// that breaks legitimate websites sharing domains with cataloged apps.
     private func updateEnforcementBlockedDomains(allowedTokens: Set<ApplicationToken>) {
         let encoder = JSONEncoder()
         let cache = storage.readAllCachedAppNames()
 
-        // Resolve names of allowed apps from multiple sources.
-        var allowedNames = Set<String>()
-
-        // 1. Token cache (built up as apps get shielded over time)
-        for token in allowedTokens {
+        // Resolve names of SHIELDED apps (picker selection minus allowed).
+        // Only these apps' web domains need DNS blocking.
+        let pickerTokens = loadPickerTokens()
+        let shieldedTokens = pickerTokens.subtracting(allowedTokens)
+        var shieldedNames = Set<String>()
+        for token in shieldedTokens {
             if let data = try? encoder.encode(token) {
                 let key = data.base64EncodedString()
                 if let name = cache[key], !name.hasPrefix("App ") {
-                    allowedNames.insert(name)
+                    shieldedNames.insert(name)
                 }
             }
         }
 
-        // 2. Time-limited apps (always have names, are auto-added to allowed list)
-        let timeLimits = storage.readAppTimeLimits()
-        for limit in timeLimits {
-            allowedNames.insert(limit.appName)
+        // Block ONLY the web domains of shielded apps — not the entire catalog.
+        var blocked = Set<String>()
+        for name in shieldedNames {
+            blocked.formUnion(DomainCategorizer.domainsForApp(name))
         }
-
-        // 3. Temporarily allowed apps (have names from unlock requests)
-        let tempAllowed = storage.readTemporaryAllowedApps().filter(\.isValid)
-        for entry in tempAllowed {
-            allowedNames.insert(entry.appName)
-        }
-
-        // Get domains of allowed apps — these must NOT be DNS-blocked
-        // (blocking them would break the allowed native apps too).
-        var allowedDomains = Set<String>()
-        for name in allowedNames {
-            allowedDomains.formUnion(DomainCategorizer.domainsForApp(name))
-        }
-
-        // Block all known app domains except allowed ones.
-        var blocked = DomainCategorizer.allAppDomains().subtracting(allowedDomains)
 
         // Always block DoH resolvers when enforcement is active — prevents DNS bypass.
         blocked.formUnion(DomainCategorizer.dohResolverDomains)
@@ -272,7 +258,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         try? storage.writeEnforcementBlockedDomains(blocked)
 
         #if DEBUG
-        print("[BigBrother] Enforcement DNS blocking: \(blocked.count) domains blocked, \(allowedDomains.count) excluded (\(allowedNames.count) allowed apps resolved)\(restrictions.denyWebGamesWhenRestricted ? " +gaming" : "")")
+        print("[BigBrother] Enforcement DNS blocking: \(blocked.count) domains blocked (\(shieldedNames.count) shielded apps)\(restrictions.denyWebGamesWhenRestricted ? " +gaming" : "")")
         #endif
     }
 
