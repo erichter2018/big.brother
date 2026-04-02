@@ -95,11 +95,28 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         try? storage.writeShieldConfiguration(config)
 
         // Verify enforcement took effect — read back the store state.
-        // If it didn't stick, try a full reset: clear all stores, then re-apply.
-        // ManagedSettingsStore can get into a corrupted state where writes fail silently.
+        // Checks both shield presence AND mode-specific details (exemptions, web blocking).
         let diag = shieldDiagnostic()
         let expectedShielded = policy.resolvedMode != .unlocked && !policy.isTemporaryUnlock
-        if expectedShielded != diag.shieldsActive {
+        // Mode-aware check: lockedDown should have zero exemptions (no per-app tokens).
+        // restricted should have per-app tokens. locked should have category-only blocking.
+        let modeInconsistent: Bool = {
+            guard expectedShielded else { return false }
+            switch policy.resolvedMode {
+            case .lockedDown:
+                // lockedDown = no exemptions, category blocking, web blocked
+                return diag.appCount > 0 // Should be 0 (no per-app, just category)
+            case .locked:
+                // locked = category blocking active, no exemptions
+                return !diag.categoryActive
+            case .restricted:
+                // restricted = shields active (either per-app or category)
+                return false // Any shield type is fine
+            default:
+                return false
+            }
+        }()
+        if expectedShielded != diag.shieldsActive || modeInconsistent {
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "Enforcement verification FAILED — attempting reset",
@@ -394,10 +411,17 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         let categoryActive = baseCat != nil || schedCat != nil
         let shieldsActive = appCount > 0 || categoryActive
 
+        // Also check web blocking and device restrictions for mode-aware verification.
+        let webBlocking = baseStore.shield.webDomainCategories != nil
+            || scheduleStore.shield.webDomainCategories != nil
+        let denyAppRemoval = ManagedSettingsStore().application.denyAppRemoval == true
+
         return ShieldDiagnostic(
             shieldsActive: shieldsActive,
             appCount: appCount,
-            categoryActive: categoryActive
+            categoryActive: categoryActive,
+            webBlockingActive: webBlocking,
+            denyAppRemoval: denyAppRemoval
         )
     }
 

@@ -245,15 +245,14 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Unlock: clear ALL shield stores (base + schedule + default).
-        // ManagedSettings merges across stores with OR logic — clearing only
-        // the schedule store leaves the base store shields active.
-        clearAllShieldStores()
-
-        // Write corrected PolicySnapshot so main app won't undo this on foreground.
+        // Write corrected PolicySnapshot FIRST so if extension is killed mid-operation,
+        // the main app sees the intended state and won't undo it on foreground.
         writeCorrectedSnapshot(mode: .unlocked, trigger: "Monitor: free window started (\(activity.rawValue))")
-        // Update shared state so the heartbeat reports .unlocked.
         updateSharedState(mode: .unlocked)
+
+        // Then clear shields. ManagedSettings merges across stores with OR logic —
+        // clearing only the schedule store leaves the base store shields active.
+        clearAllShieldStores()
 
         logEvent(.scheduleTriggered, details: "Unlocked window started: \(activity.rawValue)")
         sendModeNotification(title: "Free Time Started", body: "All apps are now accessible.")
@@ -287,14 +286,17 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Resolve the current mode — an essential window may be active.
         let mode = profile.resolvedMode(at: Date())
         let policy = storage.readPolicySnapshot()?.effectivePolicy
+
+        // Write snapshot FIRST so if extension is killed mid-operation,
+        // the main app sees the intended state and won't undo it.
+        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: free window ended, mode → \(mode.rawValue)")
+        updateSharedState(mode: mode)
+
         if mode == .unlocked {
             clearAllShieldStores()
         } else {
             applyShieldingToAllStores(mode: mode, policy: policy)
         }
-        // Write corrected PolicySnapshot so main app won't undo this on foreground.
-        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: free window ended, mode → \(mode.rawValue)")
-        updateSharedState(mode: mode)
         if mode != .unlocked {
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
                 .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
@@ -344,14 +346,14 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Don't override if currently in an unlocked window (unlocked > locked).
         if profile.isInUnlockedWindow(at: Date()) { return }
 
-        // Apply essential-only mode on ALL stores.
-        // Never block tightening restrictions — essential mode should ALWAYS apply,
-        // even if the main app is force-closed/suspended.
-        let policy = storage.readPolicySnapshot()?.effectivePolicy
-        applyShieldingToAllStores(mode: .locked, policy: policy)
-        // Write corrected PolicySnapshot so main app won't undo this on foreground.
+        // Write snapshot FIRST so if extension is killed mid-operation,
+        // the main app sees the intended state and won't undo it.
         writeCorrectedSnapshot(mode: .locked, trigger: "Monitor: locked window started (\(activity.rawValue))")
         updateSharedState(mode: .locked)
+
+        // Then apply essential-only mode on ALL stores.
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShieldingToAllStores(mode: .locked, policy: policy)
         logEvent(.scheduleTriggered, details: "Locked window started: \(activity.rawValue)")
         sendModeNotification(title: "Locked Mode", body: "Only essential apps are available.")
     }
@@ -380,11 +382,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // If in another locked window, stay locked.
         if profile.isInLockedWindow(at: Date()) { return }
 
-        let policy = storage.readPolicySnapshot()?.effectivePolicy
-        applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
-        // Write corrected PolicySnapshot so main app won't undo this on foreground.
+        // Write snapshot FIRST so if extension is killed mid-operation,
+        // the main app sees the intended state and won't undo it.
         writeCorrectedSnapshot(mode: profile.lockedMode, trigger: "Monitor: locked window ended, mode → \(profile.lockedMode.rawValue)")
         updateSharedState(mode: profile.lockedMode)
+
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
         logEvent(.scheduleEnded, details: "Locked window ended, locked to \(profile.lockedMode.rawValue)")
         sendModeNotification(
             title: "Locked Mode Ended",
@@ -526,15 +530,17 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         defaults?.removeObject(forKey: "lockUntilPreviousMode")
         defaults?.removeObject(forKey: "lockUntilExpiresAt")
 
+        // Write snapshot FIRST so if extension is killed mid-operation,
+        // the main app sees the intended state and won't undo it.
+        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: lockUntil expired, mode → \(mode.rawValue)")
+        updateSharedState(mode: mode)
+
         if mode == .unlocked {
             clearAllShieldStores()
         } else {
             let policy = storage.readPolicySnapshot()?.effectivePolicy
             applyShieldingToAllStores(mode: mode, policy: policy)
         }
-        // Write corrected PolicySnapshot so main app won't undo this on foreground.
-        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: lockUntil expired, mode → \(mode.rawValue)")
-        updateSharedState(mode: mode)
         logEvent(.scheduleEnded, details: "Lock-until expired, mode: \(mode.rawValue)")
         sendModeNotification(
             title: mode == .unlocked ? "Free Time Started" : "Lock Period Ended",
@@ -980,7 +986,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             trigger: trigger,
             effectivePolicy: corrected
         )
-        try? storage.writePolicySnapshot(snapshot)
+        do {
+            try storage.writePolicySnapshot(snapshot)
+        } catch {
+            // Critical: snapshot write failed — main app may see stale state and undo enforcement.
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Monitor: PolicySnapshot write FAILED",
+                details: "Mode: \(mode.rawValue), error: \(error.localizedDescription)"
+            ))
+        }
     }
 
     /// Update ExtensionSharedState so the heartbeat reports the correct mode

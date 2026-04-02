@@ -46,6 +46,8 @@ struct ShieldDiagnostic {
     let shieldsActive: Bool
     let appCount: Int
     let categoryActive: Bool
+    var webBlockingActive: Bool = false
+    var denyAppRemoval: Bool = false
 }
 
 /// Simplified authorization status (avoids exposing FamilyControls types

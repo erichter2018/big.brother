@@ -28,15 +28,25 @@ public enum ModeStackResolver {
         // 1. Active temporary unlock (parent-initiated, PIN, or self-unlock)?
         if let temp = storage.readTemporaryUnlockState() {
             if temp.expiresAt > now {
-                return Resolution(
-                    mode: .unlocked,
-                    isTemporary: true,
-                    expiresAt: temp.expiresAt,
-                    reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
-                )
+                // Clock manipulation guard: if the unlock duration has passed
+                // based on monotonic uptime, treat as expired even if wall clock says otherwise.
+                let elapsed = ProcessInfo.processInfo.systemUptime - (temp.uptimeAtStart ?? ProcessInfo.processInfo.systemUptime)
+                let originalDuration = temp.expiresAt.timeIntervalSince(temp.startedAt)
+                if elapsed > originalDuration + 60 {
+                    // Monotonic clock says duration elapsed — clock was set back
+                    try? storage.clearTemporaryUnlockState()
+                } else {
+                    return Resolution(
+                        mode: .unlocked,
+                        isTemporary: true,
+                        expiresAt: temp.expiresAt,
+                        reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
+                    )
+                }
+            } else {
+                // Expired — clean up and fall through to previous mode
+                try? storage.clearTemporaryUnlockState()
             }
-            // Expired — clean up and fall through to previous mode
-            try? storage.clearTemporaryUnlockState()
         }
 
         // 2. Active timed unlock (penalty + unlock phases)?

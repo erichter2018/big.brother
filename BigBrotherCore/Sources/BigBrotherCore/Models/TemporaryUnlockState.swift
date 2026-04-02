@@ -38,6 +38,10 @@ public struct TemporaryUnlockState: Codable, Sendable, Equatable {
     /// The command ID that triggered this unlock, if remote.
     public let commandID: UUID?
 
+    /// Monotonic system uptime when the unlock was created.
+    /// Used to detect clock manipulation (wall clock set backward).
+    public let uptimeAtStart: TimeInterval?
+
     /// Whether the unlock has expired.
     public var isExpired: Bool { isExpired(at: Date()) }
 
@@ -60,7 +64,8 @@ public struct TemporaryUnlockState: Codable, Sendable, Equatable {
         previousMode: LockMode,
         startedAt: Date = Date(),
         expiresAt: Date,
-        commandID: UUID? = nil
+        commandID: UUID? = nil,
+        uptimeAtStart: TimeInterval? = ProcessInfo.processInfo.systemUptime
     ) {
         self.unlockID = unlockID
         self.origin = origin
@@ -68,5 +73,6 @@ public struct TemporaryUnlockState: Codable, Sendable, Equatable {
         self.startedAt = startedAt
         self.expiresAt = expiresAt
         self.commandID = commandID
+        self.uptimeAtStart = uptimeAtStart
     }
 }
