@@ -372,6 +372,11 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             vpnDetected: VPNDetector.isVPNActive(),
             internetBlocked: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
                 .bool(forKey: "tunnelInternetBlocked") == true ? true : nil,
+            internetBlockedReason: {
+                let r = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                    .string(forKey: "tunnelInternetBlockedReason")
+                return (r?.isEmpty == false) ? r : nil
+            }(),
             timeZoneIdentifier: TimeZone.current.identifier,
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),

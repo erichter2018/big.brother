@@ -99,6 +99,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// Whether the VPN tunnel is actively blackholing DNS (internet blocked).
     public let internetBlocked: Bool?
 
+    /// Human-readable reason why DNS is blocked (e.g. "Emergency — app not running, shields down").
+    public let internetBlockedReason: String?
+
     /// The device's current time zone identifier (e.g. "America/New_York").
     public let timeZoneIdentifier: String?
 
@@ -196,6 +199,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         monitorLastActiveAt: Date? = nil,
         vpnDetected: Bool? = nil,
         internetBlocked: Bool? = nil,
+        internetBlockedReason: String? = nil,
         timeZoneIdentifier: String? = nil,
         timeZoneOffsetSeconds: Int? = nil,
         screenTimeMinutes: Int? = nil,
@@ -259,6 +263,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.monitorLastActiveAt = monitorLastActiveAt
         self.vpnDetected = vpnDetected
         self.internetBlocked = internetBlocked
+        self.internetBlockedReason = internetBlockedReason
         self.timeZoneIdentifier = timeZoneIdentifier
         self.timeZoneOffsetSeconds = timeZoneOffsetSeconds
         self.screenTimeMinutes = screenTimeMinutes
@@ -308,7 +313,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case activeScheduleWindowName
         case lastCommandProcessedAt
         case monitorLastActiveAt
-        case vpnDetected, internetBlocked
+        case vpnDetected, internetBlocked, internetBlockedReason
         case timeZoneIdentifier
         case timeZoneOffsetSeconds
         case screenTimeMinutes
@@ -364,6 +369,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         monitorLastActiveAt = try container.decodeIfPresent(Date.self, forKey: .monitorLastActiveAt)
         vpnDetected = try container.decodeIfPresent(Bool.self, forKey: .vpnDetected)
         internetBlocked = try container.decodeIfPresent(Bool.self, forKey: .internetBlocked)
+        internetBlockedReason = try container.decodeIfPresent(String.self, forKey: .internetBlockedReason)
         timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
         timeZoneOffsetSeconds = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetSeconds)
         screenTimeMinutes = try container.decodeIfPresent(Int.self, forKey: .screenTimeMinutes)

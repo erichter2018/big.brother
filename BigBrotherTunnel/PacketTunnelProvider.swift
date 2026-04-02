@@ -337,6 +337,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let livenessDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
             livenessDefaults?.set(Date().timeIntervalSince1970, forKey: "tunnelLastActiveAt")
             livenessDefaults?.set(self?.isInternetBlocked ?? false, forKey: "tunnelInternetBlocked")
+            livenessDefaults?.set(self?.internetBlockedReason ?? "", forKey: "tunnelInternetBlockedReason")
             self?.checkAppLiveness()
             self?.checkNetworkPathAndReconnect()
             self?.checkDNSDayRollover()
@@ -704,15 +705,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         emergencyCheckCount += 1
         guard emergencyCheckCount >= 5 else { return }
 
-        // Activate emergency blackhole
-        if !emergencyBlackholeActive {
-            NSLog("[Tunnel] EMERGENCY: App dead (age \(Int(appAge))s), Monitor dead (\(Int(monitorAge))s), screen unlocked, mode should be \(resolution.mode.rawValue) — activating DNS blackhole")
-            emergencyBlackholeActive = true
-            reapplyNetworkSettings()
+        // Activate emergency blackhole — only fire once, not every 30s.
+        guard !emergencyBlackholeActive else { return }
+        NSLog("[Tunnel] EMERGENCY: App dead (age \(Int(appAge))s), Monitor dead (\(Int(monitorAge))s), screen unlocked, mode should be \(resolution.mode.rawValue) — activating DNS blackhole")
+        emergencyBlackholeActive = true
+        reapplyNetworkSettings()
 
-            // Notify parent via CloudKit event
-            Task { await sendEmergencyAlert(resolution: resolution, monitorAge: Int(monitorAge)) }
-        }
+        // Notify parent via CloudKit event (once)
+        Task { await sendEmergencyAlert(resolution: resolution, monitorAge: Int(monitorAge)) }
     }
 
     private func deactivateEmergencyBlackhole() {
@@ -774,29 +774,35 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Internet is blocked when: device is in .lockedDown mode, emergency blackhole is active,
     /// or legacy internetBlockedUntil flag is set.
     private var isInternetBlocked: Bool {
+        return internetBlockedReason != nil
+    }
+
+    /// Returns the reason DNS is blackholed, or nil if not blocked.
+    /// This reason is written to UserDefaults so the heartbeat can report it to the parent.
+    private var internetBlockedReason: String? {
         // Permissions blackhole (FC auth revoked)
-        if permissionsBlackholeActive { return true }
+        if permissionsBlackholeActive { return "FamilyControls permissions revoked" }
         // Build mismatch blackhole (app needs to launch on new build)
-        if buildMismatchBlackholeActive { return true }
+        if buildMismatchBlackholeActive { return "App update pending — open Big Brother" }
         // Emergency blackhole (tunnel last-resort enforcement)
-        if emergencyBlackholeActive { return true }
+        if emergencyBlackholeActive { return "Emergency — app not running, shields down" }
         // Primary: check current mode from policy snapshot or extension shared state
         if let extState = storage.readExtensionSharedState(), extState.currentMode == .lockedDown {
-            return true
+            return "Locked Down mode active"
         }
         if let snap = storage.readPolicySnapshot(),
            snap.effectivePolicy.resolvedMode == .lockedDown {
-            return true
+            return "Locked Down mode active"
         }
         // Legacy: check explicit internetBlockedUntil flag
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         guard let unblockTimestamp = defaults?.double(forKey: "internetBlockedUntil"),
-              unblockTimestamp > 0 else { return false }
+              unblockTimestamp > 0 else { return nil }
         if Date().timeIntervalSince1970 >= unblockTimestamp {
             defaults?.removeObject(forKey: "internetBlockedUntil")
-            return false
+            return nil
         }
-        return true
+        return "Internet blocked by parent"
     }
 
     /// Reapply tunnel network settings (DNS) based on current block/safe-search state.

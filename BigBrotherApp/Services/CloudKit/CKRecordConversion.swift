@@ -383,6 +383,7 @@ enum CKRecordConversion {
         record[CKFieldName.hbNotificationsAuthorized] = hb.notificationsAuthorized.map { NSNumber(value: $0) }
         record[CKFieldName.hbDeviceLocked] = hb.isDeviceLocked.map { NSNumber(value: $0) }
         record[CKFieldName.hbInternetBlocked] = hb.internetBlocked.map { NSNumber(value: $0) }
+        record["hbInternetBlockedReason"] = hb.internetBlockedReason
         record[CKFieldName.hbShieldsActive] = hb.shieldsActive.map { NSNumber(value: $0) }
         record[CKFieldName.hbScheduleResolvedMode] = hb.scheduleResolvedMode
         record[CKFieldName.hbLastShieldChangeReason] = hb.lastShieldChangeReason
@@ -454,6 +455,7 @@ enum CKRecordConversion {
             monitorLastActiveAt: record[CKFieldName.hbMonitorLastActiveAt] as? Date,
             vpnDetected: (record[CKFieldName.hbVPNDetected] as? Int64).map { $0 != 0 },
             internetBlocked: (record[CKFieldName.hbInternetBlocked] as? Int64).map { $0 != 0 },
+            internetBlockedReason: record["hbInternetBlockedReason"] as? String,
             timeZoneIdentifier: record[CKFieldName.hbTimeZoneID] as? String,
             timeZoneOffsetSeconds: (record[CKFieldName.hbTimeZoneOffset] as? Int64).map { Int($0) },
             screenTimeMinutes: (record[CKFieldName.hbScreenTimeMinutes] as? Int64).map { Int($0) },

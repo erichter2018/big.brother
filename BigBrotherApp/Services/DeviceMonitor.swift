@@ -191,8 +191,12 @@ final class DeviceMonitor {
             }
 
             // --- Shield Mismatch Detection ---
+            // Skip if device is locked (screen off) — shields are still enforced by
+            // ManagedSettingsStore even if the app isn't running. Only alert when the
+            // kid is actually using the device (screen unlocked, recent heartbeat).
             if let hb = heartbeat,
-               Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds {
+               Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds,
+               hb.isDeviceLocked != true {
                 let shouldBeShielded = hb.currentMode != .unlocked
                 let shieldsDown = shouldBeShielded && hb.shieldsActive == false && hb.shieldCategoryActive != true
                 // Skip if temp unlock is still active
@@ -203,7 +207,7 @@ final class DeviceMonitor {
                         id: "shields-\(key)",
                         title: "\(name) — Shields Down",
                         body: "\(name)'s \(device.displayName) should be in \(hb.currentMode.rawValue) mode but shields are not active.",
-                        throttleHours: 1
+                        throttleHours: 2
                     )
                 }
             }
@@ -221,6 +225,8 @@ final class DeviceMonitor {
             }
 
             // --- Auth Type Degradation ---
+            // Throttled heavily (7 days) — this is informational, not urgent.
+            // Fires for all devices with OurPact installed (individual auth).
             if let hb = heartbeat,
                hb.familyControlsAuthType == "individual",
                Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds {
@@ -229,21 +235,25 @@ final class DeviceMonitor {
                     id: "auth-individual-\(key)",
                     title: "\(name) — Weak Protection",
                     body: "\(name)'s \(device.displayName) uses Individual auth (revocable with device passcode). Remove OurPact to upgrade to Family auth.",
-                    throttleHours: 24
+                    throttleHours: 168
                 )
             }
 
             // --- Device Offline Detection + Auto-Ping ---
             if let hb = heartbeat {
                 let age = Date().timeIntervalSince(hb.timestamp)
-                // Alert if heartbeat is stale (>15 min) — device may be offline or app killed
-                if age > 900 {
+                // Alert if heartbeat is stale (>30 min) and device is expected to be active.
+                // 15 min was too aggressive — idle/sleeping devices always trigger this.
+                // Only alert during daytime hours (7am-11pm) to avoid nighttime spam.
+                let hour = Calendar.current.component(.hour, from: Date())
+                let isDaytime = hour >= 7 && hour < 23
+                if age > 1800 && isDaytime {
                     let name = childName(for: device)
                     sendThrottledNotification(
                         id: "offline-\(key)",
                         title: "\(name) — Device Offline",
                         body: "\(name)'s \(device.displayName) hasn't reported in \(Int(age / 60)) minutes.",
-                        throttleHours: 1
+                        throttleHours: 4
                     )
                     // Auto-ping to wake the app (throttled to once per 15 min per device)
                     let pingKey = "ping-\(key)"

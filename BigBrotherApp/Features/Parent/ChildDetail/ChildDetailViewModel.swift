@@ -353,7 +353,11 @@ final class ChildDetailViewModel: CommandSendable {
                     }
                 }
                 if internetBlocked {
-                    reasons.append("DNS blocked by tunnel")
+                    if let reason = hb.internetBlockedReason, !reason.isEmpty {
+                        reasons.append("DNS blocked: \(reason)")
+                    } else {
+                        reasons.append("DNS blocked by tunnel")
+                    }
                 }
                 issues.append(DeviceIssue(
                     id: device.id,
