@@ -17,6 +17,8 @@ enum SafetyEventNotificationService {
         .sosAlert,
         .newAppDetected,
         .enforcementDegraded,
+        .authorizationLost,
+        .familyControlsAuthChanged,
     ]
 
     /// Check recent events and post notifications for safety-relevant ones.
@@ -91,6 +93,18 @@ enum SafetyEventNotificationService {
         case .enforcementDegraded:
             content.title = "\(childName) — Protection Alert"
             content.body = event.details ?? "Device protection may be compromised"
+            content.sound = .default
+            content.interruptionLevel = .timeSensitive
+
+        case .authorizationLost:
+            content.title = "\(childName) — Permissions Revoked"
+            content.body = event.details ?? "Screen Time permissions were disabled"
+            content.sound = .defaultCritical
+            content.interruptionLevel = .critical
+
+        case .familyControlsAuthChanged:
+            content.title = "\(childName) — Permission Change"
+            content.body = event.details ?? "FamilyControls authorization changed"
             content.sound = .default
             content.interruptionLevel = .timeSensitive
 

@@ -189,6 +189,105 @@ final class DeviceMonitor {
                 }
                 lastKnownTimeZones[device.id] = tz
             }
+
+            // --- Shield Mismatch Detection ---
+            if let hb = heartbeat,
+               Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds {
+                let shouldBeShielded = hb.currentMode != .unlocked
+                let shieldsDown = shouldBeShielded && hb.shieldsActive == false && hb.shieldCategoryActive != true
+                // Skip if temp unlock is still active
+                let hasTempUnlock = hb.temporaryUnlockExpiresAt.map { $0 > Date() } ?? false
+                if shieldsDown && !hasTempUnlock {
+                    let name = childName(for: device)
+                    sendThrottledNotification(
+                        id: "shields-\(key)",
+                        title: "\(name) — Shields Down",
+                        body: "\(name)'s \(device.displayName) should be in \(hb.currentMode.rawValue) mode but shields are not active.",
+                        throttleHours: 1
+                    )
+                }
+            }
+
+            // --- Notification Authorization Detection ---
+            if let hb = heartbeat, hb.notificationsAuthorized == false,
+               Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds {
+                let name = childName(for: device)
+                sendThrottledNotification(
+                    id: "notif-off-\(key)",
+                    title: "\(name) — Notifications Disabled",
+                    body: "\(name)'s \(device.displayName) has Big Brother notifications disabled. Nag screens and alerts won't work.",
+                    throttleHours: 24
+                )
+            }
+
+            // --- Auth Type Degradation ---
+            if let hb = heartbeat,
+               hb.familyControlsAuthType == "individual",
+               Date().timeIntervalSince(hb.timestamp) < AppConstants.onlineThresholdSeconds {
+                let name = childName(for: device)
+                sendThrottledNotification(
+                    id: "auth-individual-\(key)",
+                    title: "\(name) — Weak Protection",
+                    body: "\(name)'s \(device.displayName) uses Individual auth (revocable with device passcode). Remove OurPact to upgrade to Family auth.",
+                    throttleHours: 24
+                )
+            }
+
+            // --- Device Offline Detection + Auto-Ping ---
+            if let hb = heartbeat {
+                let age = Date().timeIntervalSince(hb.timestamp)
+                // Alert if heartbeat is stale (>15 min) — device may be offline or app killed
+                if age > 900 {
+                    let name = childName(for: device)
+                    sendThrottledNotification(
+                        id: "offline-\(key)",
+                        title: "\(name) — Device Offline",
+                        body: "\(name)'s \(device.displayName) hasn't reported in \(Int(age / 60)) minutes.",
+                        throttleHours: 1
+                    )
+                    // Auto-ping to wake the app (throttled to once per 15 min per device)
+                    let pingKey = "ping-\(key)"
+                    if lastNotificationTimes[pingKey] == nil ||
+                       Date().timeIntervalSince(lastNotificationTimes[pingKey]!) > 900 {
+                        lastNotificationTimes[pingKey] = Date()
+                        Task {
+                            try? await appState.sendCommand(
+                                target: .device(device.id),
+                                action: .requestHeartbeat
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Safety Event Notifications (C4 fix) ---
+        // Check CloudKit events for all children, not just when Activity Feed is open.
+        checkSafetyEvents()
+    }
+
+    /// Check CloudKit events and trigger safety notifications.
+    /// Previously only ran when parent opened Activity Feed — now runs every 60s.
+    private func checkSafetyEvents() {
+        Task {
+            guard let cloudKit = appState.cloudKit,
+                  let familyID = appState.parentState?.familyID else { return }
+            let profiles = appState.childProfiles
+            let devices = appState.childDevices
+
+            // Fetch only safety-relevant events from the last hour.
+            let cutoff = Date().addingTimeInterval(-3600)
+            guard let events = try? await cloudKit.fetchEventLogs(
+                familyID: familyID,
+                since: cutoff,
+                types: SafetyEventNotificationService.notifiableTypes
+            ) else { return }
+
+            for profile in profiles {
+                let deviceIDs = Set(devices.filter { $0.childProfileID == profile.id }.map(\.id))
+                let childEvents = events.filter { deviceIDs.contains($0.deviceID) }
+                SafetyEventNotificationService.checkAndNotify(events: childEvents, childName: profile.name)
+            }
         }
     }
 

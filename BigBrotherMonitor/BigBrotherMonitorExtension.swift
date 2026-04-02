@@ -214,6 +214,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Manual mode override — skip schedule-driven changes.
         if !AppConstants.isScheduleDriven() { return }
 
+        // lockedDown is parent-enforced maximum restriction — schedule must never override it.
+        if storage.readPolicySnapshot()?.effectivePolicy.resolvedMode == .lockedDown { return }
+
         guard let profile = storage.readActiveScheduleProfile() else { return }
 
         // Exception date — schedule suspended, ensure device stays unlocked.
@@ -231,7 +234,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Check if the current date/time actually falls within this window.
         // Uses ActiveWindow.contains() which correctly handles cross-midnight
         // windows and yesterday's day-of-week for the morning portion.
-        guard window.contains(Date()) else { return }
+        // Allow 30-second tolerance for late DeviceActivity callbacks.
+        guard window.contains(Date()) || window.contains(Date().addingTimeInterval(-30)) else { return }
 
         // Block scheduled unlocks if the main app was force-closed.
         // This is the ONE case where we nag — the kid's free time is being blocked.
@@ -246,6 +250,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // the schedule store leaves the base store shields active.
         clearAllShieldStores()
 
+        // Write corrected PolicySnapshot so main app won't undo this on foreground.
+        writeCorrectedSnapshot(mode: .unlocked, trigger: "Monitor: free window started (\(activity.rawValue))")
         // Update shared state so the heartbeat reports .unlocked.
         updateSharedState(mode: .unlocked)
 
@@ -263,6 +269,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Manual mode override — skip schedule-driven changes.
         if !AppConstants.isScheduleDriven() { return }
+
+        // lockedDown is parent-enforced maximum restriction — schedule must never override it.
+        if storage.readPolicySnapshot()?.effectivePolicy.resolvedMode == .lockedDown { return }
 
         guard let profile = storage.readActiveScheduleProfile() else { return }
 
@@ -283,6 +292,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         } else {
             applyShieldingToAllStores(mode: mode, policy: policy)
         }
+        // Write corrected PolicySnapshot so main app won't undo this on foreground.
+        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: free window ended, mode → \(mode.rawValue)")
         updateSharedState(mode: mode)
         if mode != .unlocked {
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
@@ -309,6 +320,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Manual mode override — skip schedule-driven changes.
         if !AppConstants.isScheduleDriven() { return }
 
+        // lockedDown is parent-enforced maximum restriction — schedule must never weaken it.
+        if storage.readPolicySnapshot()?.effectivePolicy.resolvedMode == .lockedDown { return }
+
         guard let profile = storage.readActiveScheduleProfile() else { return }
 
         // Exception date — schedule suspended, ensure device stays unlocked.
@@ -324,7 +338,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         // Check if the current date/time actually falls within this window.
-        guard window.contains(Date()) else { return }
+        // Allow 30-second tolerance for late DeviceActivity callbacks.
+        guard window.contains(Date()) || window.contains(Date().addingTimeInterval(-30)) else { return }
 
         // Don't override if currently in an unlocked window (unlocked > locked).
         if profile.isInUnlockedWindow(at: Date()) { return }
@@ -334,6 +349,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // even if the main app is force-closed/suspended.
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: .locked, policy: policy)
+        // Write corrected PolicySnapshot so main app won't undo this on foreground.
+        writeCorrectedSnapshot(mode: .locked, trigger: "Monitor: locked window started (\(activity.rawValue))")
         updateSharedState(mode: .locked)
         logEvent(.scheduleTriggered, details: "Locked window started: \(activity.rawValue)")
         sendModeNotification(title: "Locked Mode", body: "Only essential apps are available.")
@@ -350,6 +367,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Manual mode override — skip schedule-driven changes.
         if !AppConstants.isScheduleDriven() { return }
 
+        // lockedDown is parent-enforced maximum restriction — schedule must never weaken it.
+        if storage.readPolicySnapshot()?.effectivePolicy.resolvedMode == .lockedDown { return }
+
         guard let profile = storage.readActiveScheduleProfile() else { return }
 
         // Exception date — don't re-lock.
@@ -362,6 +382,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
+        // Write corrected PolicySnapshot so main app won't undo this on foreground.
+        writeCorrectedSnapshot(mode: profile.lockedMode, trigger: "Monitor: locked window ended, mode → \(profile.lockedMode.rawValue)")
         updateSharedState(mode: profile.lockedMode)
         logEvent(.scheduleEnded, details: "Locked window ended, locked to \(profile.lockedMode.rawValue)")
         sendModeNotification(
@@ -502,6 +524,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Clean up saved state
         defaults?.removeObject(forKey: "lockUntilPreviousMode")
+        defaults?.removeObject(forKey: "lockUntilExpiresAt")
 
         if mode == .unlocked {
             clearAllShieldStores()
@@ -509,6 +532,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             let policy = storage.readPolicySnapshot()?.effectivePolicy
             applyShieldingToAllStores(mode: mode, policy: policy)
         }
+        // Write corrected PolicySnapshot so main app won't undo this on foreground.
+        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: lockUntil expired, mode → \(mode.rawValue)")
         updateSharedState(mode: mode)
         logEvent(.scheduleEnded, details: "Lock-until expired, mode: \(mode.rawValue)")
         sendModeNotification(
@@ -676,6 +701,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         defaultStore.shield.applicationCategories = nil
         defaultStore.shield.webDomainCategories = nil
         defaultStore.shield.webDomains = nil
+
+        // Clear DNS-level enforcement blocking — device is unlocked.
+        try? storage.writeEnforcementBlockedDomains([])
     }
 
     /// Apply shields to BOTH base and schedule stores using the hybrid per-app + category strategy.
@@ -683,15 +711,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private static let maxShieldApplications = 50
 
     private func applyShieldingToAllStores(mode: LockMode, policy: EffectivePolicy?) {
-        // Check if the main app applied enforcement very recently (within 5 seconds).
-        // If so, defer to the main app to avoid a race where Monitor overwrites
-        // what the main app just wrote (ManagedSettings merges across stores with OR).
+        // Check if main app enforced very recently (within 2s) to avoid stomping on it.
+        // ManagedSettings OR-merges so both writing is safe, but we skip unnecessary work.
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let mainAppEnforcedAt = defaults?.double(forKey: "mainAppEnforcementAt") ?? 0
-        if mainAppEnforcedAt > 0 && Date().timeIntervalSince1970 - mainAppEnforcedAt < 5 {
-            logEvent(.policyReconciled, details: "Monitor deferred to main app (enforced \(Int(Date().timeIntervalSince1970 - mainAppEnforcedAt))s ago)")
-            return
-        }
 
         // Force essential mode if permissions are missing.
         let effectiveMode: LockMode
@@ -780,7 +802,51 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     }
                 }
             }
+
+            // DNS-block web versions of shielded apps (prevents Safari web app bypass).
+            updateEnforcementBlockedDomains(allowedTokens: allowedTokens)
         }
+    }
+
+    /// Compute and write DNS-blocked domains when shields are up.
+    /// Mirrors EnforcementServiceImpl.updateEnforcementBlockedDomains().
+    private func updateEnforcementBlockedDomains(allowedTokens: Set<ApplicationToken>) {
+        let encoder = JSONEncoder()
+        let cache = storage.readAllCachedAppNames()
+        var allowedNames = Set<String>()
+
+        for token in allowedTokens {
+            if let data = try? encoder.encode(token) {
+                let key = data.base64EncodedString()
+                if let name = cache[key], !name.hasPrefix("App ") {
+                    allowedNames.insert(name)
+                }
+            }
+        }
+        for limit in storage.readAppTimeLimits() {
+            allowedNames.insert(limit.appName)
+        }
+        for entry in storage.readTemporaryAllowedApps() where entry.isValid {
+            allowedNames.insert(entry.appName)
+        }
+
+        var allowedDomains = Set<String>()
+        for name in allowedNames {
+            allowedDomains.formUnion(DomainCategorizer.domainsForApp(name))
+        }
+
+        var blocked = DomainCategorizer.allAppDomains().subtracting(allowedDomains)
+
+        // Always block DoH resolvers when enforcement is active.
+        blocked.formUnion(DomainCategorizer.dohResolverDomains)
+
+        // If web games are denied, also block browser gaming sites.
+        let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+        if restrictions.denyWebGamesWhenRestricted {
+            blocked.formUnion(DomainCategorizer.webGamingDomains)
+        }
+
+        try? storage.writeEnforcementBlockedDomains(blocked)
     }
 
     /// Load app tokens from the saved FamilyActivitySelection.
@@ -895,8 +961,30 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         defaults?.set(Date().timeIntervalSince1970, forKey: "extensionHeartbeatRequestedAt")
     }
 
+    /// Write a corrected PolicySnapshot so the main app, tunnel, and heartbeat
+    /// all agree on the current mode after a schedule transition.
+    private func writeCorrectedSnapshot(mode: LockMode, trigger: String) {
+        let existing = storage.readPolicySnapshot()
+        let basePolicy = existing?.effectivePolicy
+        let corrected = EffectivePolicy(
+            resolvedMode: mode,
+            isTemporaryUnlock: false,
+            temporaryUnlockExpiresAt: nil,
+            shieldedCategoriesData: basePolicy?.shieldedCategoriesData,
+            allowedAppTokensData: basePolicy?.allowedAppTokensData,
+            warnings: basePolicy?.warnings ?? [],
+            policyVersion: (basePolicy?.policyVersion ?? 0) + 1
+        )
+        let snapshot = PolicySnapshot(
+            source: .scheduleTransition,
+            trigger: trigger,
+            effectivePolicy: corrected
+        )
+        try? storage.writePolicySnapshot(snapshot)
+    }
+
     /// Update ExtensionSharedState so the heartbeat reports the correct mode
-    /// after schedule transitions (the Monitor doesn't write full PolicySnapshots).
+    /// after schedule transitions. Also writes PolicySnapshot for consistency.
     private func updateSharedState(mode: LockMode, isTemporaryUnlock: Bool = false, temporaryUnlockExpiresAt: Date? = nil) {
         let snapshot = storage.readPolicySnapshot()
         let authHealth = storage.readAuthorizationHealth()

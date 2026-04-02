@@ -52,8 +52,10 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
             // Map the error to a human-readable reason
             let reason: String
             let errorDesc = "\(error)"
-            if errorDesc.contains("authorizationConflict") || errorDesc.contains("conflict") {
-                reason = "Another parental control app holds Family auth (e.g., OurPact)"
+            if errorDesc.contains("restricted") {
+                reason = "Device restriction blocks Family auth (likely MDM profile e.g. OurPact)"
+            } else if errorDesc.contains("authorizationConflict") || errorDesc.contains("conflict") {
+                reason = "Another parental control app holds Family auth"
             } else if errorDesc.contains("invalidAccountType") || errorDesc.contains("invalid") {
                 reason = "Device not signed into a child/teen Apple ID in Family Sharing"
             } else if errorDesc.contains("authorizationCanceled") || errorDesc.contains("cancel") {

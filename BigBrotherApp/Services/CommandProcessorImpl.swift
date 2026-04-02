@@ -4,19 +4,38 @@ import ManagedSettings
 import DeviceActivity
 import BigBrotherCore
 
-/// Serializes access to a boolean flag for async contexts.
+/// Serializes access to command processing with a "needs reprocess" flag.
+/// If a push arrives while processing is active, the flag is set so that
+/// processing re-runs after the current batch completes (instead of dropping).
 private actor ProcessingGate {
     private var active = false
+    private var pendingReprocess = false
 
     func tryStart() -> Bool {
-        guard !active else { return false }
+        guard !active else {
+            // Signal that another run is needed after the current one finishes.
+            pendingReprocess = true
+            return false
+        }
         active = true
+        pendingReprocess = false
         return true
     }
 
-    func finish() {
+    /// Returns true if another run was requested while we were processing.
+    func finish() -> Bool {
+        let needsRerun = pendingReprocess
+        pendingReprocess = false
         active = false
+        return needsRerun
     }
+}
+
+/// Internal errors thrown by command helpers to communicate failure back to the caller,
+/// so the caller can return an accurate receipt status instead of false "applied".
+private enum CommandError: Error {
+    case permissionDeficiency
+    case expiredBeforeDelivery
 }
 
 /// Concrete command processor for child devices.
@@ -87,21 +106,28 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Prevent concurrent execution from poll timer + push notification firing together.
         guard await processingGate.tryStart() else {
             #if DEBUG
-            print("[BigBrother] Command processing already in progress — skipping")
+            print("[BigBrother] Command processing already in progress — queued for reprocess")
             #endif
             return
         }
-        
-        // Clear the gate when done. We use do/catch + explicit await instead of
-        // defer { Task { ... } } which would clear the gate asynchronously and could
-        // cause the next invocation to be skipped.
-        do {
-            try await _processIncomingCommandsBody()
-        } catch {
-            await processingGate.finish()
-            throw error
+
+        // Process commands, then re-run if a push arrived during processing.
+        var shouldRerun = true
+        while shouldRerun {
+            do {
+                try await _processIncomingCommandsBody()
+            } catch {
+                let _ = await processingGate.finish()
+                throw error
+            }
+            shouldRerun = await processingGate.finish()
+            if shouldRerun {
+                #if DEBUG
+                print("[BigBrother] Reprocessing commands (push arrived during previous batch)")
+                #endif
+                guard await processingGate.tryStart() else { break }
+            }
         }
-        await processingGate.finish()
     }
 
     private func _processIncomingCommandsBody() async throws {
@@ -126,17 +152,20 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Filter out already-processed commands.
         let unprocessed = commands.filter { !processedIDs.contains($0.id) }
 
-        // Safety: skip commands older than 1 hour. Stale pending commands from before
-        // the child got the status-update fix should not be re-processed on first launch.
-        let staleCutoff = Date().addingTimeInterval(-3600)
-        let fresh = unprocessed.filter { $0.issuedAt > staleCutoff }
-        let staleCount = unprocessed.count - fresh.count
-        if staleCount > 0 {
+        // Drop commands past their explicit expiry (default 24 hours from issuedAt).
+        // Do NOT use an arbitrary shorter cutoff — devices can be offline for hours
+        // and must still process legitimate commands when connectivity returns.
+        let now = Date()
+        let fresh = unprocessed.filter { cmd in
+            if let expiresAt = cmd.expiresAt, expiresAt < now { return false }
+            return true
+        }
+        let expiredCount = unprocessed.count - fresh.count
+        if expiredCount > 0 {
             #if DEBUG
-            print("[BigBrother] Skipping \(staleCount) commands older than 1 hour")
+            print("[BigBrother] Skipping \(expiredCount) expired commands")
             #endif
-            // Mark stale commands as processed so they don't reappear
-            for cmd in unprocessed where cmd.issuedAt <= staleCutoff {
+            for cmd in unprocessed where cmd.expiresAt != nil && cmd.expiresAt! < now {
                 try? storage.markCommandProcessed(cmd.id)
                 try? await cloudKit.updateCommandStatus(cmd.id, status: .expired)
             }
@@ -346,21 +375,30 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 // any active temp unlock, timed unlock, or schedule is overridden.
                 try? storage.clearTemporaryUnlockState()
                 try? storage.clearTimedUnlockInfo()
+                clearLockUntilState()
                 cancelNonScheduleActivities()
-                try applyMode(mode, enrollment: enrollment, commandID: command.id)
+                // Disable schedule BEFORE applying mode so enforcement.apply()
+                // doesn't consult the live schedule and override the parent command.
                 UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(false, forKey: "scheduleDrivenMode")
+                try applyMode(mode, enrollment: enrollment, commandID: command.id)
                 eventLogger.log(.commandApplied, details: "Mode set to \(mode.rawValue)")
                 ModeChangeNotifier.notify(newMode: mode)
                 return .applied
 
             case .temporaryUnlock(let durationSeconds):
                 let wasUnlocked = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode == .unlocked
-                try applyTemporaryUnlock(
-                    durationSeconds: durationSeconds,
-                    enrollment: enrollment,
-                    commandID: command.id,
-                    issuedAt: command.issuedAt
-                )
+                do {
+                    try applyTemporaryUnlock(
+                        durationSeconds: durationSeconds,
+                        enrollment: enrollment,
+                        commandID: command.id,
+                        issuedAt: command.issuedAt
+                    )
+                } catch CommandError.permissionDeficiency {
+                    return .failedExecution(reason: "Temporary unlock blocked: permissions missing")
+                } catch CommandError.expiredBeforeDelivery {
+                    return .failedExecution(reason: "Temporary unlock expired before delivery")
+                }
                 let h = durationSeconds / 3600
                 let m = (durationSeconds % 3600) / 60
                 let dur = h > 0 ? (m > 0 ? "\(h)h \(m)m" : "\(h)h") : "\(m)m"
@@ -442,13 +480,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return .applied
 
             case .timedUnlock(let totalSeconds, let penaltySeconds):
-                try applyTimedUnlock(
-                    totalSeconds: totalSeconds,
-                    penaltySeconds: penaltySeconds,
-                    issuedAt: command.issuedAt,
-                    enrollment: enrollment,
-                    commandID: command.id
-                )
+                do {
+                    try applyTimedUnlock(
+                        totalSeconds: totalSeconds,
+                        penaltySeconds: penaltySeconds,
+                        issuedAt: command.issuedAt,
+                        enrollment: enrollment,
+                        commandID: command.id
+                    )
+                } catch CommandError.expiredBeforeDelivery {
+                    return .failedExecution(reason: "Timed unlock expired before delivery")
+                }
                 return .applied
 
             case .returnToSchedule:
@@ -771,7 +813,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Block unlock if permissions are missing
         if hasPermissionDeficiency() {
             eventLogger.log(.enforcementDegraded, details: "Temporary unlock blocked: permissions missing")
-            return
+            throw CommandError.permissionDeficiency
         }
 
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
@@ -783,16 +825,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         let now = Date()
         let expiresAt = issuedAt.addingTimeInterval(Double(durationSeconds))
 
-        // If the unlock has already expired by the time we process it, skip.
+        // If the unlock has already expired by the time we process it, reject.
         guard expiresAt > now else {
             eventLogger.log(.commandFailed, details: "Temporary unlock expired before delivery (issued \(Int(Date().timeIntervalSince(issuedAt)))s ago)")
-            return
+            throw CommandError.expiredBeforeDelivery
         }
 
-        // Clear any existing timed unlock to prevent conflicts.
+        // Clear any existing timed unlock / lockUntil to prevent conflicts.
         // If a penalty phase is active and parent sends a temp unlock,
         // the timed unlock's scheduled free phase could later override this.
         try? storage.clearTimedUnlockInfo()
+        clearLockUntilState()
 
         // Create durable temp unlock state.
         let unlockState = TemporaryUnlockState(
@@ -951,11 +994,23 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             previousSnapshot: currentSnapshot
         )
 
+        // Register the re-lock schedule BEFORE applying enforcement.
+        // If this fails, we must NOT unlock — matches applyTemporaryUnlock() pattern.
+        do {
+            try registerTempUnlockExpirySchedule(commandID: unlockID, start: now, end: expiresAt)
+        } catch {
+            eventLogger.log(.commandFailed, details: "Self-unlock ABORTED: schedule registration failed: \(error.localizedDescription)")
+            try? storage.clearTemporaryUnlockState()
+            return
+        }
+
+        // Also schedule a BGProcessingTask as a second safety net.
+        AppDelegate.scheduleRelockTask(at: expiresAt)
+
         let result = try snapshotStore.commit(output.snapshot)
         if case .committed(let snapshot) = result {
             try enforcement?.apply(snapshot.effectivePolicy)
             try snapshotStore.markApplied()
-            try registerTempUnlockExpirySchedule(commandID: unlockID, start: now, end: expiresAt)
             eventLogger.log(.temporaryUnlockStarted, details: "Self-unlock for \(ModeChangeNotifier.formatDuration(durationSeconds))")
         }
     }
@@ -969,6 +1024,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         enrollment: ChildEnrollmentState,
         commandID: UUID
     ) throws {
+        // Clear lockUntil state — timedUnlock overrides it.
+        clearLockUntilState()
+
         // Account for delivery delay.
         let elapsed = Int(Date().timeIntervalSince(issuedAt))
         let adjustedPenalty = max(0, penaltySeconds - elapsed)
@@ -976,17 +1034,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         guard adjustedTotal > 0 else {
             eventLogger.log(.commandFailed, details: "Timed unlock expired before delivery (elapsed \(elapsed)s)")
-            // Notify parent that the command was dropped.
-            let ck = cloudKit
-            let receipt = CommandReceipt(
-                commandID: commandID,
-                deviceID: enrollment.deviceID,
-                familyID: enrollment.familyID,
-                status: .expired,
-                failureReason: "Expired before delivery (elapsed \(elapsed)s)"
-            )
-            Task.detached { try? await ck.saveReceipt(receipt) }
-            return
+            throw CommandError.expiredBeforeDelivery
         }
 
         if adjustedPenalty <= 0 {
@@ -1062,9 +1110,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Clear overrides and apply the mode dictated by the child's schedule profile.
     /// Falls back to dailyMode if no profile is assigned.
     private func applyReturnToSchedule(enrollment: ChildEnrollmentState, commandID: UUID) throws {
-        // Clear any temporary unlock / timed unlock state.
+        // Clear any temporary unlock / timed unlock / lockUntil state.
         try? storage.clearTemporaryUnlockState()
         try? storage.clearTimedUnlockInfo()
+        clearLockUntilState()
 
         // Cancel any active temp/timed/lockuntil DeviceActivity schedules
         // so they don't interfere with the schedule-driven mode.
@@ -1088,6 +1137,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         ModeChangeNotifier.notify(newMode: mode)
     }
 
+    /// Clear lockUntil state from UserDefaults. Must be called by any command that
+    /// overrides the lockUntil (setMode, returnToSchedule, temporaryUnlock, timedUnlock).
+    private func clearLockUntilState() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        defaults?.removeObject(forKey: "lockUntilPreviousMode")
+        defaults?.removeObject(forKey: "lockUntilExpiresAt")
+    }
+
     /// Cancel all non-schedule DeviceActivity monitors (temp unlock, timed unlock, lock-until).
     private func cancelNonScheduleActivities() {
         let center = DeviceActivityCenter()
@@ -1105,10 +1162,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// return to schedule at the target date.
     private func applyLockUntil(date: Date, enrollment: ChildEnrollmentState, commandID: UUID) throws {
         // lockUntil is temporary — it pushes onto the stack and restores prior mode at expiry.
-        // Save prior mode for restoration.
+        // Clear any active temp/timed unlock — lockUntil overrides them.
+        // Without this, ModeStackResolver would see the temp unlock and override the lock.
+        try? storage.clearTemporaryUnlockState()
+        try? storage.clearTimedUnlockInfo()
+        cancelNonScheduleActivities()
+
+        // Save prior mode and expiry for restoration + self-healing.
         let priorMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set(priorMode.rawValue, forKey: "lockUntilPreviousMode")
+        let lockDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        lockDefaults?.set(priorMode.rawValue, forKey: "lockUntilPreviousMode")
+        lockDefaults?.set(date.timeIntervalSince1970, forKey: "lockUntilExpiresAt")
 
         // Apply lock immediately.
         try applyMode(.restricted, enrollment: enrollment, commandID: commandID)

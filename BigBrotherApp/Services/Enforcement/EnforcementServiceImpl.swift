@@ -49,8 +49,6 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     func apply(_ policy: EffectivePolicy) throws {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         defaults?.set("apply", forKey: "lastShieldChangeReason")
-        // Write enforcement version so Monitor can detect if main app wrote more recently.
-        // Monitor checks this before overwriting stores to avoid race conditions.
         defaults?.set(Date().timeIntervalSince1970, forKey: "mainAppEnforcementAt")
 
         // Device restrictions apply ALWAYS, regardless of lock/unlock state.
@@ -71,14 +69,15 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             clearAllShieldStores()
 
         case .restricted, .locked, .lockedDown:
-            if let profile = storage.readActiveScheduleProfile() {
+            // lockedDown is never overridden by schedule — parent explicitly locked down.
+            // Also skip schedule when scheduleDrivenMode=false (explicit parent command).
+            let isScheduleDriven = AppConstants.isScheduleDriven()
+            if policy.resolvedMode != .lockedDown && isScheduleDriven,
+               let profile = storage.readActiveScheduleProfile() {
                 let scheduleMode = profile.resolvedMode(at: Date())
                 if scheduleMode == .unlocked {
                     clearAllShieldStores()
                 } else {
-                    // Use the schedule-resolved mode for shield decisions —
-                    // essential windows should get essentialOnly enforcement
-                    // even if the base policy says dailyMode.
                     let effectiveMode = scheduleMode == .locked ? .locked : policy.resolvedMode
                     applyShield(allowExemptions: effectiveMode == .restricted)
                 }
@@ -118,6 +117,8 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 applyShield(allowExemptions: policy.resolvedMode == .restricted)
                 applyWebBlocking()
             }
+            // Always re-apply device restrictions (denyAppRemoval etc.) after nuclear reset.
+            applyRestrictions()
 
             let retryDiag = shieldDiagnostic()
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -141,7 +142,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
     /// - Parameter allowExemptions: When false (essentialOnly), blocks ALL apps with no exemptions.
     private func applyShield(allowExemptions: Bool) {
-        var allowedTokens = allowExemptions ? collectAllowedTokens() : []
+        var allowedTokens = allowExemptions ? collectAllowedTokens() : Set<ApplicationToken>()
         let pickerTokens = loadPickerTokens()
 
         // Remove time-exhausted apps from the allowed set and collect their tokens
@@ -197,6 +198,65 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             #endif
         }
         applyWebBlocking()
+        updateEnforcementBlockedDomains(allowedTokens: allowedTokens)
+    }
+
+    /// Compute and write DNS-blocked domains for web app bypass prevention.
+    /// When shields are up, blocks web versions of all known apps except allowed ones.
+    /// This prevents kids from using Safari web apps to bypass shield.applications.
+    private func updateEnforcementBlockedDomains(allowedTokens: Set<ApplicationToken>) {
+        let encoder = JSONEncoder()
+        let cache = storage.readAllCachedAppNames()
+
+        // Resolve names of allowed apps from multiple sources.
+        var allowedNames = Set<String>()
+
+        // 1. Token cache (built up as apps get shielded over time)
+        for token in allowedTokens {
+            if let data = try? encoder.encode(token) {
+                let key = data.base64EncodedString()
+                if let name = cache[key], !name.hasPrefix("App ") {
+                    allowedNames.insert(name)
+                }
+            }
+        }
+
+        // 2. Time-limited apps (always have names, are auto-added to allowed list)
+        let timeLimits = storage.readAppTimeLimits()
+        for limit in timeLimits {
+            allowedNames.insert(limit.appName)
+        }
+
+        // 3. Temporarily allowed apps (have names from unlock requests)
+        let tempAllowed = storage.readTemporaryAllowedApps().filter(\.isValid)
+        for entry in tempAllowed {
+            allowedNames.insert(entry.appName)
+        }
+
+        // Get domains of allowed apps — these must NOT be DNS-blocked
+        // (blocking them would break the allowed native apps too).
+        var allowedDomains = Set<String>()
+        for name in allowedNames {
+            allowedDomains.formUnion(DomainCategorizer.domainsForApp(name))
+        }
+
+        // Block all known app domains except allowed ones.
+        var blocked = DomainCategorizer.allAppDomains().subtracting(allowedDomains)
+
+        // Always block DoH resolvers when enforcement is active — prevents DNS bypass.
+        blocked.formUnion(DomainCategorizer.dohResolverDomains)
+
+        // If web games are denied, also block browser gaming sites.
+        let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
+        if restrictions.denyWebGamesWhenRestricted {
+            blocked.formUnion(DomainCategorizer.webGamingDomains)
+        }
+
+        try? storage.writeEnforcementBlockedDomains(blocked)
+
+        #if DEBUG
+        print("[BigBrother] Enforcement DNS blocking: \(blocked.count) domains blocked, \(allowedDomains.count) excluded (\(allowedNames.count) allowed apps resolved)\(restrictions.denyWebGamesWhenRestricted ? " +gaming" : "")")
+        #endif
     }
 
     /// Apply web domain blocking based on the denyWebWhenLocked restriction.
@@ -250,6 +310,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         defaultStore.shield.applicationCategories = nil
         defaultStore.shield.webDomainCategories = nil
         defaultStore.shield.webDomains = nil
+
+        // Clear DNS-level enforcement blocking — device is unlocked, all web apps work.
+        try? storage.writeEnforcementBlockedDomains([])
     }
 
     /// Collect tokens for apps that should NOT be shielded (parent-approved).
@@ -295,6 +358,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         clearAllShieldStores()
         recordShieldedAppCount(0)
         tempUnlockStore.clearAllSettings()
+        // Re-apply device-level restrictions (denyAppRemoval, lockAccounts, etc.)
+        // that should persist even when shields are cleared during unlocked mode.
+        applyRestrictions()
     }
 
     func clearTemporaryUnlock() throws {
@@ -344,7 +410,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     }
 
     func reconcile(with snapshot: PolicySnapshot) throws {
-        clearAllShieldStores()
+        // Don't clear stores first — apply() already handles unlocked (clears)
+        // and locked (overwrites). Clearing first creates a vulnerability window
+        // where shields are down if apply() throws.
         try apply(snapshot.effectivePolicy)
     }
 

@@ -325,8 +325,7 @@ final class ChildDetailViewModel: CommandSendable {
         var issues: [DeviceIssue] = []
         for device in devices {
             guard let hb = heartbeat(for: device) else { continue }
-            // Skip stale heartbeats (>10 min old)
-            guard hb.timestamp.timeIntervalSinceNow > -600 else { continue }
+            let isStale = hb.timestamp.timeIntervalSinceNow < -600
             let isIPad = device.modelIdentifier.lowercased().contains("ipad")
 
             // Shields down when they shouldn't be
@@ -340,6 +339,10 @@ final class ChildDetailViewModel: CommandSendable {
 
             if shieldsDown || internetBlocked {
                 var reasons: [String] = []
+                if isStale {
+                    let mins = Int(-hb.timestamp.timeIntervalSinceNow / 60)
+                    reasons.append("Last seen \(mins) min ago — issue may persist")
+                }
                 if shieldsDown {
                     reasons.append("Shields down — mode is \(hb.currentMode.rawValue) but ManagedSettings empty")
                     if hb.heartbeatSource == "vpnTunnel" {

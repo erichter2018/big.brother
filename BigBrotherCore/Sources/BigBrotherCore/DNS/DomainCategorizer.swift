@@ -483,9 +483,18 @@ public enum DomainCategorizer {
     private static let appDomainCatalog: [String: String] = [
         // Social Media
         "tiktok.com": "TikTok",
+        "tiktokcdn.com": "TikTok",
+        "tiktokcdn-us.com": "TikTok",
+        "tiktokv.us": "TikTok",
+        "tiktokv.com": "TikTok",
         "snapchat.com": "Snapchat",
+        "snap.com": "Snapchat",
+        "sc-cdn.net": "Snapchat",
+        "bitmoji.com": "Snapchat",
         "instagram.com": "Instagram",
+        "cdninstagram.com": "Instagram",
         "facebook.com": "Facebook",
+        "fbcdn.net": "Facebook",
         "messenger.com": "Messenger",
         "twitter.com": "X (Twitter)",
         "x.com": "X (Twitter)",
@@ -501,16 +510,25 @@ public enum DomainCategorizer {
         // Messaging
         "discord.com": "Discord",
         "discordapp.com": "Discord",
+        "discord.gg": "Discord",
+        "discord.media": "Discord",
         "telegram.org": "Telegram",
         "whatsapp.com": "WhatsApp",
         "whatsapp.net": "WhatsApp",
+        "wa.me": "WhatsApp",
         "signal.org": "Signal",
         "kik.com": "Kik",
         "viber.com": "Viber",
         "line.me": "LINE",
         // Video & Streaming
         "youtube.com": "YouTube",
+        "googlevideo.com": "YouTube",
+        "ytimg.com": "YouTube",
+        "youtu.be": "YouTube",
         "netflix.com": "Netflix",
+        "nflxvideo.net": "Netflix",
+        "nflximg.net": "Netflix",
+        "nflxso.net": "Netflix",
         "hulu.com": "Hulu",
         "disneyplus.com": "Disney+",
         "max.com": "Max",
@@ -519,10 +537,14 @@ public enum DomainCategorizer {
         "paramountplus.com": "Paramount+",
         "crunchyroll.com": "Crunchyroll",
         "twitch.tv": "Twitch",
+        "jtvnw.net": "Twitch",
+        "twitchcdn.net": "Twitch",
         "kick.com": "Kick",
         "rumble.com": "Rumble",
         // Music
         "spotify.com": "Spotify",
+        "scdn.co": "Spotify",
+        "spotifycdn.com": "Spotify",
         "tidal.com": "Tidal",
         "soundcloud.com": "SoundCloud",
         "pandora.com": "Pandora",
@@ -597,6 +619,7 @@ public enum DomainCategorizer {
         "yahoo.com": "Yahoo",
         "redd.it": "Reddit",
         "redditmedia.com": "Reddit",
+        "redditstatic.com": "Reddit",
         // Video / Streaming (additional)
         "plex.tv": "Plex",
         "plex.direct": "Plex",
@@ -650,6 +673,109 @@ public enum DomainCategorizer {
         }
         return domains
     }
+
+    /// Returns all root domains in the catalog (every known app domain).
+    /// Used to compute enforcement DNS blocking: block all app web domains
+    /// except those belonging to explicitly allowed apps.
+    public static func allAppDomains() -> Set<String> {
+        Set(appDomainCatalog.keys)
+    }
+
+    /// Returns all unique app names in the catalog.
+    public static func allAppNames() -> Set<String> {
+        Set(appDomainCatalog.values)
+    }
+
+    // MARK: - Web Gaming Domains
+
+    /// Browser-based gaming sites that kids access via Safari.
+    /// These have no native app equivalent — blocking at DNS level is the only option.
+    /// Used when denyWebGamesWhenRestricted is enabled.
+    public static let webGamingDomains: Set<String> = [
+        // Popular browser game portals
+        "coolmathgames.com",
+        "coolmath-games.com",
+        "poki.com",
+        "crazygames.com",
+        "kizi.com",
+        "miniclip.com",
+        "addictinggames.com",
+        "kongregate.com",
+        "armorgames.com",
+        "newgrounds.com",
+        "itch.io",
+        "now.gg",
+        "iogames.space",
+        "gamepix.com",
+        "silvergames.com",
+        "primarygames.com",
+        "friv.com",
+        "y8.com",
+        "gameflare.com",
+        "gamedistribution.com",
+        // .io games (hugely popular with kids)
+        "slither.io",
+        "agar.io",
+        "diep.io",
+        "krunker.io",
+        "surviv.io",
+        "shellshock.io",
+        "zombsroyale.io",
+        "buildroyale.io",
+        "moomoo.io",
+        "starve.io",
+        "skribbl.io",
+        "deeeep.io",
+        "hole.io",
+        "paper.io",
+        "powerline.io",
+        // Unblocked games (kids search these to bypass school filters)
+        "unblockedgames.dev",
+        "tyrone-unblocked-games.com",
+        "unblockedgames66.com",
+        "unblockedgames76.com",
+        "unblockedgames77play.com",
+        // Popular .io / browser FPS
+        "1v1.lol",
+        "ev.io",
+        "bloxd.io",
+        "retrobowl.me",
+        "slope-game.com",
+        "run3.io",
+        "subway-surfers.me",
+        // Board / casual gaming
+        "boardgamearena.com",
+        "chess.com",
+        "lichess.org",
+        "geoguessr.com",
+        // Gambling / casino (underage risk)
+        "draftkings.com",
+        "fanduel.com",
+        "betmgm.com",
+        "pokerstars.com",
+    ]
+
+    // MARK: - DNS-over-HTTPS Bypass Prevention
+
+    /// Known DoH (DNS-over-HTTPS) resolver domains.
+    /// Kids can use these to bypass DNS-level enforcement entirely.
+    /// Blocked during enforcement to prevent circumvention.
+    public static let dohResolverDomains: Set<String> = [
+        "dns.google",
+        "dns.google.com",
+        "dns.quad9.net",
+        "doh.opendns.com",
+        "doh.familyshield.opendns.com",
+        "dns.nextdns.io",
+        "doh.cleanbrowsing.org",
+        "dns.adguard.com",
+        "doh.mullvad.net",
+        "dns.controld.com",
+        // Cloudflare DoH endpoints
+        "one.one.one.one",
+        "cloudflare-dns.com",
+        "family.cloudflare-dns.com",
+    ]
 
     // MARK: - Subdomain Intelligence
 

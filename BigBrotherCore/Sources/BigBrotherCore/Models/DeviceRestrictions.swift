@@ -9,19 +9,22 @@ public struct DeviceRestrictions: Codable, Sendable, Equatable {
     public var lockAccounts: Bool
     public var requireAutomaticDateAndTime: Bool
     public var denyWebWhenLocked: Bool
+    public var denyWebGamesWhenRestricted: Bool
 
     public init(
         denyAppRemoval: Bool = false,
         denyExplicitContent: Bool = false,
         lockAccounts: Bool = false,
         requireAutomaticDateAndTime: Bool = false,
-        denyWebWhenLocked: Bool = false
+        denyWebWhenLocked: Bool = false,
+        denyWebGamesWhenRestricted: Bool = false
     ) {
         self.denyAppRemoval = denyAppRemoval
         self.denyExplicitContent = denyExplicitContent
         self.lockAccounts = lockAccounts
         self.requireAutomaticDateAndTime = requireAutomaticDateAndTime
         self.denyWebWhenLocked = denyWebWhenLocked
+        self.denyWebGamesWhenRestricted = denyWebGamesWhenRestricted
     }
 
     /// Custom decoder — uses `decodeIfPresent` so older JSON files missing
@@ -33,10 +36,11 @@ public struct DeviceRestrictions: Codable, Sendable, Equatable {
         lockAccounts = try container.decodeIfPresent(Bool.self, forKey: .lockAccounts) ?? false
         requireAutomaticDateAndTime = try container.decodeIfPresent(Bool.self, forKey: .requireAutomaticDateAndTime) ?? false
         denyWebWhenLocked = try container.decodeIfPresent(Bool.self, forKey: .denyWebWhenLocked) ?? false
+        denyWebGamesWhenRestricted = try container.decodeIfPresent(Bool.self, forKey: .denyWebGamesWhenRestricted) ?? false
     }
 
     /// Whether any restriction is enabled.
     public var hasAnyRestriction: Bool {
-        denyAppRemoval || denyExplicitContent || lockAccounts || requireAutomaticDateAndTime || denyWebWhenLocked
+        denyAppRemoval || denyExplicitContent || lockAccounts || requireAutomaticDateAndTime || denyWebWhenLocked || denyWebGamesWhenRestricted
     }
 }

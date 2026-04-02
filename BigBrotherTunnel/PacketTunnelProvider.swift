@@ -963,18 +963,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // Skip commands already processed by this tunnel instance
                 guard !processedByTunnel.contains(commandID) else { continue }
 
-                // Skip stale commands (older than 30 minutes)
-                if let issuedAt = record["issuedAt"] as? Date,
-                   Date().timeIntervalSince(issuedAt) > 1800 {
-                    // Mark as applied to prevent future re-processing
-                    record["status"] = "applied"
-                    _ = try? await db.save(record)
-                    processedByTunnel.insert(commandID)
-                    NSLog("[Tunnel] Skipping stale command \(commandID) (issued \(Int(Date().timeIntervalSince(issuedAt)))s ago)")
-                    continue
-                }
-
-                // Check if this command targets our device
+                // Check if this command targets our device FIRST —
+                // never mark another child's commands as applied.
                 let deviceIDStr = enrollment.deviceID.rawValue
                 let childIDStr = enrollment.childProfileID.rawValue
                 let isTargeted: Bool
@@ -985,6 +975,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 default:        isTargeted = false
                 }
                 guard isTargeted else { continue }
+
+                // Skip stale commands (older than 30 minutes) — only for OUR device.
+                if let issuedAt = record["issuedAt"] as? Date,
+                   Date().timeIntervalSince(issuedAt) > 1800 {
+                    processedByTunnel.insert(commandID)
+                    NSLog("[Tunnel] Skipping stale command \(commandID) (issued \(Int(Date().timeIntervalSince(issuedAt)))s ago)")
+                    continue
+                }
 
                 processedByTunnel.insert(commandID)
 

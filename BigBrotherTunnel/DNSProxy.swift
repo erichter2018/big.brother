@@ -47,6 +47,11 @@ final class DNSProxy {
     func start() {
         restoreFromAppGroup()
         restoreKnownApps()
+        // Pre-load enforcement blocked domains so the first DNS query is already enforced.
+        enforcementBlockedDomains = storage.readEnforcementBlockedDomains()
+        enforcementBlockedExpiry = Date().addingTimeInterval(5)
+        timeLimitBlockedDomains = storage.readTimeLimitBlockedDomains()
+        timeLimitBlockedExpiry = Date().addingTimeInterval(5)
         upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
         upstreamSession?.setReadHandler({ [weak self] datagrams, error in
             if let error {
@@ -118,9 +123,19 @@ final class DNSProxy {
             return
         }
 
-        // Time-limit domain blocking: return localhost for exhausted app domains
+        // Time-limit domain blocking: REFUSED for exhausted app domains.
+        // Uses REFUSED (not fake A record) so it works for both A and AAAA queries.
         if let domain, isTimeLimitBlocked(domain) {
-            let resp = buildDNSResponse(query: dns, ip: "127.0.0.1")
+            let resp = buildRefusedResponse(query: dns)
+            writeResponse(resp, destIP: srcIP, destPort: srcPort)
+            bgLog(domain)
+            return
+        }
+
+        // Enforcement domain blocking: block web versions of shielded apps.
+        // Uses REFUSED to handle both A and AAAA queries correctly.
+        if let domain, isEnforcementBlocked(domain) {
+            let resp = buildRefusedResponse(query: dns)
             writeResponse(resp, destIP: srcIP, destPort: srcPort)
             bgLog(domain)
             return
@@ -182,11 +197,29 @@ final class DNSProxy {
         let now = Date()
         if now >= timeLimitBlockedExpiry {
             timeLimitBlockedDomains = storage.readTimeLimitBlockedDomains()
-            timeLimitBlockedExpiry = now.addingTimeInterval(30)
+            timeLimitBlockedExpiry = now.addingTimeInterval(5)
         }
         guard !timeLimitBlockedDomains.isEmpty else { return false }
         let root = DomainCategorizer.rootDomain(domain)
         return timeLimitBlockedDomains.contains(root)
+    }
+
+    // MARK: - Enforcement Domain Blocking
+
+    private var enforcementBlockedDomains: Set<String> = []
+    private var enforcementBlockedExpiry: Date = .distantPast
+
+    /// Check if a domain should be blocked because its app is shielded (not allowed).
+    /// Blocks web versions of apps so kids can't bypass shield.applications via Safari.
+    private func isEnforcementBlocked(_ domain: String) -> Bool {
+        let now = Date()
+        if now >= enforcementBlockedExpiry {
+            enforcementBlockedDomains = storage.readEnforcementBlockedDomains()
+            enforcementBlockedExpiry = now.addingTimeInterval(5)
+        }
+        guard !enforcementBlockedDomains.isEmpty else { return false }
+        let root = DomainCategorizer.rootDomain(domain)
+        return enforcementBlockedDomains.contains(root)
     }
 
     // MARK: - Safe Search
@@ -197,7 +230,7 @@ final class DNSProxy {
             let r = storage.readDeviceRestrictions()?.denyExplicitContent == true
             let t = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.bool(forKey: "safeSearchEnabled") ?? false
             safeSearchOn = r || t
-            safeSearchExpiry = now.addingTimeInterval(30)
+            safeSearchExpiry = now.addingTimeInterval(5)
         }
         guard safeSearchOn else { return nil }
         return Self.safeSearchRedirects[domain.lowercased()]
@@ -222,6 +255,21 @@ final class DNSProxy {
     }
 
     // MARK: - DNS Response Builder
+
+    /// Build a REFUSED DNS response. Works for any query type (A, AAAA, etc.)
+    /// by returning the query's own question section with RCODE=5 (REFUSED).
+    private func buildRefusedResponse(query: Data) -> Data {
+        guard query.count >= 12 else { return query }
+        var r = Data(query)
+        // Set QR=1 (response), RCODE=5 (REFUSED)
+        r[2] = 0x81  // QR=1, Opcode=0, AA=0, TC=0, RD=1
+        r[3] = 0x05  // RA=0, Z=0, RCODE=5 (REFUSED)
+        // Zero answer, authority, additional counts
+        r[6] = 0; r[7] = 0  // ANCOUNT = 0
+        r[8] = 0; r[9] = 0  // NSCOUNT = 0
+        r[10] = 0; r[11] = 0 // ARCOUNT = 0
+        return r
+    }
 
     private func buildDNSResponse(query: Data, ip: String) -> Data {
         let octets = ip.split(separator: ".").compactMap { UInt8($0) }

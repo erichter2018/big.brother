@@ -64,7 +64,37 @@ public enum ModeStackResolver {
             try? storage.clearTimedUnlockInfo()
         }
 
-        // 3. Schedule-driven mode?
+        // 3. Active lockUntil? (parent locked device until a specific time)
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if let lockUntilMode = defaults?.string(forKey: "lockUntilPreviousMode") {
+            // Check persisted expiry — if past, self-heal by clearing the flag.
+            if let expiryInterval = defaults?.object(forKey: "lockUntilExpiresAt") as? Double {
+                let expiresAt = Date(timeIntervalSince1970: expiryInterval)
+                if expiresAt <= now {
+                    // Expired — clean up and fall through to schedule/snapshot.
+                    defaults?.removeObject(forKey: "lockUntilPreviousMode")
+                    defaults?.removeObject(forKey: "lockUntilExpiresAt")
+                } else {
+                    return Resolution(
+                        mode: .restricted,
+                        isTemporary: true,
+                        expiresAt: expiresAt,
+                        reason: "lockUntil active until \(shortTime(expiresAt)) (reverts to \(lockUntilMode))"
+                    )
+                }
+            } else {
+                // Legacy: no expiry stored. Trust DeviceActivity schedule but
+                // include nil expiresAt so diagnostics can flag it.
+                return Resolution(
+                    mode: .restricted,
+                    isTemporary: true,
+                    expiresAt: nil,
+                    reason: "lockUntil active (reverts to \(lockUntilMode)), no expiry stored"
+                )
+            }
+        }
+
+        // 4. Schedule-driven mode?
         let isScheduleDriven = AppConstants.isScheduleDriven()
 
         if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
@@ -77,7 +107,7 @@ public enum ModeStackResolver {
             )
         }
 
-        // 4. Explicit parent mode (non-schedule)
+        // 5. Explicit parent mode (non-schedule)
         if let snapshot = storage.readPolicySnapshot() {
             let mode = snapshot.effectivePolicy.resolvedMode
             return Resolution(
@@ -88,7 +118,7 @@ public enum ModeStackResolver {
             )
         }
 
-        // 5. No state at all — safe default
+        // 6. No state at all — safe default
         return Resolution(
             mode: .restricted,
             isTemporary: false,

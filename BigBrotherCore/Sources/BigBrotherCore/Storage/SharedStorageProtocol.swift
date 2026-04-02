@@ -250,6 +250,15 @@ public protocol SharedStorageProtocol: Sendable {
     /// Read raw data for a given key. Returns nil if not found.
     func readRawData(forKey key: String) -> Data?
 
+    // MARK: - Enforcement DNS Blocking
+
+    /// Domains to DNS-block because their apps are shielded (not in always-allowed list).
+    /// Written by main app enforcement, read by VPN tunnel.
+    func readEnforcementBlockedDomains() -> Set<String>
+
+    /// Write the set of domains to DNS-block during enforcement.
+    func writeEnforcementBlockedDomains(_ domains: Set<String>) throws
+
     // MARK: - File Pre-creation
 
     /// Ensure all files that extensions need to modify already exist.

@@ -237,19 +237,34 @@ struct AppLaunchRestorer {
 
         guard scheduleMode != currentMode else { return }
 
+        // Build a corrected snapshot with the schedule-resolved mode
+        // so all subsequent checks (60s loop, heartbeat, Monitor) agree.
+        let basePolicy = currentSnapshot?.effectivePolicy
+        let corrected = EffectivePolicy(
+            resolvedMode: scheduleMode,
+            isTemporaryUnlock: false,
+            temporaryUnlockExpiresAt: nil,
+            shieldedCategoriesData: basePolicy?.shieldedCategoriesData,
+            allowedAppTokensData: basePolicy?.allowedAppTokensData,
+            warnings: basePolicy?.warnings ?? [],
+            policyVersion: (basePolicy?.policyVersion ?? 0) + 1
+        )
+        let correctedSnapshot = PolicySnapshot(
+            source: .restoration,
+            trigger: "Schedule reconciliation: \(currentMode?.rawValue ?? "nil") → \(scheduleMode.rawValue)",
+            effectivePolicy: corrected
+        )
+        try? storage.writePolicySnapshot(correctedSnapshot)
+
         switch scheduleMode {
         case .unlocked:
-            // Free window — clear shields but keep device restrictions.
             do { try enforcement.clearAllRestrictions() } catch {
                 eventLogger.log(.commandFailed, details: "Schedule reconciliation: failed to clear restrictions: \(error.localizedDescription)")
             }
             eventLogger.log(.policyReconciled, details: "Schedule reconciliation: cleared shields for free window")
         case .locked, .restricted, .lockedDown:
-            // Locked or essential — re-apply enforcement from snapshot.
-            if let snapshot = currentSnapshot {
-                do { try enforcement.reconcile(with: snapshot) } catch {
-                    eventLogger.log(.commandFailed, details: "Schedule reconciliation: failed to apply \(scheduleMode.rawValue): \(error.localizedDescription)")
-                }
+            do { try enforcement.apply(corrected) } catch {
+                eventLogger.log(.commandFailed, details: "Schedule reconciliation: failed to apply \(scheduleMode.rawValue): \(error.localizedDescription)")
             }
             eventLogger.log(.policyReconciled, details: "Schedule reconciliation: applied \(scheduleMode.rawValue)")
         }

@@ -1085,9 +1085,13 @@ final class AppState {
 
         if newStatus == .denied || newStatus == .notDetermined {
             eventLogger.log(.familyControlsAuthChanged, details: "Authorization revoked")
+            // Also log as authorizationLost so parent gets a critical notification
+            eventLogger.log(.authorizationLost, details: "FamilyControls authorization revoked — shields may be down")
             // Signal tunnel to block internet immediately
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
                 .set(false, forKey: "allPermissionsGranted")
+            // Force heartbeat so parent sees revocation immediately
+            Task { try? await heartbeatService?.sendNow(force: true) }
 
             // Generate a degraded snapshot if we have a current policy.
             if let snapshot = currentSnapshot {
@@ -1129,6 +1133,9 @@ final class AppState {
             // Signal tunnel to unblock internet
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
                 .set(true, forKey: "allPermissionsGranted")
+
+            // Force heartbeat so parent sees restoration immediately
+            Task { try? await heartbeatService?.sendNow(force: true) }
 
             // After FC auth is restored, ManagedSettingsStore may be corrupted.
             // Nuke all stores first, then re-apply from scratch.
@@ -2017,9 +2024,17 @@ final class AppState {
                 details: "Shields \(isShielded ? "UP" : "DOWN") → \(shouldBeShielded ? "UP" : "DOWN") (mode: \(resolution.mode.rawValue), reason: \(resolution.reason))"
             ))
 
+            // Log an event so the parent is notified via SafetyEventNotificationService.
+            eventLogger?.log(.enforcementDegraded, details: "Shields were \(isShielded ? "up" : "down") but should be \(shouldBeShielded ? "up" : "down") — auto-corrected (mode: \(resolution.mode.rawValue))")
+
             // Write mainAppLastActiveAt so tunnel knows we're alive and fixing things
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
                 .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+
+            // Force heartbeat so parent sees corrected state immediately
+            Task {
+                try? await heartbeatService?.sendNow(force: true)
+            }
         }
     }
 

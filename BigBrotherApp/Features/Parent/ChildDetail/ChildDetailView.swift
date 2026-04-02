@@ -1126,6 +1126,14 @@ struct ChildDetailView: View {
                     restrictionToggle("Block Web When Locked", icon: "globe.badge.chevron.backward",
                                       isOn: viewModel.restrictions.denyWebWhenLocked,
                                       toggle: { viewModel.toggleRestriction(\.denyWebWhenLocked) })
+                    restrictionToggle("Block Web Games", icon: "gamecontroller",
+                                      isOn: viewModel.restrictions.denyWebGamesWhenRestricted,
+                                      toggle: { viewModel.toggleRestriction(\.denyWebGamesWhenRestricted) })
+                    if viewModel.restrictions.denyWebGamesWhenRestricted {
+                        Text("Blocks browser gaming sites (coolmathgames, poki, .io games, etc.) when device is restricted or locked.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 // Safe Search (DNS-based via VPN tunnel)

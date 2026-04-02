@@ -278,6 +278,30 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         try writeRawData(data, forKey: "timeLimitBlockedDomains")
     }
 
+    /// Domains to DNS-block because their apps are shielded (blocked by enforcement).
+    /// When device is in restricted/locked mode, web versions of blocked apps are DNS-blocked
+    /// so kids can't bypass shield.applications via Safari web apps.
+    public func readEnforcementBlockedDomains() -> Set<String> {
+        guard let data: Data = readRawData(forKey: "enforcementBlockedDomains") else {
+            return [] // File doesn't exist — legitimate empty state.
+        }
+        guard let domains = try? JSONDecoder().decode(Set<String>.self, from: data) else {
+            // File exists but is corrupted — return sentinel that callers can detect.
+            // Log for diagnostics.
+            try? appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Corrupted enforcementBlockedDomains file (\(data.count) bytes) — DNS blocking may be stale"
+            ))
+            return [] // Can't recover; callers should use cached value if they have one.
+        }
+        return domains
+    }
+
+    public func writeEnforcementBlockedDomains(_ domains: Set<String>) throws {
+        let data = try JSONEncoder().encode(domains)
+        try writeRawData(data, forKey: "enforcementBlockedDomains")
+    }
+
     // MARK: - Pre-create Shared Files
     //
     // Extensions cannot create new files in the App Group container (silent failure).

@@ -437,13 +437,23 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            // Log in all builds — failed BGTask = no safety net for re-lock.
+            // Log in all builds — failed BGTask = reduced safety net for re-lock.
             let storage = AppGroupStorage()
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
-                message: "BGTask re-lock schedule FAILED",
+                message: "BGTask re-lock schedule FAILED — DeviceActivity schedule is primary safety net",
                 details: "Target: \(date) — \(error.localizedDescription)"
             ))
+            // Schedule a local notification at expiry as a last-resort wakeup.
+            // When the user taps it, the app launches and the 60s enforcement loop catches it.
+            let content = UNMutableNotificationContent()
+            content.title = "Big Brother"
+            content.body = "Checking enforcement status..."
+            content.sound = nil
+            let interval = max(1, date.timeIntervalSinceNow)
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+            let request = UNNotificationRequest(identifier: "relock-fallback", content: content, trigger: trigger)
+            UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
         }
     }
 

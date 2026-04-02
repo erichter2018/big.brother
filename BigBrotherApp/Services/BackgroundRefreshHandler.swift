@@ -84,9 +84,10 @@ enum BackgroundRefreshHandler {
                 return .failed
             }
         } else {
-            // Debounce rapid pushes — skip if we synced recently.
+            // Reduced debounce — always sync on push unless we literally JUST synced.
+            // Commands can be lost if pushes are debounced too aggressively.
             let elapsed = Date().timeIntervalSince(lastPushSync)
-            guard elapsed >= pushDebounceInterval else {
+            guard elapsed >= 2 else {
                 #if DEBUG
                 print("[BigBrother] Push debounced (\(Int(elapsed))s since last sync)")
                 #endif
