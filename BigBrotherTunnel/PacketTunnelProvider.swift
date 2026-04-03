@@ -481,17 +481,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private var permissionsBlackholeActive: Bool = false
 
-    /// Block internet when FamilyControls authorization is not granted.
+    /// Block internet when FamilyControls Individual authorization is explicitly revoked.
     /// Without FC auth, ManagedSettingsStore writes fail silently — DNS blackhole
     /// is the only enforcement available.
+    ///
+    /// Only checks FC auth status — NOT the generic allPermissionsGranted flag,
+    /// which can be false due to child auth failure (MDM blocks .child auth)
+    /// even when Individual auth works fine and shields are fully functional.
     private func checkPermissionsEnforcement() {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let fcAuth = defaults?.string(forKey: "familyControlsAuthStatus")
-        let permissionsOK = defaults?.object(forKey: "allPermissionsGranted") == nil
-            || defaults?.bool(forKey: "allPermissionsGranted") == true
 
-        // FC auth not authorized OR permissions flag explicitly set to false — block internet
-        let authOK = permissionsOK && (fcAuth == "approved" || fcAuth == "authorized" || fcAuth == nil)
+        // Only blackhole when FC auth is explicitly revoked (not nil, not authorized).
+        // nil = never set (first boot) — don't blackhole.
+        // "approved"/"authorized" = working — don't blackhole.
+        // Anything else ("denied", "notDetermined" after revocation) = revoked — blackhole.
+        let authOK = fcAuth == nil || fcAuth == "approved" || fcAuth == "authorized"
         let resolution = ModeStackResolver.resolve(storage: storage)
         let shouldBeRestricted = resolution.mode != .unlocked
 
