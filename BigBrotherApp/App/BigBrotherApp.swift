@@ -249,9 +249,11 @@ struct BigBrotherApp: App {
         for attempt in 1...maxAttempts {
             do {
                 try await cloudKit?.setupSubscriptions(familyID: familyID, deviceID: deviceID)
+                NSLog("[BigBrother] CK subscriptions setup OK (attempt \(attempt))")
                 _LaunchLog.log("Subscriptions setup succeeded (attempt \(attempt))")
                 return
             } catch {
+                NSLog("[BigBrother] CK subscriptions setup FAILED (attempt \(attempt)/\(maxAttempts)): \(error)")
                 _LaunchLog.log("Subscriptions setup failed (attempt \(attempt)/\(maxAttempts)): \(error)")
                 if attempt < maxAttempts {
                     try? await Task.sleep(for: .seconds(Double(attempt) * 2))

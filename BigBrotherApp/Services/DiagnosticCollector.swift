@@ -51,6 +51,7 @@ enum DiagnosticCollector {
             "lastShieldChangeReason", "shieldedAppCount", "lastHeartbeatSentAt",
             "mainAppLastLaunchedBuild", "monitorLastActiveAt", "tunnelStatus",
             "tunnelLastActiveAt", "mainAppLastActiveAt", "locationTrackingMode",
+            "apnsTokenRegisteredAt", "apnsTokenError", "lastPushReceivedAt",
             "extensionHeartbeatRequestToken", "extensionHeartbeatAcknowledgedToken",
             "extensionHeartbeatRequestedAt", "extensionHeartbeatAcknowledgedAt",
             "drivingSettings"

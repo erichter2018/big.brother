@@ -560,16 +560,27 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             ? "commands-\(familyID.rawValue)"
             : "unlock-requests-v3-\(familyID.rawValue)"
 
-        let existing = (try? await database.allSubscriptions()) ?? []
+        // Always log what we find for debugging push issues
+        let existing: [CKSubscription]
+        do {
+            existing = try await database.allSubscriptions()
+            NSLog("[BigBrother] CK subscriptions found: \(existing.map(\.subscriptionID))")
+        } catch {
+            NSLog("[BigBrother] CK allSubscriptions() FAILED: \(error.localizedDescription) — will re-create")
+            existing = []
+        }
+
         let hasExpected = existing.contains { $0.subscriptionID == expectedID }
 
         if hasExpected {
-            NSLog("[BigBrother] CK subscription \(expectedID) exists — push OK, skipping re-register")
+            NSLog("[BigBrother] CK subscription \(expectedID) exists — push should work")
+            // Even if subscription exists, ensure APNs token is fresh
+            await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
             return
         }
 
         // Subscription missing — nuke everything and re-create with fresh APNs token.
-        NSLog("[BigBrother] CK subscription \(expectedID) MISSING — deleting stale subs + re-registering")
+        NSLog("[BigBrother] CK subscription \(expectedID) MISSING from \(existing.count) subs — deleting stale + re-registering")
         await deleteAllSubscriptions()
         await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
 
@@ -654,16 +665,12 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             op.modifySubscriptionsResultBlock = { result in
                 switch result {
                 case .success:
-                    #if DEBUG
                     for subscription in subscriptionsToSave {
-                        print("[BigBrother] ✅ CloudKit subscription active: \(subscription.subscriptionID)")
+                        NSLog("[BigBrother] CK subscription SAVED: \(subscription.subscriptionID)")
                     }
-                    #endif
                     continuation.resume()
                 case .failure(let error):
-                    #if DEBUG
-                    print("[BigBrother] ❌ CloudKit subscription failed: \(error.localizedDescription)")
-                    #endif
+                    NSLog("[BigBrother] CK subscription SAVE FAILED: \(error.localizedDescription)")
                     continuation.resume(throwing: error)
                 }
             }

@@ -943,16 +943,7 @@ final class AppState {
             // Don't make them wait for schedule sync or enforcement verification.
             try? await commandProcessor?.processIncomingCommands()
 
-            // 2. Re-register CK subscriptions if missing (broken after MDM removal / iCloud change).
-            // This restores push delivery for future commands.
-            if let enrollment = try? keychain.get(ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState) {
-                try? await cloudKit?.setupSubscriptions(
-                    familyID: enrollment.familyID,
-                    deviceID: enrollment.deviceID
-                )
-            }
-
-            // 3. Sync schedule + restrictions from CloudKit
+            // 2. Sync schedule + restrictions from CloudKit
             await syncScheduleProfile()
 
             // 4. Re-apply enforcement — use ModeStackResolver as ground truth.

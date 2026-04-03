@@ -57,19 +57,20 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
-        #if DEBUG
         let tokenString = deviceToken.map { String(format: "%02x", $0) }.joined()
-        print("[BigBrother] Registered for remote notifications (token: \(tokenString.prefix(16))...)")
-        #endif
+        NSLog("[BigBrother] APNs token registered: \(tokenString.prefix(16))...")
+        // Write to App Group so diagnostic can report push status
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "apnsTokenRegisteredAt")
     }
 
     func application(
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
-        #if DEBUG
-        print("[BigBrother] Failed to register for remote notifications: \(error.localizedDescription)")
-        #endif
+        NSLog("[BigBrother] APNs registration FAILED: \(error.localizedDescription)")
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("failed: \(error.localizedDescription)", forKey: "apnsTokenError")
     }
 
     func application(
@@ -77,9 +78,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
-        #if DEBUG
-        print("[BigBrother] didReceiveRemoteNotification called")
-        #endif
+        NSLog("[BigBrother] PUSH RECEIVED: didReceiveRemoteNotification")
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "lastPushReceivedAt")
 
         guard let appState else {
             #if DEBUG
