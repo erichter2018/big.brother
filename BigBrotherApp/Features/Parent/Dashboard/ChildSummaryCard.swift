@@ -58,25 +58,35 @@ struct ChildSummaryCard: View {
         let builds = childHeartbeats.compactMap(\.appBuildNumber)
         let onOldBuild = (builds.min() ?? AppConstants.appBuildNumber) < AppConstants.appBuildNumber
 
-        // isShieldMismatch — only flag when shields are genuinely down.
-        // Brief shield-down during transitions (unlocked→locked) is normal and resolves
-        // within 1-2 heartbeats. Require the heartbeat to be at least 3 min old to avoid
-        // alarming the parent during transient states that self-correct.
+        // isShieldMismatch — flag when shields are genuinely down.
+        // Two detection paths:
+        // 1. Main app heartbeat: shieldsActive == false (direct ManagedSettingsStore check)
+        // 2. Tunnel heartbeat: shieldsActive is nil (can't check), but if mode is restrictive
+        //    and the main app isn't running, shields are almost certainly down.
         var shieldMismatch = false
         if countdown == nil && dominantMode != .unlocked {
             for device in devices {
                 if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
-                   hb.currentMode != .unlocked,
-                   hb.shieldsActive == false,
-                   hb.shieldCategoryActive != true {
+                   hb.currentMode != .unlocked {
                     if let expires = hb.temporaryUnlockExpiresAt, expires > Date() { continue }
-                    // Only alert if heartbeat is 3-10 min old — gives transitions time to settle.
-                    // Very fresh heartbeats (<3 min) may catch mid-transition state.
-                    // Very old heartbeats (>10 min) are stale and not actionable.
-                    let age = -hb.timestamp.timeIntervalSinceNow
-                    if age >= 180 && age <= 600 {
-                        shieldMismatch = true
-                        break
+
+                    let isTunnel = hb.heartbeatSource == "vpnTunnel"
+                    let confirmedDown = hb.shieldsActive == false && hb.shieldCategoryActive != true
+                    let inferredDown = isTunnel && hb.shieldsActive == nil  // Tunnel can't check — app is dead
+
+                    if confirmedDown || inferredDown {
+                        // For confirmed (main app) heartbeats: require 3-10 min age to avoid
+                        // transient mid-transition alerts. For tunnel heartbeats: app is dead,
+                        // so this isn't a transition — show immediately (no age filter).
+                        if isTunnel {
+                            shieldMismatch = true
+                            break
+                        }
+                        let age = -hb.timestamp.timeIntervalSinceNow
+                        if age >= 180 && age <= 600 {
+                            shieldMismatch = true
+                            break
+                        }
                     }
                 }
             }

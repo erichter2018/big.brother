@@ -27,11 +27,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var livenessTimer: DispatchSourceTimer?
 
     /// Timestamp of last IPC ping from the main app.
-    /// Initialized to tunnel start time to avoid false "app dead" during startup.
-    private var lastPingFromApp: Date? = Date()
+    /// Seeded from App Group so the tunnel immediately knows if the app has been dead for hours.
+    /// Falls back to Date() only if no App Group timestamp exists (first-ever tunnel start).
+    private lazy var lastPingFromApp: Date? = {
+        let ts = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .double(forKey: "mainAppLastActiveAt") ?? 0
+        return ts > 0 ? Date(timeIntervalSince1970: ts) : Date()
+    }()
 
-    /// Whether the main app is considered alive.
-    private var mainAppAlive = true
+    /// Whether the main app is considered alive. Seeded from App Group timestamp.
+    private lazy var mainAppAlive: Bool = {
+        let ts = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .double(forKey: "mainAppLastActiveAt") ?? 0
+        // If app was active within the last 10 minutes, assume alive
+        return ts > 0 && (Date().timeIntervalSince1970 - ts) < AppConstants.appDeathThresholdSeconds
+    }()
 
     /// Prevent duplicate heartbeats — only send from tunnel when main app is dead.
     private var tunnelOwnsHeartbeat = false
