@@ -768,6 +768,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .removeTimeLimit(let fingerprint):
                 return handleRemoveTimeLimit(fingerprint: fingerprint)
+
+            case .blockAppForToday(let fingerprint):
+                return handleBlockAppForToday(fingerprint: fingerprint)
             }
 
         } catch {
@@ -1662,6 +1665,41 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         return .applied
     }
 
+    private func handleBlockAppForToday(fingerprint: String) -> CommandProcessingResult {
+        let limits = storage.readAppTimeLimits()
+        guard let limit = limits.first(where: { $0.fingerprint == fingerprint }) else {
+            return .failedExecution(reason: "No time limit found for fingerprint \(fingerprint)")
+        }
+
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        let today: String = {
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyy-MM-dd"
+            return fmt.string(from: Date())
+        }()
+
+        // Already exhausted today — no-op
+        guard !exhausted.contains(where: { $0.fingerprint == fingerprint && $0.dateString == today }) else {
+            return .applied
+        }
+
+        let entry = TimeLimitExhaustedApp(
+            id: UUID(),
+            timeLimitID: limit.id,
+            appName: limit.appName,
+            tokenData: limit.tokenData,
+            fingerprint: limit.fingerprint,
+            exhaustedAt: Date(),
+            dateString: today
+        )
+        exhausted.append(entry)
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+
+        reapplyCurrentEnforcement()
+        eventLogger.log(.timeLimitExhausted, details: "\(limit.appName) blocked for today by parent")
+        return .applied
+    }
+
     /// Re-apply enforcement so ManagedSettingsStore picks up changes.
     /// Called after any change to allowed app lists or device restrictions.
     /// Always applies — device restrictions are active even in unlocked mode.
@@ -1772,7 +1810,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         case .setMode, .temporaryUnlock, .timedUnlock, .lockUntil, .returnToSchedule,
              .allowApp, .revokeApp, .allowManagedApp, .blockManagedApp,
              .temporaryUnlockApp, .revokeAllApps, .requestAlwaysAllowedSetup, .unenroll,
-             .requestTimeLimitSetup, .grantExtraTime, .removeTimeLimit:
+             .requestTimeLimitSetup, .grantExtraTime, .removeTimeLimit, .blockAppForToday:
             return true
         case .setSelfUnlockBudget, .setRestrictions, .nameApp, .syncPINHash,
              .setScheduleProfile, .clearScheduleProfile, .setHeartbeatProfile,

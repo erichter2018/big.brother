@@ -6,6 +6,11 @@ import BigBrotherCore
 struct AppTimeLimitsSection: View {
     @Bindable var viewModel: ChildDetailViewModel
 
+    @State private var renameConfig: TimeLimitConfig?
+    @State private var renameText: String = ""
+    @State private var customLimitConfig: TimeLimitConfig?
+    @State private var customLimitText: String = ""
+
     var body: some View {
         Section {
             if viewModel.timeLimitConfigs.isEmpty {
@@ -47,6 +52,41 @@ struct AppTimeLimitsSection: View {
         } footer: {
             Text("Set daily time budgets per app. When time runs out, the app is blocked until midnight. Usage estimates are approximate (based on network activity).")
         }
+        .alert("Rename App", isPresented: Binding(
+            get: { renameConfig != nil },
+            set: { if !$0 { renameConfig = nil } }
+        )) {
+            TextField("App name", text: $renameText)
+            Button("Save") {
+                if let config = renameConfig, !renameText.isEmpty {
+                    Task { await viewModel.renameTimeLimit(config: config, newName: renameText) }
+                }
+                renameConfig = nil
+            }
+            Button("Cancel", role: .cancel) {
+                renameConfig = nil
+            }
+        } message: {
+            Text("Enter a new display name for this app.")
+        }
+        .alert("Custom Time Limit", isPresented: Binding(
+            get: { customLimitConfig != nil },
+            set: { if !$0 { customLimitConfig = nil } }
+        )) {
+            TextField("Minutes", text: $customLimitText)
+                .keyboardType(.numberPad)
+            Button("Set") {
+                if let config = customLimitConfig, let mins = Int(customLimitText), mins > 0 {
+                    Task { await viewModel.setTimeLimit(config: config, minutes: mins) }
+                }
+                customLimitConfig = nil
+            }
+            Button("Cancel", role: .cancel) {
+                customLimitConfig = nil
+            }
+        } message: {
+            Text("Enter the daily time limit in minutes.")
+        }
     }
 
     @ViewBuilder
@@ -55,57 +95,73 @@ struct AppTimeLimitsSection: View {
         let progress = config.dailyLimitMinutes > 0 ? min(1.0, usage / Double(config.dailyLimitMinutes)) : 0
         let exhausted = usage >= Double(config.dailyLimitMinutes) && config.dailyLimitMinutes > 0
 
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(config.appName)
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-
-                // Editable limit
-                Menu {
-                    ForEach([15, 30, 45, 60, 90, 120, 180, 240], id: \.self) { minutes in
-                        Button {
-                            Task { await viewModel.setTimeLimit(config: config, minutes: minutes) }
-                        } label: {
-                            Text(formatMinutes(minutes))
-                            if config.dailyLimitMinutes == minutes {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                } label: {
-                    Text(config.dailyLimitMinutes > 0 ? formatMinutes(config.dailyLimitMinutes) : "Set limit")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(config.dailyLimitMinutes > 0 ? Color.primary : Color.blue)
-                }
-            }
+        HStack(spacing: 8) {
+            Text(config.appName)
+                .font(.subheadline)
+                .lineLimit(1)
 
             if config.dailyLimitMinutes > 0 {
-                // Progress bar
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3)
+                        RoundedRectangle(cornerRadius: 2)
                             .fill(.quaternary)
-                            .frame(height: 6)
-                        RoundedRectangle(cornerRadius: 3)
+                            .frame(height: 4)
+                        RoundedRectangle(cornerRadius: 2)
                             .fill(exhausted ? .red : progress > 0.75 ? .orange : .green)
-                            .frame(width: geo.size.width * progress, height: 6)
+                            .frame(width: geo.size.width * progress, height: 4)
                     }
+                    .frame(maxHeight: .infinity, alignment: .center)
                 }
-                .frame(height: 6)
+                .frame(height: 4)
 
-                HStack {
-                    Text("~\(formatMinutes(Int(usage))) used")
-                        .font(.caption2)
-                        .foregroundStyle(exhausted ? .red : .secondary)
-                    Spacer()
-                    Text("\(formatMinutes(config.dailyLimitMinutes)) limit")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                Text("\(formatMinutes(Int(usage))) / \(formatMinutes(config.dailyLimitMinutes))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            } else {
+                Spacer()
+                Text("No limit")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
+        .contextMenu {
+            Button {
+                renameText = config.appName
+                renameConfig = config
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+
+            Menu {
+                ForEach([15, 30, 45, 60, 90, 120, 180, 240], id: \.self) { mins in
+                    Button("\(mins >= 60 ? "\(mins/60)h\(mins % 60 > 0 ? " \(mins%60)m" : "")" : "\(mins)m")") {
+                        Task { await viewModel.setTimeLimit(config: config, minutes: mins) }
+                    }
+                }
+                Button("Custom...") {
+                    customLimitText = config.dailyLimitMinutes > 0 ? "\(config.dailyLimitMinutes)" : ""
+                    customLimitConfig = config
+                }
+            } label: {
+                Label("Change Limit", systemImage: "clock")
+            }
+
+            Divider()
+
+            Button {
+                Task { await viewModel.blockAppForToday(config: config) }
+            } label: {
+                Label("Block for Today", systemImage: "clock.badge.xmark")
+            }
+
+            Button(role: .destructive) {
+                Task { await viewModel.removeTimeLimit(config: config) }
+            } label: {
+                Label("Remove & Block", systemImage: "trash")
+            }
+        }
     }
 
     private func deleteConfigs(at indices: IndexSet) async {

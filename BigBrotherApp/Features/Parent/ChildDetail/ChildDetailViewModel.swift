@@ -263,7 +263,8 @@ final class ChildDetailViewModel: CommandSendable {
             async let e: () = loadEvents()
             async let s: () = loadWeeklyScreenTime()
             async let o: () = loadOnlineActivity()
-            _ = await (e, s, o)
+            async let t: () = loadTimeLimits()
+            _ = await (e, s, o, t)
         }
     }
 
@@ -274,6 +275,7 @@ final class ChildDetailViewModel: CommandSendable {
         let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             Task { [weak self] in
                 await self?.loadEvents()
+                await self?.loadTimeLimits()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -735,7 +737,15 @@ final class ChildDetailViewModel: CommandSendable {
 
     func loadTimeLimits() async {
         guard let cloudKit = appState.cloudKit else { return }
-        if let configs = try? await cloudKit.fetchTimeLimitConfigs(childProfileID: child.id) {
+        if var configs = try? await cloudKit.fetchTimeLimitConfigs(childProfileID: child.id) {
+            // Pre-fill names from parent mapping for generic names
+            for i in configs.indices {
+                let saved = ParentAppNameMapping.resolvedName(for: configs[i].appName)
+                if saved != configs[i].appName {
+                    configs[i].appName = saved
+                    try? await cloudKit.saveTimeLimitConfig(configs[i])
+                }
+            }
             timeLimitConfigs = configs.sorted { $0.appName < $1.appName }
         }
     }
@@ -757,10 +767,32 @@ final class ChildDetailViewModel: CommandSendable {
 
     func removeTimeLimit(config: TimeLimitConfig) async {
         guard let cloudKit = appState.cloudKit else { return }
+        // Persist name so it pre-fills when re-adding
+        ParentAppNameMapping.setName(config.appName, forFingerprint: config.appFingerprint)
         try? await cloudKit.deleteTimeLimitConfig(config.id)
         timeLimitConfigs.removeAll { $0.id == config.id }
         // Send command to all child devices to stop monitoring
         await performCommand(.removeTimeLimit(appFingerprint: config.appFingerprint), target: .child(config.childProfileID))
+    }
+
+    func renameTimeLimit(config: TimeLimitConfig, newName: String) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        var updated = config
+        updated.appName = newName
+        updated.updatedAt = Date()
+        try? await cloudKit.saveTimeLimitConfig(updated)
+        if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
+            timeLimitConfigs[idx] = updated
+        }
+        ParentAppNameMapping.setName(newName, forFingerprint: config.appFingerprint)
+        await sendAppNameToChild(name: newName, rawAppName: config.appName, deviceID: config.deviceID)
+    }
+
+    func blockAppForToday(config: TimeLimitConfig) async {
+        await performCommand(
+            .blockAppForToday(appFingerprint: config.appFingerprint),
+            target: .child(config.childProfileID)
+        )
     }
 
     func grantExtraTime(config: TimeLimitConfig, minutes: Int) async {

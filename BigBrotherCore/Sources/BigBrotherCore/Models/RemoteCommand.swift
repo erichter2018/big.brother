@@ -135,6 +135,8 @@ public enum CommandAction: Codable, Sendable, Equatable {
     case grantExtraTime(appFingerprint: String, extraMinutes: Int)
     /// Remove a time limit from an app.
     case removeTimeLimit(appFingerprint: String)
+    /// Block an app for the rest of today (mark as exhausted without waiting for threshold).
+    case blockAppForToday(appFingerprint: String)
 
     // Thread-safe date formatting via Date.FormatStyle (replaces non-thread-safe static DateFormatter)
 
@@ -181,6 +183,7 @@ public enum CommandAction: Codable, Sendable, Equatable {
         case .requestTimeLimitSetup: return "requestTimeLimitSetup"
         case .grantExtraTime(let fp, _): return "grantExtraTime.\(fp)"
         case .removeTimeLimit(let fp): return "removeTimeLimit.\(fp)"
+        case .blockAppForToday(let fp): return "blockAppForToday.\(fp)"
         }
     }
 
@@ -305,6 +308,8 @@ public enum CommandAction: Codable, Sendable, Equatable {
             return "Grant \(mins) extra minutes"
         case .removeTimeLimit:
             return "Remove app time limit"
+        case .blockAppForToday:
+            return "Block app for today"
         }
     }
 }
