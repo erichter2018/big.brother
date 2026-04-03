@@ -84,44 +84,16 @@ enum BackgroundRefreshHandler {
                 return .failed
             }
         } else {
-            // Brief debounce — but schedule a delayed reprocess instead of dropping.
-            // The delayed task goes through processIncomingCommands() which uses
-            // ProcessingGate, preventing uncoordinated concurrent syncs.
-            let elapsed = Date().timeIntervalSince(lastPushSync)
-            if elapsed < 2 {
-                #if DEBUG
-                print("[BigBrother] Push debounced (\(Int(elapsed * 1000))ms) — scheduling delayed command processing")
-                #endif
-                // Schedule a delayed sync through the proper command processing gate.
-                Task {
-                    try? await Task.sleep(for: .seconds(2 - elapsed + 0.5))
-                    try? await appState.commandProcessor?.processIncomingCommands()
-                }
-                return .newData
-            }
-            lastPushSync = Date()
-
-            #if DEBUG
-            print("[BigBrother] CloudKit push received (child) — waiting for index consistency...")
-            #endif
-            try? await Task.sleep(for: .seconds(0.5))
-
+            // Process commands IMMEDIATELY. No debounce, no sleep.
+            // The parent just sent a command and is waiting. Every millisecond counts.
+            NSLog("[BigBrother] Push received (child) — processing commands NOW")
             do {
-                await MainActor.run {
-                    appState.handleMainAppResponsive(reapplyEnforcement: true)
-                }
-                // performQuickSync already includes commands + heartbeat + events.
-                // No need for a separate forced heartbeat — it just doubles CloudKit writes.
-                try await appState.syncCoordinator?.performQuickSync()
+                try await appState.commandProcessor?.processIncomingCommands()
                 await MainActor.run { appState.refreshLocalState() }
-                #if DEBUG
-                print("[BigBrother] Quick sync complete after push")
-                #endif
+                NSLog("[BigBrother] Push command processing complete")
                 return .newData
             } catch {
-                #if DEBUG
-                print("[BigBrother] Quick sync failed: \(error.localizedDescription)")
-                #endif
+                NSLog("[BigBrother] Push command processing failed: \(error.localizedDescription)")
                 return .failed
             }
         }

@@ -904,7 +904,7 @@ final class AppState {
     func startForegroundCommandPoll() {
         guard deviceRole == .child else { return }
         stopForegroundCommandPoll()
-        foregroundCommandPollTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        foregroundCommandPollTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { [weak self] in
                 try? await self?.commandProcessor?.processIncomingCommands()
             }
