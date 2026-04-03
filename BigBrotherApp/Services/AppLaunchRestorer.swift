@@ -36,6 +36,10 @@ struct AppLaunchRestorer {
 
     /// Run the full restoration flow. Should be called on app launch for child devices.
     func restore() {
+        // Reset enforcement throttle on every fresh launch so deploy-driven restarts
+        // don't exhaust the nuclear reset budget across separate app launches.
+        enforcement.resetThrottle()
+
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("launchRestore", forKey: "lastShieldChangeReason")
 

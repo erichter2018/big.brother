@@ -28,8 +28,15 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     private let fcManager: any FamilyControlsManagerProtocol
 
     /// Throttle nuclear resets to prevent infinite clear/re-apply loops.
+    /// Reset on each fresh app launch (resetThrottle()) so deploy restarts get a clean slate.
     private var nuclearResetCount = 0
     private var nuclearResetWindowStart = Date()
+
+    /// Reset the nuclear throttle counter. Call on each fresh app launch.
+    func resetThrottle() {
+        nuclearResetCount = 0
+        nuclearResetWindowStart = Date()
+    }
 
     init(
         storage: any SharedStorageProtocol = AppGroupStorage(),

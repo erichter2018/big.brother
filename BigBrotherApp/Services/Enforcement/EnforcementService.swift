@@ -39,6 +39,10 @@ protocol EnforcementServiceProtocol {
 
     /// Read current shield state from ManagedSettingsStore for diagnostic reporting.
     func shieldDiagnostic() -> ShieldDiagnostic
+
+    /// Reset the nuclear enforcement throttle. Call on each fresh app launch
+    /// so deploy-driven restarts get a clean slate of reset attempts.
+    func resetThrottle()
 }
 
 /// Snapshot of the current ManagedSettingsStore shield state for heartbeat diagnostics.
