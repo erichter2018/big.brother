@@ -1077,13 +1077,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     record["status"] = "applied"
                     _ = try? await db.save(record)
                     NSLog("[Tunnel] Processed blockInternet (mode-driven): \(commandID)")
-                } else if !mainAppAlive, let tunnelAction,
+                } else if let tunnelAction,
                           Self.isModeChangingAction(tunnelAction) {
-                    // Main app is dead — handle mode-changing commands from the tunnel.
-                    // The tunnel can't write to ManagedSettingsStore, but it CAN:
-                    // 1. Write state files to App Group (snapshot, ext state, temp unlock)
-                    // 2. Update DNS blocking immediately
-                    // 3. Send a notification to prompt the user to open the app
+                    // Always process mode commands from the tunnel — don't gate on mainAppAlive.
+                    // Push notifications may be broken (iCloud account change, MDM removal),
+                    // so the app can't be relied on to wake and process commands.
+                    // The tunnel polls every 30s and is the reliable fallback.
+                    // Dedup via processedCommandIDs prevents double application if both
+                    // the tunnel and main app process the same command.
                     await handleModeCommandFromTunnel(
                         actionType: tunnelAction,
                         actionJSON: actionJSON,
@@ -1091,7 +1092,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         enrollment: enrollment,
                         db: db
                     )
-                    NSLog("[Tunnel] Processed mode command \(tunnelAction) while app dead: \(commandID)")
+                    NSLog("[Tunnel] Processed mode command \(tunnelAction): \(commandID) (appAlive=\(mainAppAlive))")
                 }
                 // Other commands are left for the main app
             }
