@@ -150,9 +150,13 @@ struct ChildHomeView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 // Immediately sync with CloudKit when kid opens the app.
-                // Pulls latest schedule, restrictions, processes commands,
-                // re-applies enforcement, and sends heartbeat to parent.
                 viewModel.appState.performForegroundSync()
+                // Start 5-second command poll while app is visible.
+                // Push notifications are unreliable — this ensures commands
+                // from parent are processed within seconds, always.
+                viewModel.appState.startForegroundCommandPoll()
+            } else if newPhase == .background {
+                viewModel.appState.stopForegroundCommandPoll()
             }
         }
     }

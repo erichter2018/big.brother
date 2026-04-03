@@ -894,9 +894,32 @@ final class AppState {
     /// This ensures that when a kid opens BB, everything is instantly up to date.
     private var isForegroundSyncing = false
 
+    /// Timer that polls for commands while the app is in foreground.
+    /// Push notifications are unreliable (iOS throttles silent pushes, iCloud
+    /// account changes break CK subscriptions). This 5-second poll ensures
+    /// commands are processed promptly when the parent sends them.
+    private var foregroundCommandPollTimer: Timer?
+
+    /// Start polling for commands while the app is in foreground.
+    func startForegroundCommandPoll() {
+        guard deviceRole == .child else { return }
+        stopForegroundCommandPoll()
+        foregroundCommandPollTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { [weak self] in
+                try? await self?.commandProcessor?.processIncomingCommands()
+            }
+        }
+    }
+
+    /// Stop polling when the app goes to background.
+    func stopForegroundCommandPoll() {
+        foregroundCommandPollTimer?.invalidate()
+        foregroundCommandPollTimer = nil
+    }
+
     func performForegroundSync() {
         guard deviceRole == .child else { return }
-        guard !isForegroundSyncing else { return } // Prevent concurrent syncs
+        guard !isForegroundSyncing else { return }
         isForegroundSyncing = true
 
         // Detect stale binary: if the tunnel has a newer build than our in-memory
@@ -910,18 +933,32 @@ final class AppState {
         }
 
         Task {
-            // 1. Sync schedule + restrictions from CloudKit
-            await syncScheduleProfile()
+            defer {
+                Task { @MainActor in
+                    self.isForegroundSyncing = false
+                }
+            }
 
-            // 2. Process any pending commands (mode changes, restrictions, etc.)
+            // 1. FIRST: process commands immediately — this is what the parent is waiting for.
+            // Don't make them wait for schedule sync or enforcement verification.
             try? await commandProcessor?.processIncomingCommands()
 
-            // 3. Re-apply enforcement — but use ModeStackResolver as ground truth.
-            // The snapshot may be stale (e.g., says restricted but temp unlock is active).
+            // 2. Re-register CK subscriptions if missing (broken after MDM removal / iCloud change).
+            // This restores push delivery for future commands.
+            if let enrollment = try? keychain.get(ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState) {
+                try? await cloudKit?.setupSubscriptions(
+                    familyID: enrollment.familyID,
+                    deviceID: enrollment.deviceID
+                )
+            }
+
+            // 3. Sync schedule + restrictions from CloudKit
+            await syncScheduleProfile()
+
+            // 4. Re-apply enforcement — use ModeStackResolver as ground truth.
             let resolution = ModeStackResolver.resolve(storage: storage)
             if let snapshot = snapshotStore?.loadCurrentSnapshot() {
                 if snapshot.effectivePolicy.resolvedMode != resolution.mode {
-                    // Snapshot is stale — build corrected policy
                     let corrected = EffectivePolicy(
                         resolvedMode: resolution.mode,
                         isTemporaryUnlock: resolution.isTemporary,
@@ -943,7 +980,7 @@ final class AppState {
                 }
             }
 
-            // 4. Ensure VPN is installed — kid may have removed it
+            // 5. Ensure VPN is installed
             if let vpn = vpnManager {
                 if !(await vpn.isConfigured()) {
                     try? await vpn.installAndStart()
@@ -954,18 +991,17 @@ final class AppState {
                 }
             }
 
-            // 5. Verify enforcement matches ModeStackResolver (catches missed Monitor callbacks)
+            // 6. Verify enforcement matches ModeStackResolver
             verifyAndFixEnforcement()
 
-            // 6. Send heartbeat so parent sees updated state immediately
+            // 7. Send heartbeat so parent sees updated state immediately
             try? await heartbeatService?.sendNow(force: true)
 
-            // 6. Ping the VPN tunnel to clear any stale blackholes
+            // 8. Ping the VPN tunnel to clear any stale blackholes
             vpnManager?.sendPing()
 
             await MainActor.run {
                 self.refreshLocalState()
-                self.isForegroundSyncing = false
             }
         }
     }
