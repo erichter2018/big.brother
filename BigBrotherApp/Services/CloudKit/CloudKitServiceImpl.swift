@@ -1,5 +1,6 @@
 import Foundation
 import CloudKit
+import UIKit
 import BigBrotherCore
 
 /// Concrete CloudKit service using the public database with familyID partitioning.
@@ -551,6 +552,15 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Subscriptions
 
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws {
+        // Nuclear reset: delete ALL existing subscriptions first, then re-create.
+        // After iCloud account changes (MDM removal, sign-out), old subscriptions
+        // reference stale APNs tokens and silent pushes never arrive. Deleting and
+        // re-creating guarantees the subscription uses the current device token.
+        await deleteAllSubscriptions()
+
+        // Force fresh APNs token registration
+        await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
+
         var subscriptionsToSave: [CKSubscription] = []
 
         if deviceID != nil {
@@ -646,6 +656,36 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 }
             }
             database.add(op)
+        }
+    }
+
+    /// Delete all CK subscriptions for this container, then let setupSubscriptions re-create.
+    /// Ensures stale subscriptions with old APNs tokens are fully purged.
+    private func deleteAllSubscriptions() async {
+        do {
+            let subs = try await database.allSubscriptions()
+            guard !subs.isEmpty else { return }
+            let idsToDelete = subs.map(\.subscriptionID)
+            let op = CKModifySubscriptionsOperation(
+                subscriptionsToSave: nil,
+                subscriptionIDsToDelete: idsToDelete
+            )
+            op.qualityOfService = .utility
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                op.modifySubscriptionsResultBlock = { result in
+                    switch result {
+                    case .success:
+                        NSLog("[BigBrother] Deleted \(idsToDelete.count) stale CK subscriptions before re-register")
+                        continuation.resume()
+                    case .failure(let error):
+                        NSLog("[BigBrother] Failed to delete CK subscriptions: \(error.localizedDescription)")
+                        continuation.resume(throwing: error)
+                    }
+                }
+                self.database.add(op)
+            }
+        } catch {
+            NSLog("[BigBrother] Could not fetch existing CK subscriptions: \(error.localizedDescription)")
         }
     }
 
