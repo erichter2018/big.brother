@@ -552,13 +552,25 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Subscriptions
 
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws {
-        // Nuclear reset: delete ALL existing subscriptions first, then re-create.
-        // After iCloud account changes (MDM removal, sign-out), old subscriptions
-        // reference stale APNs tokens and silent pushes never arrive. Deleting and
-        // re-creating guarantees the subscription uses the current device token.
-        await deleteAllSubscriptions()
+        // Check if our expected subscriptions already exist in CloudKit.
+        // If they do, skip re-registration (fast path — no unnecessary work).
+        // If they're missing (iCloud account change, MDM removal wiped them),
+        // delete any stale leftovers and re-create from scratch.
+        let expectedID = deviceID != nil
+            ? "commands-\(familyID.rawValue)"
+            : "unlock-requests-v3-\(familyID.rawValue)"
 
-        // Force fresh APNs token registration
+        let existing = (try? await database.allSubscriptions()) ?? []
+        let hasExpected = existing.contains { $0.subscriptionID == expectedID }
+
+        if hasExpected {
+            NSLog("[BigBrother] CK subscription \(expectedID) exists — push OK, skipping re-register")
+            return
+        }
+
+        // Subscription missing — nuke everything and re-create with fresh APNs token.
+        NSLog("[BigBrother] CK subscription \(expectedID) MISSING — deleting stale subs + re-registering")
+        await deleteAllSubscriptions()
         await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
 
         var subscriptionsToSave: [CKSubscription] = []
