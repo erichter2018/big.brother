@@ -94,11 +94,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let safeSearchEnabled = defaults?.bool(forKey: "safeSearchEnabled") ?? false
 
-        // Determine upstream DNS server
+        // Determine upstream DNS server.
+        // Even during blackhole, use a REAL upstream so Apple domains (CloudKit, APNS)
+        // still resolve. The proxy itself refuses non-exempt domains in blackhole mode.
         let upstreamDNS: String
         if isInternetBlocked {
-            upstreamDNS = "127.0.0.1" // blackhole
-            NSLog("[Tunnel] DNS blackhole active — internet blocked")
+            upstreamDNS = "1.1.1.1" // Real DNS — proxy handles blackhole with Apple exemptions
+            NSLog("[Tunnel] DNS blackhole active — internet blocked (Apple domains exempt)")
         } else if safeSearchEnabled {
             upstreamDNS = "185.228.168.168" // CleanBrowsing Family
             NSLog("[Tunnel] DNS safe search enabled (CleanBrowsing Family)")
@@ -113,6 +115,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Create DNS proxy with the selected upstream
         dnsProxy = DNSProxy(provider: self, upstreamDNSServer: upstreamDNS, storage: storage)
+        dnsProxy?.isBlackholeMode = isInternetBlocked
 
         // Seed enforcement blocked domains from last-known fallback if the
         // main list is empty (main app may not have written one yet after reboot).

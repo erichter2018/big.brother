@@ -26,7 +26,25 @@ final class DNSProxy {
     private var totalQueries: Int = 0
     private let statsLock = NSLock()
     var isDeviceLocked: Bool = false
+    /// When true, all DNS queries are REFUSED except Apple infrastructure domains
+    /// (CloudKit, APNS, iCloud). This ensures the device stays reachable for commands
+    /// even when internet is blackholed for enforcement.
+    var isBlackholeMode: Bool = false
     private var knownApps: Set<String> = []
+
+    /// Domains always allowed through the blackhole — Apple infrastructure for CloudKit
+    /// commands, APNS push delivery, and iCloud sync. Without these, a blackholed device
+    /// becomes permanently unreachable and parent can't send commands to fix it.
+    private static let blackholeExemptSuffixes = [
+        "icloud.com", "apple-cloudkit.com", "icloud-content.com",
+        "apple.com", "mzstatic.com", "push.apple.com",
+        "cdn-apple.com", "apple-dns.net"
+    ]
+
+    private func isBlackholeExempt(_ domain: String) -> Bool {
+        let lower = domain.lowercased()
+        return Self.blackholeExemptSuffixes.contains { lower.hasSuffix($0) }
+    }
 
     // DNS-based per-app time tracking
     private var appWindows: [String: Date] = [:]     // app name -> current 60s window start
@@ -142,6 +160,16 @@ final class DNSProxy {
         // Enforcement domain blocking: block web versions of shielded apps.
         // Uses REFUSED to handle both A and AAAA queries correctly.
         if let domain, isEnforcementBlocked(domain) {
+            let resp = buildRefusedResponse(query: dns)
+            writeResponse(resp, destIP: srcIP, destPort: srcPort)
+            bgLog(domain)
+            return
+        }
+
+        // DNS blackhole mode: REFUSE everything except Apple infrastructure.
+        // CloudKit, APNS, iCloud must always work so the device stays reachable
+        // for parent commands even when internet is blocked for enforcement.
+        if isBlackholeMode, let domain, !isBlackholeExempt(domain) {
             let resp = buildRefusedResponse(query: dns)
             writeResponse(resp, destIP: srcIP, destPort: srcPort)
             bgLog(domain)

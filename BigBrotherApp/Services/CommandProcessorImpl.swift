@@ -389,13 +389,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 }
             } else {
                 // Device is enrolled but has no trusted keys — Keychain may have been wiped
-                // or keys were never provisioned. Reject to prevent unsigned command injection.
+                // (e.g., MDM removal clears Keychain entries). Accept command with warning.
+                // Rejecting here bricks the device — parent can't send ANY commands.
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .command,
-                    message: "SECURITY: Rejecting command \(command.id) — enrolled but no trusted public keys in Keychain"
+                    message: "WARNING: No trusted public keys in Keychain — accepting command \(command.id) unsigned. Re-enroll to restore key verification."
                 ))
-                eventLogger.log(.commandFailed, details: "Rejected command \(command.id): enrolled device has no trusted signing keys")
-                return .rejectedSignature
             }
         }
 
