@@ -111,6 +111,9 @@ struct ChildSummaryCard: View {
         let internetBlocked = childHeartbeats.contains { $0.internetBlocked == true }
         let internetBlockedReason = childHeartbeats.first(where: { $0.internetBlocked == true })?.internetBlockedReason
 
+        // DNS domain blocking — selective blocking of app domains via VPN (fallback when shields are down)
+        let dnsBlockedCount = childHeartbeats.compactMap(\.dnsBlockedDomainCount).max() ?? 0
+
         return PrecomputedValues(
             hasAnyPermissionIssue: permissionIssue,
             isOnOldBuild: onOldBuild,
@@ -121,7 +124,8 @@ struct ChildSummaryCard: View {
             jailbreakReasons: jailbreakReasons,
             hasJailbreak: hasJailbreak,
             isInternetBlocked: internetBlocked,
-            internetBlockedReason: internetBlockedReason
+            internetBlockedReason: internetBlockedReason,
+            dnsBlockedDomainCount: dnsBlockedCount
         )
     }
 
@@ -136,6 +140,7 @@ struct ChildSummaryCard: View {
         let hasJailbreak: Bool
         let isInternetBlocked: Bool
         let internetBlockedReason: String?
+        let dnsBlockedDomainCount: Int
     }
 
     var body: some View {
@@ -178,6 +183,13 @@ struct ChildSummaryCard: View {
                         Text("shields down")
                             .foregroundStyle(.red)
                             .fontWeight(.semibold)
+                    }
+                    if cached.dnsBlockedDomainCount > 0 {
+                        infoRow(icon: "network.badge.shield.half.filled", color: .orange) {
+                            Text("DNS blocking \(cached.dnsBlockedDomainCount) domains")
+                                .foregroundStyle(.orange)
+                                .font(.system(size: 12))
+                        }
                     }
                 }
                 if cached.hasJailbreak {

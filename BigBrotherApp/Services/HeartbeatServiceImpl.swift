@@ -377,6 +377,11 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                     .string(forKey: "tunnelInternetBlockedReason")
                 return (r?.isEmpty == false) ? r : nil
             }(),
+            dnsBlockedDomainCount: {
+                let count = storage.readEnforcementBlockedDomains().count
+                    + storage.readTimeLimitBlockedDomains().count
+                return count > 0 ? count : nil
+            }(),
             timeZoneIdentifier: TimeZone.current.identifier,
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
