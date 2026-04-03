@@ -372,6 +372,8 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
             (FileName.shieldConfig, "{}"),
             (FileName.policySnapshot, "{}"),
             (FileName.parentMessages, "[]"),
+            ("app_time_limits.json", "[]"),
+            ("time_limit_exhausted.json", "[]"),
         ]
 
         for (name, emptyContent) in allExtensionFiles {

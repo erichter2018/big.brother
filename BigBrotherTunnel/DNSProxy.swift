@@ -28,6 +28,13 @@ final class DNSProxy {
     var isDeviceLocked: Bool = false
     private var knownApps: Set<String> = []
 
+    // DNS-based per-app time tracking
+    private var appWindows: [String: Date] = [:]     // app name -> current 60s window start
+    private var appMinutes: [String: Int] = [:]       // app name -> accumulated active minutes today
+    private var appUsageDateString: String = ""        // "yyyy-MM-dd" for daily reset
+    private var timeLimitsCache: [AppTimeLimit] = []   // cached time limits
+    private var timeLimitsCacheExpiry: Date = .distantPast
+
     private static let safeSearchRedirects: [String: String] = [
         "www.google.com": "216.239.38.120", "google.com": "216.239.38.120",
         "www.youtube.com": "216.239.38.120", "youtube.com": "216.239.38.120",
@@ -331,14 +338,18 @@ final class DNSProxy {
         if DomainCategorizer.isNoise(fullDomain) { return }
         guard !isDeviceLocked else { return }
 
-        // New app detection
-        if let appName = DomainCategorizer.appName(for: root), !knownApps.contains(appName) {
+        // New app detection + per-app time tracking
+        let appName = DomainCategorizer.appName(for: root)
+        if let appName, !knownApps.contains(appName) {
             knownApps.insert(appName)
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(Array(knownApps), forKey: "knownAppDomains")
             var p = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.stringArray(forKey: "newAppDetections") ?? []
             p.append(appName)
             UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(p, forKey: "newAppDetections")
             NSLog("[DNSProxy] New app: \(appName)")
+        }
+        if let appName {
+            trackAppMinute(appName)
         }
 
         let display = DomainCategorizer.displayDomain(fullDomain)
@@ -362,6 +373,125 @@ final class DNSProxy {
                                                flagged: flagged, category: category, slotCounts: [slot: 1])
         }
         statsLock.unlock()
+    }
+
+    // MARK: - Per-App Time Tracking
+
+    /// Track a 60-second activity window for an app. Called from recordDomain() on bgQueue.
+    /// A "minute" requires sustained DNS activity: an open window must last 60s before counting.
+    private func trackAppMinute(_ appName: String) {
+        let now = Date()
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
+        let today = fmt.string(from: now)
+
+        // Day rollover: reset all tracking
+        if today != appUsageDateString {
+            appWindows.removeAll()
+            appMinutes.removeAll()
+            appUsageDateString = today
+        }
+
+        if let windowStart = appWindows[appName] {
+            // Open window exists — check if 60s has elapsed
+            if now.timeIntervalSince(windowStart) >= 60 {
+                // Close window: increment minute count
+                appMinutes[appName, default: 0] += 1
+                // Open a new window for continued activity
+                appWindows[appName] = now
+                checkTimeLimitExhaustion(appName)
+            }
+            // Otherwise window is still open, nothing to do (sustained activity continues)
+        } else {
+            // No open window — start one
+            appWindows[appName] = now
+        }
+    }
+
+    /// Check if an app has exceeded its time limit (with 10% buffer for DNS noise).
+    /// If exhausted, write to the same pathway the Monitor uses (TimeLimitExhaustedApp).
+    private func checkTimeLimitExhaustion(_ appName: String) {
+        let now = Date()
+
+        // Refresh time limits cache every 30 seconds
+        if now >= timeLimitsCacheExpiry {
+            timeLimitsCache = storage.readAppTimeLimits()
+            timeLimitsCacheExpiry = now.addingTimeInterval(30)
+        }
+
+        // Find the limit for this app
+        guard let limit = timeLimitsCache.first(where: { $0.appName == appName }),
+              limit.dailyLimitMinutes > 0 else { return }
+
+        let minutes = appMinutes[appName] ?? 0
+        let threshold = Int(Double(limit.dailyLimitMinutes) * 1.1)
+        guard minutes >= threshold else { return }
+
+        // Check dedup: don't write if already exhausted for today
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
+        let today = fmt.string(from: now)
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        if exhausted.contains(where: { $0.appName == appName && $0.dateString == today }) {
+            return
+        }
+
+        // Append new exhaustion entry
+        let entry = TimeLimitExhaustedApp(
+            timeLimitID: limit.id,
+            appName: appName,
+            tokenData: limit.tokenData,
+            fingerprint: limit.fingerprint,
+            exhaustedAt: now,
+            dateString: today
+        )
+        exhausted.append(entry)
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+
+        // Update DNS blocklist: compute blocked domains for ALL exhausted apps
+        var blockedDomains = Set<String>()
+        for app in exhausted where app.dateString == today {
+            blockedDomains.formUnion(DomainCategorizer.domainsForApp(app.appName))
+        }
+        try? storage.writeTimeLimitBlockedDomains(blockedDomains)
+
+        // Force-refresh the in-memory blocked domains cache immediately
+        timeLimitBlockedDomains = blockedDomains
+        timeLimitBlockedExpiry = now.addingTimeInterval(5)
+
+        NSLog("[DNSProxy] DNS time limit exhausted: \(appName) (\(minutes)m >= \(limit.dailyLimitMinutes)m * 1.1)")
+    }
+
+    /// Persist current app usage to App Group. Called from flushToAppGroup().
+    private func flushAppUsageToAppGroup() {
+        guard !appMinutes.isEmpty || !appWindows.isEmpty else { return }
+
+        // Close any open windows older than 60s (count their minute)
+        let now = Date()
+        for (app, windowStart) in appWindows {
+            if now.timeIntervalSince(windowStart) >= 60 {
+                appMinutes[app, default: 0] += 1
+                appWindows[app] = now
+            }
+        }
+
+        let usage = DNSAppUsage(dateString: appUsageDateString, apps: appMinutes)
+        if let data = try? JSONEncoder().encode(usage) {
+            try? storage.writeRawData(data, forKey: "dnsAppUsage")
+        }
+    }
+
+    /// Restore app usage from App Group on startup. Called from restoreFromAppGroup().
+    private func restoreAppUsageFromAppGroup() {
+        guard let data = storage.readRawData(forKey: "dnsAppUsage"),
+              let saved = try? JSONDecoder().decode(DNSAppUsage.self, from: data) else { return }
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
+        let today = fmt.string(from: Date())
+        guard saved.dateString == today else { return }
+
+        // Restore: take max of in-memory and persisted (tunnel may have restarted mid-day)
+        appUsageDateString = today
+        for (app, minutes) in saved.apps {
+            appMinutes[app] = max(appMinutes[app] ?? 0, minutes)
+        }
     }
 
     // MARK: - Persistence
@@ -388,6 +518,7 @@ final class DNSProxy {
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
         defaults?.set(fmt.string(from: Date()), forKey: "dnsActivityDate")
         defaults?.set(Date().timeIntervalSince1970, forKey: "dnsActivityUpdatedAt")
+        flushAppUsageToAppGroup()
     }
 
     private func restoreFromAppGroup() {
@@ -403,6 +534,7 @@ final class DNSProxy {
         }
         totalQueries = max(totalQueries, defaults?.integer(forKey: "dnsActivityTotalQueries") ?? 0)
         statsLock.unlock()
+        restoreAppUsageFromAppGroup()
     }
 
     private func restoreKnownApps() {
@@ -413,6 +545,11 @@ final class DNSProxy {
         statsLock.lock(); domainCounts.removeAll(); totalQueries = 0; statsLock.unlock()
         let d = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         d?.removeObject(forKey: "dnsActivityDomains"); d?.set(0, forKey: "dnsActivityTotalQueries")
+        // Reset per-app time tracking
+        appWindows.removeAll()
+        appMinutes.removeAll()
+        appUsageDateString = ""
+        try? storage.writeRawData(nil, forKey: "dnsAppUsage")
     }
 
     func cleanupStalePendingQueries() {
