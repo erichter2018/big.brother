@@ -681,6 +681,23 @@ final class AppState {
                     #if DEBUG
                     print("[BigBrother] CKAccountChanged — real change: \(previous) → \(current)")
                     #endif
+
+                    // Re-register CloudKit subscriptions — the old push token may be
+                    // invalid after an iCloud account change (MDM removal, sign-out, etc.)
+                    // Without this, silent pushes for commands stop being delivered.
+                    if let enrollment = try? self.keychain.get(ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState) {
+                        Task {
+                            try? await self.cloudKit?.setupSubscriptions(
+                                familyID: enrollment.familyID,
+                                deviceID: enrollment.deviceID
+                            )
+                            // Also re-register for remote notifications (APNs token)
+                            await MainActor.run {
+                                UIApplication.shared.registerForRemoteNotifications()
+                            }
+                            self.eventLogger?.log(.policyReconciled, details: "Re-registered CK subscriptions + push after iCloud account change")
+                        }
+                    }
                 }
             }
             notificationObservers.append(observer)
