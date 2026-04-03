@@ -932,17 +932,18 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         )
 
         // Register the re-lock schedule BEFORE applying enforcement.
-        // If this fails, we must NOT unlock — otherwise the device stays unlocked
-        // permanently with no mechanism to re-lock.
+        // Try to register DeviceActivity schedule for expiry callback.
+        // If this fails (e.g., after MDM removal disrupted DeviceActivity),
+        // proceed with the unlock anyway — BGTask and ModeStackResolver provide
+        // safety nets for re-locking. Aborting here blocks ALL unlocks when
+        // DeviceActivity is temporarily broken.
         do {
             try registerTempUnlockExpirySchedule(commandID: commandID, start: now, end: expiresAt)
         } catch {
-            eventLogger.log(.commandFailed, details: "Temp unlock ABORTED: DeviceActivitySchedule registration failed: \(error.localizedDescription). Device NOT unlocked.")
-            try? storage.clearTemporaryUnlockState()
-            throw CommandError.permissionDeficiency
+            eventLogger.log(.commandFailed, details: "DeviceActivity schedule registration failed (\(error.localizedDescription)) — proceeding with BGTask safety net")
         }
 
-        // Also schedule a BGProcessingTask as a second safety net.
+        // BGProcessingTask as safety net for re-lock (works even if DeviceActivity is broken).
         AppDelegate.scheduleRelockTask(at: expiresAt)
 
         let result = try snapshotStore.commit(output.snapshot)
