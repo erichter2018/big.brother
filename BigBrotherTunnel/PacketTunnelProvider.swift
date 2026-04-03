@@ -492,11 +492,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let fcAuth = defaults?.string(forKey: "familyControlsAuthStatus")
 
-        // Only blackhole when FC auth is explicitly revoked (not nil, not authorized).
+        // Only blackhole when FC auth is EXPLICITLY denied (child revoked in Settings).
         // nil = never set (first boot) — don't blackhole.
+        // "notDetermined" = pre-auth or transient state during app install — don't blackhole.
         // "approved"/"authorized" = working — don't blackhole.
-        // Anything else ("denied", "notDetermined" after revocation) = revoked — blackhole.
-        let authOK = fcAuth == nil || fcAuth == "approved" || fcAuth == "authorized"
+        // "denied" = explicitly revoked by user — blackhole.
+        let authOK = fcAuth != "denied"
         let resolution = ModeStackResolver.resolve(storage: storage)
         let shouldBeRestricted = resolution.mode != .unlocked
 
