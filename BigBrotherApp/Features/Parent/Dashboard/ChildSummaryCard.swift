@@ -59,10 +59,11 @@ struct ChildSummaryCard: View {
         let onOldBuild = (builds.min() ?? AppConstants.appBuildNumber) < AppConstants.appBuildNumber
 
         // isShieldMismatch — flag when shields are genuinely down.
-        // Two detection paths:
-        // 1. Main app heartbeat: shieldsActive == false (direct ManagedSettingsStore check)
-        // 2. Tunnel heartbeat: shieldsActive is nil (can't check), but if mode is restrictive
-        //    and the main app isn't running, shields are almost certainly down.
+        // No age filter: if a heartbeat reports shields-down in a restrictive mode,
+        // show the alert immediately. With 5-minute heartbeat intervals, catching a
+        // transient mid-transition blip is near-impossible. Hiding real failures
+        // (Olivia b265: shields down for hours, dashboard silent) is far worse than
+        // a rare false positive that self-corrects on the next heartbeat.
         var shieldMismatch = false
         if countdown == nil && dominantMode != .unlocked {
             for device in devices {
@@ -70,23 +71,12 @@ struct ChildSummaryCard: View {
                    hb.currentMode != .unlocked {
                     if let expires = hb.temporaryUnlockExpiresAt, expires > Date() { continue }
 
-                    let isTunnel = hb.heartbeatSource == "vpnTunnel"
                     let confirmedDown = hb.shieldsActive == false && hb.shieldCategoryActive != true
-                    let inferredDown = isTunnel && hb.shieldsActive == nil  // Tunnel can't check — app is dead
+                    let inferredDown = hb.heartbeatSource == "vpnTunnel" && hb.shieldsActive == nil
 
                     if confirmedDown || inferredDown {
-                        // For confirmed (main app) heartbeats: require 3-10 min age to avoid
-                        // transient mid-transition alerts. For tunnel heartbeats: app is dead,
-                        // so this isn't a transition — show immediately (no age filter).
-                        if isTunnel {
-                            shieldMismatch = true
-                            break
-                        }
-                        let age = -hb.timestamp.timeIntervalSinceNow
-                        if age >= 180 && age <= 600 {
-                            shieldMismatch = true
-                            break
-                        }
+                        shieldMismatch = true
+                        break
                     }
                 }
             }
