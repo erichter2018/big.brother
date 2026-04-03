@@ -1280,9 +1280,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if appProcessed.count > 200 { appProcessed = Array(appProcessed.suffix(200)) }
         defaults?.set(appProcessed, forKey: "tunnelAppliedCommandIDs")
 
-        // 8. Send a notification to prompt the child to open the app
-        //    (only the main app can write to ManagedSettingsStore)
-        requestAppLaunchNotification(reason: actionType)
+        // No notification needed — the Monitor extension reconciles every 5 min
+        // and will apply ManagedSettings shields from the snapshot we just wrote.
+        // DNS blocking is already active immediately from the tunnel.
     }
 
     /// Request a local notification to prompt the child to open the app
