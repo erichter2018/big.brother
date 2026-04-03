@@ -374,22 +374,32 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Check every 30 seconds if the main app is still alive + poll for pending commands.
     private var lastScheduleSyncAt: Date?
 
+    private var livenessTickCount: Int = 0
+
     private func startLivenessTimer() {
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-        timer.schedule(deadline: .now() + 30, repeating: 30)
+        // Poll commands every 10 seconds for responsive command delivery.
+        // Heavier operations (schedule sync, blocklist persist, app liveness) run
+        // every 3rd tick (30 seconds) to save battery.
+        timer.schedule(deadline: .now() + 10, repeating: 10)
         timer.setEventHandler { [weak self] in
-            // Write liveness timestamp + internet block state every 30 seconds.
-            let livenessDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-            livenessDefaults?.set(Date().timeIntervalSince1970, forKey: "tunnelLastActiveAt")
-            livenessDefaults?.set(self?.isInternetBlocked ?? false, forKey: "tunnelInternetBlocked")
-            livenessDefaults?.set(self?.internetBlockedReason ?? "", forKey: "tunnelInternetBlockedReason")
-            self?.checkAppLiveness()
-            self?.checkNetworkPathAndReconnect()
-            self?.checkDNSDayRollover()
-            self?.persistCurrentBlocklist()
-            Task {
-                await self?.pollAndProcessCommands()
-                await self?.syncScheduleProfileIfNeeded()
+            guard let self else { return }
+            self.livenessTickCount += 1
+
+            // Fast path: poll for commands every 10 seconds
+            Task { await self.pollAndProcessCommands() }
+
+            // Slow path: heavier operations every 30 seconds (every 3rd tick)
+            if self.livenessTickCount % 3 == 0 {
+                let livenessDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                livenessDefaults?.set(Date().timeIntervalSince1970, forKey: "tunnelLastActiveAt")
+                livenessDefaults?.set(self.isInternetBlocked, forKey: "tunnelInternetBlocked")
+                livenessDefaults?.set(self.internetBlockedReason ?? "", forKey: "tunnelInternetBlockedReason")
+                self.checkAppLiveness()
+                self.checkNetworkPathAndReconnect()
+                self.checkDNSDayRollover()
+                self.persistCurrentBlocklist()
+                Task { await self.syncScheduleProfileIfNeeded() }
             }
         }
         timer.resume()
