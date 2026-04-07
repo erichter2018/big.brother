@@ -77,7 +77,7 @@ struct StatusProvider: TimelineProvider {
         let nextTransition = profile?.nextTransitionTime(from: now)
         let nextTransitionLabel: String? = {
             guard let profile, let next = nextTransition else { return nil }
-            let nextMode = profile.resolvedMode(at: next.addingTimeInterval(60))
+            let _ = profile.resolvedMode(at: next.addingTimeInterval(60))
             let formatter = DateFormatter()
             formatter.dateFormat = "h:mm a"
             switch currentMode {

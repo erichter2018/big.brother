@@ -310,15 +310,12 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     /// runs from AppDelegate without needing AppState.
     private func reregisterReconciliationSchedule() {
         let center = DeviceActivityCenter()
-        // 60 reconciliation slots (every minute), 2-minute overlapping intervals.
-        // Ensures at least one slot is always active for stopMonitoring trigger.
-        for m in 0..<60 {
+        // 30 reconciliation slots at 2-minute intervals, 1-minute duration each.
+        for m in stride(from: 0, to: 60, by: 2) {
             let name = m == 0 ? "bigbrother.reconciliation" : "bigbrother.reconciliation.m\(m)"
             let activityName = DeviceActivityName(rawValue: name)
             let start = DateComponents(minute: m)
-            let endMinute = (m + 2) % 60
-            guard endMinute > m else { continue } // Skip hour-boundary wrapping
-            let end = DateComponents(minute: endMinute)
+            let end = DateComponents(minute: m + 1)
             let schedule = DeviceActivitySchedule(
                 intervalStart: start,
                 intervalEnd: end,

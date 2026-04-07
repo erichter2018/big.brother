@@ -1293,6 +1293,11 @@ final class AppState {
             // Force heartbeat so parent sees restoration immediately
             Task { try? await heartbeatService?.sendNow(force: true) }
 
+            // Re-register reconciliation schedules now that FC auth is available.
+            // Registration before auth silently fails (DeviceActivity requires FC auth).
+            try? ScheduleManagerImpl().registerReconciliationSchedule()
+            NSLog("[BigBrother] Reconciliation schedules registered after auth restored")
+
             // After FC auth is restored, ManagedSettingsStore may be corrupted.
             // Nuke all stores first, then re-apply from scratch.
             try? enforcement.clearAllRestrictions()

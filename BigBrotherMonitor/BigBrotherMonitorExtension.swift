@@ -833,9 +833,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         let start = DateComponents(minute: minute)
-        let endMinute = (minute + 2) % 60
-        guard endMinute > minute else { return } // Skip hour-boundary
-        let end = DateComponents(minute: endMinute)
+        let end = DateComponents(minute: minute + 1)
         let schedule = DeviceActivitySchedule(intervalStart: start, intervalEnd: end, repeats: true)
         let center = DeviceActivityCenter()
         do {

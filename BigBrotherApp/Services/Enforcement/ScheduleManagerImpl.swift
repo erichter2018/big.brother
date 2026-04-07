@@ -45,11 +45,10 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
 
     func registerReconciliationSchedule() throws {
         // Register repeating schedules that fire every 2 minutes to reconcile enforcement state.
-        // Register 60 reconciliation slots (every minute) for maximum responsiveness.
-        // Each slot has a 2-minute duration so intervals overlap — at any given moment,
-        // at least one slot is active. This ensures stopMonitoring() triggers intervalDidEnd.
+        // Register 30 reconciliation slots at 2-minute intervals.
+        // Each fires for 1 minute. The Monitor checks enforcement on every callback.
         var intervals: [(name: String, minute: Int)] = []
-        for m in 0..<60 {
+        for m in stride(from: 0, to: 60, by: 2) {
             let name = m == 0 ? "bigbrother.reconciliation" : "bigbrother.reconciliation.m\(m)"
             intervals.append((name: name, minute: m))
         }
@@ -57,10 +56,7 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
         for q in intervals {
             let activityName = DeviceActivityName(rawValue: q.name)
             let start = DateComponents(minute: q.minute)
-            let endMinute = (q.minute + 2) % 60
-            // Skip slots where end wraps past the hour (DeviceActivity doesn't handle cross-hour)
-            guard endMinute > q.minute else { continue }
-            let end = DateComponents(minute: endMinute)
+            let end = DateComponents(minute: q.minute + 1)
 
             let schedule = DeviceActivitySchedule(
                 intervalStart: start,

@@ -1029,8 +1029,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Throws if registration fails — caller must not grant unlock without a re-lock guarantee.
     private func registerTempUnlockExpirySchedule(commandID: UUID, start: Date, end: Date) throws {
         let cal = Calendar.current
-        let startComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: start)
-        let endComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: end)
+        // Use ONLY hour/minute/second — NOT year/month/day.
+        // Including date components causes "invalid schedule" failures on iOS 17+.
+        let startComps = cal.dateComponents([.hour, .minute, .second], from: start)
+        let endComps = cal.dateComponents([.hour, .minute, .second], from: end)
 
         let activityName = DeviceActivityName(rawValue: "bigbrother.tempunlock.\(commandID.uuidString)")
         let schedule = DeviceActivitySchedule(
@@ -1296,11 +1298,11 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         NSLog("[CommandProcessor] triggerMonitorRefresh: \(activeCount) reconciliation activities registered, stopping all")
 
         var toStop: [DeviceActivityName] = [DeviceActivityName(rawValue: "bigbrother.reconciliation")]
-        for m in 1..<58 {
+        for m in stride(from: 2, to: 60, by: 2) {
             toStop.append(DeviceActivityName(rawValue: "bigbrother.reconciliation.m\(m)"))
         }
         center.stopMonitoring(toStop)
-        NSLog("[CommandProcessor] triggerMonitorRefresh: stopMonitoring called for 58 slots")
+        NSLog("[CommandProcessor] triggerMonitorRefresh: stopMonitoring called for 30 slots")
     }
 
     /// Clear lockUntil state from UserDefaults. Must be called by any command that

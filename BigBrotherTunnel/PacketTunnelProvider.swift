@@ -1068,14 +1068,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
 
-        // Stop ALL 58 reconciliation activities to fire intervalDidEnd in the Monitor.
+        // Stop all 30 reconciliation activities to fire intervalDidEnd in the Monitor.
         let center = DeviceActivityCenter()
         var toStop: [DeviceActivityName] = [DeviceActivityName(rawValue: "bigbrother.reconciliation")]
-        for m in 1..<58 {
+        for m in stride(from: 2, to: 60, by: 2) {
             toStop.append(DeviceActivityName(rawValue: "bigbrother.reconciliation.m\(m)"))
         }
         center.stopMonitoring(toStop)
-        NSLog("[Tunnel] Triggered Monitor via stopMonitoring (58 reconciliation slots)")
+        NSLog("[Tunnel] Triggered Monitor via stopMonitoring (30 reconciliation slots)")
     }
 
     /// Handle removeTimeLimit from tunnel: remove limit, remove from allowed, update DNS.
