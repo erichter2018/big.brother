@@ -238,7 +238,8 @@ struct ParentDashboardView: View {
                 : nil,
             onSchedule: { Task { await viewModel.scheduleChild(child) } },
             hasPendingRequests: viewModel.appState.childrenWithPendingRequests.contains(child.id),
-            debugMode: viewModel.appState.debugMode
+            debugMode: viewModel.appState.debugMode,
+            namedPlaces: viewModel.namedPlaces
         )
         .contentShape(RoundedRectangle(cornerRadius: 18))
         .contextMenu { childContextMenu(child) }

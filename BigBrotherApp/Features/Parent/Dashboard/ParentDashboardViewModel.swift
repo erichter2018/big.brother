@@ -17,6 +17,7 @@ final class ParentDashboardViewModel: CommandSendable {
         didSet { persistUnlockExpiries() }
     }
     var now = Date()
+    var namedPlaces: [NamedPlace] = []
     private var countdownTimer: Timer?
 
     /// Proxy for appState.scheduleActiveChildren (shared across all view models).
@@ -274,6 +275,11 @@ final class ParentDashboardViewModel: CommandSendable {
                 loadingState = .empty("No children configured yet.")
             } else {
                 loadingState = .loaded(appState.childProfiles)
+            }
+            // Load named places for location resolution on cards.
+            if let cloudKit = appState.cloudKit,
+               let familyID = appState.parentState?.familyID {
+                namedPlaces = (try? await cloudKit.fetchNamedPlaces(familyID: familyID)) ?? []
             }
             // Pre-process driving routes in background so maps load instantly.
             if let cloudKit = appState.cloudKit,
