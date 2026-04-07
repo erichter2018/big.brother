@@ -769,11 +769,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // the tunnel can apply. This prevents the kid from having unrestricted internet
         // while shields are down.
         let staleDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if resolution.mode != .unlocked && !mainAppAlive && !emergencyBlackholeActive {
+        // Only activate emergency DNS blackhole for lockedDown mode.
+        // For restricted/locked, shields are the enforcement — DNS blocking kills internet
+        // for kids at school when the app is dead, which is normal iOS behavior.
+        if resolution.mode == .lockedDown && !mainAppAlive && !emergencyBlackholeActive {
             let appActiveAt = staleDefaults?.double(forKey: "mainAppLastActiveAt") ?? 0
             let appDead = appActiveAt > 0 && Date().timeIntervalSince1970 - appActiveAt > 300 // 5 min
             if appDead {
-                NSLog("[Tunnel] Shields confirmed down + app dead — activating DNS blackhole as enforcement backstop")
+                NSLog("[Tunnel] lockedDown + app dead — activating DNS blackhole as enforcement backstop")
                 emergencyBlackholeActive = true
             }
         }
@@ -974,22 +977,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let resolution = ModeStackResolver.resolve(storage: storage)
 
-        // DNS-block when we have evidence shields may be down.
-        // Positive evidence: auth revoked or main app reported shields=false.
-        // Prolonged app death: app dead >15 min means shields can't self-heal, so
-        // DNS-block as safety net even if last heartbeat said shields were up.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let authRevoked = defaults?.string(forKey: "familyControlsAuthStatus") == "denied"
-        let lastShieldsActive = defaults?.object(forKey: "shieldsActiveAtLastHeartbeat") as? Bool
-        let shieldsConfirmedDown = lastShieldsActive == false
-        let lastAppActiveAt = defaults?.double(forKey: "mainAppLastActiveAt") ?? 0
-        let appDeadDuration = lastAppActiveAt > 0 ? Date().timeIntervalSince1970 - lastAppActiveAt : .infinity
-        let prolongedAppDeath = appDeadDuration > 900 // 15 minutes
-        let positiveEvidence = authRevoked || shieldsConfirmedDown || prolongedAppDeath
-        // If shields are confirmed down, DNS-block regardless of app liveness.
-        // The app may be "alive" but unable to enforce (e.g., .child auth silently failing).
-        let shouldBlock = resolution.mode != .unlocked
-            && (shieldsConfirmedDown || (!mainAppAlive && positiveEvidence))
+        // DNS blackhole should ONLY activate for lockedDown mode.
+        // For restricted/locked, ManagedSettings shields are the enforcement mechanism.
+        // Blocking DNS for restricted/locked was causing kids to lose internet at school
+        // whenever the app was dead for >15 minutes — way too aggressive.
+        // lockedDown is an explicit parent-initiated total lockdown where DNS blocking is intentional.
+        let shouldBlock = resolution.mode == .lockedDown
 
         if shouldBlock != scheduleBlackholeActive {
             scheduleBlackholeActive = shouldBlock
@@ -1031,18 +1024,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // If app has been dead for 30+ minutes, post a one-time local notification
         // prompting the child to open the app (restores location tracking + enforcement).
-        if !mainAppAlive && appDeadDuration > 1800 {
+        let nagDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let lastAppAt = nagDefaults?.double(forKey: "mainAppLastActiveAt") ?? 0
+        let appDeadFor = lastAppAt > 0 ? Date().timeIntervalSince1970 - lastAppAt : 0
+        if !mainAppAlive && appDeadFor > 1800 {
             let lastNagKey = "tunnelLocationNagAt"
-            let lastNag = defaults?.double(forKey: lastNagKey) ?? 0
+            let lastNag = nagDefaults?.double(forKey: lastNagKey) ?? 0
             if Date().timeIntervalSince1970 - lastNag > 3600 { // Max once per hour
-                defaults?.set(Date().timeIntervalSince1970, forKey: lastNagKey)
+                nagDefaults?.set(Date().timeIntervalSince1970, forKey: lastNagKey)
                 let content = UNMutableNotificationContent()
                 content.title = "Open Big Brother"
                 content.body = "Tap to restore location tracking and full protection."
                 content.sound = .default
                 let req = UNNotificationRequest(identifier: "tunnel-location-nag", content: content, trigger: nil)
                 UNUserNotificationCenter.current().add(req)
-                NSLog("[Tunnel] Posted location nag notification — app dead for \(Int(appDeadDuration))s")
+                NSLog("[Tunnel] Posted location nag notification — app dead for \(Int(appDeadFor))s")
             }
         }
     }
