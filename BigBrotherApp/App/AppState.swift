@@ -2140,13 +2140,15 @@ final class AppState {
     private func verifyAndFixEnforcement() {
         guard deviceRole == .child, let enforcement else { return }
 
-        // Skip enforcement fix if a command was just processed (within 30s).
+        // Skip enforcement fix if a command was just processed (within 10s).
         // The command processor's result is authoritative — the enforcement fix can
         // race against it and "correct" enforcement backwards (especially temp unlocks
         // where ModeStackResolver may see stale state from a different process).
+        // 10s is enough to prevent races while allowing rapid command correction.
+        // Post-write verification (1s retry) handles immediate write failures.
         let cmdDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let lastCommandAt = cmdDefaults?.double(forKey: "fr.bigbrother.lastCommandProcessedAt") ?? 0
-        if Date().timeIntervalSince1970 - lastCommandAt < 30 {
+        if Date().timeIntervalSince1970 - lastCommandAt < 10 {
             return
         }
 
