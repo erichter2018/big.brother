@@ -418,7 +418,15 @@ struct SettingsView: View {
 
             let text = lines.joined(separator: "\n")
             UIPasteboard.general.string = text
-            logCopyStatus = "Copied \(records.count) entries"
+
+            // Delete copied records from CloudKit to prevent accumulation
+            let idsToDelete = records.map(\.recordID)
+            if !idsToDelete.isEmpty {
+                let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
+                try? await db.modifyRecords(saving: [], deleting: idsToDelete)
+            }
+
+            logCopyStatus = "Copied \(records.count) entries (cleared from cloud)"
         } catch {
             logCopyStatus = "Failed: \(error.localizedDescription)"
         }

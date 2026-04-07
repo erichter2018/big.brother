@@ -328,6 +328,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         } catch {
             NSLog("[Tunnel] Enforcement log batch failed: \(error.localizedDescription)")
         }
+
+        // Auto-prune records older than 48 hours
+        let cutoff = Date().addingTimeInterval(-48 * 3600)
+        let predicate = NSPredicate(
+            format: "%K == %@ AND %K < %@",
+            "familyID", enrollment.familyID.rawValue,
+            "timestamp", cutoff as NSDate
+        )
+        let query = CKQuery(recordType: "BBEnforcementLog", predicate: predicate)
+        do {
+            let (results, _) = try await db.records(matching: query, resultsLimit: 200)
+            let idsToDelete = results.compactMap { id, result -> CKRecord.ID? in
+                if case .success = result { return id }
+                return nil
+            }
+            if !idsToDelete.isEmpty {
+                try await db.modifyRecords(saving: [], deleting: idsToDelete)
+                NSLog("[Tunnel] Enforcement log: pruned \(idsToDelete.count) records older than 48h")
+            }
+        } catch {
+            // Non-fatal — old records just accumulate until next prune
+        }
     }
 
     // MARK: - DNS Activity Sync
