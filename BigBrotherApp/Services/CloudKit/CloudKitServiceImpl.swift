@@ -576,7 +576,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         // delete any stale leftovers and re-create from scratch.
         let expectedIDs: Set<String> = deviceID != nil
             ? ["commands-\(familyID.rawValue)", "mode-commands-alert-\(familyID.rawValue)"]
-            : ["unlock-requests-v3-\(familyID.rawValue)"]
+            : ["unlock-requests-v3-\(familyID.rawValue)", "heartbeats-v1-\(familyID.rawValue)"]
 
         // Always log what we find for debugging push issues
         let existing: [CKSubscription]
@@ -697,8 +697,26 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             subscriptionsToSave.append(safetySub)
 
             #if DEBUG
-            print("[BigBrother] 🔔 Setting up CloudKit subscription: all-events-\(familyID.rawValue)")
+            print("[BigBrother] Setting up CloudKit subscription: all-events-\(familyID.rawValue)")
             #endif
+
+            // Subscribe to heartbeat updates — fires instantly when child sends heartbeat
+            // (unlike event logs which are batch-uploaded with a 5s delay).
+            // This gives the parent near-instant dashboard updates after mode changes.
+            let heartbeatPredicate = NSPredicate(
+                format: "%K == %@",
+                CKFieldName.familyID, familyID.rawValue
+            )
+            let heartbeatSub = CKQuerySubscription(
+                recordType: CKRecordType.heartbeat,
+                predicate: heartbeatPredicate,
+                subscriptionID: "heartbeats-v1-\(familyID.rawValue)",
+                options: [.firesOnRecordUpdate]
+            )
+            let heartbeatNotifInfo = CKSubscription.NotificationInfo()
+            heartbeatNotifInfo.shouldSendContentAvailable = true
+            heartbeatSub.notificationInfo = heartbeatNotifInfo
+            subscriptionsToSave.append(heartbeatSub)
         }
 
         let op = CKModifySubscriptionsOperation(

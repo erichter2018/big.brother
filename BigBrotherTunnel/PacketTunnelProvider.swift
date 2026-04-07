@@ -406,6 +406,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             Task { await self.pollAndProcessCommands() }
             // Sync unlock requests from App Group to CloudKit (ShieldAction can't make network calls)
             Task { await self.syncPendingUnlockRequests() }
+            // Check if Monitor needs a confirmation heartbeat (fast path for responsiveness)
+            self.checkMonitorHeartbeatRequest()
 
             // Slow path: heavier operations every 30 seconds (every 3rd tick)
             if self.livenessTickCount % 3 == 0 {
@@ -985,6 +987,26 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             NSLog("[Tunnel] Shield confirmation TIMEOUT after \(Int(age))s — keeping DNS blocked for safety")
             // Don't clear pendingShieldConfirmation — keep checking
         }
+    }
+
+    /// Check if the Monitor extension requested an immediate heartbeat after applying enforcement.
+    /// The Monitor can't make network calls — it writes a flag, we pick it up and send the heartbeat.
+    /// This ensures the parent sees the confirmed mode within seconds of the Monitor applying shields.
+    private func checkMonitorHeartbeatRequest() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard let requestTime = defaults?.double(forKey: "monitorNeedsHeartbeat"),
+              requestTime > 0 else { return }
+
+        // Only honor recent requests (within 2 minutes)
+        let age = Date().timeIntervalSince1970 - requestTime
+        guard age < 120 else {
+            defaults?.removeObject(forKey: "monitorNeedsHeartbeat")
+            return
+        }
+
+        defaults?.removeObject(forKey: "monitorNeedsHeartbeat")
+        NSLog("[Tunnel] Monitor requested heartbeat (\(Int(age))s ago) — sending")
+        Task { await sendHeartbeatFromTunnel(reason: "monitorConfirmation") }
     }
 
     /// Handle grantExtraTime from tunnel: remove exhausted entry, update limit, clear DNS block.

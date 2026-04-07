@@ -151,6 +151,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
             updateSharedState(mode: resolution.mode)
             logEvent(.policyReconciled, details: "On-demand enforcement: \(resolution.mode.rawValue) (\(resolution.reason))")
+            // Signal tunnel to send a confirmation heartbeat — Monitor can't make network calls.
+            // Parent sees the confirmed mode within 30s (tunnel's next liveness tick).
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "monitorNeedsHeartbeat")
             reregisterReconciliationQuarter(activity)
             return
         }
