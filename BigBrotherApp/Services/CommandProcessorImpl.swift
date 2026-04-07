@@ -1204,8 +1204,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             let lockAt = now.addingTimeInterval(Double(adjustedTotal))
             let cal = Calendar.current
 
-            let startComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: unlockAt)
-            let endComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: lockAt)
+            // Use ONLY hour/minute/second — date components cause registration failures on iOS 17+.
+            let startComps = cal.dateComponents([.hour, .minute, .second], from: unlockAt)
+            let endComps = cal.dateComponents([.hour, .minute, .second], from: lockAt)
 
             let activityName = DeviceActivityName(rawValue: "bigbrother.timedunlock.\(commandID.uuidString)")
             let schedule = DeviceActivitySchedule(
@@ -1287,22 +1288,19 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     }
 
     /// Wake the DeviceActivityMonitor extension to apply enforcement from its privileged context.
-    /// Uses stopMonitoring on reconciliation schedules to fire intervalDidEnd immediately.
-    /// Stops ALL 30 reconciliation slots to maximize the chance at least one triggers.
+    /// Fires intervalDidEnd in the Monitor by stopping the currently-active reconciliation quarter.
+    /// The Monitor re-applies enforcement from its privileged context, then re-registers the quarter.
     private func triggerMonitorEnforcementRefresh() {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
 
         let center = DeviceActivityCenter()
-        let activeCount = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
-        NSLog("[CommandProcessor] triggerMonitorRefresh: \(activeCount) reconciliation activities registered, stopping all")
-
-        var toStop: [DeviceActivityName] = [DeviceActivityName(rawValue: "bigbrother.reconciliation")]
-        for m in stride(from: 2, to: 60, by: 2) {
-            toStop.append(DeviceActivityName(rawValue: "bigbrother.reconciliation.m\(m)"))
-        }
-        center.stopMonitoring(toStop)
-        NSLog("[CommandProcessor] triggerMonitorRefresh: stopMonitoring called for 30 slots")
+        let activeReconciliation = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }
+        let hour = Calendar.current.component(.hour, from: Date())
+        let quarter = hour / 6
+        let quarterName = DeviceActivityName(rawValue: "bigbrother.reconciliation.q\(quarter)")
+        NSLog("[CommandProcessor] triggerMonitorRefresh: \(activeReconciliation.count) reconciliation activities, stopping q\(quarter)")
+        center.stopMonitoring([quarterName])
     }
 
     /// Clear lockUntil state from UserDefaults. Must be called by any command that
@@ -1359,8 +1357,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         AppDelegate.scheduleRelockTask(at: date)
 
         let cal = Calendar.current
-        let startComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
-        let endComps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        // Use ONLY hour/minute/second — date components cause registration failures on iOS 17+.
+        let startComps = cal.dateComponents([.hour, .minute, .second], from: now)
+        let endComps = cal.dateComponents([.hour, .minute, .second], from: date)
 
         let activityName = DeviceActivityName(rawValue: "bigbrother.lockuntil.\(commandID.uuidString)")
         let schedule = DeviceActivitySchedule(

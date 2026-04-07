@@ -24,8 +24,14 @@ import BigBrotherCore
 class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     private let storage = AppGroupStorage()
-    private let store = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
-    private let baseStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
+    /// Fresh ManagedSettingsStore instances on every access.
+    /// Cached instances risk stale XPC connections — the same bug that broke enforcement in the main app.
+    private var store: ManagedSettingsStore {
+        ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
+    }
+    private var baseStore: ManagedSettingsStore {
+        ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
+    }
     private lazy var keychain = KeychainManager()
 
     /// Prefix used by ScheduleRegistrar for unlocked-window activities.
@@ -59,8 +65,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // The tunnel can't write ManagedSettings — we must do it here on the next callback.
         checkEnforcementRefreshSignal()
 
-        // Reconciliation schedule (fires every 15 min) — verify enforcement matches snapshot.
-        if activity.rawValue.hasPrefix("bigbrother.reconciliation") {
+        // Reconciliation quarter window started — verify enforcement matches snapshot.
+        if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
+            NSLog("[Monitor] intervalDidStart FIRED for \(activity.rawValue)")
             reconcile()
             return
         }
@@ -128,34 +135,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     override func intervalDidEnd(for activity: DeviceActivityName) {
         checkEnforcementRefreshSignal()
 
-        // Reconciliation intervalDidEnd — triggered by stopMonitoring from tunnel/main app.
+        // Reconciliation quarter ended — triggered by natural end OR by stopMonitoring from tunnel/main app.
         // This is the ON-DEMAND enforcement trigger. Apply shields from our privileged context.
-        // Multiple reconciliation slots may fire at once (all 30 stopped simultaneously).
-        // Use a flag to only apply enforcement once, then re-register all slots.
-        if activity.rawValue.hasPrefix("bigbrother.reconciliation") {
+        if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
             NSLog("[Monitor] intervalDidEnd FIRED for \(activity.rawValue)")
-            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-            let lastRefreshAt = defaults?.double(forKey: "monitorLastEnforcementRefreshAt") ?? 0
-            let now = Date().timeIntervalSince1970
-
-            if now - lastRefreshAt > 3 {
-                defaults?.set(now, forKey: "monitorLastEnforcementRefreshAt")
-                let resolution = ModeStackResolver.resolve(storage: storage)
-                let policy = storage.readPolicySnapshot()?.effectivePolicy
-                NSLog("[Monitor] On-demand enforcement: mode=\(resolution.mode.rawValue) reason=\(resolution.reason)")
-                if resolution.mode == .unlocked {
-                    clearAllShieldStores()
-                    NSLog("[Monitor] Cleared all shield stores (unlocked)")
-                } else {
-                    applyShieldingToAllStores(mode: resolution.mode, policy: policy)
-                    NSLog("[Monitor] Applied shields for \(resolution.mode.rawValue)")
-                }
-                updateSharedState(mode: resolution.mode)
-                logEvent(.policyReconciled, details: "On-demand enforcement: \(resolution.mode.rawValue) (\(resolution.reason))")
+            let resolution = ModeStackResolver.resolve(storage: storage)
+            let policy = storage.readPolicySnapshot()?.effectivePolicy
+            NSLog("[Monitor] On-demand enforcement: mode=\(resolution.mode.rawValue) reason=\(resolution.reason)")
+            if resolution.mode == .unlocked {
+                clearAllShieldStores()
+                NSLog("[Monitor] Cleared all shield stores (unlocked)")
             } else {
-                NSLog("[Monitor] intervalDidEnd deduped (last refresh \(Int(now - lastRefreshAt))s ago)")
+                applyShieldingToAllStores(mode: resolution.mode, policy: policy)
+                NSLog("[Monitor] Applied shields for \(resolution.mode.rawValue)")
             }
-            reregisterReconciliationSlot(activity)
+            updateSharedState(mode: resolution.mode)
+            logEvent(.policyReconciled, details: "On-demand enforcement: \(resolution.mode.rawValue) (\(resolution.reason))")
+            reregisterReconciliationQuarter(activity)
             return
         }
 
@@ -207,6 +203,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         logEvent(.scheduleEnded, details: "Schedule ended: \(activity.rawValue)")
     }
 
+    override func intervalWillEndWarning(for activity: DeviceActivityName) {
+        checkEnforcementRefreshSignal()
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+
+        // Reconciliation quarter warning — 3 hours before end = mid-quarter enforcement check.
+        if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
+            NSLog("[Monitor] intervalWillEndWarning for \(activity.rawValue) — reconciling")
+            reconcile()
+            return
+        }
+    }
+
     override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name, activity: DeviceActivityName) {
         checkEnforcementRefreshSignal()
         // Handle per-app time limit events.
@@ -250,12 +259,18 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         // Record Monitor activity timestamp.
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+        let monitorDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        monitorDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
 
-        #if DEBUG
-        print("[BigBrother] Usage milestone: \(minutes) minutes")
-        #endif
+        // Piggyback enforcement reconciliation on usage tracking callbacks.
+        // These fire every ~5 minutes of active device use — exactly when enforcement matters most.
+        // Throttle to once per 60 seconds to avoid excessive work.
+        let lastReconcile = monitorDefaults?.double(forKey: "monitorLastReconcileAt") ?? 0
+        let now = Date().timeIntervalSince1970
+        if now - lastReconcile > 60 {
+            monitorDefaults?.set(now, forKey: "monitorLastReconcileAt")
+            reconcile()
+        }
     }
 
     // MARK: - Schedule Profile Handling
@@ -818,28 +833,27 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     // MARK: - Reconciliation Re-registration
 
-    /// Re-register a reconciliation slot after it was stopped by stopMonitoring (on-demand trigger).
-    /// Parses the minute offset from the activity name and re-creates the same schedule.
-    private func reregisterReconciliationSlot(_ activity: DeviceActivityName) {
-        let name = activity.rawValue
-        let minute: Int
-        if name == "bigbrother.reconciliation" {
-            minute = 0
-        } else if name.hasPrefix("bigbrother.reconciliation.m"),
-                  let m = Int(name.replacingOccurrences(of: "bigbrother.reconciliation.m", with: "")) {
-            minute = m
-        } else {
-            return // Unknown reconciliation slot
-        }
+    /// Re-register a reconciliation quarter after it was stopped by stopMonitoring (on-demand trigger).
+    /// Re-registers the same 6-hour window so it fires again at the next natural boundary.
+    private func reregisterReconciliationQuarter(_ activity: DeviceActivityName) {
+        guard activity.rawValue.hasPrefix("bigbrother.reconciliation.q"),
+              let quarterChar = activity.rawValue.last,
+              let quarter = Int(String(quarterChar)) else { return }
 
-        let start = DateComponents(minute: minute)
-        let end = DateComponents(minute: minute + 1)
-        let schedule = DeviceActivitySchedule(intervalStart: start, intervalEnd: end, repeats: true)
+        let startHour = quarter * 6
+        let endHour = startHour + 5
+        let schedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: startHour, minute: 0),
+            intervalEnd: DateComponents(hour: endHour, minute: 59),
+            repeats: true,
+            warningTime: DateComponents(hour: 3)
+        )
         let center = DeviceActivityCenter()
         do {
             try center.startMonitoring(activity, during: schedule)
+            NSLog("[Monitor] Re-registered \(activity.rawValue)")
         } catch {
-            // Non-fatal — other reconciliation slots continue firing
+            NSLog("[Monitor] Failed to re-register \(activity.rawValue): \(error)")
         }
     }
 
