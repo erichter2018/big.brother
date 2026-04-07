@@ -2140,6 +2140,16 @@ final class AppState {
     private func verifyAndFixEnforcement() {
         guard deviceRole == .child, let enforcement else { return }
 
+        // Skip enforcement fix if a command was just processed (within 30s).
+        // The command processor's result is authoritative — the enforcement fix can
+        // race against it and "correct" enforcement backwards (especially temp unlocks
+        // where ModeStackResolver may see stale state from a different process).
+        let cmdDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let lastCommandAt = cmdDefaults?.double(forKey: "fr.bigbrother.lastCommandProcessedAt") ?? 0
+        if Date().timeIntervalSince1970 - lastCommandAt < 30 {
+            return
+        }
+
         var resolution = ModeStackResolver.resolve(storage: storage)
 
         // If ModeStackResolver says unlocked (temp unlock) but the latest snapshot says
