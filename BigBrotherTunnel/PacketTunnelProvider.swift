@@ -313,6 +313,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             record["enfDetails"] = entry.details
             record["timestamp"] = entry.timestamp as NSDate
             record["build"] = AppConstants.appBuildNumber as NSNumber
+            record["deviceName"] = UIDevice.current.name
             return record
         }
 

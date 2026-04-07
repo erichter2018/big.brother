@@ -406,7 +406,7 @@ struct SettingsView: View {
             var lines: [String] = ["=== Enforcement Log \(DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)) ===\n"]
             for record in sorted {
                 let deviceID = record[CKFieldName.deviceID] as? String ?? "?"
-                let name = deviceNames[deviceID] ?? deviceID.prefix(8).description
+                let name = (record["deviceName"] as? String) ?? deviceNames[deviceID] ?? deviceID.prefix(8).description
                 let time = formatter.string(from: (record[CKFieldName.timestamp] as? Date) ?? Date())
                 let cat = record[CKFieldName.enfCategory] as? String ?? ""
                 let msg = record[CKFieldName.enfMessage] as? String ?? ""
