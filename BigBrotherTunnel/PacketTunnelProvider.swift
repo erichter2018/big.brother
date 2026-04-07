@@ -2077,6 +2077,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             flags["🔍 DIAGNOSIS"] = diagnosis.joined(separator: " | ")
         }
 
+        // === DEVICE ACTIVITY (reconciliation health) ===
+        let daCenter = DeviceActivityCenter()
+        let allActivities = daCenter.activities
+        let reconciliation = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }
+        let usageTracking = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.usagetracking") }
+        flags["deviceActivity.total"] = "\(allActivities.count)"
+        flags["deviceActivity.reconciliation"] = "\(reconciliation.count) [\(reconciliation.map(\.rawValue).joined(separator: ", "))]"
+        flags["deviceActivity.usageTracking"] = "\(usageTracking.count)"
+        flags["deviceActivity.monitorLastActiveAt"] = "\(defaults?.double(forKey: "monitorLastActiveAt") ?? 0)"
+        flags["deviceActivity.monitorLastReconcileAt"] = "\(defaults?.double(forKey: "monitorLastReconcileAt") ?? 0)"
+
         // Restrictions from App Group
         if let r = storage.readDeviceRestrictions() {
             flags["restrictions.denyAppRemoval"] = "\(r.denyAppRemoval)"
