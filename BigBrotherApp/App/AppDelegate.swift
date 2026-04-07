@@ -322,7 +322,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 intervalStart: DateComponents(hour: q.startHour, minute: 0),
                 intervalEnd: DateComponents(hour: q.endHour, minute: 59),
                 repeats: true,
-                warningTime: DateComponents(hour: 3)
+                warningTime: nil
             )
             do {
                 try center.startMonitoring(activityName, during: schedule)

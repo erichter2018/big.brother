@@ -58,9 +58,21 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
     /// - Minimum interval: 15 minutes
     /// - DateComponents must include `hour` (minute-only = invalidDateComponents)
     ///
-    /// 4 windows × (intervalDidStart + warningTime + intervalDidEnd) = 12 callbacks/day.
+    /// Each window fires intervalDidStart + intervalDidEnd = 8 callbacks/day.
     /// Usage tracking milestones provide additional reconciliation every ~5 min of screen time.
     func registerReconciliationSchedule() throws {
+        let storage = AppGroupStorage()
+
+        // Log existing activities before registration for diagnosis.
+        let existingActivities = center.activities
+        let existingNames = existingActivities.map(\.rawValue)
+        NSLog("[ScheduleManager] Before registration: \(existingActivities.count) activities: \(existingNames)")
+        try? storage.appendDiagnosticEntry(DiagnosticEntry(
+            category: .enforcement,
+            message: "Reconciliation registration starting",
+            details: "\(existingActivities.count) existing activities"
+        ))
+
         let quarters: [(name: String, startHour: Int, endHour: Int)] = [
             ("bigbrother.reconciliation.q0", 0, 5),
             ("bigbrother.reconciliation.q1", 6, 11),
@@ -68,23 +80,36 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
             ("bigbrother.reconciliation.q3", 18, 23),
         ]
 
+        var registered = 0
+        var errors: [String] = []
+
         for q in quarters {
             let activityName = DeviceActivityName(rawValue: q.name)
             let schedule = DeviceActivitySchedule(
                 intervalStart: DateComponents(hour: q.startHour, minute: 0),
                 intervalEnd: DateComponents(hour: q.endHour, minute: 59),
-                repeats: true,
-                warningTime: DateComponents(hour: 3)
+                repeats: true
             )
             do {
                 try center.startMonitoring(activityName, during: schedule)
+                registered += 1
+                NSLog("[ScheduleManager] ✓ Registered \(q.name)")
             } catch {
-                NSLog("[ScheduleManager] FAILED to register \(q.name): \(error)")
-                throw error
+                let msg = "\(q.name): \(error.localizedDescription)"
+                errors.append(msg)
+                NSLog("[ScheduleManager] ✗ FAILED \(msg)")
             }
         }
 
-        let count = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
-        NSLog("[ScheduleManager] Registered \(count) reconciliation quarters (of 4)")
+        let afterCount = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
+        let result = "Registered \(registered)/4 quarters (\(afterCount) visible in .activities)"
+        NSLog("[ScheduleManager] \(result)")
+        try? storage.appendDiagnosticEntry(DiagnosticEntry(
+            category: .enforcement,
+            message: errors.isEmpty ? "Reconciliation registered OK" : "Reconciliation registration PARTIAL",
+            details: "\(result)\(errors.isEmpty ? "" : " ERRORS: \(errors.joined(separator: "; "))")"
+        ))
+
+        if registered == 0 { throw NSError(domain: "ScheduleManager", code: 1, userInfo: [NSLocalizedDescriptionKey: errors.joined(separator: "; ")]) }
     }
 }
