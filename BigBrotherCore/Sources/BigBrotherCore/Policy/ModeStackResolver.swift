@@ -28,82 +28,28 @@ public enum ModeStackResolver {
     public static func resolve(storage: any SharedStorageProtocol, now: Date = Date()) -> Resolution {
 
         // 1. Active temporary unlock (parent-initiated, PIN, or self-unlock)?
+        // READ-ONLY: ModeStackResolver must NEVER delete temp unlock files.
+        // Multiple processes call this (main app, Monitor, tunnel). If the Monitor
+        // reads stale file data and deletes the file while the main app just wrote
+        // a new temp unlock, the new data is lost. Cleanup is done by the command
+        // processor (setMode, returnToSchedule) which owns the state.
         if let temp = storage.readTemporaryUnlockState() {
             if temp.expiresAt > now {
-                let currentUptime = ProcessInfo.processInfo.systemUptime
-                let originalDuration = temp.expiresAt.timeIntervalSince(temp.startedAt)
-
-                // Reboot detection: if stored uptime is larger than current, the device
-                // was rebooted and the monotonic guard is invalidated. Fall back to wall clock
-                // but verify remaining time is reasonable.
-                if let storedUptime = temp.uptimeAtStart, currentUptime < storedUptime {
-                    let wallElapsed = now.timeIntervalSince(temp.startedAt)
-                    if wallElapsed > originalDuration + 60 {
-                        // Wall clock says well past expiry — clear it
-                        // (handles clock-forward-then-reboot scenario)
-                        try? storage.clearTemporaryUnlockState()
-                    } else {
-                        // Wall clock says still within duration — trust it.
-                        // Reboot alone shouldn't cancel a valid unlock.
-                        return Resolution(
-                            mode: .unlocked,
-                            controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
-                            isTemporary: true,
-                            expiresAt: temp.expiresAt,
-                            reason: "Temporary unlock (\(temp.origin.rawValue)) post-reboot, expires \(shortTime(temp.expiresAt))"
-                        )
-                    }
-                } else {
-                    // Normal case: monotonic clock is valid.
-                    // Clock manipulation guard: if the unlock duration has passed
-                    // based on monotonic uptime, treat as expired even if wall clock says otherwise.
-                    let elapsed = currentUptime - (temp.uptimeAtStart ?? currentUptime)
-                    if elapsed > originalDuration + 3 {
-                        // Monotonic clock says duration elapsed — clock was set back
-                        try? storage.clearTemporaryUnlockState()
-                    } else {
-                        return Resolution(
-                            mode: .unlocked,
-                            controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
-                            isTemporary: true,
-                            expiresAt: temp.expiresAt,
-                            reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
-                        )
-                    }
-                }
-            } else {
-                // Expired — clean up and fall through to previous mode
-                try? storage.clearTemporaryUnlockState()
+                return Resolution(
+                    mode: .unlocked,
+                    controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
+                    isTemporary: true,
+                    expiresAt: temp.expiresAt,
+                    reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
+                )
             }
+            // Expired — fall through (but don't delete — command processor handles cleanup)
         }
 
         // 2. Active timed unlock (penalty + unlock phases)?
+        // READ-ONLY: same principle as temp unlock — never delete from ModeStackResolver.
         if let timed = storage.readTimedUnlockInfo() {
-            let currentUptime = ProcessInfo.processInfo.systemUptime
-            let totalDuration = timed.lockAt.timeIntervalSince(timed.createdAt ?? timed.unlockAt)
-            let timedCreatedAt = timed.createdAt ?? timed.unlockAt
-
-            // Reboot detection: if stored uptime is larger than current, the device
-            // was rebooted and the monotonic guard is invalidated.
-            var clockManipulated = false
-            if let storedUptime = timed.uptimeAtStart, currentUptime < storedUptime {
-                // Device was rebooted — fall back to wall clock only.
-                let wallElapsed = now.timeIntervalSince(timedCreatedAt)
-                if wallElapsed > totalDuration + 60 {
-                    // Wall clock says well past expiry — treat as manipulated/expired
-                    clockManipulated = true
-                }
-                // Otherwise trust wall clock for phase determination below
-            } else {
-                // Normal case: monotonic clock is valid.
-                let monotonicElapsed = currentUptime - (timed.uptimeAtStart ?? currentUptime)
-                clockManipulated = monotonicElapsed > totalDuration + 3
-            }
-
-            if clockManipulated {
-                // Wall clock was set forward to skip penalty or extend free phase
-                try? storage.clearTimedUnlockInfo()
-            } else if now < timed.unlockAt {
+            if now < timed.unlockAt {
                 // Penalty phase — device MUST be locked regardless of previousMode.
                 return Resolution(
                     mode: .restricted,
@@ -121,10 +67,8 @@ public enum ModeStackResolver {
                     expiresAt: timed.lockAt,
                     reason: "Timed unlock free phase, locks at \(shortTime(timed.lockAt))"
                 )
-            } else {
-                // Fully expired — clean up and fall through
-                try? storage.clearTimedUnlockInfo()
             }
+            // Expired — fall through (command processor handles cleanup)
         }
 
         // 3. Active lockUntil? (parent locked device until a specific time)
