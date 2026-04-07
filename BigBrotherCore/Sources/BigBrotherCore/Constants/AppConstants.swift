@@ -38,7 +38,7 @@ public enum AppConstants {
 
     /// Manual build number — bump each time you deploy new code during development.
     /// Both parent and child read this constant; matching numbers = same code.
-    public static let appBuildNumber = 317
+    public static let appBuildNumber = 318
 
     // MARK: - Enrollment
 

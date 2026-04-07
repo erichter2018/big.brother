@@ -887,8 +887,25 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         switch result {
         case .committed(let snapshot):
             try enforcement?.apply(snapshot.effectivePolicy)
-            NSLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): enforcement.apply() completed, triggering Monitor")
+            NSLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): enforcement.apply() completed")
             try snapshotStore.markApplied()
+
+            // Verify write stuck — ManagedSettings writes from background can silently fail.
+            // Wait 1s for XPC round-trip, then read back with a FRESH store instance.
+            Thread.sleep(forTimeInterval: 1.0)
+            let verifyDiag = enforcement?.shieldDiagnostic()
+            let shouldBeShielded = effectiveMode != .unlocked
+            let isShielded = verifyDiag?.shieldsActive == true || verifyDiag?.categoryActive == true
+            if shouldBeShielded != isShielded {
+                NSLog("[CommandProcessor] POST-WRITE VERIFY FAILED — retrying (shields=\(isShielded), expected=\(shouldBeShielded))")
+                Thread.sleep(forTimeInterval: 0.5)
+                try enforcement?.apply(snapshot.effectivePolicy)
+                let retryDiag = enforcement?.shieldDiagnostic()
+                let retryOK = (retryDiag?.shieldsActive == true || retryDiag?.categoryActive == true) == shouldBeShielded
+                NSLog("[CommandProcessor] Retry result: \(retryOK ? "OK" : "STILL FAILED")")
+            } else {
+                NSLog("[CommandProcessor] Post-write verify OK")
+            }
 
             // Trigger the Monitor extension to apply enforcement from its privileged context.
             // The main app's enforcement.apply() above is best-effort (works in foreground).
