@@ -2152,14 +2152,27 @@ final class AppState {
             return
         }
 
-        let resolution = ModeStackResolver.resolve(storage: storage)
+        // DIRECT temp unlock file check FIRST, before ModeStackResolver.
+        // ModeStackResolver sometimes fails to see the file (reason unknown — possibly
+        // file system race, monotonic clock guard, or cross-process timing).
+        // If the file exists and hasn't expired, that's ALWAYS authoritative.
+        if let tempState = storage.readTemporaryUnlockState(),
+           tempState.expiresAt > Date() {
+            let tempDiag = enforcement.shieldDiagnostic()
+            let isShielded = tempDiag.shieldsActive || tempDiag.categoryActive
+            if isShielded {
+                // Shields are UP but temp unlock is active — clear all shields
+                try? enforcement.clearAllRestrictions()
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Temp unlock override",
+                    details: "Shields were UP during active temp unlock (expires \(tempState.expiresAt)) — forced DOWN"
+                ))
+            }
+            return // Temp unlock is active — don't let anything else override it
+        }
 
-        // ModeStackResolver is authoritative. If it says temp unlock is active
-        // (file exists + not expired), trust it — even if the snapshot disagrees.
-        // The snapshot may be stale (written before the temp unlock command).
-        // If setMode was supposed to clear the temp, it already tried (with retry + nuclear).
-        // Force-clearing here was CAUSING the bug: deleting valid temp unlock files
-        // because the snapshot hadn't been flushed yet.
+        let resolution = ModeStackResolver.resolve(storage: storage)
 
         let diag = enforcement.shieldDiagnostic()
         let shouldBeShielded = resolution.mode != .unlocked
