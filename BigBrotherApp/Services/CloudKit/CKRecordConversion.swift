@@ -540,6 +540,25 @@ enum CKRecordConversion {
         )
     }
 
+    // MARK: - EnforcementLog
+
+    static func enforcementLogRecord(
+        entryID: UUID, deviceID: DeviceID, familyID: FamilyID,
+        category: String, message: String, details: String?,
+        timestamp: Date, build: Int
+    ) -> CKRecord {
+        let id = recordID(entryID.uuidString, type: CKRecordType.enforcementLog)
+        let record = CKRecord(recordType: CKRecordType.enforcementLog, recordID: id)
+        record[CKFieldName.deviceID] = deviceID.rawValue
+        record[CKFieldName.familyID] = familyID.rawValue
+        record[CKFieldName.enfCategory] = category
+        record[CKFieldName.enfMessage] = message
+        record[CKFieldName.enfDetails] = details
+        record[CKFieldName.timestamp] = timestamp as NSDate
+        record[CKFieldName.enfBuild] = build as NSNumber
+        return record
+    }
+
     // MARK: - EnrollmentInvite
 
     static func toCKRecord(_ invite: EnrollmentInvite) -> CKRecord {

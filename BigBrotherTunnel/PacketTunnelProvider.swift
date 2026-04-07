@@ -26,6 +26,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let keychain = KeychainManager()
     private var heartbeatTimer: DispatchSourceTimer?
     private var livenessTimer: DispatchSourceTimer?
+    private var enforcementLogTimer: DispatchSourceTimer?
+    /// Track last uploaded enforcement log entry ID to avoid duplicates.
+    private var lastEnforcementLogUploadAt: Date = .distantPast
 
     /// Timestamp of last IPC ping from the main app.
     /// Seeded from App Group so the tunnel immediately knows if the app has been dead for hours.
@@ -148,6 +151,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self?.startDNSActivitySyncTimer()
             self?.startHeartbeatTimer()
             self?.startLivenessTimer()
+            self?.startEnforcementLogSyncTimer()
             self?.startScreenLockMonitoring()
             self?.startNetworkPathMonitoring()
 
@@ -264,6 +268,61 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         timer.resume()
         heartbeatTimer = timer
+    }
+
+    // MARK: - Enforcement Log Sync
+
+    /// Upload enforcement-related diagnostic entries to CloudKit every 5 minutes.
+    /// Parent app can fetch these to see a rolling enforcement timeline across all devices.
+    private func startEnforcementLogSyncTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 60, repeating: 300) // First at 1 min, then every 5 min
+        timer.setEventHandler { [weak self] in
+            Task { await self?.syncEnforcementLogs() }
+        }
+        timer.resume()
+        enforcementLogTimer = timer
+    }
+
+    private func syncEnforcementLogs() async {
+        guard let enrollment = try? keychain.get(
+            ChildEnrollmentState.self,
+            forKey: StorageKeys.enrollmentState
+        ) else { return }
+
+        let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
+
+        // Read enforcement-relevant entries newer than our last upload.
+        let allEntries = storage.readDiagnosticEntries(category: nil)
+        let enforcementCategories: Set<DiagnosticCategory> = [.enforcement, .command, .restoration, .auth, .temporaryUnlock]
+        let newEntries = allEntries.filter { entry in
+            enforcementCategories.contains(entry.category) && entry.timestamp > lastEnforcementLogUploadAt
+        }
+
+        guard !newEntries.isEmpty else { return }
+
+        // Batch upload (max 50 per batch)
+        let batch = Array(newEntries.prefix(50))
+        let records: [CKRecord] = batch.map { entry in
+            let recordID = CKRecord.ID(recordName: "BBEnforcementLog_\(entry.id.uuidString)")
+            let record = CKRecord(recordType: "BBEnforcementLog", recordID: recordID)
+            record["deviceID"] = enrollment.deviceID.rawValue
+            record["familyID"] = enrollment.familyID.rawValue
+            record["category"] = entry.category.rawValue
+            record["message"] = entry.message
+            record["enfDetails"] = entry.details
+            record["timestamp"] = entry.timestamp as NSDate
+            record["build"] = AppConstants.appBuildNumber as NSNumber
+            return record
+        }
+
+        do {
+            try await db.modifyRecords(saving: records, deleting: [], savePolicy: .allKeys)
+            lastEnforcementLogUploadAt = batch.last?.timestamp ?? lastEnforcementLogUploadAt
+            NSLog("[Tunnel] Enforcement log: uploaded \(batch.count) entries")
+        } catch {
+            NSLog("[Tunnel] Enforcement log batch failed: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - DNS Activity Sync

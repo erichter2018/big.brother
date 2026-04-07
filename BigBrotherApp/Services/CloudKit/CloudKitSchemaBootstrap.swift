@@ -75,6 +75,7 @@ enum CloudKitSchemaBootstrap {
             buildDeviceLocation(),
             buildTimeLimitConfig(),
             buildPendingAppReview(),
+            buildEnforcementLog(),
         ]
     }
 
@@ -281,6 +282,18 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.nameResolved] = 0 as NSNumber
         r[CKFieldName.createdAt] = Date() as NSDate
         r[CKFieldName.updatedAt] = Date() as NSDate
+        return r
+    }
+
+    private static func buildEnforcementLog() -> CKRecord {
+        let r = seed(CKRecordType.enforcementLog)
+        r[CKFieldName.familyID] = seedFamilyID
+        r[CKFieldName.deviceID] = seedPrefix
+        r[CKFieldName.enfCategory] = "enforcement"
+        r[CKFieldName.enfMessage] = "_seed_"
+        r[CKFieldName.enfDetails] = "_seed_"
+        r[CKFieldName.timestamp] = Date() as NSDate
+        r[CKFieldName.enfBuild] = 0 as NSNumber
         return r
     }
 }

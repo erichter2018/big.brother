@@ -567,6 +567,17 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await delete(recordID)
     }
 
+    // MARK: - Enforcement Log
+
+    func fetchEnforcementLogs(familyID: FamilyID, since: Date) async throws -> [CKRecord] {
+        let predicate = NSPredicate(
+            format: "%K == %@ AND %K > %@",
+            CKFieldName.familyID, familyID.rawValue,
+            CKFieldName.timestamp, since as NSDate
+        )
+        return try await query(CKRecordType.enforcementLog, predicate: predicate)
+    }
+
     // MARK: - Subscriptions
 
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws {

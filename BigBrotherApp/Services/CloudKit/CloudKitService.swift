@@ -121,6 +121,9 @@ protocol CloudKitServiceProtocol: Sendable {
 
     /// Set up CKQuerySubscriptions for near-real-time command delivery.
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws
+
+    /// Fetch enforcement log entries for a family since a given date.
+    func fetchEnforcementLogs(familyID: FamilyID, since: Date) async throws -> [CKRecord]
 }
 
 extension CloudKitServiceProtocol {

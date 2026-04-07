@@ -24,6 +24,7 @@ enum CKRecordType {
     static let diagnosticReport = "BBDiagnosticReport"
     static let timeLimitConfig = "BBTimeLimitConfig"
     static let pendingAppReview = "BBPendingAppReview"
+    static let enforcementLog = "BBEnforcementLog"
 }
 
 /// Field names used in CloudKit records.
@@ -220,6 +221,12 @@ enum CKFieldName {
     // BBEnrollmentInvite (signing)
     static let commandSigningPubKey = "commandSigningPubKey"
     static let commandSigningPrivKey = "commandSigningPrivKey"
+
+    // BBEnforcementLog
+    static let enfCategory = "category"
+    static let enfMessage = "message"
+    static let enfDetails = "enfDetails"
+    static let enfBuild = "build"
 
     // BBDeviceLocation
     static let locLatitude = "latitude"

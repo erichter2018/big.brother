@@ -14,6 +14,8 @@ struct SettingsView: View {
     @State private var exportedFileURL: URL?
     @State private var exportError: String?
     @State private var showDashboardLayout = false
+    @State private var isCopyingLog = false
+    @State private var logCopyStatus: String?
 
     init(appState: AppState) {
         self.appState = appState
@@ -119,6 +121,19 @@ struct SettingsView: View {
                     Text(exportError)
                         .font(.caption)
                         .foregroundStyle(.red)
+                }
+
+                Button {
+                    Task { await copyEnforcementLog() }
+                } label: {
+                    Label(isCopyingLog ? "Fetching..." : "Copy Enforcement Log", systemImage: "doc.on.clipboard")
+                }
+                .disabled(isCopyingLog)
+
+                if let logCopyStatus {
+                    Text(logCopyStatus)
+                        .font(.caption)
+                        .foregroundStyle(logCopyStatus.contains("Copied") ? .green : .red)
                 }
 
                 Button {
@@ -358,6 +373,56 @@ struct SettingsView: View {
             exportError = CloudKitErrorHelper.userMessage(for: error)
         }
         isExporting = false
+    }
+
+    private func copyEnforcementLog() async {
+        guard let cloudKit = appState.cloudKit,
+              let familyID = appState.parentState?.familyID else {
+            logCopyStatus = "CloudKit unavailable"
+            return
+        }
+        isCopyingLog = true
+        logCopyStatus = nil
+        do {
+            let since = Calendar.current.startOfDay(for: Date())
+            let records = try await cloudKit.fetchEnforcementLogs(familyID: familyID, since: since)
+
+            // Build device name map from child devices
+            let deviceNames: [String: String] = Dictionary(
+                appState.childDevices.map { ($0.id.rawValue, $0.displayName) },
+                uniquingKeysWith: { first, _ in first }
+            )
+
+            // Format as text
+            let formatter = DateFormatter()
+            formatter.dateFormat = "h:mm:ss a"
+
+            let sorted = records.sorted { r1, r2 in
+                let t1 = (r1[CKFieldName.timestamp] as? Date) ?? .distantPast
+                let t2 = (r2[CKFieldName.timestamp] as? Date) ?? .distantPast
+                return t1 < t2
+            }
+
+            var lines: [String] = ["=== Enforcement Log \(DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)) ===\n"]
+            for record in sorted {
+                let deviceID = record[CKFieldName.deviceID] as? String ?? "?"
+                let name = deviceNames[deviceID] ?? deviceID.prefix(8).description
+                let time = formatter.string(from: (record[CKFieldName.timestamp] as? Date) ?? Date())
+                let cat = record[CKFieldName.enfCategory] as? String ?? ""
+                let msg = record[CKFieldName.enfMessage] as? String ?? ""
+                let details = record[CKFieldName.enfDetails] as? String
+                let build = record[CKFieldName.enfBuild] as? Int ?? 0
+                let detail = details.map { " | \($0)" } ?? ""
+                lines.append("[\(name)] \(time) [\(cat)] \(msg)\(detail) (b\(build))")
+            }
+
+            let text = lines.joined(separator: "\n")
+            UIPasteboard.general.string = text
+            logCopyStatus = "Copied \(records.count) entries"
+        } catch {
+            logCopyStatus = "Failed: \(error.localizedDescription)"
+        }
+        isCopyingLog = false
     }
 
     private var subscriptionStatusColor: Color {
