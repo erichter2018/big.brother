@@ -2152,20 +2152,14 @@ final class AppState {
             return
         }
 
-        var resolution = ModeStackResolver.resolve(storage: storage)
+        let resolution = ModeStackResolver.resolve(storage: storage)
 
-        // If ModeStackResolver says unlocked (temp unlock) but the latest snapshot says
-        // a different mode (setMode overrode it), trust the snapshot. This handles the
-        // race where clearTemporaryUnlockState failed but setMode committed a new snapshot.
-        if resolution.mode == .unlocked && resolution.isTemporary,
-           let snap = snapshotStore?.loadCurrentSnapshot(),
-           !snap.effectivePolicy.isTemporaryUnlock,
-           snap.effectivePolicy.resolvedMode != .unlocked {
-            // Snapshot says not unlocked — the setMode won. Force-clear stale temp state.
-            try? storage.clearTemporaryUnlockState()
-            try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
-            resolution = ModeStackResolver.resolve(storage: storage)
-        }
+        // ModeStackResolver is authoritative. If it says temp unlock is active
+        // (file exists + not expired), trust it — even if the snapshot disagrees.
+        // The snapshot may be stale (written before the temp unlock command).
+        // If setMode was supposed to clear the temp, it already tried (with retry + nuclear).
+        // Force-clearing here was CAUSING the bug: deleting valid temp unlock files
+        // because the snapshot hadn't been flushed yet.
 
         let diag = enforcement.shieldDiagnostic()
         let shouldBeShielded = resolution.mode != .unlocked
