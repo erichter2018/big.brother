@@ -187,8 +187,10 @@ enum ScheduleRegistrar {
 
     static let timeLimitPrefix = "bigbrother.timelimit."
 
-    /// Register DeviceActivityEvent for each per-app time limit.
-    /// Each app gets its own schedule + event so thresholds are independent.
+    /// Register DeviceActivityEvents for each per-app time limit.
+    /// Each app gets its own schedule with:
+    /// - 5-minute usage milestones (for precise tracking reported to parent)
+    /// - Exhaustion threshold (blocks the app when limit is reached)
     /// Clears previously registered time limit activities first.
     static func registerTimeLimitEvents(limits: [AppTimeLimit]) {
         let center = DeviceActivityCenter()
@@ -203,6 +205,23 @@ enum ScheduleRegistrar {
         let decoder = JSONDecoder()
 
         for limit in limits where limit.dailyLimitMinutes > 0 {
+            // Auto-resolve stale pending name resolution — if pending for over 1 hour,
+            // apply the resolved limit so the app isn't stuck at 1 minute forever.
+            if limit.pendingNameResolution == true,
+               Date().timeIntervalSince(limit.createdAt) > 3600 {
+                let storage = AppGroupStorage()
+                var allLimits = storage.readAppTimeLimits()
+                if let idx = allLimits.firstIndex(where: { $0.id == limit.id }) {
+                    allLimits[idx].pendingNameResolution = false
+                    allLimits[idx].dailyLimitMinutes = limit.resolvedDailyLimitMinutes ?? 60
+                    allLimits[idx].updatedAt = Date()
+                    if allLimits[idx].appName.hasPrefix("Temporary Name") {
+                        allLimits[idx].appName = limit.bundleID ?? "App"
+                    }
+                    try? storage.writeAppTimeLimits(allLimits)
+                }
+                continue // Re-registration will pick up the corrected limit on next call
+            }
             guard let appToken = try? decoder.decode(ApplicationToken.self, from: limit.tokenData) else {
                 #if DEBUG
                 print("[BigBrother] Failed to decode token for time limit: \(limit.appName)")
@@ -219,25 +238,44 @@ enum ScheduleRegistrar {
                 repeats: true
             )
 
-            // Single event: fires when this app's foreground usage reaches the threshold.
-            let hours = limit.dailyLimitMinutes / 60
-            let mins = limit.dailyLimitMinutes % 60
-            var threshold = DateComponents()
-            threshold.hour = hours
-            threshold.minute = mins
+            var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
 
-            let eventName = DeviceActivityEvent.Name(rawValue: "timelimit.exhausted")
-            let event = DeviceActivityEvent(
+            // Usage milestones every 5 minutes for precise tracking.
+            // The Monitor writes actual usage to App Group on each milestone.
+            let maxMilestone = limit.dailyLimitMinutes + 120 // Track well beyond limit (multiple extra time grants)
+            for m in stride(from: 5, through: maxMilestone, by: 5) {
+                let eventName = DeviceActivityEvent.Name(rawValue: "timelimit.usage.\(m)")
+                var threshold = DateComponents()
+                threshold.hour = m / 60
+                threshold.minute = m % 60
+                events[eventName] = DeviceActivityEvent(
+                    applications: [appToken],
+                    categories: [],
+                    webDomains: [],
+                    threshold: threshold
+                )
+            }
+
+            // Exhaustion threshold — fires when the limit is reached.
+            // Include the limit value in the event name so that re-registering after
+            // grantExtraTime creates a genuinely new event. Without this, iOS may not
+            // re-fire "timelimit.exhausted" if it already fired at the old threshold
+            // within the same schedule interval.
+            let exhaustionName = DeviceActivityEvent.Name(rawValue: "timelimit.exhausted.\(limit.dailyLimitMinutes)")
+            var exhaustionThreshold = DateComponents()
+            exhaustionThreshold.hour = limit.dailyLimitMinutes / 60
+            exhaustionThreshold.minute = limit.dailyLimitMinutes % 60
+            events[exhaustionName] = DeviceActivityEvent(
                 applications: [appToken],
                 categories: [],
                 webDomains: [],
-                threshold: threshold
+                threshold: exhaustionThreshold
             )
 
             do {
-                try center.startMonitoring(activityName, during: schedule, events: [eventName: event])
+                try center.startMonitoring(activityName, during: schedule, events: events)
                 #if DEBUG
-                print("[BigBrother] Registered time limit: \(limit.appName) = \(limit.dailyLimitMinutes) min/day")
+                print("[BigBrother] Registered time limit: \(limit.appName) = \(limit.dailyLimitMinutes) min/day (\(events.count) events)")
                 #endif
             } catch {
                 #if DEBUG

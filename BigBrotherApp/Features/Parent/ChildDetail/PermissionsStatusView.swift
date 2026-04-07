@@ -7,6 +7,7 @@ struct PermissionsStatusView: View {
     let device: ChildDevice
     let heartbeat: DeviceHeartbeat?
     let onRequestPermissions: () async -> Void
+    @State private var requestCooldown = false
 
     private var anyIssue: Bool {
         guard let hb = heartbeat else { return true }
@@ -59,15 +60,21 @@ struct PermissionsStatusView: View {
 
                 if anyIssue {
                     Button {
-                        Task { await onRequestPermissions() }
+                        requestCooldown = true
+                        Task {
+                            await onRequestPermissions()
+                            try? await Task.sleep(for: .seconds(5))
+                            requestCooldown = false
+                        }
                     } label: {
                         Label("Re-request Permissions", systemImage: "arrow.clockwise")
                             .font(.subheadline)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.orange)
+                    .tint(requestCooldown ? .gray : .orange)
                     .controlSize(.small)
+                    .disabled(requestCooldown)
                 }
             }
         } else {

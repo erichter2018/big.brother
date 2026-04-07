@@ -15,6 +15,11 @@ public struct NamedPlace: Codable, Sendable, Identifiable, Equatable {
     /// Which child profiles this place applies to (empty = all children).
     public let childProfileIDs: [ChildProfileID]
 
+    /// Whether to notify parent when any child arrives at this place.
+    public var notifyArrival: Bool
+    /// Whether to notify parent when any child departs this place.
+    public var notifyDeparture: Bool
+
     public init(
         id: UUID = UUID(),
         familyID: FamilyID,
@@ -24,7 +29,9 @@ public struct NamedPlace: Codable, Sendable, Identifiable, Equatable {
         radiusMeters: Double = 150,
         createdAt: Date = Date(),
         createdBy: String = "Parent",
-        childProfileIDs: [ChildProfileID] = []
+        childProfileIDs: [ChildProfileID] = [],
+        notifyArrival: Bool = true,
+        notifyDeparture: Bool = true
     ) {
         self.id = id
         self.familyID = familyID
@@ -35,5 +42,7 @@ public struct NamedPlace: Codable, Sendable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.createdBy = createdBy
         self.childProfileIDs = childProfileIDs
+        self.notifyArrival = notifyArrival
+        self.notifyDeparture = notifyDeparture
     }
 }

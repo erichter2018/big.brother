@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import CoreMotion
+import UIKit
 import BigBrotherCore
 
 /// Manages location tracking on child devices.
@@ -110,9 +111,12 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     /// motion coprocessor with near-zero battery impact.
     private let motionManager = CMMotionActivityManager()
 
-    /// Whether CoreMotion is actively monitoring.
     /// Whether CoreMotion is actively monitoring (exposed for diagnostics).
     private(set) var motionMonitoringActive = false
+
+    /// iOS 17+ background activity session — keeps location alive even after force-quit.
+    /// The system will relaunch the app for location updates when this session exists.
+    private var backgroundSession: CLBackgroundActivitySession?
 
     init(
         cloudKit: any CloudKitServiceProtocol,
@@ -214,6 +218,14 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             locationManager.startMonitoringVisits()
             locationManager.requestLocation()
             startMotionMonitoring()
+
+            // iOS 17+: CLBackgroundActivitySession keeps location alive even after
+            // force-quit. The system relaunches the app for updates. This is what
+            // Life360 uses. Requires Always authorization.
+            if status == .authorizedAlways && backgroundSession == nil {
+                backgroundSession = CLBackgroundActivitySession()
+                logDiag("CLBackgroundActivitySession started — survives force-quit")
+            }
         }
     }
 
@@ -253,10 +265,15 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
                 }
 
                 if !wasMoving && self.mode == .continuous {
+                    // Background task to bridge the gap until startUpdatingLocation keeps us alive
+                    let bgTask = UIApplication.shared.beginBackgroundTask(withName: "motionDetected") { }
                     self.activateHighFrequencyTracking()
                     self.lastBreadcrumbSaveAt = nil
                     self.onRequestImmediateHeartbeat?()
                     self.logDiag("Movement started: \(activityDesc) → high-frequency tracking ON")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                        if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
+                    }
                 }
 
                 // Notify driving monitor of automotive start — require high confidence
@@ -321,8 +338,8 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     /// Sets showsBackgroundLocationIndicator = true, which is REQUIRED since iOS 16.4
     /// for reliable background delivery with distanceFilter + startUpdatingLocation().
     private func activateHighFrequencyTracking() {
-        locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-        locationManager.distanceFilter = 50  // meters
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.distanceFilter = 25  // meters — tighter for better trip tracking
         locationManager.showsBackgroundLocationIndicator = true
         locationManager.startUpdatingLocation()
         activeTrackingStartedAt = Date()
@@ -615,8 +632,13 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             locationManager.requestLocation()
             return
         }
-        // Left home
-        logDiag("Geofence EXIT: Home → high-frequency tracking activated")
+        // Left home — start a background task to keep the app alive long enough
+        // for high-frequency tracking to activate and start delivering updates.
+        // Without this, iOS may suspend the app before startUpdatingLocation kicks in.
+        let bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "geofenceExit") {
+            // Expiration handler — nothing to clean up, tracking is already started
+        }
+        logDiag("Geofence EXIT: Home → high-frequency tracking activated (bg task \(bgTaskID.rawValue))")
         eventLogger?.log(.namedPlaceDeparture, details: "Left Home")
         Task { try? await eventLogger?.syncPendingEvents() }
         isMoving = true
@@ -627,6 +649,13 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         lastBreadcrumbSaveAt = nil
         locationManager.requestLocation()
         onRequestImmediateHeartbeat?()
+        // End the background task after 10s — by then, startUpdatingLocation
+        // with showsBackgroundLocationIndicator=true should be keeping us alive.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            if bgTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(bgTaskID)
+            }
+        }
         #if DEBUG
         print("[LocationService] Exited home geofence — high-frequency tracking activated")
         #endif

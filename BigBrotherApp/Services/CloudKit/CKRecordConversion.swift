@@ -234,6 +234,16 @@ enum CKRecordConversion {
         record[CKFieldName.expiresAt] = command.expiresAt as NSDate?
         record[CKFieldName.status] = command.status.rawValue
         record[CKFieldName.signatureBase64] = command.signatureBase64
+
+        // Alert push fields — only mode commands get these, enabling the
+        // CKQuerySubscription to deliver an alert (non-silent) push.
+        if let title = command.action.alertPushTitle {
+            record[CKFieldName.alertTitle] = title
+        }
+        if let body = command.action.alertPushBody {
+            record[CKFieldName.alertBody] = body
+        }
+
         return record
     }
 
@@ -378,12 +388,16 @@ enum CKRecordConversion {
         record[CKFieldName.hbIsDriving] = hb.isDriving.map { NSNumber(value: $0) }
         record[CKFieldName.hbCurrentSpeed] = hb.currentSpeed.map { $0 as NSNumber }
         record[CKFieldName.hbHeartbeatSource] = hb.heartbeatSource
+        record[CKFieldName.hbBuildType] = hb.buildType
         record[CKFieldName.hbTunnelConnected] = hb.tunnelConnected.map { NSNumber(value: $0) }
         record[CKFieldName.hbMotionAuthorized] = hb.motionAuthorized.map { NSNumber(value: $0) }
         record[CKFieldName.hbNotificationsAuthorized] = hb.notificationsAuthorized.map { NSNumber(value: $0) }
         record[CKFieldName.hbDeviceLocked] = hb.isDeviceLocked.map { NSNumber(value: $0) }
         record[CKFieldName.hbInternetBlocked] = hb.internetBlocked.map { NSNumber(value: $0) }
         record["hbInternetBlockedReason"] = hb.internetBlockedReason
+        if let usage = hb.appUsageMinutes, let data = try? JSONEncoder().encode(usage) {
+            record["hbAppUsageMinutes"] = String(data: data, encoding: .utf8)
+        }
         record[CKFieldName.hbShieldsActive] = hb.shieldsActive.map { NSNumber(value: $0) }
         record[CKFieldName.hbScheduleResolvedMode] = hb.scheduleResolvedMode
         record[CKFieldName.hbLastShieldChangeReason] = hb.lastShieldChangeReason
@@ -456,6 +470,9 @@ enum CKRecordConversion {
             vpnDetected: (record[CKFieldName.hbVPNDetected] as? Int64).map { $0 != 0 },
             internetBlocked: (record[CKFieldName.hbInternetBlocked] as? Int64).map { $0 != 0 },
             internetBlockedReason: record["hbInternetBlockedReason"] as? String,
+            appUsageMinutes: (record["hbAppUsageMinutes"] as? String).flatMap { str in
+                str.data(using: .utf8).flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) }
+            },
             timeZoneIdentifier: record[CKFieldName.hbTimeZoneID] as? String,
             timeZoneOffsetSeconds: (record[CKFieldName.hbTimeZoneOffset] as? Int64).map { Int($0) },
             screenTimeMinutes: (record[CKFieldName.hbScreenTimeMinutes] as? Int64).map { Int($0) },
@@ -465,6 +482,7 @@ enum CKRecordConversion {
             isDriving: (record[CKFieldName.hbIsDriving] as? Int64).map { $0 != 0 },
             currentSpeed: record[CKFieldName.hbCurrentSpeed] as? Double,
             heartbeatSource: record[CKFieldName.hbHeartbeatSource] as? String,
+            buildType: record[CKFieldName.hbBuildType] as? String,
             tunnelConnected: (record[CKFieldName.hbTunnelConnected] as? Int64).map { $0 != 0 },
             motionAuthorized: (record[CKFieldName.hbMotionAuthorized] as? Int64).map { $0 != 0 },
             notificationsAuthorized: (record[CKFieldName.hbNotificationsAuthorized] as? Int64).map { $0 != 0 },
@@ -909,6 +927,50 @@ enum CKRecordConversion {
         )
     }
 
+    // MARK: - Pending App Review
+
+    static func toCKRecord(_ review: PendingAppReview) -> CKRecord {
+        let id = recordID(review.id.uuidString, type: CKRecordType.pendingAppReview)
+        let record = CKRecord(recordType: CKRecordType.pendingAppReview, recordID: id)
+        record[CKFieldName.familyID] = review.familyID.rawValue
+        record[CKFieldName.profileID] = review.childProfileID.rawValue
+        record[CKFieldName.deviceID] = review.deviceID.rawValue
+        record[CKFieldName.appFingerprint] = review.appFingerprint
+        record[CKFieldName.appName] = review.appName
+        if let bundleID = review.bundleID { record["appBundleID"] = bundleID }
+        record[CKFieldName.nameResolved] = (review.nameResolved ? 1 : 0) as NSNumber
+        record[CKFieldName.createdAt] = review.createdAt as NSDate
+        record[CKFieldName.updatedAt] = review.updatedAt as NSDate
+        return record
+    }
+
+    static func pendingAppReview(from record: CKRecord) -> PendingAppReview? {
+        guard record.recordType == CKRecordType.pendingAppReview,
+              let familyID = record[CKFieldName.familyID] as? String,
+              let childProfileID = record[CKFieldName.profileID] as? String,
+              let deviceID = record[CKFieldName.deviceID] as? String,
+              let fingerprint = record[CKFieldName.appFingerprint] as? String,
+              let appName = record[CKFieldName.appName] as? String,
+              let createdAt = record[CKFieldName.createdAt] as? Date,
+              let updatedAt = record[CKFieldName.updatedAt] as? Date
+        else { return nil }
+
+        let nameResolved = (record[CKFieldName.nameResolved] as? Int64 ?? 0) != 0
+
+        return PendingAppReview(
+            id: UUID(uuidString: record.recordID.recordName.replacingOccurrences(of: "BBPendingAppReview_", with: "")) ?? UUID(),
+            familyID: FamilyID(rawValue: familyID),
+            childProfileID: ChildProfileID(rawValue: childProfileID),
+            deviceID: DeviceID(rawValue: deviceID),
+            appFingerprint: fingerprint,
+            appName: appName,
+            bundleID: record["appBundleID"] as? String,
+            nameResolved: nameResolved,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
     // MARK: - Named Place
 
     static func toCKRecord(_ place: NamedPlace) -> CKRecord {
@@ -923,6 +985,8 @@ enum CKRecordConversion {
         record[CKFieldName.placeCreatedBy] = place.createdBy
         let childIDs = place.childProfileIDs.map(\.rawValue)
         record[CKFieldName.placeChildProfileIDs] = childIDs as [NSString]
+        record["placeNotifyArrival"] = (place.notifyArrival ? 1 : 0) as NSNumber
+        record["placeNotifyDeparture"] = (place.notifyDeparture ? 1 : 0) as NSNumber
         return record
     }
 
@@ -950,7 +1014,9 @@ enum CKRecordConversion {
             radiusMeters: radius,
             createdAt: createdAt,
             createdBy: createdBy,
-            childProfileIDs: childIDStrings.map { ChildProfileID(rawValue: $0) }
+            childProfileIDs: childIDStrings.map { ChildProfileID(rawValue: $0) },
+            notifyArrival: (record["placeNotifyArrival"] as? Int64 ?? 1) != 0,
+            notifyDeparture: (record["placeNotifyDeparture"] as? Int64 ?? 1) != 0
         )
     }
 }

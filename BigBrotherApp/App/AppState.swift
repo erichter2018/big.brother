@@ -54,6 +54,23 @@ final class AppState {
     /// Latest heartbeats for all devices (parent mode).
     var latestHeartbeats: [DeviceHeartbeat] = []
 
+    /// Rolling history of last 3 heartbeats per device (parent mode).
+    /// Keyed by deviceID raw value. Most recent first.
+    @ObservationIgnored var heartbeatHistory: [String: [DeviceHeartbeat]] = [:]
+
+    /// Record new heartbeats into the rolling history buffer.
+    func recordHeartbeatHistory(_ heartbeats: [DeviceHeartbeat]) {
+        for hb in heartbeats {
+            let key = hb.deviceID.rawValue
+            var history = heartbeatHistory[key] ?? []
+            // Skip if this exact timestamp is already recorded
+            if history.first?.timestamp == hb.timestamp { continue }
+            history.insert(hb, at: 0)
+            if history.count > 3 { history = Array(history.prefix(3)) }
+            heartbeatHistory[key] = history
+        }
+    }
+
     /// Heartbeats for a specific child's devices.
     func latestHeartbeats(for childID: ChildProfileID) -> [DeviceHeartbeat] {
         let deviceIDs = Set(childDevices.filter { $0.childProfileID == childID }.map(\.id))
@@ -74,6 +91,12 @@ final class AppState {
         vm.ensureDataLoaded()
         childDetailViewModels[childID] = vm
         return vm
+    }
+
+    /// Look up child detail view model by device ID (for notification action handling).
+    func childDetailViewModel(forDeviceID deviceID: DeviceID) -> ChildDetailViewModel? {
+        guard let device = childDevices.first(where: { $0.id == deviceID }) else { return nil }
+        return childDetailViewModel(forID: device.childProfileID)
     }
 
     /// Heartbeat monitoring profiles (parent mode).
@@ -114,6 +137,9 @@ final class AppState {
     /// Set to true when a requestTimeLimitSetup command is received.
     var showTimeLimitSetup: Bool = false
 
+    /// Set to true when a requestChildAppPick command is received.
+    var showChildAppPick: Bool = false
+
     /// Expected mode per child, set when any view model sends a mode command.
     /// Used by the dashboard to show the correct mode before heartbeat confirms.
     /// Cleared when a heartbeat confirms the mode.
@@ -137,6 +163,12 @@ final class AppState {
     /// Set by notification tap to deep-link into a specific child's detail view.
     var pendingChildNavigation: ChildProfileID?
 
+    /// Children with pending unlock/time requests (updated by unlock request polling).
+    var childrenWithPendingRequests: Set<ChildProfileID> = []
+
+    /// Temporary confirmation message shown on the child home screen (auto-dismisses).
+    var childConfirmationMessage: String?
+
     // MARK: - Debug Mode
 
     /// Developer mode — shows build numbers, Insights tab, diagnostics.
@@ -147,7 +179,7 @@ final class AppState {
         didSet { UserDefaults.standard.set(debugMode, forKey: "fr.bigbrother.debugMode") }
     }
     #else
-    let debugMode: Bool = false
+    var debugMode: Bool = false
     #endif
 
     // MARK: - Network
@@ -473,6 +505,9 @@ final class AppState {
         cmdProcessor.onRequestTimeLimitSetup = { [weak self] in
             self?.showTimeLimitSetup = true
         }
+        cmdProcessor.onRequestChildAppPick = { [weak self] in
+            self?.showChildAppPick = true
+        }
         self.commandProcessor = cmdProcessor
 
         let hbService = HeartbeatServiceImpl(
@@ -721,6 +756,52 @@ final class AppState {
         syncImpl.onUnenroll = unenrollHandler
 
         self.syncCoordinator = syncImpl
+
+        // Restore any persisted debug subscription override.
+        subscriptionManager.restoreDebugOverride()
+
+        // Freemium: when subscription expires, unlock non-free children.
+        // When subscription resumes, re-apply enforcement.
+        subscriptionManager.onStatusChange = { [weak self] oldStatus, newStatus in
+            guard let self else { return }
+            let wasSubscribed = oldStatus == .subscribed || oldStatus == .trial
+            let isNowSubscribed = newStatus == .subscribed || newStatus == .trial
+            let sorted = self.childProfiles.sorted { $0.createdAt < $1.createdAt }
+            let paidChildren = sorted.dropFirst(SubscriptionManager.freeChildLimit)
+            guard !paidChildren.isEmpty else { return }
+
+            Task { @MainActor in
+                if wasSubscribed && !isNowSubscribed {
+                    // Subscription expired → unlock non-free children
+                    for child in paidChildren {
+                        try? await self.sendCommand(target: .child(child.id), action: .setMode(.unlocked))
+                    }
+                } else if !wasSubscribed && isNowSubscribed {
+                    // Subscription restored → re-lock non-free children
+                    for child in paidChildren {
+                        try? await self.sendCommand(target: .child(child.id), action: .returnToSchedule)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sync pending app reviews to CloudKit (both resolved and unresolved).
+    /// Pushes all reviews so parent sees them immediately, even before name resolution.
+    private func syncResolvedPendingReviews() async {
+        guard let cloudKit else { return }
+        guard let data = storage.readRawData(forKey: "pending_review_local.json"),
+              let localReviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
+              !localReviews.isEmpty else { return }
+
+        for review in localReviews {
+            try? await cloudKit.savePendingAppReview(review)
+        }
+        // Keep unresolved locally so ShieldConfiguration can still update names
+        let remaining = localReviews.filter { !$0.nameResolved }
+        if let encoded = try? JSONEncoder().encode(remaining) {
+            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+        }
     }
 
     /// Clear local enrollment state and reset to unconfigured.
@@ -841,6 +922,11 @@ final class AppState {
             return
         }
 
+        // Ping tunnel immediately on launch — clears DNS blackhole ASAP.
+        vpnManager?.sendPing()
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+
         // One-time migration: denyWebWhenLocked used to default to true, which was wrong.
         // Reset it to false on all existing devices so web isn't blocked unless the parent
         // explicitly enables it. Future setRestrictions commands will set the correct value.
@@ -932,6 +1018,12 @@ final class AppState {
             exit(0)
         }
 
+        // Ping tunnel IMMEDIATELY — before any async work. This clears schedule
+        // DNS blackhole the instant the kid opens the app, not 30+ seconds later.
+        vpnManager?.sendPing()
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+
         Task {
             defer {
                 Task { @MainActor in
@@ -942,6 +1034,10 @@ final class AppState {
             // 1. FIRST: process commands immediately — this is what the parent is waiting for.
             // Don't make them wait for schedule sync or enforcement verification.
             try? await commandProcessor?.processIncomingCommands()
+
+            // 1b. Sync resolved pending app reviews to CloudKit.
+            // ShieldAction writes resolved names to local file; we push to CloudKit here.
+            await syncResolvedPendingReviews()
 
             // 2. Sync schedule + restrictions from CloudKit
             await syncScheduleProfile()
@@ -964,7 +1060,7 @@ final class AppState {
                         trigger: "Foreground sync: corrected \(snapshot.effectivePolicy.resolvedMode.rawValue) → \(resolution.mode.rawValue)",
                         effectivePolicy: corrected
                     )
-                    try? storage.commitCorrectedSnapshot(correctedSnapshot)
+                    _ = try? storage.commitCorrectedSnapshot(correctedSnapshot)
                     try? enforcement?.apply(corrected)
                 } else {
                     try? enforcement?.apply(snapshot.effectivePolicy)
@@ -1336,12 +1432,14 @@ final class AppState {
             preserveLocalDeviceFields(into: &devices)
             if devices != childDevices { childDevices = devices }
             if heartbeats != latestHeartbeats { latestHeartbeats = heartbeats }
+            recordHeartbeatHistory(heartbeats)
         } else if let devices = fetchedDevices {
             var merged = devices
             preserveLocalDeviceFields(into: &merged)
             if merged != childDevices { childDevices = merged }
         } else if let heartbeats = fetchedHeartbeats {
             if heartbeats != latestHeartbeats { latestHeartbeats = heartbeats }
+            recordHeartbeatHistory(heartbeats)
             // Re-merge into existing devices.
             for heartbeat in heartbeats {
                 if let idx = childDevices.firstIndex(where: { $0.id == heartbeat.deviceID }) {
@@ -1575,15 +1673,24 @@ final class AppState {
             let since = Date().addingTimeInterval(-1800) // last 30 minutes
             let events = (try? await cloudKit.fetchEventLogs(familyID: familyID, since: since)) ?? []
 
+            var pendingChildIDs = Set<ChildProfileID>()
             for profile in childProfiles {
                 let deviceIDs = Set(childDevices.filter { $0.childProfileID == profile.id }.map(\.id))
+                let configs = childDetailViewModel(forID: profile.id).timeLimitConfigs
                 UnlockRequestNotificationService.checkAndNotify(
                     events: events,
                     childDeviceIDs: deviceIDs,
                     childName: profile.name,
-                    childProfileID: profile.id
+                    childProfileID: profile.id,
+                    timeLimitConfigs: configs
                 )
+                // Track which children have pending requests for the blue dot.
+                let hasRequests = events.contains { event in
+                    event.eventType == .unlockRequested && deviceIDs.contains(event.deviceID)
+                }
+                if hasRequests { pendingChildIDs.insert(profile.id) }
             }
+            await MainActor.run { childrenWithPendingRequests = pendingChildIDs }
         }
     }
 
@@ -1747,7 +1854,7 @@ final class AppState {
     func recoverModeIfNeeded() async {
         guard deviceRole == .child,
               let enrollment = enrollmentState,
-              let cloudKit,
+              cloudKit != nil,
               let commandProcessor = commandProcessor as? CommandProcessorImpl,
               snapshotStore?.loadCurrentSnapshot() == nil else { return }
 
@@ -1979,18 +2086,25 @@ final class AppState {
         }
     }
 
-    /// Check for schedule profile changes every 60 seconds.
+    /// Enforcement verification every 10 seconds + schedule sync every 60 seconds.
+    /// The 10-second check is the PRIMARY enforcement mechanism for background mode changes.
+    /// ManagedSettingsStore writes from backgrounded apps are unreliable (iOS platform limitation).
+    /// The Monitor extension trigger (stopMonitoring) is also unreliable.
+    /// This 10-second check is what actually catches and fixes shield mismatches.
+    private var enforcementTickCount = 0
     private func startScheduleSync() {
         scheduleSyncTimer?.invalidate()
-        let schTimer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+        let schTimer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             guard let self else { return }
-            Task {
-                await self.syncScheduleProfile()
-                await self.syncTimeLimits()
-                // Every 60 seconds: verify enforcement matches ModeStackResolver.
-                // This catches missed Monitor callbacks, stale ManagedSettingsStore,
-                // and any other drift. If shields are wrong, re-apply immediately.
+            Task { @MainActor in
+                // Verify enforcement every 10 seconds (fast path)
                 self.verifyAndFixEnforcement()
+                // Schedule sync every 60 seconds (slow path — CloudKit queries)
+                self.enforcementTickCount += 1
+                if self.enforcementTickCount % 6 == 0 {
+                    await self.syncScheduleProfile()
+                    await self.syncTimeLimits()
+                }
             }
         }
         RunLoop.main.add(schTimer, forMode: .common)
@@ -2009,7 +2123,21 @@ final class AppState {
     private func verifyAndFixEnforcement() {
         guard deviceRole == .child, let enforcement else { return }
 
-        let resolution = ModeStackResolver.resolve(storage: storage)
+        var resolution = ModeStackResolver.resolve(storage: storage)
+
+        // If ModeStackResolver says unlocked (temp unlock) but the latest snapshot says
+        // a different mode (setMode overrode it), trust the snapshot. This handles the
+        // race where clearTemporaryUnlockState failed but setMode committed a new snapshot.
+        if resolution.mode == .unlocked && resolution.isTemporary,
+           let snap = snapshotStore?.loadCurrentSnapshot(),
+           !snap.effectivePolicy.isTemporaryUnlock,
+           snap.effectivePolicy.resolvedMode != .unlocked {
+            // Snapshot says not unlocked — the setMode won. Force-clear stale temp state.
+            try? storage.clearTemporaryUnlockState()
+            try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
+            resolution = ModeStackResolver.resolve(storage: storage)
+        }
+
         let diag = enforcement.shieldDiagnostic()
         let shouldBeShielded = resolution.mode != .unlocked
         let isShielded = diag.shieldsActive || diag.categoryActive
@@ -2033,7 +2161,7 @@ final class AppState {
                 trigger: "60s enforcement check: shields were \(isShielded ? "UP" : "DOWN"), should be \(shouldBeShielded ? "UP" : "DOWN") (mode: \(resolution.mode.rawValue))",
                 effectivePolicy: corrected
             )
-            try? storage.commitCorrectedSnapshot(snap)
+            _ = try? storage.commitCorrectedSnapshot(snap)
 
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
@@ -2141,6 +2269,31 @@ final class AppState {
         guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
         do {
             try cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+
+            // Verify shields applied — .child auth can silently reject writes
+            // after temp unlock expiry. Retry with delay if needed.
+            if mode != .unlocked, let enforcement {
+                let diag = enforcement.shieldDiagnostic()
+                if !diag.shieldsActive && !diag.categoryActive {
+                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .enforcement,
+                        message: "Shield re-apply failed after unlock expiry (app path) — retrying in 2s"
+                    ))
+                    Thread.sleep(forTimeInterval: 2.0)
+                    try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+
+                    let retry = enforcement.shieldDiagnostic()
+                    if !retry.shieldsActive && !retry.categoryActive {
+                        try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                            category: .enforcement,
+                            message: "Shield re-apply FAILED on retry — writing confirmed-down for tunnel"
+                        ))
+                        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                            .set(false, forKey: "shieldsActiveAtLastHeartbeat")
+                    }
+                }
+            }
+
             refreshLocalState()
             ModeChangeNotifier.notify(newMode: mode)
         } catch {

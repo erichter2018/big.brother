@@ -106,6 +106,10 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// Non-zero when enforcement blocked domains are written (shields may be down but DNS catches traffic).
     public let dnsBlockedDomainCount: Int?
 
+    /// Precise per-app foreground usage in minutes, keyed by fingerprint.
+    /// From DeviceActivityEvent milestones — ground truth from iOS, not DNS estimates.
+    public let appUsageMinutes: [String: Int]?
+
     /// The device's current time zone identifier (e.g. "America/New_York").
     public let timeZoneIdentifier: String?
 
@@ -128,6 +132,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     public let currentSpeed: Double?
     /// Who sent this heartbeat: "mainApp" or "vpnExtension".
     public let heartbeatSource: String?
+
+    /// Build type: "debug", "testflight", or "appstore".
+    public let buildType: String?
 
     /// Whether the BigBrother VPN tunnel is connected on the child device.
     public let tunnelConnected: Bool?
@@ -205,6 +212,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         internetBlocked: Bool? = nil,
         internetBlockedReason: String? = nil,
         dnsBlockedDomainCount: Int? = nil,
+        appUsageMinutes: [String: Int]? = nil,
         timeZoneIdentifier: String? = nil,
         timeZoneOffsetSeconds: Int? = nil,
         screenTimeMinutes: Int? = nil,
@@ -214,6 +222,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         isDriving: Bool? = nil,
         currentSpeed: Double? = nil,
         heartbeatSource: String? = nil,
+        buildType: String? = nil,
         tunnelConnected: Bool? = nil,
         motionAuthorized: Bool? = nil,
         notificationsAuthorized: Bool? = nil,
@@ -270,6 +279,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.internetBlocked = internetBlocked
         self.internetBlockedReason = internetBlockedReason
         self.dnsBlockedDomainCount = dnsBlockedDomainCount
+        self.appUsageMinutes = appUsageMinutes
         self.timeZoneIdentifier = timeZoneIdentifier
         self.timeZoneOffsetSeconds = timeZoneOffsetSeconds
         self.screenTimeMinutes = screenTimeMinutes
@@ -279,6 +289,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.isDriving = isDriving
         self.currentSpeed = currentSpeed
         self.heartbeatSource = heartbeatSource
+        self.buildType = buildType
         self.tunnelConnected = tunnelConnected
         self.motionAuthorized = motionAuthorized
         self.notificationsAuthorized = notificationsAuthorized
@@ -319,14 +330,14 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case activeScheduleWindowName
         case lastCommandProcessedAt
         case monitorLastActiveAt
-        case vpnDetected, internetBlocked, internetBlockedReason, dnsBlockedDomainCount
+        case vpnDetected, internetBlocked, internetBlockedReason, dnsBlockedDomainCount, appUsageMinutes
         case timeZoneIdentifier
         case timeZoneOffsetSeconds
         case screenTimeMinutes
         case screenUnlockCount
         case jailbreakDetected
         case jailbreakReason
-        case isDriving, currentSpeed, heartbeatSource, tunnelConnected
+        case isDriving, currentSpeed, heartbeatSource, buildType, tunnelConnected
         case motionAuthorized, notificationsAuthorized
         case isDeviceLocked
         case shieldsActive, scheduleResolvedMode, lastShieldChangeReason
@@ -377,6 +388,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         internetBlocked = try container.decodeIfPresent(Bool.self, forKey: .internetBlocked)
         internetBlockedReason = try container.decodeIfPresent(String.self, forKey: .internetBlockedReason)
         dnsBlockedDomainCount = try container.decodeIfPresent(Int.self, forKey: .dnsBlockedDomainCount)
+        appUsageMinutes = try container.decodeIfPresent([String: Int].self, forKey: .appUsageMinutes)
         timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
         timeZoneOffsetSeconds = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetSeconds)
         screenTimeMinutes = try container.decodeIfPresent(Int.self, forKey: .screenTimeMinutes)
@@ -386,6 +398,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         isDriving = try container.decodeIfPresent(Bool.self, forKey: .isDriving)
         currentSpeed = try container.decodeIfPresent(Double.self, forKey: .currentSpeed)
         heartbeatSource = try container.decodeIfPresent(String.self, forKey: .heartbeatSource)
+        buildType = try container.decodeIfPresent(String.self, forKey: .buildType)
         tunnelConnected = try container.decodeIfPresent(Bool.self, forKey: .tunnelConnected)
         motionAuthorized = try container.decodeIfPresent(Bool.self, forKey: .motionAuthorized)
         notificationsAuthorized = try container.decodeIfPresent(Bool.self, forKey: .notificationsAuthorized)

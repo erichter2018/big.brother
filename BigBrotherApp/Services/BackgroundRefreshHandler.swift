@@ -84,15 +84,29 @@ enum BackgroundRefreshHandler {
                 return .failed
             }
         } else {
+            // Detect if this is an alert push (mode command) vs. silent push.
+            // Alert pushes include an "aps" dict with an "alert" key.
+            let isAlertPush: Bool = {
+                guard let aps = userInfo["aps"] as? [String: Any] else { return false }
+                return aps["alert"] != nil
+            }()
+
             // Process commands IMMEDIATELY. No debounce, no sleep.
             // The parent just sent a command and is waiting. Every millisecond counts.
-            NSLog("[BigBrother] Push received (child) — processing commands NOW")
+            NSLog("[BigBrother] Push received (child, \(isAlertPush ? "alert" : "silent")) — processing commands NOW")
+
+            // Suppress duplicate local notifications when the alert push already showed a banner.
+            let processor = await MainActor.run { appState.commandProcessor as? CommandProcessorImpl }
+            if isAlertPush { processor?.suppressModeNotifications = true }
+
             do {
                 try await appState.commandProcessor?.processIncomingCommands()
+                processor?.suppressModeNotifications = false
                 await MainActor.run { appState.refreshLocalState() }
                 NSLog("[BigBrother] Push command processing complete")
                 return .newData
             } catch {
+                processor?.suppressModeNotifications = false
                 NSLog("[BigBrother] Push command processing failed: \(error.localizedDescription)")
                 return .failed
             }

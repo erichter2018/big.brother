@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import CloudKit
+import UserNotifications
 import BigBrotherCore
 
 /// Bedtime compliance result for a single day.
@@ -38,6 +39,9 @@ struct TimelineEntry: Identifiable {
     /// The app name extracted from unlock request details.
     let appName: String?
 
+    /// Token fingerprint from unlock request (for matching to TimeLimitConfig).
+    let fingerprint: String?
+
     /// The event type (for non-command entries).
     let eventType: EventType?
 
@@ -50,6 +54,7 @@ struct TimelineEntry: Identifiable {
         isUnlockRequest: Bool = false,
         deviceID: DeviceID? = nil,
         appName: String? = nil,
+        fingerprint: String? = nil,
         eventType: EventType? = nil
     ) {
         self.id = id
@@ -60,6 +65,7 @@ struct TimelineEntry: Identifiable {
         self.isUnlockRequest = isUnlockRequest
         self.deviceID = deviceID
         self.appName = appName
+        self.fingerprint = fingerprint
         self.eventType = eventType
     }
 }
@@ -82,6 +88,11 @@ final class ChildDetailViewModel: CommandSendable {
 
     /// Per-app time limit configs from CloudKit.
     var timeLimitConfigs: [TimeLimitConfig] = []
+
+    /// Fingerprints of apps blocked for today, persisted in UserDefaults keyed by child+date.
+    var blockedForTodayFingerprints: Set<String> {
+        didSet { Self.saveBlockedForToday(blockedForTodayFingerprints, childID: child.id) }
+    }
 
     /// DNS-based online activity snapshot for this child (today only, with slot data for timeline scrubbing).
     var onlineActivity: DomainActivitySnapshot?
@@ -139,6 +150,8 @@ final class ChildDetailViewModel: CommandSendable {
     init(appState: AppState, child: ChildProfile) {
         self.appState = appState
         self.child = child
+        self.blockedForTodayFingerprints = Self.loadBlockedForToday(childID: child.id)
+        self.grantedExtraMinutes = Self.loadGrantedExtra(childID: child.id)
         self.selfUnlockBudget = Self.loadSelfUnlockBudget(for: child.id)
         self.didFinishInit = true
     }
@@ -209,6 +222,30 @@ final class ChildDetailViewModel: CommandSendable {
         UserDefaults.standard.set(budget, forKey: "selfUnlockBudget.\(childID.rawValue)")
     }
 
+    // MARK: - Blocked For Today Persistence
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static func blockedKey(childID: ChildProfileID) -> String {
+        let today = dateFormatter.string(from: Date())
+        return "blockedForToday.\(childID.rawValue).\(today)"
+    }
+
+    private static func loadBlockedForToday(childID: ChildProfileID) -> Set<String> {
+        let key = blockedKey(childID: childID)
+        let arr = UserDefaults.standard.stringArray(forKey: key) ?? []
+        return Set(arr)
+    }
+
+    private static func saveBlockedForToday(_ fingerprints: Set<String>, childID: ChildProfileID) {
+        let key = blockedKey(childID: childID)
+        UserDefaults.standard.set(Array(fingerprints), forKey: key)
+    }
+
     /// Toggle a single restriction and send to all child devices.
     func toggleRestriction(_ keyPath: WritableKeyPath<DeviceRestrictions, Bool>) {
         var r = restrictions
@@ -264,7 +301,8 @@ final class ChildDetailViewModel: CommandSendable {
             async let s: () = loadWeeklyScreenTime()
             async let o: () = loadOnlineActivity()
             async let t: () = loadTimeLimits()
-            _ = await (e, s, o, t)
+            async let p: () = loadPendingAppReviews()
+            _ = await (e, s, o, t, p)
         }
     }
 
@@ -276,6 +314,7 @@ final class ChildDetailViewModel: CommandSendable {
             Task { [weak self] in
                 await self?.loadEvents()
                 await self?.loadTimeLimits()
+                await self?.loadPendingAppReviews()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -301,6 +340,48 @@ final class ChildDetailViewModel: CommandSendable {
         appState.latestHeartbeats.first { $0.deviceID == device.id }
     }
 
+    /// Rolling history of last 3 heartbeats for a device (most recent first).
+    func heartbeatHistory(for device: ChildDevice) -> [DeviceHeartbeat] {
+        appState.heartbeatHistory[device.id.rawValue] ?? []
+    }
+
+    /// Format heartbeat history as copyable text for troubleshooting.
+    func formattedHeartbeatHistory(for device: ChildDevice) -> String {
+        let history = heartbeatHistory(for: device)
+        guard !history.isEmpty else { return "No heartbeat history available." }
+
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss"
+
+        let deviceName = DeviceIcon.displayName(for: device.modelIdentifier)
+        var lines: [String] = ["Heartbeat History: \(deviceName) (\(child.name))"]
+        lines.append("Device ID: \(device.id.rawValue)")
+        lines.append("Exported: \(df.string(from: Date()))")
+        lines.append(String(repeating: "-", count: 50))
+
+        for (i, hb) in history.enumerated() {
+            let age = Int(-hb.timestamp.timeIntervalSinceNow)
+            let ageStr = age < 60 ? "\(age)s ago" : "\(age / 60)m ago"
+            lines.append("")
+            lines.append("[\(i + 1)] \(df.string(from: hb.timestamp)) (\(ageStr))")
+            lines.append("  Mode: \(hb.currentMode.rawValue)  Policy: v\(hb.policyVersion)")
+            lines.append("  Source: \(hb.heartbeatSource ?? "unknown")  Seq: \(hb.heartbeatSeq.map(String.init) ?? "?")")
+            lines.append("  Shields: \(hb.shieldsActive.map { $0 ? "UP" : "DOWN" } ?? "?")  Category: \(hb.shieldCategoryActive.map { $0 ? "active" : "off" } ?? "?")  Apps: \(hb.shieldedAppCount.map(String.init) ?? "?")")
+            lines.append("  Battery: \(hb.batteryLevel.map { "\(Int($0 * 100))%" } ?? "?")  Charging: \(hb.isCharging.map { $0 ? "yes" : "no" } ?? "?")")
+            lines.append("  Build: b\(hb.appBuildNumber ?? 0)  Main: b\(hb.mainAppLastLaunchedBuild ?? 0)")
+            lines.append("  DNS blocked: \(hb.dnsBlockedDomainCount ?? 0)  Tunnel: \(hb.tunnelConnected.map { $0 ? "connected" : "off" } ?? "?")")
+            lines.append("  Internet blocked: \(hb.internetBlocked.map { $0 ? "YES" : "no" } ?? "?")")
+            lines.append("  FC auth: \(hb.familyControlsAuthorized ? "yes" : "NO")  Type: \(hb.familyControlsAuthType ?? "?")")
+            lines.append("  Schedule: \(hb.scheduleResolvedMode ?? "none")  Shield reason: \(hb.lastShieldChangeReason ?? "?")")
+            lines.append("  Screen: \(hb.isDeviceLocked.map { $0 ? "locked" : "unlocked" } ?? "?")  ScreenTime: \(hb.screenTimeMinutes.map { "\($0)m" } ?? "?")")
+            if let err = hb.enforcementError { lines.append("  ERROR: \(err)") }
+            if let tempExp = hb.temporaryUnlockExpiresAt {
+                lines.append("  Temp unlock expires: \(df.string(from: tempExp))")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// The schedule profile assigned to this child (from any of their devices).
     var scheduleProfile: ScheduleProfile? {
         for dev in devices {
@@ -319,6 +400,8 @@ final class ChildDetailViewModel: CommandSendable {
         let isIPad: Bool
         let shieldsDown: Bool
         let internetBlocked: Bool
+        let dnsBlockingActive: Bool
+        let dnsBlockedCount: Int
         let reason: String
     }
 
@@ -339,27 +422,37 @@ final class ChildDetailViewModel: CommandSendable {
             // Internet blocked
             let internetBlocked = hb.internetBlocked == true
 
+            // DNS blocking as fallback
+            let dnsCount = hb.dnsBlockedDomainCount ?? 0
+            let dnsActive = dnsCount > 0
+
             if shieldsDown || internetBlocked {
                 var reasons: [String] = []
-                if isStale {
-                    let mins = Int(-hb.timestamp.timeIntervalSinceNow / 60)
-                    reasons.append("Last seen \(mins) min ago — issue may persist")
-                }
+
                 if shieldsDown {
-                    reasons.append("Shields down — mode is \(hb.currentMode.rawValue) but ManagedSettings empty")
                     if hb.heartbeatSource == "vpnTunnel" {
-                        reasons.append("App not running (heartbeat from tunnel)")
+                        reasons.append("App was killed or suspended — shield state may be stale")
+                    } else {
+                        reasons.append("App is running but ManagedSettings are empty — open the app on this device to re-apply")
                     }
-                    if let reason = hb.lastShieldChangeReason {
-                        reasons.append("Last shield change: \(reason)")
+                    if dnsActive {
+                        reasons.append("DNS fallback active — blocking \(dnsCount) domain\(dnsCount == 1 ? "" : "s") via VPN tunnel")
+                    } else if hb.tunnelConnected == true {
+                        reasons.append("VPN tunnel connected but no DNS blocking active")
+                    } else {
+                        reasons.append("VPN tunnel not connected — no fallback protection")
                     }
                 }
                 if internetBlocked {
                     if let reason = hb.internetBlockedReason, !reason.isEmpty {
-                        reasons.append("DNS blocked: \(reason)")
+                        reasons.append("Internet blocked: \(reason)")
                     } else {
-                        reasons.append("DNS blocked by tunnel")
+                        reasons.append("Internet blocked by tunnel")
                     }
+                }
+                if isStale {
+                    let mins = Int(-hb.timestamp.timeIntervalSinceNow / 60)
+                    reasons.append("Last seen \(mins) min ago")
                 }
                 issues.append(DeviceIssue(
                     id: device.id,
@@ -367,6 +460,8 @@ final class ChildDetailViewModel: CommandSendable {
                     isIPad: isIPad,
                     shieldsDown: shieldsDown,
                     internetBlocked: internetBlocked,
+                    dnsBlockingActive: dnsActive,
+                    dnsBlockedCount: dnsCount,
                     reason: reasons.joined(separator: "\n")
                 ))
             }
@@ -456,7 +551,7 @@ final class ChildDetailViewModel: CommandSendable {
     /// Lock down: essentialOnly shielding + internet block via VPN DNS blackhole.
     func lockDown(seconds: Int? = nil) async {
         appState.expectedModes[child.id] = (.lockedDown, Date())
-        let blockDuration = seconds ?? 86400
+        let _ = seconds ?? 86400
         isSendingCommand = true
         do {
             try await appState.sendCommand(target: .child(child.id), action: .setMode(.lockedDown))
@@ -549,6 +644,17 @@ final class ChildDetailViewModel: CommandSendable {
         appState.removeApprovedApp(appName: app.appName, deviceID: app.deviceID)
     }
 
+    /// Names revoked this session — excluded from the always-allowed display
+    /// until the next heartbeat confirms the change.
+    var revokedAppNames: Set<String> = []
+    var localAlwaysAllowedNames: Set<String> = []
+
+    /// Revoke an always-allowed app by name across all child devices.
+    func revokeApp(named name: String) async {
+        revokedAppNames.insert(name)
+        await performCommand(.blockManagedApp(appName: name), target: .child(child.id))
+    }
+
     /// Send an app name to the child device so ShieldAction uses it in future requests.
     func sendAppNameToChild(name: String, rawAppName: String, deviceID: DeviceID?) async {
         guard let fingerprint = ParentAppNameMapping.extractFingerprint(from: rawAppName) else { return }
@@ -618,9 +724,14 @@ final class ChildDetailViewModel: CommandSendable {
 
         // Extract app name from unlock requests.
         let appName: String?
-        if event.eventType == .unlockRequested,
-           cleanDetails.hasPrefix("Requesting access to ") {
-            appName = String(cleanDetails.dropFirst("Requesting access to ".count))
+        if event.eventType == .unlockRequested {
+            if cleanDetails.hasPrefix("Requesting more time for ") {
+                appName = String(cleanDetails.dropFirst("Requesting more time for ".count))
+            } else if cleanDetails.hasPrefix("Requesting access to ") {
+                appName = String(cleanDetails.dropFirst("Requesting access to ".count))
+            } else {
+                appName = nil
+            }
         } else {
             appName = nil
         }
@@ -649,9 +760,15 @@ final class ChildDetailViewModel: CommandSendable {
                 Self.visibleEventTypes.contains(event.eventType)
             }
             .map { event in
-                // Extract app name from "Requesting access to AppName\nTOKEN:..." details.
-                // Strip the TOKEN payload for display.
                 let (displayDetails, extractedAppName) = Self.parseEventDetails(event)
+                let fp = UnlockRequestNotificationService.extractFingerprint(from: event.details)
+
+                // Resolve app name from TimeLimitConfig by fingerprint if name is generic.
+                var resolvedName = extractedAppName
+                if (resolvedName == nil || resolvedName == "App" || resolvedName == "an app"),
+                   let fp, let config = self.timeLimitConfigs.first(where: { $0.appFingerprint == fp }) {
+                    resolvedName = config.appName
+                }
 
                 return TimelineEntry(
                     id: event.id,
@@ -660,7 +777,8 @@ final class ChildDetailViewModel: CommandSendable {
                     isCommand: false,
                     isUnlockRequest: event.eventType == .unlockRequested,
                     deviceID: event.deviceID,
-                    appName: extractedAppName,
+                    appName: resolvedName,
+                    fingerprint: fp,
                     eventType: event.eventType
                 )
             }
@@ -675,7 +793,7 @@ final class ChildDetailViewModel: CommandSendable {
 
             // Skip if a child event already covers this command (within 30s window).
             let cmdEpoch = Int(cmd.issuedAt.timeIntervalSince1970)
-            let hasCoveringEvent = (-30...30).contains(where: { offset in
+            let _ = (-30...30).contains(where: { offset in
                 eventTimestamps.contains(cmdEpoch + offset)
             })
 
@@ -763,15 +881,23 @@ final class ChildDetailViewModel: CommandSendable {
         if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
             timeLimitConfigs[idx] = updated
         }
+        // Send command to child so the device-side limit updates immediately
+        await performCommand(
+            .reviewApp(fingerprint: config.appFingerprint, disposition: .timeLimit, minutes: minutes),
+            target: .child(config.childProfileID)
+        )
     }
 
     func removeTimeLimit(config: TimeLimitConfig) async {
         guard let cloudKit = appState.cloudKit else { return }
-        // Persist name so it pre-fills when re-adding
-        ParentAppNameMapping.setName(config.appName, forFingerprint: config.appFingerprint)
-        try? await cloudKit.deleteTimeLimitConfig(config.id)
-        timeLimitConfigs.removeAll { $0.id == config.id }
-        // Send command to all child devices to stop monitoring
+        // Deactivate — keep record in CloudKit so name auto-populates if re-added
+        var updated = config
+        updated.isActive = false
+        updated.updatedAt = Date()
+        try? await cloudKit.saveTimeLimitConfig(updated)
+        if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
+            timeLimitConfigs[idx] = updated
+        }
         await performCommand(.removeTimeLimit(appFingerprint: config.appFingerprint), target: .child(config.childProfileID))
     }
 
@@ -788,15 +914,164 @@ final class ChildDetailViewModel: CommandSendable {
         await sendAppNameToChild(name: newName, rawAppName: config.appName, deviceID: config.deviceID)
     }
 
+    /// Convert a time-limited app to always allowed.
+    /// Updates the existing CloudKit config to 0 minutes (= always allowed).
+    func convertToAlwaysAllowed(config: TimeLimitConfig) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        var updated = config
+        updated.dailyLimitMinutes = 0
+        updated.updatedAt = Date()
+        try? await cloudKit.saveTimeLimitConfig(updated)
+        if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
+            timeLimitConfigs[idx] = updated
+        }
+        await performCommand(
+            .reviewApp(fingerprint: config.appFingerprint, disposition: .allowAlways, minutes: nil),
+            target: .child(config.childProfileID)
+        )
+    }
+
+    /// Convert an always-allowed app to time-limited.
+    /// Updates the existing CloudKit config with the new limit.
+    func convertToTimeLimited(config: TimeLimitConfig, minutes: Int) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        var updated = config
+        updated.dailyLimitMinutes = minutes
+        updated.updatedAt = Date()
+        try? await cloudKit.saveTimeLimitConfig(updated)
+        if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
+            timeLimitConfigs[idx] = updated
+        }
+        await performCommand(
+            .reviewApp(fingerprint: config.appFingerprint, disposition: .timeLimit, minutes: minutes),
+            target: .child(config.childProfileID)
+        )
+    }
+
+    /// Revoke an always-allowed app (deactivate in CloudKit, block on device).
+    /// Keeps the record so the name auto-populates if re-added later.
+    func revokeAlwaysAllowed(config: TimeLimitConfig) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        var updated = config
+        updated.isActive = false
+        updated.updatedAt = Date()
+        try? await cloudKit.saveTimeLimitConfig(updated)
+        if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
+            timeLimitConfigs[idx] = updated
+        }
+        await performCommand(
+            .reviewApp(fingerprint: config.appFingerprint, disposition: .keepBlocked, minutes: nil),
+            target: .child(config.childProfileID)
+        )
+    }
+
     func blockAppForToday(config: TimeLimitConfig) async {
+        blockedForTodayFingerprints.insert(config.appFingerprint)
+        grantedExtraMinutes.removeValue(forKey: config.appFingerprint)
         await performCommand(
             .blockAppForToday(appFingerprint: config.appFingerprint),
             target: .child(config.childProfileID)
         )
     }
 
+    /// Whether the app is blocked for today (exhausted or manually blocked).
+    func isAppBlockedForToday(_ config: TimeLimitConfig) -> Bool {
+        if blockedForTodayFingerprints.contains(config.appFingerprint) { return true }
+        guard config.dailyLimitMinutes > 0 else { return false }
+        return appUsageMinutes(for: config) >= Double(config.dailyLimitMinutes)
+    }
+
+    /// Extra minutes granted today, keyed by app fingerprint. Persisted in UserDefaults by child+date.
+    var grantedExtraMinutes: [String: Int] {
+        didSet { Self.saveGrantedExtra(grantedExtraMinutes, childID: child.id) }
+    }
+
     func grantExtraTime(config: TimeLimitConfig, minutes: Int) async {
+        grantedExtraMinutes[config.appFingerprint, default: 0] += minutes
+        dismissRequest(for: config)
         await performCommand(.grantExtraTime(appFingerprint: config.appFingerprint, extraMinutes: minutes), target: .child(config.childProfileID))
+    }
+
+    /// Dismissed request IDs — user explicitly denied or acted on them.
+    /// Request IDs dismissed this session (optimistic UI removal before CK delete completes).
+    private var dismissedRequestIDs: Set<String> = []
+
+    /// Whether this app has a pending "more time" request from the child.
+    func hasPendingTimeRequest(for config: TimeLimitConfig) -> Bool {
+        pendingTimeRequest(for: config) != nil
+    }
+
+    /// Find the pending time request entry for a config, if any.
+    /// Matches by fingerprint first (reliable), then falls back to name.
+    func pendingTimeRequest(for config: TimeLimitConfig) -> TimelineEntry? {
+        timeline.first { entry in
+            guard entry.isUnlockRequest, !dismissedRequestIDs.contains(entry.id.uuidString) else { return false }
+            // Match by fingerprint (reliable)
+            if let fp = entry.fingerprint, fp == config.appFingerprint { return true }
+            // Fallback: match by name
+            if let name = entry.appName, name == config.appName { return true }
+            return false
+        }
+    }
+
+    /// Whether this child has ANY pending time requests (for dashboard dot).
+    /// Returns false if data hasn't loaded yet to avoid stale dots.
+    var hasPendingTimeRequests: Bool {
+        guard hasLoadedInitialData else { return false }
+        return timeline.contains { $0.isUnlockRequest && !dismissedRequestIDs.contains($0.id.uuidString) }
+    }
+
+    /// Deny a time request — remove from UI and delete from CloudKit.
+    func denyTimeRequest(for config: TimeLimitConfig) {
+        dismissRequest(for: config)
+    }
+
+    /// Remove a request from the UI immediately and delete from CloudKit in the background.
+    private func dismissRequest(for config: TimeLimitConfig) {
+        guard let entry = pendingTimeRequest(for: config) else { return }
+        let eventID = entry.id
+        dismissedRequestIDs.insert(eventID.uuidString)
+        timeline.removeAll { $0.id == eventID }
+        // Clear the parent notification for this request.
+        UNUserNotificationCenter.current().removeDeliveredNotifications(
+            withIdentifiers: ["unlock-\(eventID.uuidString)"]
+        )
+        // Remove from pending set so blue dot clears.
+        appState.childrenWithPendingRequests.remove(child.id)
+        // Delete from CloudKit so it never comes back.
+        Task {
+            try? await appState.cloudKit?.deleteEventLog(eventID)
+        }
+    }
+
+    private static func grantedExtraKey(childID: ChildProfileID) -> String {
+        let today = dateFormatter.string(from: Date())
+        return "grantedExtra.\(childID.rawValue).\(today)"
+    }
+
+    static func loadGrantedExtra(childID: ChildProfileID) -> [String: Int] {
+        let key = grantedExtraKey(childID: childID)
+        return (UserDefaults.standard.dictionary(forKey: key) as? [String: Int]) ?? [:]
+    }
+
+    private static func saveGrantedExtra(_ extras: [String: Int], childID: ChildProfileID) {
+        let key = grantedExtraKey(childID: childID)
+        UserDefaults.standard.set(extras, forKey: key)
+    }
+
+
+    /// App usage in minutes. Uses precise DeviceActivityEvent data when available
+    /// (from heartbeat's appUsageMinutes), falls back to DNS estimate.
+    func appUsageMinutes(for config: TimeLimitConfig) -> Double {
+        // Precise: from DeviceActivityEvent milestones via heartbeat.
+        let deviceIDs = Set(devices.map(\.id))
+        for hb in appState.latestHeartbeats where deviceIDs.contains(hb.deviceID) {
+            if let usage = hb.appUsageMinutes, let minutes = usage[config.appFingerprint] {
+                return Double(minutes)
+            }
+        }
+        // Fallback: DNS estimate.
+        return estimatedAppUsage(for: config.appName)
     }
 
     /// Estimated app usage in minutes from DNS data for today.
@@ -937,7 +1212,7 @@ final class ChildDetailViewModel: CommandSendable {
 
     /// Fetch DNS activity from CloudKit for this child's devices.
     func loadOnlineActivity() async {
-        guard let cloudKit = appState.cloudKit,
+        guard appState.cloudKit != nil,
               let familyID = appState.parentState?.familyID else { return }
 
         let deviceIDs = Set(devices.map(\.id))
@@ -1080,6 +1355,138 @@ final class ChildDetailViewModel: CommandSendable {
     func requestLocation() async {
         await performCommand(.requestLocation, target: .child(child.id))
     }
+
+    // MARK: - Pending App Reviews
+
+    /// Apps selected by the child awaiting parent review.
+    var pendingAppReviews: [PendingAppReview] = []
+    /// IDs of reviews the parent already acted on — filtered out even if CloudKit returns stale data.
+    private var dismissedReviewIDs: Set<UUID> = []
+
+    var pendingReviewDiagnostic = ""
+
+    func loadPendingAppReviews() async {
+        guard let cloudKit = appState.cloudKit else {
+            pendingReviewDiagnostic = "No CloudKit service"
+            return
+        }
+        do {
+            let all = try await cloudKit.fetchPendingAppReviews(childProfileID: child.id)
+                .filter { !dismissedReviewIDs.contains($0.id) }
+            // Also deduplicate by fingerprint — keep only the latest per app
+            var seen: [String: PendingAppReview] = [:]
+            for review in all {
+                if let existing = seen[review.appFingerprint] {
+                    if review.createdAt > existing.createdAt { seen[review.appFingerprint] = review }
+                } else {
+                    seen[review.appFingerprint] = review
+                }
+            }
+            let deduped = Array(seen.values)
+            let resolved = deduped.filter(\.nameResolved)
+            pendingReviewDiagnostic = "CK: \(all.count) total, \(deduped.count) unique, \(resolved.count) named"
+            pendingAppReviews = deduped.sorted { $0.createdAt < $1.createdAt }
+        } catch {
+            pendingReviewDiagnostic = "CK ERROR: \(error.localizedDescription)"
+        }
+    }
+
+    /// Rename a pending review (parent types the real name after child tells them).
+    func renameReview(_ review: PendingAppReview, newName: String) async {
+        guard let idx = pendingAppReviews.firstIndex(where: { $0.id == review.id }) else { return }
+        var updated = pendingAppReviews[idx]
+        updated.appName = newName
+        updated.nameResolved = true
+        updated.updatedAt = Date()
+        pendingAppReviews[idx] = updated
+        // Update in CloudKit
+        if let cloudKit = appState.cloudKit {
+            try? await cloudKit.savePendingAppReview(updated)
+        }
+    }
+
+    /// Delete all pending app reviews for this child from CloudKit.
+    func clearAllPendingReviews() async {
+        guard let cloudKit = appState.cloudKit else { return }
+        // Mark all as dismissed so stale CloudKit reads don't resurrect them
+        for review in pendingAppReviews {
+            dismissedReviewIDs.insert(review.id)
+        }
+        // Delete everything from CloudKit (fetch fresh to catch duplicates)
+        let allFromCK = (try? await cloudKit.fetchPendingAppReviews(childProfileID: child.id)) ?? []
+        for review in allFromCK {
+            dismissedReviewIDs.insert(review.id)
+            try? await cloudKit.deletePendingAppReview(review.id)
+        }
+        pendingAppReviews = []
+        pendingReviewDiagnostic = "Cleared"
+    }
+
+    /// Send the child app picker command to a specific device.
+    func requestChildAppPick(for device: ChildDevice) async {
+        await performCommand(.requestChildAppPick, target: .device(device.id))
+    }
+
+    /// Parent decides on a pending app: allow always, time limit, or keep blocked.
+    func reviewApp(_ review: PendingAppReview, disposition: AppDisposition, minutes: Int? = nil) async {
+        // Send command to child device
+        await performCommand(
+            .reviewApp(fingerprint: review.appFingerprint, disposition: disposition, minutes: minutes),
+            target: .device(review.deviceID)
+        )
+
+        // Create or reactivate CloudKit config — source of truth for app status.
+        // Check for existing inactive config with same fingerprint to avoid duplicates.
+        if let cloudKit = appState.cloudKit, disposition != .keepBlocked {
+            let dailyMinutes = disposition == .allowAlways ? 0 : (minutes ?? 60)
+
+            if let existingIdx = timeLimitConfigs.firstIndex(where: { $0.appFingerprint == review.appFingerprint }) {
+                // Reactivate existing config
+                var updated = timeLimitConfigs[existingIdx]
+                updated.dailyLimitMinutes = dailyMinutes
+                updated.isActive = true
+                updated.appName = review.appName
+                updated.updatedAt = Date()
+                try? await cloudKit.saveTimeLimitConfig(updated)
+                timeLimitConfigs[existingIdx] = updated
+            } else {
+                // Create new config
+                let config = TimeLimitConfig(
+                    familyID: review.familyID,
+                    childProfileID: review.childProfileID,
+                    appFingerprint: review.appFingerprint,
+                    appName: review.appName,
+                    dailyLimitMinutes: dailyMinutes,
+                    isActive: true
+                )
+                try? await cloudKit.saveTimeLimitConfig(config)
+                timeLimitConfigs.append(config)
+            }
+        }
+
+        // Delete the pending review from CloudKit
+        if let cloudKit = appState.cloudKit {
+            try? await cloudKit.deletePendingAppReview(review.id)
+        }
+
+        // Remove from local list and mark as dismissed so CloudKit stale reads don't bring it back
+        dismissedReviewIDs.insert(review.id)
+        // Also dismiss any duplicates with same fingerprint
+        pendingAppReviews.filter { $0.appFingerprint == review.appFingerprint }.forEach {
+            dismissedReviewIDs.insert($0.id)
+        }
+        pendingAppReviews.removeAll { $0.appFingerprint == review.appFingerprint }
+
+        // Delete ALL CloudKit records with this fingerprint (catches duplicates)
+        if let cloudKit = appState.cloudKit {
+            let allForChild = (try? await cloudKit.fetchPendingAppReviews(childProfileID: review.childProfileID)) ?? []
+            for dup in allForChild where dup.appFingerprint == review.appFingerprint {
+                try? await cloudKit.deletePendingAppReview(dup.id)
+            }
+        }
+    }
+
+    // MARK: - Permissions
 
     /// Re-request all permissions on the child device (Screen Time + Location).
     /// Parent should be physically holding the child device when sending this.

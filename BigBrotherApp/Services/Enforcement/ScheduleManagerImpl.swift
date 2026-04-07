@@ -44,28 +44,23 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
     }
 
     func registerReconciliationSchedule() throws {
-        // Register repeating schedules that fire every 5 minutes to reconcile enforcement state.
-        // Tightened from 15-minute to reduce the window when Monitor is killed mid-operation
-        // and shields are inconsistent with the policy snapshot.
-        let intervals: [(name: String, minute: Int)] = [
-            ("bigbrother.reconciliation", 0),
-            ("bigbrother.reconciliation.q2", 5),
-            ("bigbrother.reconciliation.q3", 10),
-            ("bigbrother.reconciliation.q4", 15),
-            ("bigbrother.reconciliation.q5", 20),
-            ("bigbrother.reconciliation.q6", 25),
-            ("bigbrother.reconciliation.q7", 30),
-            ("bigbrother.reconciliation.q8", 35),
-            ("bigbrother.reconciliation.q9", 40),
-            ("bigbrother.reconciliation.q10", 45),
-            ("bigbrother.reconciliation.q11", 50),
-            ("bigbrother.reconciliation.q12", 55),
-        ]
+        // Register repeating schedules that fire every 2 minutes to reconcile enforcement state.
+        // Register 60 reconciliation slots (every minute) for maximum responsiveness.
+        // Each slot has a 2-minute duration so intervals overlap — at any given moment,
+        // at least one slot is active. This ensures stopMonitoring() triggers intervalDidEnd.
+        var intervals: [(name: String, minute: Int)] = []
+        for m in 0..<60 {
+            let name = m == 0 ? "bigbrother.reconciliation" : "bigbrother.reconciliation.m\(m)"
+            intervals.append((name: name, minute: m))
+        }
 
         for q in intervals {
             let activityName = DeviceActivityName(rawValue: q.name)
             let start = DateComponents(minute: q.minute)
-            let end = DateComponents(minute: q.minute + 1)
+            let endMinute = (q.minute + 2) % 60
+            // Skip slots where end wraps past the hour (DeviceActivity doesn't handle cross-hour)
+            guard endMinute > q.minute else { continue }
+            let end = DateComponents(minute: endMinute)
 
             let schedule = DeviceActivitySchedule(
                 intervalStart: start,

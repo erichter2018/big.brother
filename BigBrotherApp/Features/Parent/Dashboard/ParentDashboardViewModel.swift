@@ -111,7 +111,7 @@ final class ParentDashboardViewModel: CommandSendable {
     func unpauseAll() async {
         let snapshot = pauseSnapshot
         let pausedAt = snapshot?.pausedAt ?? Date()
-        let pauseDuration = Date().timeIntervalSince(pausedAt)
+        let _ = Date().timeIntervalSince(pausedAt)
 
         familyPauseExpiresAt = nil
         pauseSnapshot = nil
@@ -274,6 +274,15 @@ final class ParentDashboardViewModel: CommandSendable {
                 loadingState = .empty("No children configured yet.")
             } else {
                 loadingState = .loaded(appState.childProfiles)
+            }
+            // Pre-process driving routes in background so maps load instantly.
+            if let cloudKit = appState.cloudKit,
+               let familyID = appState.parentState?.familyID {
+                RouteProcessingService.shared.processIfNeeded(
+                    cloudKit: cloudKit,
+                    childDevices: appState.childDevices,
+                    familyID: familyID
+                )
             }
         } catch {
             loadingState = .error(error.localizedDescription)
@@ -497,7 +506,7 @@ final class ParentDashboardViewModel: CommandSendable {
         scheduleActiveChildren.remove(child.id)
         appState.expectedModes[child.id] = (.lockedDown, Date())
         // Track lock-down expiry for countdown display.
-        let blockDuration = seconds ?? 86400 // 24h default
+        let _ = seconds ?? 86400 // 24h default
         if let seconds, seconds < 86400 {
             lockDownExpiries[child.id] = Date().addingTimeInterval(Double(seconds))
             startCountdownTimer()
@@ -754,6 +763,7 @@ final class ParentDashboardViewModel: CommandSendable {
         let modes = devs.compactMap(\.confirmedMode)
         // If no heartbeat data at all, assume locked (safer than assuming unlocked).
         if modes.isEmpty { return (.restricted, false) }
+        if modes.contains(.lockedDown) { return (.lockedDown, false) }
         if modes.contains(.locked) { return (.locked, false) }
         if modes.contains(.restricted) { return (.restricted, false) }
         return (.unlocked, false)
@@ -974,6 +984,49 @@ final class ParentDashboardViewModel: CommandSendable {
         }
     }
 
+    /// Tracks when we last sent a corrective command per device to avoid spam.
+    private var lastScheduleCorrection: [DeviceID: Date] = [:]
+
+    /// Detect child devices where the heartbeat's schedule mode disagrees with the parent's
+    /// computed schedule mode, and automatically send returnToSchedule to fix it.
+    /// Throttled to once per 5 minutes per device.
+    private func autoCorrectScheduleMismatches() async {
+        let correctionCooldown: TimeInterval = 300 // 5 minutes
+
+        for child in childProfiles {
+            guard isScheduleActive(for: child) else { continue }
+            guard let profile = scheduleProfile(for: child) else { continue }
+            let parentMode = profile.resolvedMode(at: Date())
+
+            for dev in devices(for: child) {
+                guard let hb = heartbeat(for: dev) else { continue }
+                // Only correct if heartbeat is fresh (< 10 min) — stale heartbeats
+                // may report an old state that's already been fixed.
+                guard hb.timestamp.timeIntervalSinceNow > -600 else { continue }
+
+                // Parse the child's schedule mode from heartbeat
+                guard let detail = hb.scheduleResolvedMode,
+                      let childModeRaw = detail.components(separatedBy: " ").first,
+                      let childMode = LockMode.from(childModeRaw) else { continue }
+
+                // If they agree, nothing to do
+                guard childMode != parentMode else { continue }
+
+                // Skip if we recently corrected this device
+                if let lastCorrection = lastScheduleCorrection[dev.id],
+                   Date().timeIntervalSince(lastCorrection) < correctionCooldown { continue }
+
+                // Child thinks it should be unlocked but parent says restricted/locked → fix it
+                lastScheduleCorrection[dev.id] = Date()
+                NSLog("[BigBrother] Schedule mismatch on \(dev.displayName): child=\(childMode.rawValue) parent=\(parentMode.rawValue) — sending returnToSchedule")
+                try? await appState.sendCommand(
+                    target: .device(dev.id),
+                    action: .returnToSchedule
+                )
+            }
+        }
+    }
+
     func startCountdownTimer() {
         guard countdownTimer == nil else { return }
         lastHeartbeatRefresh = Date()
@@ -998,6 +1051,8 @@ final class ParentDashboardViewModel: CommandSendable {
                     }
                     // Auto-ping stale devices in the background — don't block the refresh cycle.
                     Task { await self.autoPingStaleDevices() }
+                    // Auto-correct child devices whose schedule mode disagrees with parent's.
+                    await self.autoCorrectScheduleMismatches()
                 }
 
                 // When penalty phase ends (transitioning to unlock), clear the Firebase timer.

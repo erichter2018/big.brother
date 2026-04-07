@@ -1,6 +1,11 @@
 import SwiftUI
 import CoreLocation
+import CloudKit
 import BigBrotherCore
+#if canImport(FamilyControls)
+import FamilyControls
+import ManagedSettings
+#endif
 
 /// Child device home screen — informational only.
 /// Shows current mode, temporary unlock countdown, and authorization status.
@@ -10,6 +15,14 @@ struct ChildHomeView: View {
     @State private var showAppBlockingSetup = false
     @State private var showAlwaysAllowedSetup = false
     @State private var showTimeLimitSetup = false
+    @State private var showChildAppPick = false
+    #if canImport(FamilyControls)
+    @State private var showSingleAppPick = false
+    @State private var singleAppSelection = FamilyActivitySelection()
+    @State private var singleAppToken: ApplicationToken?
+    @State private var singleAppName = ""
+    @State private var singleAppSaving = false
+    #endif
     @State private var showPINUnlock = false
     @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
     @State private var showSOSConfirmation = false
@@ -25,10 +38,28 @@ struct ChildHomeView: View {
 
             ScrollView {
                 VStack(spacing: 24) {
+                    // Confirmation banner (e.g. "Doodle Buddy — extra time granted!")
+                    if let msg = viewModel.appState.childConfirmationMessage {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text(msg)
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
                     Spacer(minLength: 20)
 
                     // Mode icon + status
                     modeHeader
+
+                    // Internet block / enforcement status banner
+                    internetStatusBanner
 
                     // Parent messages
                     ForEach(viewModel.undismissedMessages) { message in
@@ -37,6 +68,10 @@ struct ChildHomeView: View {
 
                     // Info cards
                     infoCards
+
+                    // Request more apps button
+                    requestMoreAppsButton
+                    resetAllAppsButton
 
                     // Authorization warning (only when needed)
                     if viewModel.needsReauthorization {
@@ -140,6 +175,15 @@ struct ChildHomeView: View {
                 viewModel.appState.showTimeLimitSetup = false
             }
         }
+        .sheet(isPresented: $showChildAppPick) {
+            ChildAppPickView(appState: viewModel.appState)
+        }
+        .onChange(of: viewModel.appState.showChildAppPick) { _, newValue in
+            if newValue {
+                showChildAppPick = true
+                viewModel.appState.showChildAppPick = false
+            }
+        }
         #endif
         .onAppear {
             viewModel.startTimer()
@@ -219,6 +263,52 @@ struct ChildHomeView: View {
             try? await Task.sleep(for: .seconds(60))
             await MainActor.run { sosSent = false }
         }
+    }
+
+    @ViewBuilder
+    private var internetStatusBanner: some View {
+        if viewModel.isTunnelInternetBlocked && viewModel.currentMode == .lockedDown {
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: "wifi.slash")
+                        .font(.title3)
+                        .foregroundStyle(.red)
+                    Text("Internet Paused")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+                if let reason = viewModel.tunnelInternetBlockedReason {
+                    Text(friendlyBlockReason(reason))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 12).fill(.red.opacity(0.3)))
+            .padding(.horizontal)
+        }
+    }
+
+    private func friendlyBlockReason(_ reason: String) -> String {
+        if reason.contains("Schedule enforcement") {
+            return "Open this app to restore internet access."
+        }
+        if reason.contains("Emergency") {
+            return "Internet was paused for safety. Open this app to restore access."
+        }
+        if reason.contains("Locked Down") {
+            return "Your parent put the device in lockdown mode."
+        }
+        if reason.contains("App update") {
+            return "An app update needs to finish. Open this app to continue."
+        }
+        if reason.contains("permissions") || reason.contains("FamilyControls") {
+            return "Permissions need to be fixed. Ask your parent for help."
+        }
+        return reason
     }
 
     @ViewBuilder
@@ -314,6 +404,197 @@ struct ChildHomeView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 20))
             }
         }
+    }
+
+    /// Child can request ONE app at a time. Opens sheet with inline picker,
+    /// auto-closes picker when one app selected, then shows naming view.
+    @ViewBuilder
+    private var requestMoreAppsButton: some View {
+        #if canImport(FamilyControls)
+        Button {
+            singleAppSelection = FamilyActivitySelection()
+            singleAppToken = nil
+            singleAppName = ""
+            showSingleAppPick = true
+        } label: {
+            Label("Request an App", systemImage: "plus.app")
+                .font(.subheadline)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .tint(.blue)
+        .padding(.horizontal)
+        .padding(.top, 8)
+        .sheet(isPresented: $showSingleAppPick) {
+            ChildSingleAppPickSheet(
+                appState: viewModel.appState,
+                onSubmit: { token, name in
+                    submitSingleApp(token: token, name: name)
+                }
+            )
+        }
+        #endif
+    }
+
+    #if canImport(FamilyControls)
+    private func submitSingleApp(token: ApplicationToken, name: String) {
+        guard let enrollment = try? KeychainManager().get(
+            ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
+        ) else { return }
+
+        let storage = AppGroupStorage()
+        let encoder = JSONEncoder()
+
+        guard let tokenData = try? encoder.encode(token) else { return }
+        let fingerprint = TokenFingerprint.fingerprint(for: tokenData)
+
+        // Check ALL sources to prevent duplicate submissions
+        // 1. Already in local pending review queue
+        if let pendingData = storage.readRawData(forKey: "pending_review_local.json"),
+           let pending = try? JSONDecoder().decode([PendingAppReview].self, from: pendingData),
+           pending.contains(where: { $0.appFingerprint == fingerprint }) {
+            return
+        }
+        // 2. Already in picker selection (submitted previously, even if synced to CloudKit)
+        if let pickerData = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+           let existing = try? JSONDecoder().decode(FamilyActivitySelection.self, from: pickerData),
+           existing.applicationTokens.contains(token) {
+            return
+        }
+        // 3. Already has a time limit configured
+        let existingLimits = storage.readAppTimeLimits()
+        if existingLimits.contains(where: { $0.fingerprint == fingerprint }) {
+            return
+        }
+        // 4. Already in always-allowed set
+        if let allowedData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let allowedTokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: allowedData),
+           allowedTokens.contains(token) {
+            return
+        }
+
+        // Add to picker selection for enforcement
+        var pickerSelection: FamilyActivitySelection
+        if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+           let existing = try? JSONDecoder().decode(FamilyActivitySelection.self, from: data) {
+            pickerSelection = existing
+        } else {
+            pickerSelection = FamilyActivitySelection()
+        }
+        pickerSelection.applicationTokens.insert(token)
+        if let encoded = try? encoder.encode(pickerSelection) {
+            try? storage.writeRawData(encoded, forKey: StorageKeys.familyActivitySelection)
+        }
+
+        // Create pending review with the name the child entered
+        let review = PendingAppReview(
+            familyID: enrollment.familyID,
+            childProfileID: enrollment.childProfileID,
+            deviceID: enrollment.deviceID,
+            appFingerprint: fingerprint,
+            appName: name,
+            nameResolved: true
+        )
+
+        // Create DNS verification watch (child-named = unverified)
+        let watch = UnverifiedAppWatch(
+            fingerprint: fingerprint,
+            childGivenName: name,
+            deviceID: enrollment.deviceID,
+            childProfileID: enrollment.childProfileID
+        )
+        var watches: [UnverifiedAppWatch] = {
+            guard let d = storage.readRawData(forKey: "unverified_app_watches.json") else { return [] }
+            return (try? JSONDecoder().decode([UnverifiedAppWatch].self, from: d)) ?? []
+        }()
+        watches.append(watch)
+        if let encoded = try? JSONEncoder().encode(watches) {
+            try? storage.writeRawData(encoded, forKey: "unverified_app_watches.json")
+        }
+
+        // Save locally
+        var pending: [PendingAppReview] = {
+            guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
+            return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
+        }()
+        pending.append(review)
+        if let encoded = try? JSONEncoder().encode(pending) {
+            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+        }
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
+
+        // Re-apply enforcement
+        if let enforcement = viewModel.appState.enforcement,
+           let snapshot = viewModel.appState.snapshotStore?.loadCurrentSnapshot() {
+            try? enforcement.apply(snapshot.effectivePolicy)
+        }
+
+        // Push to CloudKit
+        Task {
+            let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
+            let db = container.publicCloudDatabase
+            let recordID = CKRecord.ID(recordName: "BBPendingAppReview_\(review.id.uuidString)")
+            let record = CKRecord(recordType: "BBPendingAppReview", recordID: recordID)
+            record["familyID"] = review.familyID.rawValue
+            record["profileID"] = review.childProfileID.rawValue
+            record["deviceID"] = review.deviceID.rawValue
+            record["appFingerprint"] = review.appFingerprint
+            record["appName"] = review.appName
+            record["nameResolved"] = 1 as NSNumber
+            record["createdAt"] = review.createdAt as NSDate
+            record["updatedAt"] = review.updatedAt as NSDate
+            let op = CKModifyRecordsOperation(recordsToSave: [record])
+            op.savePolicy = .changedKeys
+            op.qualityOfService = .userInitiated
+            do {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    op.modifyRecordsResultBlock = { result in
+                        switch result {
+                        case .success: cont.resume()
+                        case .failure(let error): cont.resume(throwing: error)
+                        }
+                    }
+                    db.add(op)
+                }
+            } catch { }
+        }
+    }
+    #endif
+
+    @ViewBuilder
+    private var resetAllAppsButton: some View {
+        #if canImport(FamilyControls)
+        Button(role: .destructive) {
+            let storage = AppGroupStorage()
+            // Nuclear: clear everything app-related locally
+            try? storage.writeRawData(nil, forKey: StorageKeys.allowedAppTokens)
+            try? storage.writeRawData(nil, forKey: "allowedBundleIDs")
+            try? storage.writeRawData(nil, forKey: StorageKeys.familyActivitySelection)
+            try? storage.writeTemporaryAllowedApps([])
+            try? storage.writeAppTimeLimits([])
+            try? storage.writeTimeLimitExhaustedApps([])
+            // Clear pending review local file
+            try? storage.writeRawData(Data("[]".utf8), forKey: "pending_review_local.json")
+            // Deregister all time limit events
+            ScheduleRegistrar.registerTimeLimitEvents(limits: [])
+            // Re-apply enforcement immediately
+            Task {
+                if let enforcement = viewModel.appState.enforcement {
+                    if let snapshot = viewModel.appState.snapshotStore?.loadCurrentSnapshot() {
+                        try? enforcement.apply(snapshot.effectivePolicy)
+                    }
+                }
+            }
+        } label: {
+            Label("Reset All Allowed Apps", systemImage: "trash")
+                .font(.caption)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .tint(.red)
+        .padding(.horizontal)
+        #endif
     }
 
     /// All countdown-dependent cards. `now` comes from TimelineView so it's

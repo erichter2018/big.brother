@@ -32,6 +32,9 @@ final class DNSProxy {
     var isBlackholeMode: Bool = false
     private var knownApps: Set<String> = []
 
+    /// Called when a known app domain is seen. Parameters: (appName, rootDomain, timestamp)
+    var onAppDomainSeen: ((String, String, Date) -> Void)?
+
     /// Domains always allowed through the blackhole — Apple infrastructure for CloudKit
     /// commands, APNS push delivery, and iCloud sync. Without these, a blackholed device
     /// becomes permanently unreachable and parent can't send commands to fix it.
@@ -378,6 +381,7 @@ final class DNSProxy {
         }
         if let appName {
             trackAppMinute(appName)
+            onAppDomainSeen?(appName, root, Date())
         }
 
         let display = DomainCategorizer.displayDomain(fullDomain)

@@ -107,6 +107,10 @@ protocol CloudKitServiceProtocol: Sendable {
     func saveTimeLimitConfig(_ config: TimeLimitConfig) async throws
     func deleteTimeLimitConfig(_ id: UUID) async throws
 
+    func fetchPendingAppReviews(childProfileID: ChildProfileID) async throws -> [PendingAppReview]
+    func savePendingAppReview(_ review: PendingAppReview) async throws
+    func deletePendingAppReview(_ id: UUID) async throws
+
     // MARK: - Cleanup
 
     /// Delete old records of the given type matching a predicate.

@@ -50,7 +50,6 @@
 		<string>remote-notification</string>
 		<string>processing</string>
 		<string>location</string>
-		<string>network-extension</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>

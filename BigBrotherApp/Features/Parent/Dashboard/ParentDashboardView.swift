@@ -237,6 +237,7 @@ struct ParentDashboardView: View {
                 ? { seconds in Task { await viewModel.unlockChildWithTimer(child, seconds: seconds) } }
                 : nil,
             onSchedule: { Task { await viewModel.scheduleChild(child) } },
+            hasPendingRequests: viewModel.appState.childrenWithPendingRequests.contains(child.id),
             debugMode: viewModel.appState.debugMode
         )
         .contentShape(RoundedRectangle(cornerRadius: 18))
@@ -257,7 +258,7 @@ struct ParentDashboardView: View {
 
     @ViewBuilder
     private func childContextMenu(_ child: ChildProfile) -> some View {
-        let hasActiveUnlock = viewModel.remainingSeconds(for: child) != nil
+        let _ = viewModel.remainingSeconds(for: child) != nil
 
         // Quick +15 (always additive)
         Button { Task { await viewModel.unlockChild(child, seconds: 15 * 60) } } label: {

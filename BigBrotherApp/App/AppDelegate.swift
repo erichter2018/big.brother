@@ -147,18 +147,33 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         switch effectiveMode {
         case .unlocked:
-            // Free window or unlocked — clear all shields.
-            for s in [baseStore, scheduleStore, tempUnlockStore] {
+            // Free window or unlocked — set wide-open shields instead of clearing.
+            // Avoids .child auth re-validation race on re-apply.
+            let decoder = JSONDecoder()
+            var allTokens = Set<ApplicationToken>()
+            if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+               let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
+                allTokens.formUnion(allowed)
+            }
+            if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+               let selection = try? decoder.decode(FamilyActivitySelection.self, from: data) {
+                allTokens.formUnion(selection.applicationTokens)
+            }
+            for limit in storage.readAppTimeLimits() {
+                if let token = try? decoder.decode(ApplicationToken.self, from: limit.tokenData) {
+                    allTokens.insert(token)
+                }
+            }
+            for s in [baseStore, scheduleStore] {
                 s.shield.applications = nil
-                s.shield.applicationCategories = nil
+                s.shield.applicationCategories = allTokens.isEmpty ? nil : .all(except: allTokens)
                 s.shield.webDomainCategories = nil
                 s.shield.webDomains = nil
             }
-            let defaultStore = ManagedSettingsStore()
-            defaultStore.shield.applications = nil
-            defaultStore.shield.applicationCategories = nil
-            defaultStore.shield.webDomainCategories = nil
-            defaultStore.shield.webDomains = nil
+            tempUnlockStore.shield.applications = nil
+            tempUnlockStore.shield.applicationCategories = nil
+            tempUnlockStore.shield.webDomainCategories = nil
+            tempUnlockStore.shield.webDomains = nil
 
         case .restricted, .locked, .lockedDown:
             let allowExemptions = effectiveMode == .restricted
@@ -186,9 +201,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 pickerTokens = selection.applicationTokens
             }
 
-            // Web blocking.
+            // Web blocking: locked/lockedDown ALWAYS block web, restricted respects flag.
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let shouldBlockWeb = restrictions.denyWebWhenLocked
+            let shouldBlockWeb = !allowExemptions || restrictions.denyWebWhenLocked
 
             // Apply hybrid blocking (mirrors Monitor extension logic).
             if !pickerTokens.isEmpty && allowExemptions {
@@ -227,6 +242,34 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     }
                 }
             }
+
+            // Write DNS blocklist for the tunnel — previously missing from background restore.
+            // Without this, shields are restored but DNS blocking stays empty until foreground.
+            let encoder = JSONEncoder()
+            let cache = storage.readAllCachedAppNames()
+            let shieldedTokens = pickerTokens.subtracting(allowedTokens)
+            var shieldedNames = Set<String>()
+            for token in shieldedTokens {
+                if let data = try? encoder.encode(token) {
+                    let key = data.base64EncodedString()
+                    if let name = cache[key], !name.hasPrefix("App ") {
+                        shieldedNames.insert(name)
+                    }
+                }
+            }
+            var blockedDomains = Set<String>()
+            for name in shieldedNames {
+                blockedDomains.formUnion(DomainCategorizer.domainsForApp(name))
+            }
+            blockedDomains.formUnion(DomainCategorizer.dohResolverDomains)
+            if restrictions.denyWebGamesWhenRestricted {
+                blockedDomains.formUnion(DomainCategorizer.webGamingDomains)
+            }
+            // Only write if we computed something, or if the existing list is empty.
+            // Preserves existing blocklist if our name cache is empty (cold start).
+            if !blockedDomains.isEmpty || storage.readEnforcementBlockedDomains().isEmpty {
+                try? storage.writeEnforcementBlockedDomains(blockedDomains)
+            }
         }
 
         // Apply device restrictions on the default store.
@@ -244,6 +287,19 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // even if DeviceActivity registrations were lost during an Xcode deploy or update.
         reregisterReconciliationSchedule()
 
+        // If we were dead and the tunnel flagged us, grab location immediately.
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if let diedAt = defaults?.double(forKey: "appDiedNeedLocationAt"), diedAt > 0 {
+            defaults?.removeObject(forKey: "appDiedNeedLocationAt")
+            // CLLocationManager is already running from startContinuousTracking.
+            // Just request an immediate fix + heartbeat.
+            CLLocationManager().requestLocation()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .restoration,
+                message: "Relaunch after death — requested immediate location fix"
+            ))
+        }
+
         #if DEBUG
         print("[BigBrother][BgRestore] Enforcement restored: mode=\(effectiveMode.rawValue) (\(resolution.reason))")
         #endif
@@ -254,24 +310,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     /// runs from AppDelegate without needing AppState.
     private func reregisterReconciliationSchedule() {
         let center = DeviceActivityCenter()
-        let intervals: [(name: String, minute: Int)] = [
-            ("bigbrother.reconciliation", 0),
-            ("bigbrother.reconciliation.q2", 5),
-            ("bigbrother.reconciliation.q3", 10),
-            ("bigbrother.reconciliation.q4", 15),
-            ("bigbrother.reconciliation.q5", 20),
-            ("bigbrother.reconciliation.q6", 25),
-            ("bigbrother.reconciliation.q7", 30),
-            ("bigbrother.reconciliation.q8", 35),
-            ("bigbrother.reconciliation.q9", 40),
-            ("bigbrother.reconciliation.q10", 45),
-            ("bigbrother.reconciliation.q11", 50),
-            ("bigbrother.reconciliation.q12", 55),
-        ]
-        for q in intervals {
-            let activityName = DeviceActivityName(rawValue: q.name)
-            let start = DateComponents(minute: q.minute)
-            let end = DateComponents(minute: q.minute + 1)
+        // 60 reconciliation slots (every minute), 2-minute overlapping intervals.
+        // Ensures at least one slot is always active for stopMonitoring trigger.
+        for m in 0..<60 {
+            let name = m == 0 ? "bigbrother.reconciliation" : "bigbrother.reconciliation.m\(m)"
+            let activityName = DeviceActivityName(rawValue: name)
+            let start = DateComponents(minute: m)
+            let endMinute = (m + 2) % 60
+            guard endMinute > m else { continue } // Skip hour-boundary wrapping
+            let end = DateComponents(minute: endMinute)
             let schedule = DeviceActivitySchedule(
                 intervalStart: start,
                 intervalEnd: end,
@@ -532,6 +579,21 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        // Child-side: "Extra Time Granted" notification from tunnel.
+        if response.notification.request.identifier.hasPrefix("extra-time-") {
+            let body = response.notification.request.content.body
+            // e.g. "Tap to start using Doodle Buddy"
+            let appName = body.replacingOccurrences(of: "Tap to start using ", with: "")
+            appState?.childConfirmationMessage = "\(appName) — extra time granted!"
+            // Auto-dismiss after 5 seconds.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                self.appState?.childConfirmationMessage = nil
+            }
+            completionHandler()
+            return
+        }
+
         guard let appState,
               let result = UnlockRequestNotificationService.handleAction(response) else {
             completionHandler()
@@ -539,14 +601,45 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
 
         Task {
+            // Delete the request event from CloudKit immediately so it doesn't reappear.
+            try? await appState.cloudKit?.deleteEventLog(result.requestID)
+            // Clear blue dot for this child.
+            if let childProfileID = result.childProfileID {
+                appState.childrenWithPendingRequests.remove(childProfileID)
+            }
+
             switch result.action {
             case .temporaryUnlock(let seconds):
-                await sendCommand(
-                    .temporaryUnlockApp(requestID: result.requestID, durationSeconds: seconds),
-                    target: .device(result.deviceID),
-                    appState: appState
-                )
-                // Navigate to child detail.
+                if result.isMoreTimeRequest, let fp = result.fingerprint {
+                    let minutes = max(1, seconds / 60)
+                    await sendCommand(
+                        .grantExtraTime(appFingerprint: fp, extraMinutes: minutes),
+                        target: .device(result.deviceID),
+                        appState: appState
+                    )
+                } else if result.isMoreTimeRequest {
+                    let minutes = max(1, seconds / 60)
+                    let vm = appState.childDetailViewModel(forDeviceID: result.deviceID)
+                    if let config = vm?.timeLimitConfigs.first(where: { $0.appName == result.appName }) {
+                        await sendCommand(
+                            .grantExtraTime(appFingerprint: config.appFingerprint, extraMinutes: minutes),
+                            target: .device(result.deviceID),
+                            appState: appState
+                        )
+                    } else {
+                        await sendCommand(
+                            .temporaryUnlockApp(requestID: result.requestID, durationSeconds: seconds),
+                            target: .device(result.deviceID),
+                            appState: appState
+                        )
+                    }
+                } else {
+                    await sendCommand(
+                        .temporaryUnlockApp(requestID: result.requestID, durationSeconds: seconds),
+                        target: .device(result.deviceID),
+                        appState: appState
+                    )
+                }
                 navigateToChild(result.childProfileID, deviceID: result.deviceID, appState: appState)
             case .allowAlways:
                 let success = await sendCommand(

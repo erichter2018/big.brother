@@ -28,8 +28,13 @@ struct NamedPlaceEditorView: View {
             _coordinate = State(initialValue: CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude))
             _radiusMeters = State(initialValue: place.radiusMeters)
             _selectedChildIDs = State(initialValue: Set(place.childProfileIDs))
+            _notifyArrival = State(initialValue: place.notifyArrival)
+            _notifyDeparture = State(initialValue: place.notifyDeparture)
         }
     }
+
+    @State private var notifyArrival: Bool = true
+    @State private var notifyDeparture: Bool = true
 
     var body: some View {
         NavigationStack {
@@ -102,6 +107,11 @@ struct NamedPlaceEditorView: View {
                         }
                         .font(.caption)
                     }
+                }
+
+                Section("Notifications") {
+                    Toggle("Notify on arrival", isOn: $notifyArrival)
+                    Toggle("Notify on departure", isOn: $notifyDeparture)
                 }
             }
             .navigationTitle(existingPlace == nil ? "New Place" : "Edit Place")
@@ -189,7 +199,9 @@ struct NamedPlaceEditorView: View {
             radiusMeters: radiusMeters,
             createdAt: existingPlace?.createdAt ?? Date(),
             createdBy: "Parent",
-            childProfileIDs: selectedChildIDs.isEmpty ? [] : Array(selectedChildIDs)
+            childProfileIDs: selectedChildIDs.isEmpty ? [] : Array(selectedChildIDs),
+            notifyArrival: notifyArrival,
+            notifyDeparture: notifyDeparture
         )
 
         await onSave(place)

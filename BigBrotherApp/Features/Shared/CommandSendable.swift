@@ -15,6 +15,31 @@ protocol CommandSendable: AnyObject {
 
 extension CommandSendable {
     func performCommand(_ action: CommandAction, target: CommandTarget) async {
+        // Freemium gate: check if the target child is within the free tier.
+        if !appState.subscriptionManager.isSubscribed {
+            let childID: ChildProfileID? = {
+                switch target {
+                case .child(let cid): return cid
+                case .device(let did): return appState.childDevices.first { $0.id == did }?.childProfileID
+                case .allDevices: return nil
+                }
+            }()
+            if let childID {
+                let sorted = appState.childProfiles.sorted { $0.createdAt < $1.createdAt }
+                let idx = sorted.firstIndex { $0.id == childID } ?? sorted.count
+                if !appState.subscriptionManager.canControlChild(childIndex: idx) {
+                    commandFeedback = "Subscribe to control this child's devices."
+                    isCommandError = true
+                    return
+                }
+            }
+            if case .allDevices = target, appState.childProfiles.count > SubscriptionManager.freeChildLimit {
+                commandFeedback = "Subscribe to control all children's devices."
+                isCommandError = true
+                return
+            }
+        }
+
         isSendingCommand = true
         commandFeedback = nil
         isCommandError = false

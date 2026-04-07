@@ -1,10 +1,11 @@
 import Foundation
 import ManagedSettings
 import BigBrotherCore
+import notify
 
 class BigBrotherShieldActionExtension: ShieldActionDelegate {
 
-    private static let buildMarker = "shield-action-2026-03-15A"
+    private static let buildMarker = "shield-action-b310"
 
     override func handle(action: ShieldAction, for application: ApplicationToken, completionHandler: @escaping (ShieldActionResponse) -> Void) {
         handleAction(action: action, token: application, completionHandler: completionHandler)
@@ -22,53 +23,49 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         directToken: ApplicationToken?,
         storage: AppGroupStorage
     ) -> (name: String, tokenBase64: String?, bundleID: String?, source: String) {
-        // 1. Direct token from application handler (only fires for shield.applications, not categories).
+        // Get token data from direct token (reliable for tokenBase64).
+        let directBase64: String?
+        let directBundle: String?
         if let directToken, let data = try? JSONEncoder().encode(directToken) {
-            let base64 = data.base64EncodedString()
-            // Try to resolve the app name from the token — works in some extension contexts.
+            directBase64 = data.base64EncodedString()
             let app = Application(token: directToken)
-            let resolvedName = app.localizedDisplayName ?? app.bundleIdentifier ?? "App"
-            let resolvedBundle = app.bundleIdentifier
-            diag(storage, "directToken resolve: name=\(app.localizedDisplayName ?? "nil") bundle=\(app.bundleIdentifier ?? "nil")")
-            return (name: resolvedName, tokenBase64: base64, bundleID: resolvedBundle, source: "directToken")
-        }
-
-        // 2. Keychain bridge — written by ShieldConfiguration (securityd, not file sandbox).
-        let keychain = KeychainManager()
-        if let cached = try? keychain.get(LastShieldedAppKeychain.self, forKey: StorageKeys.lastShieldedAppKeychain) {
-            let age = Date().timeIntervalSince1970 - cached.timestamp
-            if age < 30, cached.tokenBase64 != "none", !cached.appName.isEmpty {
-                return (
-                    name: cached.appName,
-                    tokenBase64: cached.tokenBase64,
-                    bundleID: cached.bundleID,
-                    source: "keychain(\(Int(age))s)"
-                )
-            }
-            // Stale or sentinel — log but don't use.
-            diag(storage, "Keychain entry stale/invalid: age=\(Int(age))s name=\(cached.appName) token=\(cached.tokenBase64 == "none" ? "none" : "present")")
+            directBundle = app.bundleIdentifier
+            diag(storage, "directToken: name=\(app.localizedDisplayName ?? "nil") bundle=\(app.bundleIdentifier ?? "nil")")
         } else {
-            diag(storage, "Keychain read: no entry found")
+            directBase64 = nil
+            directBundle = nil
         }
 
-        // 3. App Group file — written by ShieldConfiguration (may fail from that extension).
+        // 1. Darwin notification state bridge — ShieldConfiguration writes app name
+        // to notifyd slots (bypasses file sandbox, Keychain, and cfprefsd entirely).
+        if let darwinName = readDarwinName(storage: storage) {
+            return (
+                name: darwinName.name,
+                tokenBase64: directBase64,
+                bundleID: directBundle ?? darwinName.bundleID,
+                source: "darwin(\(darwinName.age)s)"
+            )
+        }
+
+        // 2. App Group file fallback.
         if let lastApp = storage.readLastShieldedApp(),
-           lastApp.tokenBase64 != "none", !lastApp.appName.isEmpty {
+           lastApp.tokenBase64 != "none", !lastApp.appName.isEmpty, lastApp.appName != "App" {
             let age = -lastApp.cachedAt.timeIntervalSinceNow
-            if age < 30 {
+            if age < 300 {
                 return (
                     name: lastApp.appName,
-                    tokenBase64: lastApp.tokenBase64,
-                    bundleID: lastApp.bundleID,
+                    tokenBase64: directBase64 ?? lastApp.tokenBase64,
+                    bundleID: directBundle ?? lastApp.bundleID,
                     source: "appGroup(\(Int(age))s)"
                 )
             }
-            diag(storage, "App Group entry stale: age=\(Int(age))s name=\(lastApp.appName)")
-        } else {
-            diag(storage, "App Group read: no valid entry (sentinel or missing)")
         }
 
-        // 4. No identity available.
+        // 3. Direct token only (name will be "App" but tokenBase64 is valid).
+        if let base64 = directBase64 {
+            return (name: "App", tokenBase64: base64, bundleID: directBundle, source: "directToken")
+        }
+
         return (name: "", tokenBase64: nil, bundleID: nil, source: "none")
     }
 
@@ -89,10 +86,71 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         }
     }
 
+    // MARK: - Pending Name Resolution
+
+    /// Check if this is a pending-name-resolution app (1-minute probe limit).
+    /// If so, auto-correct: capture name from ShieldConfiguration, set real limit, unblock.
+    /// Returns true if handled (caller should return .defer).
+    private func tryAutoCorrectNameResolution(identity: (name: String, tokenBase64: String?, bundleID: String?, source: String), storage: AppGroupStorage) -> Bool {
+        guard let tokenBase64 = identity.tokenBase64,
+              let tokenData = Data(base64Encoded: tokenBase64) else { return false }
+
+        let fp = TokenFingerprint.fingerprint(for: tokenData)
+        var limits = storage.readAppTimeLimits()
+        guard let idx = limits.firstIndex(where: { $0.fingerprint == fp && $0.pendingNameResolution == true }) else {
+            return false
+        }
+
+        let realName = (!identity.name.isEmpty && identity.name != "App") ? identity.name : limits[idx].appName
+        let resolvedLimit = limits[idx].resolvedDailyLimitMinutes ?? 60
+
+        diag(storage, "Name resolution: \(limits[idx].appName) → \(realName), limit 1m → \(resolvedLimit)m (src: \(identity.source))")
+
+        limits[idx].appName = realName
+        limits[idx].bundleID = identity.bundleID ?? limits[idx].bundleID
+        limits[idx].dailyLimitMinutes = resolvedLimit
+        limits[idx].pendingNameResolution = false
+        limits[idx].resolvedDailyLimitMinutes = nil
+        limits[idx].updatedAt = Date()
+        try? storage.writeAppTimeLimits(limits)
+
+        // Remove from exhausted list so the app unblocks.
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        exhausted.removeAll { $0.fingerprint == fp }
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+
+        // Signal Monitor to re-apply enforcement.
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+
+        // Update local pending review with resolved name for CloudKit sync.
+        if let data = storage.readRawData(forKey: "pending_review_local.json"),
+           var pendingReviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
+           let reviewIdx = pendingReviews.firstIndex(where: { $0.appFingerprint == fp }) {
+            pendingReviews[reviewIdx].appName = realName
+            pendingReviews[reviewIdx].nameResolved = true
+            pendingReviews[reviewIdx].updatedAt = Date()
+            if let encoded = try? JSONEncoder().encode(pendingReviews) {
+                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+            }
+        }
+
+        return true
+    }
+
     // MARK: - Primary Button ("OK" / "Open")
 
     private func handlePrimaryButton(directToken: ApplicationToken?, storage: AppGroupStorage, completionHandler: @escaping (ShieldActionResponse) -> Void) {
         let identity = resolveAppIdentity(directToken: directToken, storage: storage)
+
+        if tryAutoCorrectNameResolution(identity: identity, storage: storage) {
+            completionHandler(.defer)
+            return
+        }
+
+        // Resolve pending review names — ShieldConfiguration can't write to App Group,
+        // so ShieldAction does it using the name from the Keychain bridge.
+        tryResolvePendingReviewName(identity: identity, storage: storage)
 
         var isAllowed = false
         if let base64 = identity.tokenBase64, let data = Data(base64Encoded: base64),
@@ -108,11 +166,82 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         completionHandler(isAllowed ? .defer : .close)
     }
 
+    /// Resolve pending app review name from Keychain bridge data.
+    /// ShieldConfiguration writes the app name to Keychain but CANNOT write to App Group.
+    /// ShieldAction bridges the gap by reading from Keychain and writing to App Group.
+    private func tryResolvePendingReviewName(
+        identity: (name: String, tokenBase64: String?, bundleID: String?, source: String),
+        storage: AppGroupStorage
+    ) {
+        guard !identity.name.isEmpty, identity.name != "App",
+              let tokenBase64 = identity.tokenBase64,
+              let tokenData = Data(base64Encoded: tokenBase64) else {
+            diag(storage, "PendingReview: skip — no valid identity (name=\(identity.name) token=\(identity.tokenBase64 != nil ? "yes" : "nil"))")
+            return
+        }
+
+        let fp = TokenFingerprint.fingerprint(for: tokenData)
+
+        guard let data = storage.readRawData(forKey: "pending_review_local.json"),
+              var reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data) else {
+            diag(storage, "PendingReview: no local file or decode failed")
+            return
+        }
+
+        let unresolved = reviews.filter { !$0.nameResolved }
+        diag(storage, "PendingReview: \(reviews.count) total, \(unresolved.count) unresolved, myFP=\(fp.prefix(8)), storedFPs=\(unresolved.map { $0.appFingerprint.prefix(8) })")
+
+        // Try fingerprint match first
+        if let idx = reviews.firstIndex(where: { $0.appFingerprint == fp && !$0.nameResolved }) {
+            reviews[idx].appName = identity.name
+            reviews[idx].bundleID = identity.bundleID
+            reviews[idx].nameResolved = true
+            reviews[idx].updatedAt = Date()
+
+            if let encoded = try? JSONEncoder().encode(reviews) {
+                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+            }
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
+            diag(storage, "Resolved pending review (fp match): \(identity.name) fp=\(fp.prefix(8)) src=\(identity.source)")
+            return
+        }
+
+        // Fingerprint didn't match — try resolving the oldest unresolved review.
+        // Cross-process JSONEncoder output can differ, making fingerprints unreliable.
+        if let idx = reviews.firstIndex(where: { !$0.nameResolved }) {
+            diag(storage, "PendingReview: FP MISMATCH — using fallback (oldest unresolved). myFP=\(fp), storedFP=\(reviews[idx].appFingerprint)")
+            reviews[idx].appName = identity.name
+            reviews[idx].bundleID = identity.bundleID
+            reviews[idx].nameResolved = true
+            reviews[idx].updatedAt = Date()
+
+            if let encoded = try? JSONEncoder().encode(reviews) {
+                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+            }
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
+            diag(storage, "Resolved pending review (fallback): \(identity.name) src=\(identity.source)")
+        }
+    }
+
     // MARK: - Secondary Button ("Ask for More Time")
 
     private func handleSecondaryButton(directToken: ApplicationToken?, storage: AppGroupStorage, completionHandler: @escaping (ShieldActionResponse) -> Void) {
-        // Anti-spam: ignore taps within 5s of previous.
-        if let previous = storage.readUnlockPickerPendingDate(), -previous.timeIntervalSinceNow < 5 {
+        let identity = resolveAppIdentity(directToken: directToken, storage: storage)
+
+        // If pending name resolution, auto-correct instead of creating a request.
+        if tryAutoCorrectNameResolution(identity: identity, storage: storage) {
+            diag(storage, "Secondary: auto-corrected pending name resolution — unblocking app")
+            completionHandler(.defer)
+            return
+        }
+
+        // Resolve pending review names via Keychain bridge
+        tryResolvePendingReviewName(identity: identity, storage: storage)
+
+        // Anti-spam: ignore taps within 30s of previous.
+        if let previous = storage.readUnlockPickerPendingDate(), -previous.timeIntervalSinceNow < 30 {
             completionHandler(.close)
             return
         }
@@ -123,19 +252,21 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         } catch {
             diag(storage, "CRITICAL: Failed to write unlock picker pending flag: \(error.localizedDescription)")
         }
-
-        let identity = resolveAppIdentity(directToken: directToken, storage: storage)
         let hasToken = identity.tokenBase64 != nil
 
         diag(storage, "[\(Self.buildMarker)] Secondary: name=\(identity.name) hasToken=\(hasToken) src=\(identity.source)")
 
         if hasToken, let tokenBase64 = identity.tokenBase64 {
             // --- Token available: create full unlock request ---
+            // Check if this is a time-limit-exhausted app (vs general restriction).
+            let isTimeLimited = isTimeLimitExhausted(storage: storage, tokenBase64: tokenBase64)
+
             let success = createUnlockRequest(
                 storage: storage,
                 appName: identity.name,
                 tokenBase64: tokenBase64,
-                bundleID: identity.bundleID
+                bundleID: identity.bundleID,
+                isTimeLimitRequest: isTimeLimited
             )
             if success {
                 diag(storage, "Created unlock request WITH token via \(identity.source)")
@@ -154,10 +285,22 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         completionHandler(.close)
     }
 
+    // MARK: - Time Limit Check
+
+    private func isTimeLimitExhausted(storage: AppGroupStorage, tokenBase64: String) -> Bool {
+        guard let tokenData = Data(base64Encoded: tokenBase64) else { return false }
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let today = f.string(from: Date())
+        return storage.readTimeLimitExhaustedApps()
+            .filter { $0.dateString == today }
+            .contains { $0.tokenData == tokenData }
+    }
+
     // MARK: - Create Unlock Request
 
     @discardableResult
-    private func createUnlockRequest(storage: AppGroupStorage, appName: String, tokenBase64: String, bundleID: String?) -> Bool {
+    private func createUnlockRequest(storage: AppGroupStorage, appName: String, tokenBase64: String, bundleID: String?, isTimeLimitRequest: Bool = false) -> Bool {
         guard let data = storage.readRawData(forKey: StorageKeys.cachedEnrollmentIDs),
               let env = try? JSONDecoder().decode(CachedEnrollmentIDs.self, from: data) else {
             diag(storage, "Cannot create request: no enrollment IDs in App Group")
@@ -166,8 +309,12 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
 
         let requestID = UUID()
 
-        // Build event details with token.
-        var details = "Requesting access to \(appName)"
+        // Build event details with token and fingerprint.
+        let fingerprint = Data(base64Encoded: tokenBase64).map { TokenFingerprint.fingerprint(for: $0) } ?? ""
+        var details = isTimeLimitRequest
+            ? "Requesting more time for \(appName)"
+            : "Requesting access to \(appName)"
+        if !fingerprint.isEmpty { details += "\nFINGERPRINT:\(fingerprint)" }
         if let b = bundleID { details += "\nBUNDLE:\(b)" }
         details += "\nTOKEN:\(tokenBase64)"
 
@@ -237,6 +384,57 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
                allowedBundles.contains(bundle) { return true }
         }
         return false
+    }
+
+    // MARK: - Darwin Notification Name Bridge
+
+    /// Read app name from Darwin notification state slots written by ShieldConfiguration.
+    private func readDarwinName(storage: AppGroupStorage) -> (name: String, bundleID: String?, age: Int)? {
+        let prefix = "group.fr.bigbrother.shared.shield"
+
+        // Read meta slot: lower 32 bits = name length, upper 32 bits = timestamp
+        guard let meta = getNotifyState("\(prefix).meta"), meta != 0 else {
+            diag(storage, "Darwin: no meta slot")
+            return nil
+        }
+
+        let nameLen = Int(meta & 0xFFFFFFFF)
+        let timestamp = Double(meta >> 32)
+        let age = Int(Date().timeIntervalSince1970) - Int(timestamp)
+
+        guard nameLen > 0, nameLen <= 32, age < 60 else {
+            diag(storage, "Darwin: meta invalid (len=\(nameLen) age=\(age)s)")
+            return nil
+        }
+
+        // Read name from 8-byte chunks
+        var nameBytes: [UInt8] = []
+        for i in 0..<4 {
+            guard let val = getNotifyState("\(prefix).n\(i)") else { break }
+            for j in 0..<8 {
+                let byte = UInt8((val >> (UInt64(j) * 8)) & 0xFF)
+                if nameBytes.count < nameLen {
+                    nameBytes.append(byte)
+                }
+            }
+        }
+
+        guard let name = String(bytes: nameBytes, encoding: .utf8), !name.isEmpty, name != "App" else {
+            diag(storage, "Darwin: name decode failed (bytes=\(nameBytes.count))")
+            return nil
+        }
+
+        diag(storage, "Darwin bridge: name=\(name) age=\(age)s")
+        return (name: name, bundleID: nil, age: age)
+    }
+
+    private func getNotifyState(_ name: String) -> UInt64? {
+        var token: Int32 = 0
+        guard notify_register_check(name, &token) == NOTIFY_STATUS_OK else { return nil }
+        var state: UInt64 = 0
+        let result = notify_get_state(token, &state)
+        notify_cancel(token)
+        return result == NOTIFY_STATUS_OK ? state : nil
     }
 
     // MARK: - Diagnostics

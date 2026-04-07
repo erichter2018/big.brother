@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var isExporting = false
     @State private var exportedFileURL: URL?
     @State private var exportError: String?
+    @State private var showDashboardLayout = false
 
     init(appState: AppState) {
         self.appState = appState
@@ -21,6 +22,14 @@ struct SettingsView: View {
 
     var body: some View {
         List {
+            Section {
+                Button {
+                    showDashboardLayout = true
+                } label: {
+                    Label("Dashboard Layout", systemImage: "square.grid.2x2")
+                }
+            }
+
             Section("Security") {
                 NavigationLink {
                     SecuritySettingsView(appState: appState)
@@ -60,12 +69,6 @@ struct SettingsView: View {
                 }
 
                 NavigationLink {
-                    ChildOrderView(appState: appState)
-                } label: {
-                    Label("Reorder Children", systemImage: "arrow.up.arrow.down")
-                }
-
-                NavigationLink {
                     ManageChildrenView(appState: appState)
                 } label: {
                     Label("Remove Children", systemImage: "person.badge.minus")
@@ -83,15 +86,6 @@ struct SettingsView: View {
                     } label: {
                         Label("Manage Parent Access", systemImage: "person.badge.minus")
                     }
-                }
-            }
-
-            Section("Dashboard") {
-                Toggle(isOn: Binding(
-                    get: { UserDefaults.standard.bool(forKey: "familyPauseEnabled") },
-                    set: { UserDefaults.standard.set($0, forKey: "familyPauseEnabled") }
-                )) {
-                    Label("Show Pause All Button", systemImage: "pause.circle")
                 }
             }
 
@@ -184,18 +178,14 @@ struct SettingsView: View {
                 } label: {
                     Label("Manage Subscription", systemImage: "star.circle")
                 }
-                #if DEBUG
-                Button {
-                    appState.subscriptionManager.debugOverride =
-                        appState.subscriptionManager.isSubscribed ? .expired : .subscribed
-                } label: {
-                    Label(
-                        appState.subscriptionManager.isSubscribed ? "Debug: Force Expire" : "Debug: Force Subscribe",
-                        systemImage: "ant"
-                    )
+                // TODO: Remove before App Store submission
+                Toggle(isOn: Binding(
+                    get: { appState.subscriptionManager.debugOverride == .subscribed },
+                    set: { appState.subscriptionManager.debugOverride = $0 ? .subscribed : .expired }
+                )) {
+                    Label("Dev: Force Subscribed", systemImage: "ant")
                 }
-                .foregroundStyle(.orange)
-                #endif
+                .tint(.orange)
             }
 
             #if DEBUG
@@ -256,13 +246,13 @@ struct SettingsView: View {
                 HStack {
                     Text("Version")
                     Spacer()
-                    Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
+                    Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")
                         .foregroundStyle(.secondary)
                 }
                 HStack {
                     Text("Build")
                     Spacer()
-                    Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—")
+                    Text("\(AppConstants.appBuildNumber)")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -278,6 +268,9 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .disabled(isNuking)
+        .sheet(isPresented: $showDashboardLayout) {
+            DashboardLayoutView(appState: appState)
+        }
         .sheet(isPresented: $showPaywall) {
             PaywallView(subscriptionManager: appState.subscriptionManager) {
                 showPaywall = false

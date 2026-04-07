@@ -11,6 +11,7 @@ struct AddChildView: View {
     @State private var errorMessage: String?
     @State private var createdProfile: ChildProfile?
     @State private var showEnrollmentCode = false
+    @State private var showPaywall = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -58,6 +59,11 @@ struct AddChildView: View {
                 }
             }
         }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(subscriptionManager: appState.subscriptionManager) {
+                showPaywall = false
+            }
+        }
     }
 
     private func createChild() {
@@ -66,6 +72,12 @@ struct AddChildView: View {
 
         let name = childName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
+
+        // Freemium gate: show paywall if adding beyond free limit.
+        if !appState.subscriptionManager.canAddChild(currentChildCount: appState.childProfiles.count) {
+            showPaywall = true
+            return
+        }
 
         isSaving = true
         errorMessage = nil

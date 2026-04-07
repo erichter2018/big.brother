@@ -11,6 +11,22 @@ import Observation
 @MainActor
 final class SubscriptionManager {
 
+    // MARK: - Freemium
+
+    /// Number of child profiles included in the free tier.
+    static let freeChildLimit = 1
+
+    /// Whether adding another child is allowed without a subscription.
+    func canAddChild(currentChildCount: Int) -> Bool {
+        isSubscribed || currentChildCount < Self.freeChildLimit
+    }
+
+    /// Whether sending commands to a specific child is allowed.
+    /// The free child (first created) is always controllable.
+    func canControlChild(childIndex: Int) -> Bool {
+        isSubscribed || childIndex < Self.freeChildLimit
+    }
+
     // MARK: - Product IDs
 
     static let monthlyID = "fr.bigbrother.app.monthly"
@@ -34,9 +50,32 @@ final class SubscriptionManager {
         }
     }
 
-    /// For testing: override subscription status.
+    /// Called when subscription status transitions (e.g., subscribed → expired).
+    /// AppState uses this to send unlock/re-lock commands to non-free children.
+    var onStatusChange: ((SubscriptionStatus, SubscriptionStatus) -> Void)?
+
+    private static let debugOverrideKey = "debugSubscriptionOverride"
+
+    /// For testing: override subscription status. Persists across launches.
     var debugOverride: SubscriptionStatus? {
-        didSet { if let override = debugOverride { subscriptionStatus = override } }
+        didSet {
+            if let override = debugOverride {
+                UserDefaults.standard.set(override.rawValue, forKey: Self.debugOverrideKey)
+                let old = subscriptionStatus
+                subscriptionStatus = override
+                if old != override { onStatusChange?(old, override) }
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.debugOverrideKey)
+            }
+        }
+    }
+
+    /// Restore persisted debug override on launch.
+    func restoreDebugOverride() {
+        if let raw = UserDefaults.standard.string(forKey: Self.debugOverrideKey),
+           let status = SubscriptionStatus(rawValue: raw) {
+            debugOverride = status
+        }
     }
 
     enum PurchaseState: Equatable {
@@ -128,6 +167,7 @@ final class SubscriptionManager {
         // Debug override takes precedence
         if debugOverride != nil { return }
 
+        let previousStatus = subscriptionStatus
         var foundActive = false
         var latestExpiration: Date?
         var latestStatus: SubscriptionStatus = .expired
@@ -182,6 +222,11 @@ final class SubscriptionManager {
             }
             subscriptionStatus = .expired
             expirationDate = nil
+        }
+
+        // Notify on status transitions (e.g., subscribed → expired).
+        if subscriptionStatus != previousStatus && previousStatus != .unknown {
+            onStatusChange?(previousStatus, subscriptionStatus)
         }
 
         // Check trial eligibility
@@ -245,7 +290,7 @@ final class SubscriptionManager {
             return "Free Trial"
         case .subscribed: return "Active"
         case .grace: return "Payment issue — retrying"
-        case .expired: return "Expired"
+        case .expired: return "Free Plan (1 child)"
         case .revoked: return "Refunded"
         }
     }

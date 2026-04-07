@@ -24,6 +24,7 @@ struct ChildDetailView: View {
     @State private var hiddenSections: Set<ChildDetailSection> = []
 
     @State private var showFullActivity = false
+    @State private var showDashboardLayout = false
 
     var body: some View {
         ScrollView {
@@ -215,6 +216,11 @@ struct ChildDetailView: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(.red)
                         }
+                        if issue.dnsBlockingActive {
+                            Label("DNS \(issue.dnsBlockedCount)", systemImage: "network.badge.shield.half.filled")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.orange)
+                        }
                         if issue.internetBlocked {
                             Label("No Internet", systemImage: "wifi.slash")
                                 .font(.system(size: 10, weight: .semibold))
@@ -262,6 +268,8 @@ struct ChildDetailView: View {
             AppUsageSection(activity: viewModel.onlineActivity, weekActivity: viewModel.onlineActivityWeek, dailySnapshots: viewModel.onlineActivityByDay)
         case .appTimeLimits:
             AppTimeLimitsSection(viewModel: viewModel)
+        case .pendingAppReview:
+            EmptyView() // Integrated into AppTimeLimitsSection (Allowed Apps)
         case .onlineActivity:
             OnlineActivitySection(activity: viewModel.onlineActivity, weekActivity: viewModel.onlineActivityWeek, dailySnapshots: viewModel.onlineActivityByDay, showFlagged: false)
         case .flaggedActivity:
@@ -518,6 +526,19 @@ struct ChildDetailView: View {
                     Text(DeviceIcon.displayName(for: device.modelIdentifier))
                         .font(.caption)
                         .fontWeight(.medium)
+                        .contextMenu {
+                            Button {
+                                let text = viewModel.formattedHeartbeatHistory(for: device)
+                                UIPasteboard.general.string = text
+                            } label: {
+                                Label("Copy Heartbeat History", systemImage: "doc.on.clipboard")
+                            }
+                        }
+                    if hb?.buildType == "testflight" {
+                        Text("TF")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.purple)
+                    }
 
                     Spacer()
 
@@ -649,6 +670,19 @@ struct ChildDetailView: View {
                 Text(DeviceIcon.displayName(for: device.modelIdentifier))
                     .font(.subheadline)
                     .fontWeight(.medium)
+                    .contextMenu {
+                        Button {
+                            let text = viewModel.formattedHeartbeatHistory(for: device)
+                            UIPasteboard.general.string = text
+                        } label: {
+                            Label("Copy Heartbeat History", systemImage: "doc.on.clipboard")
+                        }
+                    }
+                if hb?.buildType == "testflight" {
+                    Text("TF")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.purple)
+                }
                 Spacer()
                 if let mode = dominantMode ?? device.confirmedMode {
                     ModeBadge(mode: mode)
@@ -996,49 +1030,58 @@ struct ChildDetailView: View {
         .presentationDetents([.medium])
     }
 
-    // MARK: - Dashboard Layout Section
+    // MARK: - Dashboard Layout Sheet
 
     @ViewBuilder
-    private var dashboardLayoutSection: some View {
-        Section {
-            ForEach(sectionOrder, id: \.self) { section in
-                HStack(spacing: 12) {
-                    Image(systemName: section.icon)
-                        .font(.system(size: 14))
-                        .foregroundColor(hiddenSections.contains(section) ? .gray.opacity(0.4) : .blue)
-                        .frame(width: 22)
+    private var dashboardLayoutSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(sectionOrder, id: \.self) { section in
+                        HStack(spacing: 12) {
+                            Image(systemName: section.icon)
+                                .font(.system(size: 14))
+                                .foregroundColor(hiddenSections.contains(section) ? .gray.opacity(0.4) : .blue)
+                                .frame(width: 22)
 
-                    Text(section.displayName)
-                        .font(.subheadline)
-                        .foregroundStyle(hiddenSections.contains(section) ? .secondary : .primary)
+                            Text(section.displayName)
+                                .font(.subheadline)
+                                .foregroundStyle(hiddenSections.contains(section) ? .secondary : .primary)
 
-                    Spacer()
+                            Spacer()
 
-                    Toggle("", isOn: Binding(
-                        get: { !hiddenSections.contains(section) },
-                        set: { visible in
-                            if visible {
-                                hiddenSections.remove(section)
-                            } else {
-                                hiddenSections.insert(section)
-                            }
-                            ChildDetailSection.saveHidden(hiddenSections, for: viewModel.child.id)
+                            Toggle("", isOn: Binding(
+                                get: { !hiddenSections.contains(section) },
+                                set: { visible in
+                                    if visible {
+                                        hiddenSections.remove(section)
+                                    } else {
+                                        hiddenSections.insert(section)
+                                    }
+                                    ChildDetailSection.saveHidden(hiddenSections, for: viewModel.child.id)
+                                }
+                            ))
+                            .labelsHidden()
+                            .tint(.blue)
                         }
-                    ))
-                    .labelsHidden()
-                    .tint(.blue)
+                    }
+                    .onMove { from, to in
+                        sectionOrder.move(fromOffsets: from, toOffset: to)
+                        ChildDetailSection.saveOrder(sectionOrder, for: viewModel.child.id)
+                    }
+                } footer: {
+                    Text("Drag to reorder. Toggle to show or hide sections.")
                 }
             }
-            .onMove { from, to in
-                sectionOrder.move(fromOffsets: from, toOffset: to)
-                ChildDetailSection.saveOrder(sectionOrder, for: viewModel.child.id)
+            .environment(\.editMode, .constant(.active))
+            .navigationTitle("Dashboard Layout")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showDashboardLayout = false }
+                }
             }
-        } header: {
-            Text("Dashboard Layout")
-        } footer: {
-            Text("Drag to reorder. Toggle to show or hide sections.")
         }
-        .environment(\.editMode, .constant(.active))
     }
 
     // MARK: - Settings Sheet (Restrictions + Web Filter + Location Mode + Permissions)
@@ -1047,8 +1090,13 @@ struct ChildDetailView: View {
     private var settingsSheet: some View {
         NavigationStack {
             List {
-                // Dashboard Layout
-                dashboardLayoutSection
+                Section {
+                    Button {
+                        showDashboardLayout = true
+                    } label: {
+                        Label("Dashboard Layout", systemImage: "square.grid.2x2")
+                    }
+                }
 
                 // Location Mode
                 Section("Location Tracking") {
@@ -1288,6 +1336,9 @@ struct ChildDetailView: View {
                     Button("Done") { showSettings = false }
                 }
             }
+            .sheet(isPresented: $showDashboardLayout) {
+                dashboardLayoutSheet
+            }
             .sheet(isPresented: $showNamedPlaceEditor) {
                 NamedPlaceEditorView(appState: viewModel.appState) { place in
                     await viewModel.saveNamedPlace(place)
@@ -1413,8 +1464,13 @@ struct ChildDetailView: View {
                     Label("\(blocked) apps blocked", systemImage: "xmark.app")
                         .foregroundStyle(.secondary)
                 } else if !shieldsOK && shouldBeLocked {
-                    Label("No apps blocked", systemImage: "xmark.app")
-                        .foregroundStyle(.red)
+                    if let dnsCount = hb.dnsBlockedDomainCount, dnsCount > 0 {
+                        Label("DNS blocking \(dnsCount) domain\(dnsCount == 1 ? "" : "s")", systemImage: "network.badge.shield.half.filled")
+                            .foregroundStyle(.orange)
+                    } else {
+                        Label("No apps blocked", systemImage: "xmark.app")
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 if let locked = hb.isDeviceLocked {

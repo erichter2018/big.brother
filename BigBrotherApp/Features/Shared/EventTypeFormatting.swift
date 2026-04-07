@@ -35,6 +35,8 @@ extension EventType {
         case .timeLimitExhausted: "Time Limit Reached"
         case .timeLimitExtended: "Extra Time Granted"
         case .timeLimitSetupCompleted: "Time Limits Configured"
+        case .appNameDeception: "App Name Mismatch"
+        case .appNameVerified: "App Name Verified"
         }
     }
 }

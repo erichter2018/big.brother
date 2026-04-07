@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -o pipefail
 
-APP="/Users/erichter/Library/Developer/Xcode/DerivedData/BigBrother-cvyasdwosjjzrccwgemgtbtnjsbw/Build/Products/Debug-iphoneos/BigBrother.app"
+APP="/tmp/BBDerivedData/Build/Products/Debug-iphoneos/BigBrother.app"
 BID="fr.bigbrother.app"
 
 NAMES=("Isla's iPhone" "Isla's New iPad" "Juliet's New iPad" "Sebastian's New iPad" "Simon's iPhone" "Olivia's iPhone" "Daphne's iPhone" "Daphne's iPad" "e phone")

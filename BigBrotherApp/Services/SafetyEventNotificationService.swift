@@ -25,7 +25,8 @@ enum SafetyEventNotificationService {
     /// Deduplicates by event ID to avoid repeat notifications.
     static func checkAndNotify(
         events: [EventLogEntry],
-        childName: String
+        childName: String,
+        namedPlaces: [NamedPlace] = []
     ) {
         let defaults = UserDefaults.standard
         var notifiedIDs = Set(defaults.stringArray(forKey: "safetyNotifiedEventIDs") ?? [])
@@ -36,6 +37,24 @@ enum SafetyEventNotificationService {
             guard !notifiedIDs.contains(idStr) else { continue }
             // Only notify for events in the last hour (avoid stale batch)
             guard Date().timeIntervalSince(event.timestamp) < 3600 else { continue }
+
+            // Respect per-place notification toggles for arrival/departure events.
+            if event.eventType == .namedPlaceArrival || event.eventType == .namedPlaceDeparture {
+                if let details = event.details,
+                   let place = namedPlaces.first(where: { details.contains($0.name) }) {
+                    if event.eventType == .namedPlaceArrival && !place.notifyArrival { continue }
+                    if event.eventType == .namedPlaceDeparture && !place.notifyDeparture { continue }
+                }
+            }
+
+            // Debounce enforcementDegraded: max one per hour per device.
+            // These fire on transient app deaths that often self-resolve.
+            if event.eventType == .enforcementDegraded {
+                let key = "lastEnforcementDegradedNotif_\(event.deviceID.rawValue)"
+                let lastNotif = defaults.double(forKey: key)
+                if lastNotif > 0 && Date().timeIntervalSince1970 - lastNotif < 3600 { continue }
+                defaults.set(Date().timeIntervalSince1970, forKey: key)
+            }
 
             notifiedIDs.insert(idStr)
             postNotification(for: event, childName: childName)

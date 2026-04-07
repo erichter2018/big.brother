@@ -108,4 +108,7 @@ public enum EventType: String, Codable, Sendable, Equatable {
     case timeLimitExhausted
     case timeLimitExtended
     case timeLimitSetupCompleted
+    // DNS verification
+    case appNameDeception
+    case appNameVerified
 }

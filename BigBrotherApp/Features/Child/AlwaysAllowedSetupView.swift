@@ -54,6 +54,9 @@ struct AlwaysAllowedSetupView: View {
                 isPresented: $showingPicker,
                 selection: $selection
             )
+            .onChange(of: selection) { _, newSelection in
+                AppNameHarvester.harvest(from: newSelection)
+            }
             .navigationTitle("Always Allowed Apps")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

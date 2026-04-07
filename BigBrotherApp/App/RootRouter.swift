@@ -21,7 +21,7 @@ struct RootRouter: View {
                     revokedParentView
                 } else {
                     ParentGate(appState: appState) {
-                        SubscriptionGate(subscriptionManager: appState.subscriptionManager, debugMode: appState.debugMode) {
+                        SubscriptionBanner(subscriptionManager: appState.subscriptionManager) {
                             ParentTabView(appState: appState)
                         }
                     }

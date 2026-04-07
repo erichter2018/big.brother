@@ -32,6 +32,7 @@ struct ChildSummaryCard: View {
     let onUnlock: (Int) -> Void
     let onUnlockWithTimer: ((Int) -> Void)?
     let onSchedule: () -> Void
+    var hasPendingRequests: Bool = false
     let debugMode: Bool
     var namedPlaces: [NamedPlace]?
 
@@ -54,9 +55,15 @@ struct ChildSummaryCard: View {
             if hb.notificationsAuthorized == false { permissionIssue = true; break }
         }
 
-        // isOnOldBuild
+        // isOnOldBuild / tunnelOnlyUpdated
+        // Both old: full "…". Tunnel updated but app hasn't launched yet: grey "…".
         let builds = childHeartbeats.compactMap(\.appBuildNumber)
+        let mainBuilds = childHeartbeats.compactMap(\.mainAppLastLaunchedBuild)
         let onOldBuild = (builds.min() ?? AppConstants.appBuildNumber) < AppConstants.appBuildNumber
+            || (mainBuilds.min() ?? AppConstants.appBuildNumber) < AppConstants.appBuildNumber
+        let tunnelCurrent = (builds.max() ?? 0) >= AppConstants.appBuildNumber
+        let appStillOld = (mainBuilds.min() ?? AppConstants.appBuildNumber) < AppConstants.appBuildNumber
+        let tunnelOnlyUpdated = onOldBuild && tunnelCurrent && appStillOld
 
         // isShieldMismatch — flag when shields are genuinely down.
         // No age filter: if a heartbeat reports shields-down in a restrictive mode,
@@ -114,9 +121,35 @@ struct ChildSummaryCard: View {
         // DNS domain blocking — selective blocking of app domains via VPN (fallback when shields are down)
         let dnsBlockedCount = childHeartbeats.compactMap(\.dnsBlockedDomainCount).max() ?? 0
 
+        // Per-device alerts for multi-device children
+        var deviceAlerts: [DeviceAlert] = []
+        for device in devices {
+            guard let hb = heartbeats.first(where: { $0.deviceID == device.id }) else { continue }
+            let isIPad = device.modelIdentifier.lowercased().contains("ipad")
+
+            let shouldBeShielded = hb.currentMode != .unlocked
+            let devShieldsDown = shouldBeShielded && hb.shieldsActive == false && hb.shieldCategoryActive != true
+            if devShieldsDown, let exp = hb.temporaryUnlockExpiresAt, exp > Date() { continue }
+
+            let devInternetBlocked = hb.internetBlocked == true
+            let devDnsCount = hb.dnsBlockedDomainCount ?? 0
+
+            if devShieldsDown || devInternetBlocked {
+                deviceAlerts.append(DeviceAlert(
+                    id: device.id,
+                    isIPad: isIPad,
+                    shieldsDown: devShieldsDown,
+                    internetBlocked: devInternetBlocked,
+                    internetBlockedReason: hb.internetBlockedReason,
+                    dnsBlockedCount: devDnsCount
+                ))
+            }
+        }
+
         return PrecomputedValues(
             hasAnyPermissionIssue: permissionIssue,
             isOnOldBuild: onOldBuild,
+            isTunnelOnlyUpdated: tunnelOnlyUpdated,
             isShieldMismatch: shieldMismatch,
             isAppForceClosed: appForceClosed,
             latestHeartbeatAge: heartbeatAge,
@@ -125,13 +158,24 @@ struct ChildSummaryCard: View {
             hasJailbreak: hasJailbreak,
             isInternetBlocked: internetBlocked,
             internetBlockedReason: internetBlockedReason,
-            dnsBlockedDomainCount: dnsBlockedCount
+            dnsBlockedDomainCount: dnsBlockedCount,
+            deviceAlerts: deviceAlerts
         )
+    }
+
+    private struct DeviceAlert: Identifiable {
+        let id: DeviceID
+        let isIPad: Bool
+        let shieldsDown: Bool
+        let internetBlocked: Bool
+        let internetBlockedReason: String?
+        let dnsBlockedCount: Int
     }
 
     private struct PrecomputedValues {
         let hasAnyPermissionIssue: Bool
         let isOnOldBuild: Bool
+        let isTunnelOnlyUpdated: Bool
         let isShieldMismatch: Bool
         let isAppForceClosed: Bool
         let latestHeartbeatAge: TimeInterval?
@@ -141,6 +185,7 @@ struct ChildSummaryCard: View {
         let isInternetBlocked: Bool
         let internetBlockedReason: String?
         let dnsBlockedDomainCount: Int
+        let deviceAlerts: [DeviceAlert]
     }
 
     var body: some View {
@@ -157,10 +202,20 @@ struct ChildSummaryCard: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.red)
                     }
-                    Text(child.name + (cached.isOnOldBuild ? "…" : ""))
+                    (
+                        Text(child.name)
+                            .foregroundColor(cached.isInternetBlocked || cached.isShieldMismatch ? .red : .primary)
+                        + (cached.isOnOldBuild
+                            ? Text("…").foregroundColor(cached.isTunnelOnlyUpdated ? .gray.opacity(0.4) : (cached.isInternetBlocked || cached.isShieldMismatch ? .red : .primary))
+                            : Text(""))
+                    )
                         .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(cached.isInternetBlocked || cached.isShieldMismatch ? .red : .primary)
                         .lineLimit(1)
+                    if hasPendingRequests {
+                        Circle()
+                            .fill(.blue)
+                            .frame(width: 8, height: 8)
+                    }
                 }
 
                 // Self-unlock dots (filled = remaining, empty = used)
@@ -177,18 +232,56 @@ struct ChildSummaryCard: View {
 
             // Detail info — one concept per line, consistent alignment
             VStack(alignment: .leading, spacing: 4) {
-                // Row 1: Critical alerts (shields down, jailbreak) — always first
-                if cached.isShieldMismatch {
-                    infoRow(icon: "shield.slash", color: .red) {
-                        Text("shields down")
-                            .foregroundStyle(.red)
-                            .fontWeight(.semibold)
+                // Row 1: Critical alerts (shields down, internet blocked, jailbreak)
+                // Show per-device when child has multiple devices, aggregate otherwise.
+                if devices.count > 1 {
+                    ForEach(cached.deviceAlerts) { alert in
+                        if alert.shieldsDown {
+                            infoRow(icon: "shield.slash", color: .red) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: alert.isIPad ? "ipad" : "iphone")
+                                        .font(.system(size: 9))
+                                    Text("shields down")
+                                        .fontWeight(.semibold)
+                                }
+                                .foregroundStyle(.red)
+                            }
+                        }
+                        if alert.internetBlocked && dominantMode != .lockedDown {
+                            infoRow(icon: "wifi.slash", color: .red) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: alert.isIPad ? "ipad" : "iphone")
+                                        .font(.system(size: 9))
+                                    Text(alert.internetBlockedReason ?? "internet blocked")
+                                        .fontWeight(.semibold)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.7)
+                                }
+                                .foregroundStyle(.red)
+                            }
+                        }
                     }
-                    if cached.dnsBlockedDomainCount > 0 {
-                        infoRow(icon: "network.badge.shield.half.filled", color: .orange) {
-                            Text("DNS blocking \(cached.dnsBlockedDomainCount) domains")
-                                .foregroundStyle(.orange)
-                                .font(.system(size: 12))
+                } else {
+                    if cached.isShieldMismatch {
+                        infoRow(icon: "shield.slash", color: .red) {
+                            Text("shields down")
+                                .foregroundStyle(.red)
+                                .fontWeight(.semibold)
+                        }
+                    }
+                    if cached.isInternetBlocked && dominantMode != .lockedDown {
+                        infoRow(icon: "wifi.slash", color: .red) {
+                            if let reason = cached.internetBlockedReason, !reason.isEmpty {
+                                Text(reason)
+                                    .foregroundStyle(.red)
+                                    .fontWeight(.semibold)
+                                    .lineLimit(2)
+                                    .minimumScaleFactor(0.8)
+                            } else {
+                                Text("internet blocked")
+                                    .foregroundStyle(.red)
+                                    .fontWeight(.semibold)
+                            }
                         }
                     }
                 }
@@ -196,21 +289,6 @@ struct ChildSummaryCard: View {
                     infoRow(icon: "exclamationmark.shield.fill", color: .red) {
                         Text("jailbreak detected")
                             .foregroundStyle(.red)
-                    }
-                }
-                if cached.isInternetBlocked && dominantMode != .lockedDown {
-                    infoRow(icon: "wifi.slash", color: .red) {
-                        if let reason = cached.internetBlockedReason, !reason.isEmpty {
-                            Text(reason)
-                                .foregroundStyle(.red)
-                                .fontWeight(.semibold)
-                                .lineLimit(2)
-                                .minimumScaleFactor(0.8)
-                        } else {
-                            Text("internet blocked")
-                                .foregroundStyle(.red)
-                                .fontWeight(.semibold)
-                        }
                     }
                 }
 

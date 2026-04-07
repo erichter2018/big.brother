@@ -73,6 +73,8 @@ enum CloudKitSchemaBootstrap {
             buildNamedPlace(),
             buildDiagnosticReport(),
             buildDeviceLocation(),
+            buildTimeLimitConfig(),
+            buildPendingAppReview(),
         ]
     }
 
@@ -130,6 +132,8 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.issuedAt] = Date() as NSDate
         r[CKFieldName.expiresAt] = Date() as NSDate
         r[CKFieldName.status] = "expired"
+        r[CKFieldName.alertTitle] = "_seed_"
+        r[CKFieldName.alertBody] = "_seed_"
         return r
     }
 
@@ -251,6 +255,32 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.locAccuracy] = 0.0 as NSNumber
         r[CKFieldName.locTimestamp] = Date() as NSDate
         r[CKFieldName.locAddress] = "_seed_"
+        return r
+    }
+
+    private static func buildTimeLimitConfig() -> CKRecord {
+        let r = seed(CKRecordType.timeLimitConfig)
+        r[CKFieldName.familyID] = seedFamilyID
+        r[CKFieldName.profileID] = seedPrefix
+        r[CKFieldName.appFingerprint] = "_seed_"
+        r[CKFieldName.appName] = "_seed_"
+        r[CKFieldName.dailyLimitMinutes] = 0 as NSNumber
+        r[CKFieldName.timeLimitIsActive] = 1 as NSNumber
+        r[CKFieldName.createdAt] = Date() as NSDate
+        r[CKFieldName.updatedAt] = Date() as NSDate
+        return r
+    }
+
+    private static func buildPendingAppReview() -> CKRecord {
+        let r = seed(CKRecordType.pendingAppReview)
+        r[CKFieldName.familyID] = seedFamilyID
+        r[CKFieldName.profileID] = seedPrefix
+        r[CKFieldName.deviceID] = seedPrefix
+        r[CKFieldName.appFingerprint] = "_seed_"
+        r[CKFieldName.appName] = "_seed_"
+        r[CKFieldName.nameResolved] = 0 as NSNumber
+        r[CKFieldName.createdAt] = Date() as NSDate
+        r[CKFieldName.updatedAt] = Date() as NSDate
         return r
     }
 }

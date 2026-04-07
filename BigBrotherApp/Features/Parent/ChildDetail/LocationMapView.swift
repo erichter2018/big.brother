@@ -1692,10 +1692,10 @@ struct LocationMapView: View {
         for i in 0..<(waypoints.count - 1) {
             let from = waypoints[i]
             let to = waypoints[i + 1]
-            let cacheKey = Self.routeCacheKey(from: from, to: to)
+            let cacheKey = RouteCache.routeCacheKey(from: from, to: to)
 
             // Check cache first
-            if let cached = Self.loadCachedRoute(key: cacheKey) {
+            if let cached = RouteCache.loadCachedRoute(key: cacheKey) {
                 resolved.append(cached)
             } else {
                 let source = MKMapItem(placemark: MKPlacemark(coordinate: from))
@@ -1711,7 +1711,7 @@ struct LocationMapView: View {
                     let response = try await directions.calculate()
                     if let route = response.routes.first {
                         resolved.append(route.polyline)
-                        Self.cacheRoute(route.polyline, key: cacheKey)
+                        RouteCache.cacheRoute(route.polyline, key: cacheKey)
                     }
                 } catch {
                     let coords = [from, to]

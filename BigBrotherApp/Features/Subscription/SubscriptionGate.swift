@@ -1,49 +1,37 @@
 import SwiftUI
 
-/// Gates parent access behind an active subscription.
-/// Shows the paywall if the subscription is expired or unknown.
-/// During grace period, allows read-only access with a banner.
+/// Non-blocking subscription banner overlay.
+/// Shows trial/grace warnings but never blocks access to the parent UI.
+/// The paywall only appears as a sheet (from AddChildView or command gate).
 /// Child devices are never gated — enforcement works regardless of subscription.
-struct SubscriptionGate<Content: View>: View {
+struct SubscriptionBanner<Content: View>: View {
     let subscriptionManager: SubscriptionManager
-    let debugMode: Bool
     @ViewBuilder let content: () -> Content
 
-    @State private var hasChecked = false
     @State private var showPaywall = false
 
     var body: some View {
-        Group {
-            if debugMode || subscriptionManager.isSubscribed || !hasChecked {
-                content()
-                    .overlay(alignment: .top) {
-                        if subscriptionManager.isTrialEndingSoon {
-                            trialBanner
-                        }
-                    }
-            } else if subscriptionManager.subscriptionStatus == .grace {
-                // Grace period: show content with warning banner
-                content()
-                    .overlay(alignment: .top) {
-                        graceBanner
-                    }
-            } else {
+        content()
+            .overlay(alignment: .top) {
+                if subscriptionManager.isTrialEndingSoon {
+                    trialBanner
+                } else if subscriptionManager.subscriptionStatus == .grace {
+                    graceBanner
+                }
+            }
+            .task {
+                await subscriptionManager.loadProducts()
+                await subscriptionManager.updateSubscriptionStatus()
+            }
+            .sheet(isPresented: $showPaywall) {
                 PaywallView(subscriptionManager: subscriptionManager) {
                     showPaywall = false
                 }
             }
-        }
-        .task {
-            await subscriptionManager.loadProducts()
-            await subscriptionManager.updateSubscriptionStatus()
-            hasChecked = true
-        }
-        .sheet(isPresented: $showPaywall) {
-            PaywallView(subscriptionManager: subscriptionManager) {
-                showPaywall = false
-            }
-        }
     }
+
+    // Keep old name available for any other references.
+    typealias SubscriptionGate = SubscriptionBanner
 
     @ViewBuilder
     private var trialBanner: some View {

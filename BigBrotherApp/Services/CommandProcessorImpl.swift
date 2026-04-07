@@ -1,6 +1,8 @@
 import Foundation
 import CloudKit
+import UIKit
 import ManagedSettings
+import FamilyControls
 import DeviceActivity
 import BigBrotherCore
 
@@ -58,6 +60,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Prevents concurrent execution of processIncomingCommands().
     private let processingGate = ProcessingGate()
 
+    /// When true, mode change local notifications are suppressed because
+    /// the alert push already displayed a banner. Reset after each processing cycle.
+    var suppressModeNotifications = false
+
     /// Called on the main thread when a requestAppConfiguration command is received.
     var onRequestAppConfiguration: (() -> Void)?
 
@@ -83,6 +89,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     var onRestartVPNTunnel: (() -> Void)?
     var onScheduleSyncNeeded: (() -> Void)?
     var onRequestTimeLimitSetup: (() -> Void)?
+    var onRequestChildAppPick: (() -> Void)?
 
     init(
         cloudKit: any CloudKitServiceProtocol,
@@ -111,6 +118,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             return
         }
 
+        // CRITICAL: Begin a background task so iOS doesn't suspend us mid-enforcement.
+        // Without this, ManagedSettingsStore writes from a backgrounded app don't commit
+        // before iOS suspends the process — shields stay in the wrong state until the
+        // user manually opens the app.
+        let bgTaskID = await MainActor.run {
+            UIApplication.shared.beginBackgroundTask(withName: "commandProcessing") { }
+        }
+
         // Process commands, then re-run if a push arrived during processing.
         var shouldRerun = true
         while shouldRerun {
@@ -118,6 +133,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 try await _processIncomingCommandsBody()
             } catch {
                 let _ = await processingGate.finish()
+                await MainActor.run {
+                    if bgTaskID != .invalid { UIApplication.shared.endBackgroundTask(bgTaskID) }
+                }
                 throw error
             }
             shouldRerun = await processingGate.finish()
@@ -127,6 +145,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 #endif
                 guard await processingGate.tryStart() else { break }
             }
+        }
+
+        // Brief pause for ManagedSettingsStore writes to commit, then release
+        try? await Task.sleep(for: .milliseconds(500))
+        await MainActor.run {
+            if bgTaskID != .invalid { UIApplication.shared.endBackgroundTask(bgTaskID) }
         }
     }
 
@@ -404,21 +428,33 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 // Indefinite mode command: clears the entire stack.
                 // Last parent command always wins — if parent says Lock,
                 // any active temp unlock, timed unlock, or schedule is overridden.
+                // CRITICAL: If clear fails, retry with brute force. The 60-second
+                // enforcement check uses ModeStackResolver which reads these files.
+                // A leftover temp unlock file will override this setMode command.
                 do {
                     try storage.clearTemporaryUnlockState()
                 } catch {
+                    // Retry once — file might be locked by another process
+                    try? storage.clearTemporaryUnlockState()
+                    // Nuclear: overwrite with nil data to ensure the file is gone
+                    try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
                     try? storage.appendDiagnosticEntry(DiagnosticEntry(
                         category: .command,
-                        message: "Failed to clear temporary unlock state during setMode: \(error.localizedDescription)"
+                        message: "Failed to clear temp unlock during setMode (retried): \(error.localizedDescription)"
                     ))
                 }
-                try? storage.clearTimedUnlockInfo()
+                do {
+                    try storage.clearTimedUnlockInfo()
+                } catch {
+                    try? storage.clearTimedUnlockInfo()
+                    try? storage.writeRawData(nil, forKey: "timedUnlockInfo.json")
+                }
                 clearLockUntilState()
                 cancelNonScheduleActivities()
                 // scheduleDrivenMode is now derived from controlAuthority in the snapshot commit.
                 try applyMode(mode, enrollment: enrollment, commandID: command.id)
                 eventLogger.log(.commandApplied, details: "Mode set to \(mode.rawValue)")
-                ModeChangeNotifier.notify(newMode: mode)
+                if !suppressModeNotifications { ModeChangeNotifier.notify(newMode: mode) }
                 return .applied
 
             case .temporaryUnlock(let durationSeconds):
@@ -439,7 +475,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 let m = (durationSeconds % 3600) / 60
                 let dur = h > 0 ? (m > 0 ? "\(h)h \(m)m" : "\(h)h") : "\(m)m"
                 eventLogger.log(.commandApplied, details: "\(wasUnlocked ? "Extended" : "Temporary") unlock for \(dur)")
-                ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: durationSeconds, isExtension: wasUnlocked)
+                if !suppressModeNotifications { ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: durationSeconds, isExtension: wasUnlocked) }
                 return .applied
 
             case .requestHeartbeat:
@@ -553,7 +589,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 let formatter = DateFormatter()
                 formatter.dateFormat = "h:mm a"
                 eventLogger.log(.commandApplied, details: "Locked until \(formatter.string(from: date))")
-                ModeChangeNotifier.notify(newMode: .restricted)
+                if !suppressModeNotifications { ModeChangeNotifier.notify(newMode: .restricted) }
                 return .applied
 
             case .syncPINHash(let base64):
@@ -760,8 +796,26 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 DispatchQueue.main.async { [weak self] in
                     self?.onRequestTimeLimitSetup?()
                 }
-                eventLogger.log(.commandApplied, details: "Time limit setup requested by parent")
+                eventLogger.log(.commandApplied, details: "Time limit setup requested by parent (Mode 1)")
                 return .applied
+
+            case .requestChildAppPick:
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRequestChildAppPick?()
+                }
+                eventLogger.log(.commandApplied, details: "App pick requested by parent (Mode 2)")
+                return .applied
+
+            case .reviewApp(let fingerprint, let disposition, let minutes):
+                return handleReviewApp(fingerprint: fingerprint, disposition: disposition, minutes: minutes)
+
+            case .reviewApps(let decisions):
+                var lastResult: CommandProcessingResult = .applied
+                for decision in decisions {
+                    lastResult = handleReviewApp(fingerprint: decision.fingerprint, disposition: decision.disposition, minutes: decision.minutes)
+                }
+                reapplyCurrentEnforcement()
+                return lastResult
 
             case .grantExtraTime(let fingerprint, let extraMinutes):
                 return handleGrantExtraTime(fingerprint: fingerprint, extraMinutes: extraMinutes)
@@ -829,10 +883,16 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         )
 
         let result = try snapshotStore.commit(output.snapshot)
+        NSLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): snapshot committed, calling enforcement.apply()")
         switch result {
         case .committed(let snapshot):
             try enforcement?.apply(snapshot.effectivePolicy)
+            NSLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): enforcement.apply() completed, triggering Monitor")
             try snapshotStore.markApplied()
+
+            // Trigger the Monitor extension to apply enforcement from its privileged context.
+            // The main app's enforcement.apply() above is best-effort (works in foreground).
+            triggerMonitorEnforcementRefresh()
 
             if output.modeChanged {
                 eventLogger.log(.modeChanged, details: "Mode changed from \(output.previousMode?.rawValue ?? "none") to \(effectiveMode.rawValue)")
@@ -891,9 +951,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
 
         // Clear any existing timed unlock / lockUntil to prevent conflicts.
-        // If a penalty phase is active and parent sends a temp unlock,
-        // the timed unlock's scheduled free phase could later override this.
         try? storage.clearTimedUnlockInfo()
+        try? storage.writeRawData(nil, forKey: "timedUnlockInfo.json")
         clearLockUntilState()
 
         // Create durable temp unlock state.
@@ -1099,7 +1158,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         enrollment: ChildEnrollmentState,
         commandID: UUID
     ) throws {
-        // Clear lockUntil state — timedUnlock overrides it.
+        // Clear all competing state — timedUnlock overrides everything.
+        try? storage.clearTemporaryUnlockState()
+        try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
         clearLockUntilState()
 
         // Account for delivery delay.
@@ -1121,7 +1182,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 commandID: commandID
             )
             eventLogger.log(.commandApplied, details: "Timed unlock: no penalty remaining, unlocked for \(ModeChangeNotifier.formatDuration(unlockDuration))")
-            ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: unlockDuration)
+            if !suppressModeNotifications { ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: unlockDuration) }
         } else if adjustedPenalty >= adjustedTotal {
             // Penalty exceeds or equals total window — no free time at all.
             // Device must be actively locked for the entire duration.
@@ -1133,7 +1194,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             let lockedMode: LockMode = currentMode == .unlocked ? .restricted : currentMode
             try applyMode(lockedMode, enrollment: enrollment, commandID: commandID, controlAuthority: .timedUnlock)
             eventLogger.log(.commandApplied, details: "Timed unlock: penalty \(ModeChangeNotifier.formatDuration(adjustedPenalty)) >= total \(ModeChangeNotifier.formatDuration(adjustedTotal)), no free time — device locked")
-            ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedTotal, unlockSeconds: 0)
+            if !suppressModeNotifications { ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedTotal, unlockSeconds: 0) }
         } else {
             // Penalty < total — lock during penalty, then unlock for remainder.
             let now = Date()
@@ -1181,7 +1242,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             let penaltyStr = ModeChangeNotifier.formatDuration(adjustedPenalty)
             let unlockStr = ModeChangeNotifier.formatDuration(adjustedTotal - adjustedPenalty)
             eventLogger.log(.commandApplied, details: "Timed unlock: \(penaltyStr) penalty then \(unlockStr) free")
-            ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedPenalty, unlockSeconds: adjustedTotal - adjustedPenalty)
+            if !suppressModeNotifications { ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedPenalty, unlockSeconds: adjustedTotal - adjustedPenalty) }
         }
     }
 
@@ -1191,8 +1252,11 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Falls back to dailyMode if no profile is assigned.
     private func applyReturnToSchedule(enrollment: ChildEnrollmentState, commandID: UUID) throws {
         // Clear any temporary unlock / timed unlock / lockUntil state.
+        // Retry + nuclear fallback to handle file lock contention.
         try? storage.clearTemporaryUnlockState()
+        try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
         try? storage.clearTimedUnlockInfo()
+        try? storage.writeRawData(nil, forKey: "timedUnlockInfo.json")
         clearLockUntilState()
 
         // Cancel any active temp/timed/lockuntil DeviceActivity schedules
@@ -1205,16 +1269,38 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         let versionKey = "scheduleProfileVersion.\(enrollment.deviceID.rawValue)"
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.removeObject(forKey: versionKey)
 
-        // Read the active schedule profile from App Group storage.
+        // Read the active schedule profile and re-register DeviceActivity intervals
+        // so upcoming transitions (e.g., restricted → locked at bedtime) fire correctly.
         let mode: LockMode
         if let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
+            // Re-register the schedule so the Monitor fires for the next transition.
+            ScheduleRegistrar.register(profile, storage: storage)
         } else {
             mode = .restricted
         }
 
         try applyMode(mode, enrollment: enrollment, commandID: commandID, controlAuthority: .schedule)
-        ModeChangeNotifier.notify(newMode: mode)
+        if !suppressModeNotifications { ModeChangeNotifier.notify(newMode: mode) }
+    }
+
+    /// Wake the DeviceActivityMonitor extension to apply enforcement from its privileged context.
+    /// Uses stopMonitoring on reconciliation schedules to fire intervalDidEnd immediately.
+    /// Stops ALL 30 reconciliation slots to maximize the chance at least one triggers.
+    private func triggerMonitorEnforcementRefresh() {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+
+        let center = DeviceActivityCenter()
+        let activeCount = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
+        NSLog("[CommandProcessor] triggerMonitorRefresh: \(activeCount) reconciliation activities registered, stopping all")
+
+        var toStop: [DeviceActivityName] = [DeviceActivityName(rawValue: "bigbrother.reconciliation")]
+        for m in 1..<58 {
+            toStop.append(DeviceActivityName(rawValue: "bigbrother.reconciliation.m\(m)"))
+        }
+        center.stopMonitoring(toStop)
+        NSLog("[CommandProcessor] triggerMonitorRefresh: stopMonitoring called for 58 slots")
     }
 
     /// Clear lockUntil state from UserDefaults. Must be called by any command that
@@ -1253,7 +1339,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // lockUntil is temporary — it pushes onto the stack and restores prior mode at expiry.
         // Clear any active temp/timed unlock — lockUntil overrides them.
         try? storage.clearTemporaryUnlockState()
+        try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
         try? storage.clearTimedUnlockInfo()
+        try? storage.writeRawData(nil, forKey: "timedUnlockInfo.json")
         cancelNonScheduleActivities()
 
         // Save prior mode and expiry for restoration + self-healing.
@@ -1585,15 +1673,18 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         return .applied
     }
 
-    /// Handle "revoke all apps" — clear all permanent and temporary allow lists.
+    /// Handle "revoke all apps" — clear all permanent and temporary allow lists,
+    /// plus pending app review probes (unreviewed 1-minute limits).
     private func handleRevokeAllApps() -> CommandProcessingResult {
-        // Clear permanent allowed tokens.
+        // Nuclear: clear everything app-related.
         try? storage.writeRawData(nil, forKey: StorageKeys.allowedAppTokens)
         try? storage.writeRawData(nil, forKey: "allowedBundleIDs")
-        // Clear temporary allowed apps.
         try? storage.writeTemporaryAllowedApps([])
+        try? storage.writeAppTimeLimits([])
+        try? storage.writeTimeLimitExhaustedApps([])
+        ScheduleRegistrar.registerTimeLimitEvents(limits: [])
         reapplyCurrentEnforcement()
-        eventLogger.log(.commandApplied, details: "All allowed apps revoked")
+        eventLogger.log(.commandApplied, details: "All apps and time limits revoked")
         return .applied
     }
 
@@ -1613,10 +1704,138 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         TokenFingerprint.fingerprint(for: data)
     }
 
+    // MARK: - App Review (Mode 2)
+
+    /// Handle app review/transition. Supports ALL state changes:
+    /// pending→allowed, pending→timeLimited, pending→blocked,
+    /// allowed→timeLimited, timeLimited→allowed, any→blocked (delete).
+    private func handleReviewApp(fingerprint: String, disposition: AppDisposition, minutes: Int?) -> CommandProcessingResult {
+        var limits = storage.readAppTimeLimits()
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        // Load allowed tokens
+        var allowedTokens = Set<ApplicationToken>()
+        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let existing = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
+            allowedTokens = existing
+        }
+
+        // Find the token for this fingerprint from any source
+        let token: ApplicationToken? = {
+            // From time limits
+            if let limit = limits.first(where: { $0.fingerprint == fingerprint }),
+               let t = try? decoder.decode(ApplicationToken.self, from: limit.tokenData) {
+                return t
+            }
+            // From allowed list (check each token's fingerprint)
+            for t in allowedTokens {
+                if let data = try? encoder.encode(t),
+                   TokenFingerprint.fingerprint(for: data) == fingerprint {
+                    return t
+                }
+            }
+            // From picker selection
+            if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+               let sel = try? decoder.decode(FamilyActivitySelection.self, from: data) {
+                for t in sel.applicationTokens {
+                    if let data = try? encoder.encode(t),
+                       TokenFingerprint.fingerprint(for: data) == fingerprint {
+                        return t
+                    }
+                }
+            }
+            return nil
+        }()
+
+        // Clean up: remove from ALL lists first (clean transition)
+        if let token {
+            allowedTokens.remove(token)
+        }
+        limits.removeAll { $0.fingerprint == fingerprint }
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        exhausted.removeAll { $0.fingerprint == fingerprint }
+
+        switch disposition {
+        case .allowAlways:
+            if let token {
+                allowedTokens.insert(token)
+            }
+
+        case .timeLimit:
+            let dailyMinutes = minutes ?? 60
+            if let token, let tokenData = try? encoder.encode(token) {
+                let appName = storage.readAllCachedAppNames()[tokenData.base64EncodedString()] ?? "App"
+                let limit = AppTimeLimit(
+                    appName: appName,
+                    tokenData: tokenData,
+                    fingerprint: fingerprint,
+                    dailyLimitMinutes: dailyMinutes,
+                    wasAlreadyAllowed: false
+                )
+                limits.append(limit)
+                // Also add to allowed so app is usable until limit reached
+                allowedTokens.insert(token)
+            }
+
+        case .keepBlocked:
+            // Remove from picker selection too (fully block)
+            if let token,
+               let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+               var sel = try? decoder.decode(FamilyActivitySelection.self, from: data) {
+                sel.applicationTokens.remove(token)
+                if let encoded = try? encoder.encode(sel) {
+                    try? storage.writeRawData(encoded, forKey: StorageKeys.familyActivitySelection)
+                }
+            }
+        }
+
+        // Persist all changes
+        if let encoded = try? encoder.encode(allowedTokens) {
+            try? storage.writeRawData(encoded, forKey: StorageKeys.allowedAppTokens)
+        }
+        try? storage.writeAppTimeLimits(limits)
+
+        // Check if any time-limited app already exceeds its limit (retroactive enforcement).
+        // This handles: parent converts always-allowed to 30 min, kid already used 45 min.
+        if disposition == .timeLimit, let mins = minutes, let token {
+            let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+            let today = f.string(from: Date())
+            // Check screen time milestones for approximate usage
+            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            let _ = defaults?.integer(forKey: "screenTimeMinutes") ?? 0
+            // If we can't determine exact per-app usage, check if the app was previously
+            // in the exhausted list (re-adding after grant extra time).
+            // Conservative: if we just set a limit, register events and let them fire naturally.
+            // But also check app-specific usage from the tunnel DNS tracker.
+            if let tokenData = try? encoder.encode(token) {
+                let appUsageKey = "appUsage.\(TokenFingerprint.fingerprint(for: tokenData)).\(today)"
+                let appMinutes = defaults?.integer(forKey: appUsageKey) ?? 0
+                if appMinutes >= mins {
+                    // Already exceeded — immediately exhaust
+                    let limitID = limits.first(where: { $0.fingerprint == fingerprint })?.id ?? UUID()
+                    let entry = TimeLimitExhaustedApp(
+                        timeLimitID: limitID,
+                        appName: limits.first(where: { $0.fingerprint == fingerprint })?.appName ?? "App",
+                        tokenData: tokenData,
+                        fingerprint: fingerprint
+                    )
+                    exhausted.append(entry)
+                }
+            }
+        }
+
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+        ScheduleRegistrar.registerTimeLimitEvents(limits: limits)
+        reapplyCurrentEnforcement()
+        eventLogger.log(.commandApplied, details: "App \(disposition.rawValue): fp \(fingerprint.prefix(8))\(minutes.map { " \($0)m" } ?? "")")
+        return .applied
+    }
+
     // MARK: - App Time Limits
 
     private func handleGrantExtraTime(fingerprint: String, extraMinutes: Int) -> CommandProcessingResult {
-        var limits = storage.readAppTimeLimits()
+        let limits = storage.readAppTimeLimits()
         guard let idx = limits.firstIndex(where: { $0.fingerprint == fingerprint }) else {
             return .failedExecution(reason: "No time limit found for fingerprint \(fingerprint)")
         }
@@ -1626,16 +1845,21 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         exhausted.removeAll { $0.fingerprint == fingerprint }
         try? storage.writeTimeLimitExhaustedApps(exhausted)
 
-        // Increase daily limit
-        limits[idx].dailyLimitMinutes += extraMinutes
-        limits[idx].updatedAt = Date()
-        try? storage.writeAppTimeLimits(limits)
+        // Store extra time separately (date-keyed so it resets at midnight).
+        // Do NOT modify limits[idx].dailyLimitMinutes — that's the permanent base limit.
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+        let todayKey = "extraTime.\(fingerprint).\(f.string(from: Date()))"
+        let existing = defaults?.integer(forKey: todayKey) ?? 0
+        defaults?.set(existing + extraMinutes, forKey: todayKey)
 
-        // Re-register DeviceActivityEvent with new threshold
-        ScheduleRegistrar.registerTimeLimitEvents(limits: limits)
+        // Re-register DeviceActivityEvent with effective threshold (base + extra)
+        var adjustedLimits = limits
+        adjustedLimits[idx].dailyLimitMinutes += existing + extraMinutes
+        ScheduleRegistrar.registerTimeLimitEvents(limits: adjustedLimits)
 
         reapplyCurrentEnforcement()
-        eventLogger.log(.timeLimitExtended, details: "\(limits[idx].appName): +\(extraMinutes) min (now \(limits[idx].dailyLimitMinutes) min/day)")
+        eventLogger.log(.timeLimitExtended, details: "\(limits[idx].appName): +\(extraMinutes) min today (base \(limits[idx].dailyLimitMinutes) + \(existing + extraMinutes) extra)")
         return .applied
     }
 
@@ -1645,16 +1869,41 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         limits.removeAll { $0.fingerprint == fingerprint }
         try? storage.writeAppTimeLimits(limits)
 
+        // Persist name + token for future re-add.
+        if let removed {
+            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            var nameMap = (defaults?.dictionary(forKey: "harvestedAppNames") as? [String: String]) ?? [:]
+            nameMap[removed.fingerprint] = removed.appName
+            defaults?.set(nameMap, forKey: "harvestedAppNames")
+            storage.cacheAppName(removed.appName, forTokenKey: removed.tokenData.base64EncodedString())
+        }
+
         // Remove from exhausted list
         var exhausted = storage.readTimeLimitExhaustedApps()
         exhausted.removeAll { $0.fingerprint == fingerprint }
         try? storage.writeTimeLimitExhaustedApps(exhausted)
 
-        // Stop monitoring this app's activity and re-register remaining
+        // Remove from allowed tokens so the app gets blocked by category shield.
+        // Only remove if the app wasn't already allowed before the time limit was added.
         if let removed {
             let center = DeviceActivityCenter()
             let activityName = DeviceActivityName(rawValue: "bigbrother.timelimit.\(removed.id.uuidString)")
             center.stopMonitoring([activityName])
+
+            if !removed.wasAlreadyAllowed,
+               let token = try? JSONDecoder().decode(ApplicationToken.self, from: removed.tokenData) {
+                var allowed: Set<ApplicationToken>
+                if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+                   let existing = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data) {
+                    allowed = existing
+                } else {
+                    allowed = []
+                }
+                allowed.remove(token)
+                if let encoded = try? JSONEncoder().encode(allowed) {
+                    try? storage.writeRawData(encoded, forKey: StorageKeys.allowedAppTokens)
+                }
+            }
         }
 
         // Re-register remaining limits
@@ -1707,8 +1956,26 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     @discardableResult
     private func reapplyCurrentEnforcement() -> Bool {
         guard let snapshot = snapshotStore.loadCurrentSnapshot() else { return false }
+        // Use ModeStackResolver as ground truth — the snapshot may have stale
+        // isTemporaryUnlock or mode from a previous command. Without this,
+        // revokeAllApps can trigger applyWideOpenShields() via a stale snapshot.
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        var policy = snapshot.effectivePolicy
+        if resolution.mode != policy.resolvedMode || (!policy.isTemporaryUnlock && storage.readTemporaryUnlockState() == nil) {
+            policy = EffectivePolicy(
+                resolvedMode: resolution.mode,
+                controlAuthority: resolution.controlAuthority,
+                isTemporaryUnlock: storage.readTemporaryUnlockState() != nil,
+                temporaryUnlockExpiresAt: storage.readTemporaryUnlockState()?.expiresAt,
+                shieldedCategoriesData: policy.shieldedCategoriesData,
+                allowedAppTokensData: policy.allowedAppTokensData,
+                deviceRestrictions: policy.deviceRestrictions,
+                warnings: policy.warnings,
+                policyVersion: policy.policyVersion
+            )
+        }
         do {
-            try enforcement?.apply(snapshot.effectivePolicy)
+            try enforcement?.apply(policy)
             return true
         } catch {
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -1810,7 +2077,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         case .setMode, .temporaryUnlock, .timedUnlock, .lockUntil, .returnToSchedule,
              .allowApp, .revokeApp, .allowManagedApp, .blockManagedApp,
              .temporaryUnlockApp, .revokeAllApps, .requestAlwaysAllowedSetup, .unenroll,
-             .requestTimeLimitSetup, .grantExtraTime, .removeTimeLimit, .blockAppForToday:
+             .requestTimeLimitSetup, .requestChildAppPick,
+             .reviewApp, .reviewApps,
+             .grantExtraTime, .removeTimeLimit, .blockAppForToday:
             return true
         case .setSelfUnlockBudget, .setRestrictions, .nameApp, .syncPINHash,
              .setScheduleProfile, .clearScheduleProfile, .setHeartbeatProfile,

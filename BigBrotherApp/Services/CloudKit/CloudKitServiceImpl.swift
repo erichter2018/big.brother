@@ -311,7 +311,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 #if DEBUG
                 print("[CloudKit] Heartbeat permission denied — deleting stale record and recreating")
                 #endif
-                try? await database.deleteRecord(withID: recordID)
+                _ = try? await database.deleteRecord(withID: recordID)
                 let fresh = CKRecord(recordType: CKRecordType.heartbeat, recordID: recordID)
                 CKRecordConversion.updateCKRecord(fresh, from: heartbeat)
                 try await save(fresh)
@@ -549,6 +549,24 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await delete(recordID)
     }
 
+    // MARK: - Pending App Reviews
+
+    func fetchPendingAppReviews(childProfileID: ChildProfileID) async throws -> [PendingAppReview] {
+        let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
+        return try await query(CKRecordType.pendingAppReview, predicate: predicate)
+            .compactMap(CKRecordConversion.pendingAppReview)
+    }
+
+    func savePendingAppReview(_ review: PendingAppReview) async throws {
+        let record = CKRecordConversion.toCKRecord(review)
+        try await save(record)
+    }
+
+    func deletePendingAppReview(_ id: UUID) async throws {
+        let recordID = CKRecordConversion.recordID(id.uuidString, type: CKRecordType.pendingAppReview)
+        try await delete(recordID)
+    }
+
     // MARK: - Subscriptions
 
     func setupSubscriptions(familyID: FamilyID, deviceID: DeviceID?) async throws {
@@ -556,9 +574,9 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         // If they do, skip re-registration (fast path — no unnecessary work).
         // If they're missing (iCloud account change, MDM removal wiped them),
         // delete any stale leftovers and re-create from scratch.
-        let expectedID = deviceID != nil
-            ? "commands-\(familyID.rawValue)"
-            : "unlock-requests-v3-\(familyID.rawValue)"
+        let expectedIDs: Set<String> = deviceID != nil
+            ? ["commands-\(familyID.rawValue)", "mode-commands-alert-\(familyID.rawValue)"]
+            : ["unlock-requests-v3-\(familyID.rawValue)"]
 
         // Always log what we find for debugging push issues
         let existing: [CKSubscription]
@@ -570,17 +588,19 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             existing = []
         }
 
-        let hasExpected = existing.contains { $0.subscriptionID == expectedID }
+        let existingIDs = Set(existing.map(\.subscriptionID))
+        let hasAllExpected = expectedIDs.isSubset(of: existingIDs)
 
-        if hasExpected {
-            NSLog("[BigBrother] CK subscription \(expectedID) exists — push should work")
+        if hasAllExpected {
+            NSLog("[BigBrother] CK subscriptions all present (\(expectedIDs)) — push should work")
             // Even if subscription exists, ensure APNs token is fresh
             await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
             return
         }
 
-        // Subscription missing — nuke everything and re-create with fresh APNs token.
-        NSLog("[BigBrother] CK subscription \(expectedID) MISSING from \(existing.count) subs — deleting stale + re-registering")
+        // Subscription(s) missing — nuke everything and re-create with fresh APNs token.
+        let missing = expectedIDs.subtracting(existingIDs)
+        NSLog("[BigBrother] CK subscriptions missing: \(missing) from \(existing.count) subs — deleting stale + re-registering")
         await deleteAllSubscriptions()
         await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
 
@@ -604,8 +624,34 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             commandSub.notificationInfo = commandNotifInfo
             subscriptionsToSave.append(commandSub)
 
+            // Alert push subscription for mode commands — reliably delivered by iOS.
+            // Matches only commands where alertTitle is populated (mode commands).
+            // Both subscriptions fire for the same record; ProcessingGate deduplicates.
+            let alertPredicate = NSPredicate(
+                format: "%K == %@ AND %K == %@ AND %K != nil",
+                CKFieldName.familyID, familyID.rawValue,
+                CKFieldName.status, CommandStatus.pending.rawValue,
+                CKFieldName.alertTitle
+            )
+            let alertSub = CKQuerySubscription(
+                recordType: CKRecordType.remoteCommand,
+                predicate: alertPredicate,
+                subscriptionID: "mode-commands-alert-\(familyID.rawValue)",
+                options: [.firesOnRecordCreation]
+            )
+            let alertNotifInfo = CKSubscription.NotificationInfo()
+            alertNotifInfo.shouldSendContentAvailable = true
+            alertNotifInfo.titleLocalizationKey = "%1$@"
+            alertNotifInfo.titleLocalizationArgs = [CKFieldName.alertTitle]
+            alertNotifInfo.alertLocalizationKey = "%1$@"
+            alertNotifInfo.alertLocalizationArgs = [CKFieldName.alertBody]
+            alertNotifInfo.soundName = "default"
+            alertNotifInfo.shouldBadge = false
+            alertSub.notificationInfo = alertNotifInfo
+            subscriptionsToSave.append(alertSub)
+
             #if DEBUG
-            print("[BigBrother] 🔔 Setting up CloudKit subscription: commands-\(familyID.rawValue) (deviceID: \(deviceID?.rawValue ?? "nil"))")
+            print("[BigBrother] Setting up CloudKit subscriptions: silent + alert for \(familyID.rawValue)")
             #endif
         } else {
             // Parent device: subscribe to unlock request event logs.

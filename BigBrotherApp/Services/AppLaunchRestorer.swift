@@ -278,7 +278,7 @@ struct AppLaunchRestorer {
             trigger: "Schedule reconciliation: \(currentMode?.rawValue ?? "nil") → \(scheduleMode.rawValue)",
             effectivePolicy: corrected
         )
-        try? storage.commitCorrectedSnapshot(correctedSnapshot)
+        _ = try? storage.commitCorrectedSnapshot(correctedSnapshot)
 
         switch scheduleMode {
         case .unlocked:

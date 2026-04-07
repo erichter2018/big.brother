@@ -130,6 +130,9 @@ struct AppBlockingSetupView: View {
                 .padding(.horizontal)
 
             FamilyActivityPicker(selection: $selection)
+                .onChange(of: selection) { _, newSelection in
+                    AppNameHarvester.harvest(from: newSelection)
+                }
 
             HStack {
                 Text("\(tokenCount) app\(tokenCount == 1 ? "" : "s") selected")

@@ -301,6 +301,13 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         shieldCategoryActive = nil
         #endif
 
+        // Persist shield state so the tunnel can check it without ManagedSettings access.
+        // Used to decide: if shields are up, don't DNS-block even if app is dead.
+        if let shieldsActive {
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(shieldsActive, forKey: "shieldsActiveAtLastHeartbeat")
+        }
+
         // Schedule diagnostic — report what the child's LOCAL schedule says right now.
         // If this disagrees with the parent's schedule, the child has stale data.
         let scheduleResolvedMode: String?
@@ -382,6 +389,12 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                     + storage.readTimeLimitBlockedDomains().count
                 return count > 0 ? count : nil
             }(),
+            appUsageMinutes: {
+                guard let snapshot = storage.readAppUsageSnapshot() else { return nil }
+                let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+                guard snapshot.dateString == f.string(from: Date()) else { return nil }
+                return snapshot.usageByFingerprint.isEmpty ? nil : snapshot.usageByFingerprint
+            }(),
             timeZoneIdentifier: TimeZone.current.identifier,
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
@@ -391,6 +404,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             isDriving: locationService?.drivingMonitor?.isDriving == true ? true : nil,
             currentSpeed: locationService?.lastLocation?.speed,
             heartbeatSource: "mainApp",
+            buildType: Self.currentBuildType,
             tunnelConnected: vpnManager?.isConnected,
             motionAuthorized: CMMotionActivityManager.authorizationStatus() == .authorized,
             notificationsAuthorized: Self.notificationsAuthorized(),
@@ -486,7 +500,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                     trigger: "Heartbeat reconciliation: snapshot stale (\(snapshotMode.rawValue) → \(resolution.mode.rawValue))",
                     effectivePolicy: corrected
                 )
-                try? storage.commitCorrectedSnapshot(correctedSnapshot)
+                _ = try? storage.commitCorrectedSnapshot(correctedSnapshot)
                 policyToApply = corrected
             } else {
                 policyToApply = snapshot.effectivePolicy
@@ -727,9 +741,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         // Async check runs in background, caches result for next heartbeat
         Task {
             let settings = await UNUserNotificationCenter.current().notificationSettings()
-            _notifAuthLock.lock()
-            _notifAuthBacking = settings.authorizationStatus == .authorized
-            _notifAuthLock.unlock()
+            _notifAuthLock.withLock {
+                _notifAuthBacking = settings.authorizationStatus == .authorized
+            }
         }
         _notifAuthLock.lock()
         defer { _notifAuthLock.unlock() }
@@ -749,6 +763,18 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         guard defaults.string(forKey: dateKey) == today else { return nil }
         let minutes = defaults.integer(forKey: minutesKey)
         return minutes > 0 ? minutes : nil
+    }
+
+    /// Detect build type: debug, testflight, or appstore.
+    static var currentBuildType: String {
+        #if DEBUG
+        return "debug"
+        #else
+        if Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt" {
+            return "testflight"
+        }
+        return "appstore"
+        #endif
     }
 
     private static func isUsefulAppName(_ name: String) -> Bool {

@@ -52,6 +52,7 @@ struct MyDrivingDebugView: View {
 
             // Map & Trips
             Section {
+                #if DEBUG
                 if let profile = appState.debugChildProfile,
                    let device = appState.debugChildDevice {
                     NavigationLink {
@@ -68,6 +69,7 @@ struct MyDrivingDebugView: View {
                         Label("Map & Trips", systemImage: "map")
                     }
                 }
+                #endif
             }
 
             // Copy full report
@@ -162,6 +164,7 @@ struct MyDrivingDebugView: View {
         lines.append("")
 
         // Breadcrumbs from CloudKit
+        #if DEBUG
         if let cloudKit = appState.cloudKit,
            let debugDevice = appState.debugChildDevice {
             let since = Date().addingTimeInterval(-24 * 3600)
@@ -186,6 +189,7 @@ struct MyDrivingDebugView: View {
                 lines.append("--- BREADCRUMBS: fetch failed ---")
             }
         }
+        #endif
         lines.append("")
 
         // Diagnostic logs

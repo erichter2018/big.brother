@@ -287,19 +287,40 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     // MARK: - App Time Limits
 
     public func readAppTimeLimits() -> [AppTimeLimit] {
-        (read("app_time_limits.json") as [AppTimeLimit]?) ?? []
+        (try? withFileLock(name: "timelimits.lock") {
+            (read("app_time_limits.json") as [AppTimeLimit]?) ?? []
+        }) ?? []
     }
 
     public func writeAppTimeLimits(_ limits: [AppTimeLimit]) throws {
-        try writeAtomically(limits, to: "app_time_limits.json")
+        try withFileLock(name: "timelimits.lock") {
+            try writeAtomically(limits, to: "app_time_limits.json")
+        }
     }
 
     public func readTimeLimitExhaustedApps() -> [TimeLimitExhaustedApp] {
-        (read("time_limit_exhausted.json") as [TimeLimitExhaustedApp]?) ?? []
+        (try? withFileLock(name: "timelimits.lock") {
+            (read("time_limit_exhausted.json") as [TimeLimitExhaustedApp]?) ?? []
+        }) ?? []
     }
 
     public func writeTimeLimitExhaustedApps(_ apps: [TimeLimitExhaustedApp]) throws {
-        try writeAtomically(apps, to: "time_limit_exhausted.json")
+        try withFileLock(name: "timelimits.lock") {
+            // Prune entries older than 7 days to prevent unbounded file growth.
+            let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+            let pruned = apps.filter { $0.exhaustedAt > cutoff }
+            try writeAtomically(pruned, to: "time_limit_exhausted.json")
+        }
+    }
+
+    /// Precise per-app usage from DeviceActivityEvent milestones.
+    /// Written by Monitor extension, read by heartbeat and parent.
+    public func readAppUsageSnapshot() -> AppUsageSnapshot? {
+        read("app_usage_snapshot.json")
+    }
+
+    public func writeAppUsageSnapshot(_ snapshot: AppUsageSnapshot) throws {
+        try writeAtomically(snapshot, to: "app_usage_snapshot.json")
     }
 
     /// Domains to block at the DNS level when time-limited apps are exhausted.

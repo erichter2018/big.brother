@@ -129,8 +129,14 @@ public enum CommandAction: Codable, Sendable, Equatable {
     /// Block all internet traffic for a duration (seconds). 0 = unblock immediately.
     /// Handled directly by the VPN tunnel — works even when the main app is dead.
     case blockInternet(durationSeconds: Int)
-    /// Open the time-limited apps picker on the child device.
+    /// Open the time-limited apps picker on the child device (Mode 1: parent on device).
     case requestTimeLimitSetup
+    /// Open the app picker on the child device for name harvesting (Mode 2: child picks).
+    case requestChildAppPick
+    /// Parent reviewed a pending app from the child's pick list.
+    case reviewApp(fingerprint: String, disposition: AppDisposition, minutes: Int?)
+    /// Batch review: parent decided on multiple pending apps at once.
+    case reviewApps(decisions: [AppReviewDecision])
     /// Grant extra time for an app that hit its daily limit.
     case grantExtraTime(appFingerprint: String, extraMinutes: Int)
     /// Remove a time limit from an app.
@@ -181,6 +187,9 @@ public enum CommandAction: Codable, Sendable, Equatable {
         case .setDrivingSettings: return "setDrivingSettings"
         case .blockInternet: return "blockInternet"
         case .requestTimeLimitSetup: return "requestTimeLimitSetup"
+        case .requestChildAppPick: return "requestChildAppPick"
+        case .reviewApp(let fp, _, _): return "reviewApp.\(fp)"
+        case .reviewApps: return "reviewApps"
         case .grantExtraTime(let fp, _): return "grantExtraTime.\(fp)"
         case .removeTimeLimit(let fp): return "removeTimeLimit.\(fp)"
         case .blockAppForToday(let fp): return "blockAppForToday.\(fp)"
@@ -196,6 +205,82 @@ public enum CommandAction: Codable, Sendable, Equatable {
             return true
         default:
             return false
+        }
+    }
+
+    /// Title for the alert push notification delivered to child device.
+    /// Only defined for mode commands — returns nil for non-mode actions.
+    public var alertPushTitle: String? {
+        switch self {
+        case .setMode(let mode):
+            switch mode {
+            case .unlocked: return "Device Unlocked"
+            case .restricted: return "Device Restricted"
+            case .locked: return "Device Locked"
+            case .lockedDown: return "Device Locked Down"
+            }
+        case .temporaryUnlock: return "Temporary Unlock"
+        case .timedUnlock(_, let penaltySeconds):
+            return penaltySeconds > 0 ? "Penalty Time" : "Temporary Unlock"
+        case .returnToSchedule: return "Back to Schedule"
+        case .lockUntil: return "Device Locked"
+        case .allowManagedApp: return "App Allowed"
+        case .blockManagedApp: return "App Blocked"
+        case .allowApp: return "App Allowed"
+        case .revokeApp: return "App Revoked"
+        case .reviewApp: return "App Reviewed"
+        case .reviewApps: return "Apps Reviewed"
+        case .grantExtraTime: return "Extra Time"
+        case .revokeAllApps: return "Apps Revoked"
+        default: return nil
+        }
+    }
+
+    /// Body for the alert push notification delivered to child device.
+    public var alertPushBody: String? {
+        switch self {
+        case .setMode(let mode):
+            switch mode {
+            case .unlocked: return "All apps are now accessible."
+            case .restricted: return "Only allowed apps are available."
+            case .locked: return "Only essential apps are available."
+            case .lockedDown: return "Only essential apps, no internet."
+            }
+        case .temporaryUnlock(let seconds):
+            let mins = (seconds + 59) / 60
+            let hours = mins / 60
+            let rem = mins % 60
+            if hours > 0 && rem > 0 { return "Device unlocked for \(hours)h \(rem)m." }
+            if hours > 0 { return "Device unlocked for \(hours) hour\(hours == 1 ? "" : "s")." }
+            return "Device unlocked for \(mins) minute\(mins == 1 ? "" : "s")."
+        case .timedUnlock(let total, let penalty):
+            let freeMin = (total - penalty) / 60
+            let penaltyMin = penalty / 60
+            if penalty > 0 && freeMin > 0 {
+                return "Locked for \(penaltyMin)m, then unlocked for \(freeMin)m."
+            } else if penalty > 0 {
+                return "Device locked for \(penaltyMin) minutes."
+            }
+            return "Device unlocked for \(total / 60) minutes."
+        case .returnToSchedule: return "Device returned to schedule."
+        case .lockUntil(let date):
+            let fmt = DateFormatter()
+            fmt.dateFormat = "h:mm a"
+            return "Device locked until \(fmt.string(from: date))."
+        case .allowManagedApp(let name): return "\(name) is now always allowed."
+        case .blockManagedApp(let name): return "\(name) has been blocked."
+        case .allowApp: return "App has been allowed."
+        case .revokeApp: return "App access revoked."
+        case .reviewApp(_, let disposition, _):
+            switch disposition {
+            case .allowAlways: return "App approved — always allowed."
+            case .timeLimit: return "App approved with time limit."
+            case .keepBlocked: return "App kept blocked."
+            }
+        case .reviewApps(let decisions): return "\(decisions.count) apps reviewed."
+        case .grantExtraTime(_, let mins): return "+\(mins) minutes granted."
+        case .revokeAllApps: return "All app access revoked."
+        default: return nil
         }
     }
 
@@ -304,6 +389,16 @@ public enum CommandAction: Codable, Sendable, Equatable {
             return enabled ? "Enable safe search" : "Disable safe search"
         case .requestTimeLimitSetup:
             return "Set up app time limits"
+        case .requestChildAppPick:
+            return "Request child to pick apps"
+        case .reviewApp(_, let disposition, let mins):
+            switch disposition {
+            case .allowAlways: return "Allow app always"
+            case .timeLimit: return "Set app time limit (\(mins ?? 0) min)"
+            case .keepBlocked: return "Keep app blocked"
+            }
+        case .reviewApps(let decisions):
+            return "Review \(decisions.count) apps"
         case .grantExtraTime(_, let mins):
             return "Grant \(mins) extra minutes"
         case .removeTimeLimit:

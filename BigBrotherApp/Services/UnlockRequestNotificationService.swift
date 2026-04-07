@@ -66,7 +66,8 @@ enum UnlockRequestNotificationService {
         events: [EventLogEntry],
         childDeviceIDs: Set<DeviceID>,
         childName: String,
-        childProfileID: ChildProfileID? = nil
+        childProfileID: ChildProfileID? = nil,
+        timeLimitConfigs: [TimeLimitConfig] = []
     ) {
         let unlockRequests = events.filter { event in
             event.eventType == .unlockRequested &&
@@ -88,19 +89,22 @@ enum UnlockRequestNotificationService {
             let idString = request.id.uuidString
             guard !notifiedIDs.contains(idString) else { continue }
 
-            // 1. Precise deduplication by Request ID (standard).
-            // (Handled by the guard above)
+            var appName = extractAppName(from: request.details)
+            let fingerprint = extractFingerprint(from: request.details)
+            let isTimeRequest = Self.isMoreTimeRequest(details: request.details)
 
-            // 2. High-signal deduplication by App Name + Device ID + Time.
-            // If the same app is requested multiple times within 30 seconds,
-            // ignore the duplicates (covers the case where child device logs twice).
-            let appName = extractAppName(from: request.details)
-            let dedupeKey = "notified-\(request.deviceID.rawValue)-\(appName)"
+            // Resolve app name from TimeLimitConfig by fingerprint if ShieldAction returned generic name.
+            if (appName == "an app" || appName == "App" || appName.isEmpty), let fp = fingerprint,
+               let config = timeLimitConfigs.first(where: { $0.appFingerprint == fp }) {
+                appName = config.appName
+            }
+
+            let dedupeKey = "notified-\(request.deviceID.rawValue)-\(fingerprint ?? appName)"
             let lastNotifiedTime = defaults.double(forKey: dedupeKey)
             let now = Date().timeIntervalSince1970
-            
+
             if now - lastNotifiedTime < 30 {
-                notifiedIDs.insert(idString) // Mark as "notified" so we don't check it again
+                notifiedIDs.insert(idString)
                 continue
             }
 
@@ -115,7 +119,9 @@ enum UnlockRequestNotificationService {
                 deviceID: request.deviceID,
                 childName: childName,
                 appName: appName,
-                childProfileID: childProfileID
+                fingerprint: fingerprint,
+                childProfileID: childProfileID,
+                isMoreTimeRequest: isTimeRequest
             )
             notifiedIDs.insert(idString)
             defaults.set(now, forKey: dedupeKey)
@@ -129,11 +135,18 @@ enum UnlockRequestNotificationService {
         deviceID: DeviceID,
         childName: String,
         appName: String,
-        childProfileID: ChildProfileID?
+        fingerprint: String?,
+        childProfileID: ChildProfileID?,
+        isMoreTimeRequest: Bool = false
     ) {
         let content = UNMutableNotificationContent()
-        content.title = "\(childName) is requesting access"
-        content.body = "Wants to use \(appName)"
+        if isMoreTimeRequest {
+            content.title = "\(childName) needs more time"
+            content.body = "\(appName)'s daily limit reached. Grant extra time?"
+        } else {
+            content.title = "\(childName) is requesting access"
+            content.body = "Wants to use \(appName)"
+        }
         content.sound = .default
         content.categoryIdentifier = categoryID
 
@@ -142,11 +155,11 @@ enum UnlockRequestNotificationService {
             "requestID": requestID.uuidString,
             "deviceID": deviceID.rawValue,
             "appName": appName,
-            "childName": childName
+            "childName": childName,
+            "isMoreTimeRequest": isMoreTimeRequest
         ]
-        if let childProfileID {
-            userInfo["childProfileID"] = childProfileID.rawValue
-        }
+        if let fingerprint { userInfo["fingerprint"] = fingerprint }
+        if let childProfileID { userInfo["childProfileID"] = childProfileID.rawValue }
         content.userInfo = userInfo
 
         let request = UNNotificationRequest(
@@ -163,7 +176,7 @@ enum UnlockRequestNotificationService {
     /// Handle a notification action response. Returns the command to send, or nil.
     static func handleAction(
         _ response: UNNotificationResponse
-    ) -> (action: UnlockAction, requestID: UUID, deviceID: DeviceID, appName: String, childProfileID: ChildProfileID?)? {
+    ) -> (action: UnlockAction, requestID: UUID, deviceID: DeviceID, appName: String, childProfileID: ChildProfileID?, isMoreTimeRequest: Bool, fingerprint: String?)? {
         guard response.notification.request.content.categoryIdentifier == categoryID else {
             return nil
         }
@@ -177,6 +190,8 @@ enum UnlockRequestNotificationService {
         }
         let deviceID = DeviceID(rawValue: deviceIDString)
         let childProfileID = (userInfo["childProfileID"] as? String).map { ChildProfileID(rawValue: $0) }
+        let isMoreTimeRequest = userInfo["isMoreTimeRequest"] as? Bool ?? false
+        let fingerprint = userInfo["fingerprint"] as? String
 
         let action: UnlockAction
         switch response.actionIdentifier {
@@ -197,7 +212,7 @@ enum UnlockRequestNotificationService {
             return nil
         }
 
-        return (action, requestID, deviceID, appName, childProfileID)
+        return (action, requestID, deviceID, appName, childProfileID, isMoreTimeRequest, fingerprint)
     }
 
     enum UnlockAction {
@@ -209,14 +224,33 @@ enum UnlockRequestNotificationService {
     // MARK: - Helpers
 
     private static func extractAppName(from details: String?) -> String {
-        guard var details, details.hasPrefix("Requesting access to ") else {
-            return "an app"
+        guard var details else { return "an app" }
+        // Strip metadata lines.
+        for prefix in ["\nFINGERPRINT:", "\nTOKEN:", "\nBUNDLE:"] {
+            if let range = details.range(of: prefix) {
+                details = String(details[..<range.lowerBound])
+            }
         }
-        // Strip TOKEN payload if present.
-        if let tokenRange = details.range(of: "\nTOKEN:") {
-            details = String(details[..<tokenRange.lowerBound])
+        if details.hasPrefix("Requesting more time for ") {
+            return String(details.dropFirst("Requesting more time for ".count))
         }
-        return String(details.dropFirst("Requesting access to ".count))
+        if details.hasPrefix("Requesting access to ") {
+            return String(details.dropFirst("Requesting access to ".count))
+        }
+        return "an app"
+    }
+
+    /// Extract the token fingerprint from event details, if present.
+    static func extractFingerprint(from details: String?) -> String? {
+        guard let details, let range = details.range(of: "FINGERPRINT:") else { return nil }
+        let afterPrefix = details[range.upperBound...]
+        let fingerprint = afterPrefix.prefix(while: { $0 != "\n" })
+        return fingerprint.isEmpty ? nil : String(fingerprint)
+    }
+
+    /// Whether the event details indicate a time-limit "more time" request (vs general unlock).
+    static func isMoreTimeRequest(details: String?) -> Bool {
+        details?.contains("Requesting more time for ") == true
     }
 
     private static func secondsUntilMidnight() -> Int { Date.secondsUntilMidnight }

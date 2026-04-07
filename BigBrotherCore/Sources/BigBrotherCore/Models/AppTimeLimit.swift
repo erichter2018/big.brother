@@ -18,6 +18,12 @@ public struct AppTimeLimit: Codable, Sendable, Identifiable, Equatable {
     /// Whether this token was already in the always-allowed list before the time limit was added.
     /// If true, deleting the time limit should leave it in the allowed list.
     public var wasAlreadyAllowed: Bool
+    /// When true, the limit is a temporary 1-minute probe to trigger ShieldConfiguration
+    /// for name resolution. ShieldAction auto-corrects to the real limit once the name is captured.
+    /// Optional for backward compatibility — existing records decode as nil (→ false).
+    public var pendingNameResolution: Bool?
+    /// The real daily limit to apply after name resolution completes.
+    public var resolvedDailyLimitMinutes: Int?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -29,6 +35,8 @@ public struct AppTimeLimit: Codable, Sendable, Identifiable, Equatable {
         fingerprint: String,
         dailyLimitMinutes: Int = 0,
         wasAlreadyAllowed: Bool = false,
+        pendingNameResolution: Bool? = nil,
+        resolvedDailyLimitMinutes: Int? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -39,6 +47,8 @@ public struct AppTimeLimit: Codable, Sendable, Identifiable, Equatable {
         self.fingerprint = fingerprint
         self.dailyLimitMinutes = dailyLimitMinutes
         self.wasAlreadyAllowed = wasAlreadyAllowed
+        self.pendingNameResolution = pendingNameResolution
+        self.resolvedDailyLimitMinutes = resolvedDailyLimitMinutes
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

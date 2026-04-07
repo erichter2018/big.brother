@@ -24,6 +24,9 @@ struct AlwaysAllowedSelectionView: View {
                 .padding(.horizontal)
 
             FamilyActivityPicker(selection: $selection)
+                .onChange(of: selection) { _, newSelection in
+                    AppNameHarvester.harvest(from: newSelection)
+                }
 
             if let feedback {
                 Text(feedback)

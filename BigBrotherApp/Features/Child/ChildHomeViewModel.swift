@@ -60,6 +60,29 @@ final class ChildHomeViewModel {
         return date > now ? date : nil
     }
 
+    /// Whether the VPN tunnel is actively blocking internet (any reason).
+    var isTunnelInternetBlocked: Bool {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        return defaults?.bool(forKey: "tunnelInternetBlocked") == true
+    }
+
+    /// Human-readable reason the tunnel is blocking internet, if any.
+    var tunnelInternetBlockedReason: String? {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard let reason = defaults?.string(forKey: "tunnelInternetBlockedReason"),
+              !reason.isEmpty else { return nil }
+        return reason
+    }
+
+    /// Whether enforcement is currently being restored (app just came alive).
+    var isRestoringEnforcement: Bool {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let lastActive = defaults?.double(forKey: "mainAppLastActiveAt") ?? 0
+        let age = Date().timeIntervalSince1970 - lastActive
+        // If app was inactive for >60s and just came back, we're restoring
+        return age > 0 && age < 30
+    }
+
     var isTemporaryUnlock: Bool {
         appState.currentEffectivePolicy?.isTemporaryUnlock ?? false
     }
@@ -528,7 +551,7 @@ final class ChildHomeViewModel {
 
         // Write permission status to App Group so tunnel blocks internet when permissions are wrong.
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let wasOK = defaults?.bool(forKey: "allPermissionsGranted") ?? true
+        let _ = defaults?.bool(forKey: "allPermissionsGranted") ?? true
         let isOK = !hasPermissionIssues
         defaults?.set(isOK, forKey: "allPermissionsGranted")
 

@@ -215,7 +215,7 @@ final class ActivityFeedViewModel {
 
     /// Fetch and merge DNS snapshots for a child across all devices for the last 7 days.
     private func fetchWeekDNSSnapshot(for childID: ChildProfileID, devices: [ChildDevice]) async -> DomainActivitySnapshot? {
-        guard let cloudKit = appState.cloudKit else { return nil }
+        guard appState.cloudKit != nil else { return nil }
         let childDevices = devices.filter { $0.childProfileID == childID }
         guard !childDevices.isEmpty else { return nil }
 
@@ -303,7 +303,7 @@ final class ActivityFeedViewModel {
 
             // DNS activity — fetch week snapshot from CloudKit
             let weekSnap = await fetchWeekDNSSnapshot(for: profile.id, devices: devices)
-            let topApps: [(name: String, minutes: Double)] = weekSnap?.estimatedAppUsage().prefix(5).map { $0 } ?? []
+            let topApps: [(name: String, minutes: Double)] = weekSnap?.estimatedAppUsage().prefix(5).map { (name: $0.appName, minutes: $0.minutes) } ?? []
             let flaggedCount = weekSnap?.flaggedDomains.count ?? 0
             let flaggedDomains = weekSnap?.flaggedDomains.prefix(5).map(\.domain) ?? []
             let sitesVisited = weekSnap?.domains.filter { !DomainCategorizer.isNoise($0.domain) }.count ?? 0

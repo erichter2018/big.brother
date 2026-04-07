@@ -256,10 +256,15 @@ final class DeviceMonitor {
                 types: SafetyEventNotificationService.notifiableTypes
             ) else { return }
 
+            // Fetch named places for notification filtering
+            let namedPlaces = (try? await appState.cloudKit?.fetchNamedPlaces(
+                familyID: appState.parentState?.familyID ?? FamilyID(rawValue: "")
+            )) ?? []
+
             for profile in profiles {
                 let deviceIDs = Set(devices.filter { $0.childProfileID == profile.id }.map(\.id))
                 let childEvents = events.filter { deviceIDs.contains($0.deviceID) }
-                SafetyEventNotificationService.checkAndNotify(events: childEvents, childName: profile.name)
+                SafetyEventNotificationService.checkAndNotify(events: childEvents, childName: profile.name, namedPlaces: namedPlaces)
             }
         }
     }

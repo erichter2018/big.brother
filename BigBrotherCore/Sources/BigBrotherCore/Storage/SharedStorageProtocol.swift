@@ -210,6 +210,12 @@ public protocol SharedStorageProtocol: Sendable {
     /// Write exhausted apps list (replaces existing).
     func writeTimeLimitExhaustedApps(_ apps: [TimeLimitExhaustedApp]) throws
 
+    /// Read precise per-app usage from DeviceActivityEvent milestones.
+    func readAppUsageSnapshot() -> AppUsageSnapshot?
+
+    /// Write per-app usage snapshot.
+    func writeAppUsageSnapshot(_ snapshot: AppUsageSnapshot) throws
+
     // MARK: - Last Shielded App
 
     /// Read the last shielded app (written by ShieldConfiguration, read by ShieldAction).

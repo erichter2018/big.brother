@@ -162,6 +162,33 @@ public struct DomainActivitySnapshot: Codable, Sendable, Equatable, Identifiable
         domains.reduce(0) { $0 + ($1.slotCounts?[slot] ?? 0) }
     }
 
+    /// Estimated app usage for a specific 15-minute slot.
+    /// Returns apps active in that slot with their proportional share of 15 minutes.
+    public func estimatedAppUsage(forSlot slot: Int) -> [(appName: String, minutes: Double)] {
+        let slotDomains = domains.filter { ($0.slotCounts?[slot] ?? 0) > 0 }
+        guard !slotDomains.isEmpty else { return [] }
+
+        let slotTotal = slotDomains.reduce(0) { $0 + ($1.slotCounts?[slot] ?? 0) }
+        guard slotTotal > 0 else { return [] }
+
+        var appQueries: [String: Int] = [:]
+        for hit in slotDomains {
+            guard let name = DomainCategorizer.appName(for: DomainCategorizer.rootDomain(hit.domain)) else { continue }
+            appQueries[name, default: 0] += hit.slotCounts?[slot] ?? 0
+        }
+
+        // Meta disambiguation for this slot
+        if let igQ = appQueries["Instagram"], igQ > 0, let fbQ = appQueries["Facebook"] {
+            appQueries["Instagram"] = igQ + fbQ
+            appQueries.removeValue(forKey: "Facebook")
+        }
+
+        return appQueries
+            .map { (appName: $0.key, minutes: Double($0.value) / Double(slotTotal) * 15.0) }
+            .filter { $0.minutes >= 0.5 }
+            .sorted { $0.minutes > $1.minutes }
+    }
+
     /// Estimated app usage in minutes using proportional time allocation.
     ///
     /// For each 15-minute slot, app queries are divided by total queries in that slot

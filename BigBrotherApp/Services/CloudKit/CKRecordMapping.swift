@@ -23,6 +23,7 @@ enum CKRecordType {
     static let namedPlace = "BBNamedPlace"
     static let diagnosticReport = "BBDiagnosticReport"
     static let timeLimitConfig = "BBTimeLimitConfig"
+    static let pendingAppReview = "BBPendingAppReview"
 }
 
 /// Field names used in CloudKit records.
@@ -66,6 +67,8 @@ enum CKFieldName {
     static let issuedAt = "issuedAt"
     static let expiresAt = "expiresAt"
     static let status = "status"
+    static let alertTitle = "alertTitle"
+    static let alertBody = "alertBody"
 
     // BBCommandReceipt
     static let appliedAt = "appliedAt"
@@ -175,6 +178,7 @@ enum CKFieldName {
     static let hbIsDriving = "hbDriving"
     static let hbCurrentSpeed = "hbSpeed"
     static let hbHeartbeatSource = "hbSource"
+    static let hbBuildType = "hbBuildType"
     static let hbTunnelConnected = "hbTunnel"
     static let hbMotionAuthorized = "hbMotionAuth"
     static let hbNotificationsAuthorized = "hbNotifAuth"
@@ -205,6 +209,10 @@ enum CKFieldName {
     static let appName = "appName"
     static let dailyLimitMinutes = "dailyLimitMinutes"
     static let timeLimitIsActive = "isActive"
+
+    // BBPendingAppReview
+    static let nameResolved = "nameResolved"
+    // appFingerprint, appName, deviceID, familyID, childProfileID reused from above
 
     // BBRemoteCommand (signing)
     static let signatureBase64 = "signatureBase64"
