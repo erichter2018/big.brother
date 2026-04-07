@@ -296,7 +296,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let allEntries = storage.readDiagnosticEntries(category: nil)
         let enforcementCategories: Set<DiagnosticCategory> = [.enforcement, .command, .restoration, .auth, .temporaryUnlock]
         let newEntries = allEntries.filter { entry in
-            enforcementCategories.contains(entry.category) && entry.timestamp > lastEnforcementLogUploadAt
+            guard enforcementCategories.contains(entry.category),
+                  entry.timestamp > lastEnforcementLogUploadAt else { return false }
+            // Skip location breadcrumbs — too noisy for enforcement analysis
+            if entry.message.hasPrefix("[Location]") { return false }
+            return true
         }
 
         guard !newEntries.isEmpty else { return }
