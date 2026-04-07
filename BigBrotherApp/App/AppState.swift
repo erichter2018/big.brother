@@ -1,6 +1,7 @@
 import Foundation
 import CloudKit
 import CoreLocation
+import DeviceActivity
 import UIKit
 import Observation
 import UserNotifications
@@ -959,10 +960,21 @@ final class AppState {
         // periodically verifies enforcement state, even if the app isn't running.
         if familyControlsAvailable {
             let scheduleManager = ScheduleManagerImpl()
-            try? scheduleManager.registerReconciliationSchedule()
+            do {
+                try scheduleManager.registerReconciliationSchedule()
+            } catch {
+                NSLog("[BigBrother] Reconciliation registration FAILED on launch: \(error)")
+            }
 
             // Register usage tracking milestones for screen time reporting.
             ScheduleRegistrar.registerUsageTracking()
+
+            // Log all active activities so we can diagnose registration issues.
+            let allActivities = DeviceActivityCenter().activities
+            let reconciliation = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }
+            let usage = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.usagetracking") }
+            NSLog("[BigBrother] Active activities: \(allActivities.count) total, \(reconciliation.count) reconciliation, \(usage.count) usage tracking")
+            for a in reconciliation { NSLog("[BigBrother]   reconciliation: \(a.rawValue)") }
         }
 
         // Update runtime state from restored snapshot.

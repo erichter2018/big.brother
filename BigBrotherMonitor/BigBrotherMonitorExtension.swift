@@ -1685,24 +1685,32 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         UNUserNotificationCenter.current().add(request)
     }
 
-    /// Re-register the 5-minute reconciliation schedule from the Monitor extension.
-    /// Tightened from 15-minute to reduce the window when Monitor is killed mid-operation
-    /// and shields are inconsistent with the policy snapshot.
+    /// Re-register the 4 quarter-day reconciliation windows from the Monitor extension.
+    /// Matches ScheduleManagerImpl.registerReconciliationSchedule().
     private func reregisterReconciliationSchedule() {
         let center = DeviceActivityCenter()
-        // Every 2 minutes — matches ScheduleManagerImpl.
-        for m in stride(from: 0, to: 60, by: 2) {
-            let name = m == 0 ? "bigbrother.reconciliation" : "bigbrother.reconciliation.m\(m)"
-            let activityName = DeviceActivityName(rawValue: name)
-            let start = DateComponents(minute: m)
-            let end = DateComponents(minute: m + 1)
+        let quarters: [(name: String, startHour: Int, endHour: Int)] = [
+            ("bigbrother.reconciliation.q0", 0, 5),
+            ("bigbrother.reconciliation.q1", 6, 11),
+            ("bigbrother.reconciliation.q2", 12, 17),
+            ("bigbrother.reconciliation.q3", 18, 23),
+        ]
+        for q in quarters {
+            let activityName = DeviceActivityName(rawValue: q.name)
             let schedule = DeviceActivitySchedule(
-                intervalStart: start,
-                intervalEnd: end,
-                repeats: true
+                intervalStart: DateComponents(hour: q.startHour, minute: 0),
+                intervalEnd: DateComponents(hour: q.endHour, minute: 59),
+                repeats: true,
+                warningTime: DateComponents(hour: 3)
             )
-            try? center.startMonitoring(activityName, during: schedule)
+            do {
+                try center.startMonitoring(activityName, during: schedule)
+            } catch {
+                NSLog("[Monitor] Failed to register \(q.name): \(error)")
+            }
         }
+        let count = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
+        NSLog("[Monitor] Re-registered reconciliation: \(count) quarters")
     }
 
     private static func todayDateString() -> String {
