@@ -409,6 +409,10 @@ enum CKRecordConversion {
         record[CKFieldName.hbLocationAddress] = hb.locationAddress
         record[CKFieldName.hbLocationAccuracy] = hb.locationAccuracy.map { $0 as NSNumber }
         record[CKFieldName.hbLocationAuthorization] = hb.locationAuthorization
+        record["hbMonitorBuild"] = hb.monitorBuildNumber.map { $0 as NSNumber }
+        record["hbShieldBuild"] = hb.shieldBuildNumber.map { $0 as NSNumber }
+        record["hbShieldActionBuild"] = hb.shieldActionBuildNumber.map { $0 as NSNumber }
+        record["hbDiagnosticSnapshot"] = hb.diagnosticSnapshot
     }
 
     static func deviceHeartbeat(from record: CKRecord) -> DeviceHeartbeat? {
@@ -497,7 +501,11 @@ enum CKRecordConversion {
             locationTimestamp: record[CKFieldName.hbLocationTimestamp] as? Date,
             locationAddress: record[CKFieldName.hbLocationAddress] as? String,
             locationAccuracy: record[CKFieldName.hbLocationAccuracy] as? Double,
-            locationAuthorization: record[CKFieldName.hbLocationAuthorization] as? String
+            locationAuthorization: record[CKFieldName.hbLocationAuthorization] as? String,
+            monitorBuildNumber: record["hbMonitorBuild"] as? Int,
+            shieldBuildNumber: record["hbShieldBuild"] as? Int,
+            shieldActionBuildNumber: record["hbShieldActionBuild"] as? Int,
+            diagnosticSnapshot: record["hbDiagnosticSnapshot"] as? String
         )
     }
 
@@ -913,6 +921,7 @@ enum CKRecordConversion {
         record[CKFieldName.appName] = config.appName
         record[CKFieldName.dailyLimitMinutes] = config.dailyLimitMinutes as NSNumber
         record[CKFieldName.timeLimitIsActive] = (config.isActive ? 1 : 0) as NSNumber
+        record["appCategory"] = config.appCategory
         record[CKFieldName.createdAt] = config.createdAt as NSDate
         record[CKFieldName.updatedAt] = config.updatedAt as NSDate
         return record
@@ -931,6 +940,7 @@ enum CKRecordConversion {
         let deviceID = record[CKFieldName.deviceID] as? String
 
         let isActive = (record[CKFieldName.timeLimitIsActive] as? Int64 ?? 1) != 0
+        let appCategory = record["appCategory"] as? String
 
         return TimeLimitConfig(
             id: UUID(uuidString: record.recordID.recordName.replacingOccurrences(of: "BBTimeLimitConfig_", with: "")) ?? UUID(),
@@ -941,6 +951,7 @@ enum CKRecordConversion {
             appName: appName,
             dailyLimitMinutes: minutes,
             isActive: isActive,
+            appCategory: appCategory,
             createdAt: createdAt,
             updatedAt: updatedAt
         )

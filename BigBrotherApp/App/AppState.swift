@@ -146,6 +146,17 @@ final class AppState {
     /// Cleared when a heartbeat confirms the mode.
     var expectedModes: [ChildProfileID: (mode: LockMode, sentAt: Date)] = [:]
 
+    /// Recent commands sent by the parent, for diagnostic interleaving.
+    /// Ring buffer of last 20 per child. Shown in diagnostic copy text
+    /// alongside the child's enforcement log to reveal delivery delays.
+    struct SentCommandEntry {
+        let at: Date
+        let action: String
+        let childID: ChildProfileID
+    }
+    var sentCommandLog: [SentCommandEntry] = []
+    private let sentCommandLogMax = 20
+
     /// Children whose enforcement is driven by their schedule (no manual override).
     /// Shared across all view models so both dashboard and child detail views can modify it.
     /// Persisted in UserDefaults so it survives app relaunch.
@@ -265,7 +276,13 @@ final class AppState {
                 deviceRole = .child
                 enrollmentState = enrollment
                 // Ensure enrollment IDs are cached in App Group for extensions.
-                let cached = CachedEnrollmentIDs(deviceID: enrollment.deviceID, familyID: enrollment.familyID)
+                // Preserve existing displayName (set during enrollment) so tunnel can tag logs.
+                let existingName: String? = {
+                    guard let data = storage.readRawData(forKey: StorageKeys.cachedEnrollmentIDs),
+                          let existing = try? JSONDecoder().decode(CachedEnrollmentIDs.self, from: data) else { return nil }
+                    return existing.deviceDisplayName
+                }()
+                let cached = CachedEnrollmentIDs(deviceID: enrollment.deviceID, familyID: enrollment.familyID, deviceDisplayName: existingName)
                 if let data = try? JSONEncoder().encode(cached) {
                     try? storage.writeRawData(data, forKey: StorageKeys.cachedEnrollmentIDs)
                 }
@@ -787,21 +804,23 @@ final class AppState {
         }
     }
 
-    /// Sync pending app reviews to CloudKit (both resolved and unresolved).
-    /// Pushes all reviews so parent sees them immediately, even before name resolution.
+    /// Sync pending app reviews to CloudKit. Once uploaded, clear the local file.
+    /// The parent manages CK records from here — re-uploading would resurrect
+    /// reviews the parent already acted on.
     private func syncResolvedPendingReviews() async {
         guard let cloudKit else { return }
         guard let data = storage.readRawData(forKey: "pending_review_local.json"),
               let localReviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
               !localReviews.isEmpty else { return }
 
+        var synced = 0
         for review in localReviews {
-            try? await cloudKit.savePendingAppReview(review)
+            if let _ = try? await cloudKit.savePendingAppReview(review) {
+                synced += 1
+            }
         }
-        // Keep unresolved locally so ShieldConfiguration can still update names
-        let remaining = localReviews.filter { !$0.nameResolved }
-        if let encoded = try? JSONEncoder().encode(remaining) {
-            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+        if synced > 0 {
+            try? storage.writeRawData(Data("[]".utf8), forKey: "pending_review_local.json")
         }
     }
 
@@ -928,15 +947,15 @@ final class AppState {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
 
-        // One-time migration: denyWebWhenLocked used to default to true, which was wrong.
+        // One-time migration: denyWebWhenRestricted used to default to true, which was wrong.
         // Reset it to false on all existing devices so web isn't blocked unless the parent
         // explicitly enables it. Future setRestrictions commands will set the correct value.
         let migrationKey = "migration_denyWebWhenLocked_default_fixed"
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         if defaults?.bool(forKey: migrationKey) != true {
             var r = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            if r.denyWebWhenLocked {
-                r.denyWebWhenLocked = false
+            if r.denyWebWhenRestricted {
+                r.denyWebWhenRestricted = false
                 try? storage.writeDeviceRestrictions(r)
             }
             defaults?.set(true, forKey: migrationKey)
@@ -959,22 +978,28 @@ final class AppState {
         // Register the hourly reconciliation schedule so the monitor extension
         // periodically verifies enforcement state, even if the app isn't running.
         if familyControlsAvailable {
-            let scheduleManager = ScheduleManagerImpl()
-            do {
-                try scheduleManager.registerReconciliationSchedule()
-            } catch {
-                NSLog("[BigBrother] Reconciliation registration FAILED on launch: \(error)")
+            // Move ALL DeviceActivity registration to background thread.
+            // startMonitoring() is synchronous and can block for 20-30s with many milestones.
+            // The existing shields persist at the OS level so enforcement is maintained
+            // during the brief window before registration completes.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let scheduleManager = ScheduleManagerImpl()
+                do {
+                    try scheduleManager.registerReconciliationSchedule()
+                } catch {
+                    NSLog("[BigBrother] Reconciliation registration FAILED on launch: \(error)")
+                }
+
+                // Register usage tracking milestones for screen time reporting.
+                ScheduleRegistrar.registerUsageTracking()
+
+                // Log all active activities so we can diagnose registration issues.
+                let allActivities = DeviceActivityCenter().activities
+                let reconciliation = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }
+                let usage = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.usagetracking") }
+                NSLog("[BigBrother] Active activities: \(allActivities.count) total, \(reconciliation.count) reconciliation, \(usage.count) usage tracking")
+                for a in reconciliation { NSLog("[BigBrother]   reconciliation: \(a.rawValue)") }
             }
-
-            // Register usage tracking milestones for screen time reporting.
-            ScheduleRegistrar.registerUsageTracking()
-
-            // Log all active activities so we can diagnose registration issues.
-            let allActivities = DeviceActivityCenter().activities
-            let reconciliation = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }
-            let usage = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.usagetracking") }
-            NSLog("[BigBrother] Active activities: \(allActivities.count) total, \(reconciliation.count) reconciliation, \(usage.count) usage tracking")
-            for a in reconciliation { NSLog("[BigBrother]   reconciliation: \(a.rawValue)") }
         }
 
         // Update runtime state from restored snapshot.
@@ -1092,6 +1117,25 @@ final class AppState {
 
             // 6. Verify enforcement matches ModeStackResolver
             verifyAndFixEnforcement()
+
+            // 6b. DeviceActivity health check — re-register if activities vanished.
+            // Runs on background thread to avoid blocking (retry sleeps in registration).
+            #if canImport(DeviceActivity)
+            DispatchQueue.global(qos: .utility).async {
+                let daCenter = DeviceActivityCenter()
+                let reconciliationCount = daCenter.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
+                if reconciliationCount < 4 {
+                    NSLog("[AppState] DeviceActivity health check: only \(reconciliationCount)/4 — re-registering")
+                    try? ScheduleManagerImpl().registerReconciliationSchedule()
+                }
+                // Also re-register usage tracking if missing
+                let usageCount = daCenter.activities.filter { $0.rawValue.hasPrefix("bigbrother.usagetracking") }.count
+                if usageCount == 0 {
+                    NSLog("[AppState] DeviceActivity health check: usage tracking missing — re-registering")
+                    ScheduleRegistrar.registerUsageTracking()
+                }
+            }
+            #endif
 
             // 7. Send heartbeat so parent sees updated state immediately
             try? await heartbeatService?.sendNow(force: true)
@@ -1564,14 +1608,28 @@ final class AppState {
         }
     }
 
+    /// Timestamp of last parent-initiated schedule assignment (optimistic UI).
+    /// Used to prevent stale CK reads from reverting the in-memory schedule.
+    var lastScheduleAssignmentAt: Date?
+
     /// Preserve parent-set fields from existing in-memory devices when CloudKit
-    /// returns nil for those fields (write may not have propagated yet).
+    /// returns nil or stale values for those fields (write may not have propagated yet).
     private func preserveLocalDeviceFields(into devices: inout [ChildDevice]) {
         for i in devices.indices {
             if let existing = childDevices.first(where: { $0.id == devices[i].id }) {
                 // If the fetched device has nil but our in-memory device has a value,
                 // the parent likely set it recently and CloudKit hasn't caught up.
                 if devices[i].scheduleProfileID == nil, existing.scheduleProfileID != nil {
+                    devices[i].scheduleProfileID = existing.scheduleProfileID
+                    devices[i].scheduleProfileVersion = existing.scheduleProfileVersion
+                }
+                // Guard against stale CK reads reverting a recent schedule assignment.
+                // If parent just assigned a new schedule (< 30s ago) and CK returns a
+                // different ID, keep the in-memory value — CK hasn't propagated yet.
+                if let assignedAt = lastScheduleAssignmentAt,
+                   Date().timeIntervalSince(assignedAt) < 30,
+                   devices[i].scheduleProfileID != existing.scheduleProfileID,
+                   existing.scheduleProfileID != nil {
                     devices[i].scheduleProfileID = existing.scheduleProfileID
                     devices[i].scheduleProfileVersion = existing.scheduleProfileVersion
                 }
@@ -1790,6 +1848,21 @@ final class AppState {
         }
 
         try await cloudKit.pushCommand(command)
+
+        // Record for diagnostic interleaving.
+        let childID: ChildProfileID? = {
+            switch target {
+            case .child(let cid): return cid
+            case .device(let did): return childDevices.first(where: { $0.id == did })?.childProfileID
+            case .allDevices: return nil
+            }
+        }()
+        if let childID {
+            sentCommandLog.append(SentCommandEntry(at: Date(), action: action.displayDescription, childID: childID))
+            if sentCommandLog.count > sentCommandLogMax {
+                sentCommandLog.removeFirst(sentCommandLog.count - sentCommandLogMax)
+            }
+        }
     }
 
     /// Push the parent PIN hash to all child devices via remote command.
@@ -1986,6 +2059,20 @@ final class AppState {
             let devices = try await cloudKit.fetchDevices(familyID: enrollment.familyID)
             guard let myDevice = devices.first(where: { $0.id == enrollment.deviceID }) else { return }
 
+            // Backfill display name in cached enrollment IDs so the tunnel
+            // can tag enforcement log records with the actual device name
+            // (UIDevice.current.name returns generic "iPhone"/"iPad" since iOS 16).
+            if !myDevice.displayName.isEmpty {
+                if let data = storage.readRawData(forKey: StorageKeys.cachedEnrollmentIDs),
+                   var cached = try? JSONDecoder().decode(CachedEnrollmentIDs.self, from: data),
+                   cached.deviceDisplayName != myDevice.displayName {
+                    cached.deviceDisplayName = myDevice.displayName
+                    if let updated = try? JSONEncoder().encode(cached) {
+                        try? storage.writeRawData(updated, forKey: StorageKeys.cachedEnrollmentIDs)
+                    }
+                }
+            }
+
             // Update penalty timer data from parent.
             childPenaltySeconds = myDevice.penaltySeconds
             childPenaltyTimerEndTime = myDevice.penaltyTimerEndTime
@@ -2030,6 +2117,23 @@ final class AppState {
                let cached = localVersion,
                deviceVersion == cached {
                 return
+            }
+
+            // Guard against stale CK device record reads reverting a fresh assignment.
+            // When the command processor registers a new profile locally, it writes the
+            // profile immediately. If this sync cycle reads a stale device record with
+            // the OLD scheduleProfileID, we'd fetch and re-register the old profile,
+            // undoing the new assignment. Check: if local profile has a DIFFERENT ID
+            // than what CK says, and the local profile was registered recently (< 30s),
+            // the CK read is likely stale — skip this cycle.
+            if let current = currentProfile, current.id != profileID {
+                let localAge = Date().timeIntervalSince(current.updatedAt)
+                if localAge < 30 {
+                    #if DEBUG
+                    print("[BigBrother] Schedule sync skipped: local \(current.name) (\(current.id.uuidString.prefix(8))) registered \(Int(localAge))s ago, CK says \(profileID.uuidString.prefix(8)) — likely stale read")
+                    #endif
+                    return
+                }
             }
 
             // Fetch the full schedule profile.
@@ -2315,18 +2419,11 @@ final class AppState {
                         category: .enforcement,
                         message: "Shield re-apply failed after unlock expiry (app path) — retrying in 2s"
                     ))
-                    Thread.sleep(forTimeInterval: 2.0)
-                    try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
-
-                    let retry = enforcement.shieldDiagnostic()
-                    if !retry.shieldsActive && !retry.categoryActive {
-                        try? storage.appendDiagnosticEntry(DiagnosticEntry(
-                            category: .enforcement,
-                            message: "Shield re-apply FAILED on retry — writing confirmed-down for tunnel"
-                        ))
-                        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-                            .set(false, forKey: "shieldsActiveAtLastHeartbeat")
+                    // Retry after delay — dispatched to avoid blocking main thread.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                        try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
                     }
+                    return // Don't check retry result synchronously
                 }
             }
 

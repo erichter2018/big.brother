@@ -5,10 +5,8 @@ import BigBrotherCore
 
 /// Concrete enforcement service bridging PolicyResolver output to ManagedSettings.
 ///
-/// Uses named ManagedSettingsStore instances:
-///   - "base": primary enforcement via per-app blocking
-///   - "schedule": managed by DeviceActivityMonitor extension
-///   - "tempUnlock": clears restrictions during temporary unlock
+/// Uses a single named ManagedSettingsStore ("enforcement") for all shield writes.
+/// Legacy stores (base, schedule, tempUnlock) are cleared on first launch via migration.
 ///
 /// Blocking strategy (hybrid):
 ///   1. `shield.applications` for per-app blocking from FamilyActivityPicker selection.
@@ -21,18 +19,25 @@ import BigBrotherCore
 /// providing enforcement continuity even when the app is not running.
 final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
-    /// FRESH store instances created on every access — never cached.
+    /// FRESH store instance created on every access — never cached.
     /// ManagedSettingsStore communicates with the system daemon via XPC.
     /// Cached instances have stale XPC connections after the app is backgrounded,
     /// causing writes to silently fail. Fresh instances establish fresh connections.
-    private var baseStore: ManagedSettingsStore {
-        ManagedSettingsStore(named: ManagedSettingsStore.Name(rawValue: AppConstants.managedSettingsStoreBase))
+    private var enforcementStore: ManagedSettingsStore {
+        ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreEnforcement))
     }
-    private var scheduleStore: ManagedSettingsStore {
-        ManagedSettingsStore(named: ManagedSettingsStore.Name(rawValue: AppConstants.managedSettingsStoreSchedule))
-    }
-    private var tempUnlockStore: ManagedSettingsStore {
-        ManagedSettingsStore(named: ManagedSettingsStore.Name(rawValue: AppConstants.managedSettingsStoreTempUnlock))
+
+    /// Clear legacy named stores (base, schedule, tempUnlock) on first launch.
+    /// ManagedSettings merges across stores, so stale data in any legacy store
+    /// would override the new single-store enforcement.
+    private func migrateLegacyStoresIfNeeded() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard defaults?.bool(forKey: "migratedToSingleStore") != true else { return }
+        for name in AppConstants.legacyStoreNames {
+            ManagedSettingsStore(named: .init(name)).clearAllSettings()
+        }
+        defaults?.set(true, forKey: "migratedToSingleStore")
+        NSLog("[Enforcement] Migrated: cleared legacy stores (base, schedule, tempUnlock)")
     }
     private let storage: any SharedStorageProtocol
     private let fcManager: any FamilyControlsManagerProtocol
@@ -61,10 +66,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     func apply(_ policy: EffectivePolicy) throws {
         NSLog("[Enforcement] apply() START — mode=\(policy.resolvedMode.rawValue) isTemp=\(policy.isTemporaryUnlock)")
 
+        migrateLegacyStoresIfNeeded()
+
         // Auth warm-up: touch authorizationStatus to wake the FamilyControls XPC daemon.
         let authStatus = authorizationStatus
-        NSLog("[Enforcement] authStatus=\(authStatus) — sleeping 0.2s for XPC warmup")
-        Thread.sleep(forTimeInterval: 0.2)
+        NSLog("[Enforcement] authStatus=\(authStatus) — XPC warmup (no sleep)")
 
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         defaults?.set("apply", forKey: "lastShieldChangeReason")
@@ -73,24 +79,19 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         applyRestrictions(policy.deviceRestrictions)
 
         if policy.isTemporaryUnlock {
-            NSLog("[Enforcement] applying wide-open shields (temp unlock)")
-            applyWideOpenShields()
+            NSLog("[Enforcement] clearing all shields (temp unlock)")
+            clearAllShieldStores()
+            recordShieldedAppCount(0)
             let diagTemp = shieldDiagnostic()
             NSLog("[Enforcement] apply() DONE — shields=\(diagTemp.shieldsActive) cat=\(diagTemp.categoryActive)")
             return
         }
 
-        // Clear temp unlock store
-        NSLog("[Enforcement] clearing tempUnlockStore")
-        tempUnlockStore.shield.applications = nil
-        tempUnlockStore.shield.applicationCategories = nil
-        tempUnlockStore.shield.webDomainCategories = nil
-        tempUnlockStore.shield.webDomains = nil
-
         switch policy.resolvedMode {
         case .unlocked:
-            NSLog("[Enforcement] applying wide-open shields (unlocked)")
-            applyWideOpenShields()
+            NSLog("[Enforcement] clearing all shields (unlocked)")
+            clearAllShieldStores()
+            recordShieldedAppCount(0)
 
         case .restricted, .locked, .lockedDown:
             NSLog("[Enforcement] applying shields for \(policy.resolvedMode.rawValue)")
@@ -102,6 +103,14 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         let shouldBeShielded = policy.resolvedMode != .unlocked
         let isShielded = diagResult.shieldsActive || diagResult.categoryActive
         NSLog("[Enforcement] apply() DONE — shields=\(diagResult.shieldsActive) cat=\(diagResult.categoryActive) shouldBeShielded=\(shouldBeShielded) match=\(shouldBeShielded == isShielded)")
+
+        // Write actual shield state so the tunnel can verify enforcement consistency.
+        let shieldDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        shieldDefaults?.set(isShielded, forKey: "shieldsActiveAtLastHeartbeat")
+
+        // Shield audit fingerprint — tracks WHO applied shields and WHY.
+        let audit = "app|\(policy.resolvedMode.rawValue)|\(isShielded ? "UP" : "DOWN")|\(diagResult.appCount)apps|\(Int(Date().timeIntervalSince1970))"
+        shieldDefaults?.set(audit, forKey: "lastShieldAudit")
 
         // Update shield config for the shield extension UI.
         let config = ShieldConfig(
@@ -148,27 +157,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 details: "Expected shields \(expectedShielded ? "UP" : "DOWN") but got \(diag.shieldsActive ? "UP" : "DOWN") (mode: \(policy.resolvedMode.rawValue))"
             ))
 
-            // Throttle nuclear resets to prevent infinite clear/re-apply loops.
-            let now = Date()
-            if now.timeIntervalSince(nuclearResetWindowStart) > 3600 {
-                nuclearResetCount = 0
-                nuclearResetWindowStart = now
-            }
-            nuclearResetCount += 1
-            if nuclearResetCount > 3 {
-                try? storage.appendDiagnosticEntry(DiagnosticEntry(
-                    category: .enforcement,
-                    message: "THROTTLED: Nuclear reset exceeded 3x in 1 hour. Skipping to prevent loop.",
-                    details: "source=app"
-                ))
-                return
-            }
+            // No throttle — always attempt reset in both directions.
+            // The Monitor now properly respects temp unlock state (b376),
+            // so the infinite fight between app and Monitor should not recur.
 
-            // Nuclear option: clear everything, recreate stores, re-apply
+            // Nuclear option: clear everything, recreate store, re-apply
             clearAllShieldStores()
-            baseStore.clearAllSettings()
-            scheduleStore.clearAllSettings()
-            tempUnlockStore.clearAllSettings()
+            enforcementStore.clearAllSettings()
 
             // Re-apply from scratch
             if expectedShielded {
@@ -261,8 +256,8 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                     ))
                 }
             }
-            baseStore.shield.applications = perAppTokens
-            baseStore.shield.applicationCategories = .all(except: allowedTokens)
+            enforcementStore.shield.applications = perAppTokens
+            enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
             recordShieldedAppCount(perAppTokens.count)
             #if DEBUG
             let overflow = tokensToBlock.count - perAppTokens.count
@@ -284,11 +279,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 let keptNonExhausted = Set(Self.stableSorted(nonExhausted).prefix(remainingSlots))
                 explicitApps = Set(Self.stableSorted(exhaustedTokens).prefix(exhaustedCount)).union(keptNonExhausted)
             }
-            baseStore.shield.applications = explicitApps
+            enforcementStore.shield.applications = explicitApps
             if allowedTokens.isEmpty {
-                baseStore.shield.applicationCategories = .all()
+                enforcementStore.shield.applicationCategories = .all()
             } else {
-                baseStore.shield.applicationCategories = .all(except: allowedTokens)
+                enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
             }
             recordShieldedAppCount(explicitApps?.count ?? 0)
             #if DEBUG
@@ -351,32 +346,22 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         #endif
     }
 
-    /// Apply web domain blocking based on mode and the denyWebWhenLocked restriction.
+    /// Apply web domain blocking based on mode and the denyWebWhenRestricted restriction.
     /// Locked/lockedDown modes ALWAYS block web regardless of the flag.
-    /// Restricted mode respects the denyWebWhenLocked parent setting.
+    /// Restricted mode respects the denyWebWhenRestricted parent setting.
     /// Uses the provided restrictions when available, falling back to storage read.
     private func applyWebBlocking(_ policyRestrictions: DeviceRestrictions? = nil, forceBlock: Bool = false) {
         let restrictions = policyRestrictions ?? storage.readDeviceRestrictions() ?? DeviceRestrictions()
-        guard restrictions.denyWebWhenLocked || forceBlock else {
-            // Clear web blocking on ALL stores — ManagedSettings merges across stores,
-            // so stale webDomainCategories on any store will keep blocking.
-            for store in [baseStore, scheduleStore, tempUnlockStore] {
-                store.shield.webDomainCategories = nil
-            }
+        guard restrictions.denyWebWhenRestricted || forceBlock else {
+            enforcementStore.shield.webDomainCategories = nil
             ManagedSettingsStore().shield.webDomainCategories = nil
             #if DEBUG
-            print("[BigBrother] Web blocking: disabled (denyWebWhenLocked=false, forceBlock=false) — cleared all stores")
+            print("[BigBrother] Web blocking: disabled (denyWebWhenRestricted=false, forceBlock=false) — cleared stores")
             #endif
             return
         }
 
-        // Block web on ALL stores to ensure coverage after schedule/unlock transitions.
-        // ManagedSettings merges across stores — a stale nil on any store won't
-        // override .all() on another, but consistency prevents confusion.
-        let allStores = [baseStore, scheduleStore, tempUnlockStore]
-        for store in allStores {
-            store.shield.webDomainCategories = .all()
-        }
+        enforcementStore.shield.webDomainCategories = .all()
     }
 
     /// Load app tokens from the saved FamilyActivitySelection.
@@ -415,21 +400,14 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             }
         }
 
-        // Set all stores to .all(except: everything) — effectively allowing all apps
+        // Set enforcement store to .all(except: everything) — effectively allowing all apps
         // but keeping the store populated so the daemon doesn't re-validate auth.
-        for store in [baseStore, scheduleStore] {
-            store.shield.applications = nil
-            store.shield.applicationCategories = allTokens.isEmpty ? nil : .all(except: allTokens)
-            store.shield.webDomainCategories = nil
-            store.shield.webDomains = nil
-        }
+        enforcementStore.shield.applications = nil
+        enforcementStore.shield.applicationCategories = allTokens.isEmpty ? nil : .all(except: allTokens)
+        enforcementStore.shield.webDomainCategories = nil
+        enforcementStore.shield.webDomains = nil
 
-        // Clear tempUnlock and default stores normally (these don't trigger the bug
-        // because they're supplementary, not the primary enforcement stores).
-        tempUnlockStore.shield.applications = nil
-        tempUnlockStore.shield.applicationCategories = nil
-        tempUnlockStore.shield.webDomainCategories = nil
-        tempUnlockStore.shield.webDomains = nil
+        // Clear the default (unnamed) store as well.
         let defaultStore = ManagedSettingsStore()
         defaultStore.shield.applications = nil
         defaultStore.shield.applicationCategories = nil
@@ -444,12 +422,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     }
 
     private func clearAllShieldStores() {
-        for store in [baseStore, scheduleStore, tempUnlockStore] {
-            store.shield.applications = nil
-            store.shield.applicationCategories = nil
-            store.shield.webDomainCategories = nil
-            store.shield.webDomains = nil
-        }
+        enforcementStore.shield.applications = nil
+        enforcementStore.shield.applicationCategories = nil
+        enforcementStore.shield.webDomainCategories = nil
+        enforcementStore.shield.webDomains = nil
+
         // Also clear the default (unnamed) store in case anything leaked there.
         let defaultStore = ManagedSettingsStore()
         defaultStore.shield.applications = nil
@@ -521,7 +498,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             .set("clearAll", forKey: "lastShieldChangeReason")
         clearAllShieldStores()
         recordShieldedAppCount(0)
-        tempUnlockStore.clearAllSettings()
+        enforcementStore.clearAllSettings()
         // Re-apply device-level restrictions (denyAppRemoval, lockAccounts, etc.)
         // that should persist even when shields are cleared during unlocked mode.
         applyRestrictions()
@@ -530,7 +507,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     func clearTemporaryUnlock() throws {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set("tempUnlockClear", forKey: "lastShieldChangeReason")
-        tempUnlockStore.clearAllSettings()
+        enforcementStore.clearAllSettings()
     }
 
     func applyEssentialOnly() throws {
@@ -550,17 +527,18 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     }
 
     func shieldDiagnostic() -> ShieldDiagnostic {
-        let baseCat = baseStore.shield.applicationCategories
-        let schedCat = scheduleStore.shield.applicationCategories
+        let enfCat = enforcementStore.shield.applicationCategories
 
         let appCount = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .integer(forKey: "shieldedAppCount") ?? 0
-        let categoryActive = baseCat != nil || schedCat != nil
-        let shieldsActive = appCount > 0 || categoryActive
+        // enfCat can be non-nil even in wide-open mode (.all(except: allTokens)
+        // to keep the store populated). That's NOT "shields active" — nothing is
+        // actually blocked. Use shieldedAppCount as the ground truth:
+        // if 0 apps are shielded and no web blocking, shields are effectively DOWN.
+        let webBlocking = enforcementStore.shield.webDomainCategories != nil
+        let categoryActive = enfCat != nil && appCount > 0
+        let shieldsActive = appCount > 0 || webBlocking
 
-        // Also check web blocking and device restrictions for mode-aware verification.
-        let webBlocking = baseStore.shield.webDomainCategories != nil
-            || scheduleStore.shield.webDomainCategories != nil
         let denyAppRemoval = ManagedSettingsStore().application.denyAppRemoval == true
 
         return ShieldDiagnostic(
@@ -589,19 +567,10 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
     // MARK: - Private
 
-    /// Apply device-level restrictions from parent settings.
-    /// Clears stale restrictions from ALL stores first, then sets on default store.
+    /// Apply device-level restrictions from parent settings on the default (unnamed) store.
     /// Uses the provided restrictions when available, falling back to storage read.
     private func applyRestrictions(_ policyRestrictions: DeviceRestrictions? = nil) {
         let r = policyRestrictions ?? storage.readDeviceRestrictions() ?? DeviceRestrictions()
-
-        // Clear restrictions from ALL named stores (stale values from earlier code).
-        for store in [baseStore, scheduleStore, tempUnlockStore] {
-            store.application.denyAppRemoval = nil
-            store.media.denyExplicitContent = nil
-            store.account.lockAccounts = nil
-            store.dateAndTime.requireAutomaticDateAndTime = nil
-        }
 
         // Apply on the default (unnamed) store.
         let store = ManagedSettingsStore()

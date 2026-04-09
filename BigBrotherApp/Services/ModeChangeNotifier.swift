@@ -3,7 +3,12 @@ import UserNotifications
 import BigBrotherCore
 
 /// Sends local notifications on the child device when the enforcement mode changes.
+/// Deduplicates: only fires when the mode actually changes from the last notification.
 enum ModeChangeNotifier {
+
+    /// Last mode we notified about — prevents duplicate notifications when
+    /// enforcement refreshes or reconciliation re-applies the same mode.
+    private static var lastNotifiedMode: LockMode?
 
     /// Request notification permissions (called once during child setup).
     static func requestPermission() {
@@ -13,7 +18,12 @@ enum ModeChangeNotifier {
     }
 
     /// Notify the child that the device mode has changed.
+    /// Deduplicates: skips if mode matches the last notification sent.
     static func notify(newMode: LockMode, reason: String? = nil) {
+        // Skip if we already notified about this mode.
+        guard newMode != lastNotifiedMode else { return }
+        lastNotifiedMode = newMode
+
         let content = UNMutableNotificationContent()
 
         switch newMode {
@@ -37,8 +47,9 @@ enum ModeChangeNotifier {
 
         content.categoryIdentifier = "MODE_CHANGE"
 
+        // Fixed identifier — replaces the previous mode notification instead of stacking.
         let request = UNNotificationRequest(
-            identifier: "mode-change-\(UUID().uuidString)",
+            identifier: "mode-change",
             content: content,
             trigger: nil // Deliver immediately.
         )
@@ -140,7 +151,11 @@ enum ModeChangeNotifier {
     }
 
     /// Notify about a schedule-triggered mode change.
+    /// Deduplicates via lastNotifiedMode — same guard as notify().
     static func notifyScheduleChange(newMode: LockMode, windowName: String? = nil) {
+        guard newMode != lastNotifiedMode else { return }
+        lastNotifiedMode = newMode
+
         let content = UNMutableNotificationContent()
 
         switch newMode {
@@ -156,8 +171,9 @@ enum ModeChangeNotifier {
         content.sound = .default
         content.categoryIdentifier = "SCHEDULE_CHANGE"
 
+        // Fixed identifier — replaces previous schedule notification.
         let request = UNNotificationRequest(
-            identifier: "schedule-change-\(UUID().uuidString)",
+            identifier: "schedule-change",
             content: content,
             trigger: nil
         )

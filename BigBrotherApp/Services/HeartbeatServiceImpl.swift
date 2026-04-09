@@ -284,21 +284,29 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let shieldsActive: Bool?
         let shieldedAppCount: Int?
         let shieldCategoryActive: Bool?
+        let webBlockingActive: Bool?
+        let denyAppRemovalActive: Bool?
         #if canImport(ManagedSettings)
         if let enforcement = enforcement {
             let diagnostic = enforcement.shieldDiagnostic()
             shieldsActive = diagnostic.shieldsActive
             shieldedAppCount = diagnostic.appCount
             shieldCategoryActive = diagnostic.categoryActive
+            webBlockingActive = diagnostic.webBlockingActive
+            denyAppRemovalActive = diagnostic.denyAppRemoval
         } else {
             shieldsActive = nil
             shieldedAppCount = nil
             shieldCategoryActive = nil
+            webBlockingActive = nil
+            denyAppRemovalActive = nil
         }
         #else
         shieldsActive = nil
         shieldedAppCount = nil
         shieldCategoryActive = nil
+        webBlockingActive = nil
+        denyAppRemovalActive = nil
         #endif
 
         // Persist shield state so the tunnel can check it without ManagedSettings access.
@@ -419,7 +427,20 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             locationTimestamp: loc?.timestamp,
             locationAddress: locAddress,
             locationAccuracy: loc?.horizontalAccuracy,
-            locationAuthorization: locationService?.authorizationStatusString
+            locationAuthorization: locationService?.authorizationStatusString,
+            monitorBuildNumber: {
+                let b = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "monitorBuildNumber") ?? 0
+                return b > 0 ? b : nil
+            }(),
+            shieldBuildNumber: {
+                let b = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "shieldBuildNumber") ?? 0
+                return b > 0 ? b : nil
+            }(),
+            shieldActionBuildNumber: {
+                let b = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "shieldActionBuildNumber") ?? 0
+                return b > 0 ? b : nil
+            }(),
+            diagnosticSnapshot: Self.buildDiagnosticSnapshot(storage: storage, shieldsActive: shieldsActive, currentMode: currentMode, webBlockingActive: webBlockingActive, denyAppRemovalActive: denyAppRemovalActive)
         )
 
         do {
@@ -487,6 +508,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                 let existing = snapshot.effectivePolicy
                 let corrected = EffectivePolicy(
                     resolvedMode: resolution.mode,
+                    controlAuthority: resolution.controlAuthority,
                     isTemporaryUnlock: resolution.isTemporary,
                     temporaryUnlockExpiresAt: resolution.expiresAt,
                     shieldedCategoriesData: existing.shieldedCategoriesData,
@@ -691,6 +713,145 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             print("[BigBrother] Failed to update device record: \(error.localizedDescription)")
             #endif
         }
+    }
+
+    /// Build a structured DiagnosticSnapshot and JSON-encode it for the heartbeat.
+    /// Machine-parseable on the parent side for rich UI rendering.
+    private static func buildDiagnosticSnapshot(
+        storage: any SharedStorageProtocol,
+        shieldsActive: Bool?,
+        currentMode: LockMode,
+        webBlockingActive: Bool? = nil,
+        denyAppRemovalActive: Bool? = nil
+    ) -> String {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let now = Date()
+
+        // Mode stack
+        let resolution = ModeStackResolver.resolve(storage: storage)
+
+        // Shield state
+        let shields = shieldsActive ?? false
+        let expected = resolution.mode != .unlocked
+
+        // Component builds
+        let builds = DiagnosticSnapshot.ComponentBuilds(
+            app: AppConstants.appBuildNumber,
+            tunnel: defaults?.integer(forKey: "tunnelBuildNumber") ?? 0,
+            monitor: defaults?.integer(forKey: "monitorBuildNumber") ?? 0,
+            shield: defaults?.integer(forKey: "shieldBuildNumber") ?? 0,
+            shieldAction: defaults?.integer(forKey: "shieldActionBuildNumber") ?? 0
+        )
+
+        // Monitor / tunnel age
+        let monitorAt = defaults?.double(forKey: "monitorLastActiveAt") ?? 0
+        let monitorAge = monitorAt > 0 ? Int(now.timeIntervalSince1970 - monitorAt) : nil
+        let tunnelAt = defaults?.double(forKey: "tunnelLastActiveAt") ?? 0
+        let tunnelAge = tunnelAt > 0 ? Int(now.timeIntervalSince1970 - tunnelAt) : nil
+
+        // Schedule info
+        let profile = storage.readActiveScheduleProfile()
+        let scheduleDriven = AppConstants.isScheduleDriven(defaults: defaults)
+        let scheduleWindow: String? = {
+            guard let p = profile else { return nil }
+            let cal = Calendar.current
+            if p.isInUnlockedWindow(at: now, calendar: cal) {
+                return "unlocked window"
+            } else if p.isInLockedWindow(at: now, calendar: cal) {
+                return "locked window"
+            }
+            return "default (\(p.lockedMode.rawValue))"
+        }()
+
+        // Temp unlock
+        let temp = storage.readTemporaryUnlockState()
+        let tempRemaining: Int? = {
+            guard let t = temp, t.expiresAt > now else { return nil }
+            return Int(t.expiresAt.timeIntervalSince(now))
+        }()
+
+        // Restrictions
+        let restrictions = storage.readDeviceRestrictions()
+
+        // Transitions — last 10 from snapshot history, enriched with shield state
+        let history = storage.readSnapshotHistory()
+        let recentTransitions = history.suffix(10).map { t in
+            DiagnosticSnapshot.TransitionEntry(
+                at: t.timestamp,
+                from: t.fromMode.rawValue,
+                to: t.toMode.rawValue,
+                source: t.source.rawValue,
+                authority: t.source.rawValue,
+                shieldsUp: nil,  // historical — not tracked per-transition yet
+                changes: t.changes
+            )
+        }
+
+        // Recent enforcement + command logs — last 30, merged by time.
+        // Filter out noisy entries (location, reconciliation registration) to keep
+        // substantive enforcement actions and command processing visible.
+        let enfLogs = storage.readDiagnosticEntries(category: .enforcement)
+        let cmdLogs = storage.readDiagnosticEntries(category: .command)
+        let noisePatterns = ["[Location]", "Reconciliation registration starting", "Reconciliation registered OK"]
+        let filtered = (enfLogs + cmdLogs).filter { entry in
+            !noisePatterns.contains(where: { entry.message.contains($0) })
+        }
+        let merged = filtered.sorted { $0.timestamp < $1.timestamp }
+        let recentLogs = merged.suffix(30).map { entry in
+            DiagnosticSnapshot.LogEntry(
+                at: entry.timestamp,
+                msg: "[\(entry.category.rawValue.prefix(3))] \(String(entry.message.prefix(110)))"
+            )
+        }
+
+        let snapshot = DiagnosticSnapshot(
+            mode: resolution.mode.rawValue,
+            authority: resolution.controlAuthority.rawValue,
+            reason: resolution.reason,
+            isTemporary: resolution.isTemporary,
+            expiresAt: resolution.expiresAt,
+            shieldsUp: shields,
+            shieldsExpected: expected,
+            shieldedAppCount: defaults?.integer(forKey: "shieldedAppCount") ?? 0,
+            categoryShieldActive: shields && expected,
+            webBlocked: webBlockingActive ?? false,
+            shieldReason: defaults?.string(forKey: "lastShieldChangeReason"),
+            shieldAudit: defaults?.string(forKey: "lastShieldAudit"),
+            builds: builds,
+            monitorAge: monitorAge,
+            tunnelAge: tunnelAge,
+            tunnelConnected: defaults?.bool(forKey: "tunnelConnected"),
+            scheduleName: profile?.name,
+            scheduleDriven: scheduleDriven,
+            scheduleWindow: scheduleWindow,
+            tempUnlockRemaining: tempRemaining,
+            tempUnlockOrigin: temp?.origin.rawValue,
+            denyWebWhenRestricted: restrictions?.denyWebWhenRestricted,
+            denyAppRemoval: denyAppRemovalActive ?? restrictions?.denyAppRemoval,
+            internetBlocked: defaults?.bool(forKey: "tunnelInternetBlocked") == true ? true : nil,
+            internetBlockReason: {
+                let r = defaults?.string(forKey: "tunnelInternetBlockedReason")
+                return (r?.isEmpty == false) ? r : nil
+            }(),
+            dnsBlockedDomains: {
+                let count = (storage.readEnforcementBlockedDomains().count)
+                    + (storage.readTimeLimitBlockedDomains().count)
+                return count > 0 ? count : nil
+            }(),
+            transitions: recentTransitions,
+            recentLogs: recentLogs
+        )
+
+        // JSON-encode — compact, no pretty print (saves ~30% space)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        if let data = try? encoder.encode(snapshot),
+           let json = String(data: data, encoding: .utf8) {
+            return json
+        }
+
+        // Fallback to legacy string if encoding fails
+        return "mode: \(resolution.mode.rawValue) (\(resolution.reason))"
     }
 
     private static func lastEnforcementError(from storage: any SharedStorageProtocol) -> String? {

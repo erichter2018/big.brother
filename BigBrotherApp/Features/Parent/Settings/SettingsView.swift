@@ -387,9 +387,17 @@ struct SettingsView: View {
             let since = Calendar.current.startOfDay(for: Date())
             let records = try await cloudKit.fetchEnforcementLogs(familyID: familyID, since: since)
 
-            // Build device name map from child devices
+            // Build device name map: deviceID → "ChildName DeviceType"
+            let childNameByProfileID = Dictionary(
+                appState.childProfiles.map { ($0.id, $0.name) },
+                uniquingKeysWith: { first, _ in first }
+            )
             let deviceNames: [String: String] = Dictionary(
-                appState.childDevices.map { ($0.id.rawValue, $0.displayName) },
+                appState.childDevices.map { device in
+                    let childName = childNameByProfileID[device.childProfileID] ?? "Unknown"
+                    let deviceType = device.modelIdentifier.lowercased().contains("ipad") ? "iPad" : "iPhone"
+                    return (device.id.rawValue, "\(childName) \(deviceType)")
+                },
                 uniquingKeysWith: { first, _ in first }
             )
 
@@ -421,12 +429,29 @@ struct SettingsView: View {
 
             // Delete copied records from CloudKit to prevent accumulation
             let idsToDelete = records.map(\.recordID)
+            var deleteCount = 0
             if !idsToDelete.isEmpty {
                 let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
-                try? await db.modifyRecords(saving: [], deleting: idsToDelete)
+                // Public database does not support atomic operations — must use atomically: false
+                // Batch in groups of 400 (CK limit per operation)
+                for batch in stride(from: 0, to: idsToDelete.count, by: 400) {
+                    let end = min(batch + 400, idsToDelete.count)
+                    let batchIDs = Array(idsToDelete[batch..<end])
+                    do {
+                        let results = try await db.modifyRecords(saving: [], deleting: batchIDs, atomically: false)
+                        let failed = results.deleteResults.values.filter { if case .failure = $0 { return true } else { return false } }
+                        deleteCount += batchIDs.count - failed.count
+                        if !failed.isEmpty {
+                            NSLog("[BigBrother] Failed to delete \(failed.count)/\(batchIDs.count) enforcement log records")
+                        }
+                    } catch {
+                        NSLog("[BigBrother] Enforcement log delete batch failed: \(error.localizedDescription)")
+                    }
+                }
             }
 
-            logCopyStatus = "Copied \(records.count) entries (cleared from cloud)"
+            let deleteNote = deleteCount == records.count ? "cleared from cloud" : "deleted \(deleteCount)/\(records.count) from cloud"
+            logCopyStatus = "Copied \(records.count) entries (\(deleteNote))"
         } catch {
             logCopyStatus = "Failed: \(error.localizedDescription)"
         }

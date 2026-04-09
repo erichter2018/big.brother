@@ -8,22 +8,35 @@ public struct DeviceRestrictions: Codable, Sendable, Equatable {
     public var denyExplicitContent: Bool
     public var lockAccounts: Bool
     public var requireAutomaticDateAndTime: Bool
-    public var denyWebWhenLocked: Bool
+    /// Block all web browsing when device is in restricted mode.
+    /// (Named "denyWebWhenLocked" in JSON for backwards compatibility.)
+    public var denyWebWhenRestricted: Bool
     public var denyWebGamesWhenRestricted: Bool
+
+    /// JSON key mapping — keeps "denyWebWhenLocked" on the wire for
+    /// backwards compatibility with existing App Group files and CloudKit.
+    private enum CodingKeys: String, CodingKey {
+        case denyAppRemoval
+        case denyExplicitContent
+        case lockAccounts
+        case requireAutomaticDateAndTime
+        case denyWebWhenRestricted = "denyWebWhenLocked"
+        case denyWebGamesWhenRestricted
+    }
 
     public init(
         denyAppRemoval: Bool = false,
         denyExplicitContent: Bool = false,
         lockAccounts: Bool = false,
         requireAutomaticDateAndTime: Bool = false,
-        denyWebWhenLocked: Bool = false,
+        denyWebWhenRestricted: Bool = false,
         denyWebGamesWhenRestricted: Bool = false
     ) {
         self.denyAppRemoval = denyAppRemoval
         self.denyExplicitContent = denyExplicitContent
         self.lockAccounts = lockAccounts
         self.requireAutomaticDateAndTime = requireAutomaticDateAndTime
-        self.denyWebWhenLocked = denyWebWhenLocked
+        self.denyWebWhenRestricted = denyWebWhenRestricted
         self.denyWebGamesWhenRestricted = denyWebGamesWhenRestricted
     }
 
@@ -35,12 +48,12 @@ public struct DeviceRestrictions: Codable, Sendable, Equatable {
         denyExplicitContent = try container.decodeIfPresent(Bool.self, forKey: .denyExplicitContent) ?? false
         lockAccounts = try container.decodeIfPresent(Bool.self, forKey: .lockAccounts) ?? false
         requireAutomaticDateAndTime = try container.decodeIfPresent(Bool.self, forKey: .requireAutomaticDateAndTime) ?? false
-        denyWebWhenLocked = try container.decodeIfPresent(Bool.self, forKey: .denyWebWhenLocked) ?? false
+        denyWebWhenRestricted = try container.decodeIfPresent(Bool.self, forKey: .denyWebWhenRestricted) ?? false
         denyWebGamesWhenRestricted = try container.decodeIfPresent(Bool.self, forKey: .denyWebGamesWhenRestricted) ?? false
     }
 
     /// Whether any restriction is enabled.
     public var hasAnyRestriction: Bool {
-        denyAppRemoval || denyExplicitContent || lockAccounts || requireAutomaticDateAndTime || denyWebWhenLocked || denyWebGamesWhenRestricted
+        denyAppRemoval || denyExplicitContent || lockAccounts || requireAutomaticDateAndTime || denyWebWhenRestricted || denyWebGamesWhenRestricted
     }
 }

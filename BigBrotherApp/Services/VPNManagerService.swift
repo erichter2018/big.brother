@@ -79,15 +79,23 @@ final class VPNManagerService {
             let oldConfig = (existing.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
             let oldBuild = oldConfig?["version"] as? Int ?? 0
             if oldBuild != AppConstants.appBuildNumber {
+                NSLog("[VPN] Build mismatch: tunnel=b\(oldBuild) app=b\(AppConstants.appBuildNumber) — restarting tunnel")
                 manager.connection.stopVPNTunnel()
-                // Brief delay for clean shutdown before restart
-                try? await Task.sleep(for: .milliseconds(500))
+                // Wait for tunnel to fully stop (500ms is often not enough)
+                for _ in 0..<20 {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    if manager.connection.status == .disconnected { break }
+                }
+                if manager.connection.status != .disconnected {
+                    NSLog("[VPN] Tunnel didn't stop cleanly (status=\(manager.connection.status.rawValue)), starting anyway")
+                }
             }
         }
 
         // Start the tunnel if not already connected
         if manager.connection.status != .connected && manager.connection.status != .connecting {
             try manager.connection.startVPNTunnel()
+            NSLog("[VPN] Tunnel started on b\(AppConstants.appBuildNumber)")
         }
 
         connectionStatus = manager.connection.status

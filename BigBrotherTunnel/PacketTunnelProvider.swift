@@ -3,7 +3,7 @@ import CloudKit
 import UserNotifications
 import UIKit
 import DeviceActivity
-import notify
+// notify import removed — was using private com.apple.springboard.lockstate API
 import BigBrotherCore
 
 /// VPN Packet Tunnel extension.
@@ -58,7 +58,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Screen Lock Monitoring
 
-    private var lockNotifyToken: Int32 = NOTIFY_TOKEN_INVALID
+    // lockNotifyToken removed — was using private API. Lock state now polled from App Group.
     private var lastUnlockAt: Date?
 
     /// When the tunnel process started. Used to skip emergency enforcement
@@ -98,13 +98,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let safeSearchEnabled = defaults?.bool(forKey: "safeSearchEnabled") ?? false
 
+        // Seed activeBlockReasons from current state at startup
+        seedBlockReasonsOnStart()
+
         // Determine upstream DNS server.
         // Even during blackhole, use a REAL upstream so Apple domains (CloudKit, APNS)
         // still resolve. The proxy itself refuses non-exempt domains in blackhole mode.
         let upstreamDNS: String
-        if isInternetBlocked {
+        if shouldBlackhole {
             upstreamDNS = "1.1.1.1" // Real DNS — proxy handles blackhole with Apple exemptions
-            NSLog("[Tunnel] DNS blackhole active — internet blocked (Apple domains exempt)")
+            NSLog("[Tunnel] DNS blackhole active — internet blocked (Apple domains exempt), reasons: \(activeBlockReasons.map(\.rawValue).joined(separator: ", "))")
         } else if safeSearchEnabled {
             upstreamDNS = "185.228.168.168" // CleanBrowsing Family
             NSLog("[Tunnel] DNS safe search enabled (CleanBrowsing Family)")
@@ -124,7 +127,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         // Schedule enforcement has a 60-second grace period after startup to let the
         // app launch after a deploy. The 30-second tick will activate it after the grace.
-        dnsProxy?.isBlackholeMode = isInternetBlocked
+        dnsProxy?.isBlackholeMode = shouldBlackhole
 
         // Seed enforcement blocked domains from last-known fallback if the
         // main list is empty (main app may not have written one yet after reboot).
@@ -202,13 +205,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             // Immediately check build mismatch — app just launched, may have resolved it.
             checkBuildMismatchEnforcement()
-            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
-            if scheduleBlackholeActive {
-                scheduleBlackholeActive = false
-                dnsProxy?.isBlackholeMode = isInternetBlocked
-                flushBlockStateToDefaults()
-                NSLog("[Tunnel] Schedule enforcement DNS cleared — app alive, sending heartbeat")
-                Task { await sendHeartbeatFromTunnel(reason: "scheduleBlackholeCleared") }
+            // Release safety-net blackholes — app is alive
+            let safetyReasons: Set<DNSBlockReason> = [.scheduledLockedDown, .buildMismatch, .emergencyAppDead]
+            let releasing = activeBlockReasons.intersection(safetyReasons)
+            if !releasing.isEmpty {
+                if releasing.contains(.emergencyAppDead) { emergencyCheckCount = 0 }
+                batchUpdateBlockReasons(remove: safetyReasons)
+                NSLog("[Tunnel] Released \(releasing.map(\.rawValue).joined(separator: ", ")) — app alive via ping")
+                Task { await sendHeartbeatFromTunnel(reason: "blackholeReleasedPing") }
             }
             completionHandler?("pong".data(using: .utf8))
 
@@ -307,6 +311,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Batch upload (max 50 per batch)
         let batch = Array(newEntries.prefix(50))
+
+        // UIDevice.current.name returns generic "iPhone"/"iPad" since iOS 16.
+        // Use enrolled display name from App Group cache instead.
+        let deviceName: String
+        if let data = storage.readRawData(forKey: StorageKeys.cachedEnrollmentIDs),
+           let cached = try? JSONDecoder().decode(CachedEnrollmentIDs.self, from: data),
+           let name = cached.deviceDisplayName, !name.isEmpty {
+            deviceName = name
+        } else {
+            deviceName = await MainActor.run { UIDevice.current.name }
+        }
+
         let records: [CKRecord] = batch.map { entry in
             let recordID = CKRecord.ID(recordName: "BBEnforcementLog_\(entry.id.uuidString)")
             let record = CKRecord(recordType: "BBEnforcementLog", recordID: recordID)
@@ -317,12 +333,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             record["enfDetails"] = entry.details
             record["timestamp"] = entry.timestamp as NSDate
             record["build"] = AppConstants.appBuildNumber as NSNumber
-            record["deviceName"] = UIDevice.current.name
+            record["deviceName"] = deviceName
             return record
         }
 
         do {
-            try await db.modifyRecords(saving: records, deleting: [], savePolicy: .allKeys)
+            _ = try await db.modifyRecords(saving: records, deleting: [], savePolicy: .allKeys)
             lastEnforcementLogUploadAt = batch.last?.timestamp ?? lastEnforcementLogUploadAt
             NSLog("[Tunnel] Enforcement log: uploaded \(batch.count) entries")
         } catch {
@@ -344,7 +360,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return nil
             }
             if !idsToDelete.isEmpty {
-                try await db.modifyRecords(saving: [], deleting: idsToDelete)
+                _ = try await db.modifyRecords(saving: [], deleting: idsToDelete)
                 NSLog("[Tunnel] Enforcement log: pruned \(idsToDelete.count) records older than 48h")
             }
         } catch {
@@ -499,15 +515,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if self.livenessTickCount % 3 == 0 {
                 let livenessDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
                 livenessDefaults?.set(Date().timeIntervalSince1970, forKey: "tunnelLastActiveAt")
-                livenessDefaults?.set(self.isInternetBlocked || self.scheduleBlackholeActive, forKey: "tunnelInternetBlocked")
-                let reason = self.internetBlockedReason ?? (self.scheduleBlackholeActive ? "Schedule enforcement — app not running" : "")
-                livenessDefaults?.set(reason, forKey: "tunnelInternetBlockedReason")
+                livenessDefaults?.set(self.shouldBlackhole, forKey: "tunnelInternetBlocked")
+                livenessDefaults?.set(self.blockReasonDescription ?? "", forKey: "tunnelInternetBlockedReason")
                 self.checkAppLiveness()
                 self.checkScheduleEnforcement()
                 self.checkPendingShieldConfirmation()
                 self.checkNetworkPathAndReconnect()
+                self.dnsProxy?.healthCheck()
                 self.checkDNSDayRollover()
                 self.persistCurrentBlocklist()
+                self.relayEnforcementRefreshIfNeeded()
+                self.verifyEnforcementState()
+                self.pollScreenLockState()
                 Task { await self.syncScheduleProfileIfNeeded() }
                 Task { await self.syncResolvedPendingReviews() }
                 self.checkDNSAppVerification()
@@ -552,11 +571,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             defaults?.set(Date().timeIntervalSince1970, forKey: "appDiedNeedLocationAt")
 
             // If screen is currently unlocked, start tracking from now
-            var currentLockState: UInt64 = 0
-            if lockNotifyToken != NOTIFY_TOKEN_INVALID {
-                notify_get_state(lockNotifyToken, &currentLockState)
-            }
-            if currentLockState == 0 {
+            let currentlyLocked = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .bool(forKey: "isDeviceLocked") ?? true
+            if !currentlyLocked {
                 lastUnlockAt = Date()
             }
 
@@ -573,26 +590,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Immediately release any safety-net blackholes — the app is alive and
             // can enforce shields directly. Without this, blackholes linger until
             // the next periodic check (~30s).
-            var released = false
-            if scheduleBlackholeActive {
-                NSLog("[Tunnel] Releasing schedule blackhole — app is alive")
-                scheduleBlackholeActive = false
-                released = true
-            }
-            if buildMismatchBlackholeActive {
-                NSLog("[Tunnel] Releasing build mismatch blackhole — app launched on new build")
-                buildMismatchBlackholeActive = false
-                buildMismatchFirstDetectedAt = nil
-                released = true
-            }
-            if emergencyBlackholeActive {
-                NSLog("[Tunnel] Releasing emergency blackhole — app is alive")
-                deactivateEmergencyBlackhole()
-                released = true
-            }
-            if released {
-                dnsProxy?.isBlackholeMode = isInternetBlocked
-                flushBlockStateToDefaults()
+            let safetyReasons: Set<DNSBlockReason> = [.scheduledLockedDown, .buildMismatch, .emergencyAppDead]
+            let releasing = activeBlockReasons.intersection(safetyReasons)
+            if !releasing.isEmpty {
+                for reason in releasing {
+                    NSLog("[Tunnel] Releasing \(reason.rawValue) blackhole — app is alive")
+                }
+                if releasing.contains(.buildMismatch) { buildMismatchFirstDetectedAt = nil }
+                if releasing.contains(.emergencyAppDead) { emergencyCheckCount = 0 }
+                batchUpdateBlockReasons(remove: safetyReasons)
                 Task { await sendHeartbeatFromTunnel(reason: "blackholeReleasedAppAlive") }
             }
         }
@@ -602,7 +608,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if let unblockAt = blockDefaults?.double(forKey: "internetBlockedUntil"),
            unblockAt > 0, Date().timeIntervalSince1970 >= unblockAt {
             blockDefaults?.removeObject(forKey: "internetBlockedUntil")
-            reapplyNetworkSettings()
+            setBlockReason(.parentCommand, active: false)
             NSLog("[Tunnel] Internet block expired — traffic restored")
             tunnelOwnsHeartbeat = false
         }
@@ -632,8 +638,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         checkEmergencyEnforcement()
     }
 
-    private var permissionsBlackholeActive: Bool = false
-
     /// Block internet when FamilyControls Individual authorization is explicitly revoked.
     /// Without FC auth, ManagedSettingsStore writes fail silently — DNS blackhole
     /// is the only enforcement available.
@@ -655,10 +659,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let shouldBeRestricted = resolution.mode != .unlocked
 
         if !authOK && shouldBeRestricted {
-            if !permissionsBlackholeActive {
-                permissionsBlackholeActive = true
+            if !activeBlockReasons.contains(.permissionsRevoked) {
                 NSLog("[Tunnel] FC auth revoked (\(fcAuth ?? "nil")) + device should be \(resolution.mode.rawValue) — blocking internet")
-                reapplyNetworkSettings()
+                setBlockReason(.permissionsRevoked, active: true)
 
                 // Notify kid
                 let content = UNMutableNotificationContent()
@@ -671,10 +674,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // Alert parent via CloudKit
                 Task { await sendPermissionRevokedAlert() }
             }
-        } else if permissionsBlackholeActive && authOK {
-            permissionsBlackholeActive = false
+        } else if activeBlockReasons.contains(.permissionsRevoked) && authOK {
             NSLog("[Tunnel] FC auth restored — unblocking internet")
-            reapplyNetworkSettings()
+            setBlockReason(.permissionsRevoked, active: false)
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["fc-auth-revoked"])
         }
     }
@@ -711,6 +713,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var lastStaleUnlockNotificationAt: Date = .distantPast
 
     private func checkExpiredTempUnlock() {
+        // GUARD: Skip if a temporary unlock is currently active.
+        // ModeStackResolver file reads can fail silently in the tunnel context
+        // (App Group file locks, iOS data protection). If we proceed without this
+        // guard, a failed file read causes ModeStackResolver to resolve to the next
+        // stack level (restricted/locked), which triggers a false "stale state"
+        // detection and re-applies shields during an active unlock.
+        // This matches the guard in verifyEnforcementState().
+        let tempUnlock = storage.readTemporaryUnlockState()
+            ?? storage.readPolicySnapshot()?.temporaryUnlockState
+        if let temp = tempUnlock, temp.expiresAt > Date() {
+            return  // Temp unlock active — don't interfere
+        }
+
+        // Also check timed unlock (penalty + free phases)
+        if let timed = storage.readTimedUnlockInfo(), timed.lockAt > Date() {
+            return  // Timed unlock active — don't interfere
+        }
+
         let resolution = ModeStackResolver.resolve(storage: storage)
 
         // Check if any state file disagrees with ModeStackResolver (the source of truth).
@@ -746,6 +766,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let existingPolicy = snapshot.effectivePolicy
             let correctedPolicy = EffectivePolicy(
                 resolvedMode: resolution.mode,
+                controlAuthority: resolution.controlAuthority,
                 isTemporaryUnlock: false,
                 temporaryUnlockExpiresAt: nil,
                 shieldedCategoriesData: existingPolicy.shieldedCategoriesData,
@@ -761,7 +782,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             _ = try? storage.commitCorrectedSnapshot(correctedSnapshot)
         }
 
-        NSLog("[Tunnel] Stale unlock state detected — corrected to \(resolution.mode.rawValue) (ext:\(extStale) snap:\(snapshotStale)). App must launch to re-apply ManagedSettings.")
+        NSLog("[Tunnel] Stale unlock state detected — corrected to \(resolution.mode.rawValue) (ext:\(extStale) snap:\(snapshotStale)). Triggering Monitor.")
+
+        // Signal the Monitor to apply enforcement from its privileged context.
+        let refreshDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        refreshDefaults?.set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+
+        // Try to trigger the Monitor by stopping/restarting reconciliation.
+        let center = DeviceActivityCenter()
+        let hour = Calendar.current.component(.hour, from: Date())
+        let quarter = hour / 6
+        let quarterName = DeviceActivityName(rawValue: "bigbrother.reconciliation.q\(quarter)")
+        if center.activities.contains(quarterName) {
+            center.stopMonitoring([quarterName])
+            let startHour = quarter * 6
+            let schedule = DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: startHour, minute: 0),
+                intervalEnd: DateComponents(hour: startHour + 5, minute: 59),
+                repeats: true
+            )
+            try? center.startMonitoring(quarterName, during: schedule)
+            NSLog("[Tunnel] Triggered Monitor via \(quarterName.rawValue) for stale unlock recovery")
+        }
 
         // The tunnel can't write to ManagedSettingsStore, so shields remain cleared.
         // If the device should be restricted and neither the app nor Monitor is running,
@@ -772,16 +814,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Only activate emergency DNS blackhole for lockedDown mode.
         // For restricted/locked, shields are the enforcement — DNS blocking kills internet
         // for kids at school when the app is dead, which is normal iOS behavior.
-        if resolution.mode == .lockedDown && !mainAppAlive && !emergencyBlackholeActive {
+        if resolution.mode == .lockedDown && !mainAppAlive && !activeBlockReasons.contains(.emergencyAppDead) {
             let appActiveAt = staleDefaults?.double(forKey: "mainAppLastActiveAt") ?? 0
             let appDead = appActiveAt > 0 && Date().timeIntervalSince1970 - appActiveAt > 300 // 5 min
             if appDead {
                 NSLog("[Tunnel] lockedDown + app dead — activating DNS blackhole as enforcement backstop")
-                emergencyBlackholeActive = true
+                setBlockReason(.emergencyAppDead, active: true)
             }
         }
-
-        reapplyNetworkSettings()
 
         // Nudge the kid to open the app (throttle to once per 5 minutes)
         let now = Date()
@@ -800,13 +840,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    private var buildMismatchBlackholeActive: Bool = false
     private var buildMismatchFirstDetectedAt: Date?
 
     private func checkBuildMismatchEnforcement() {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         let mainAppBuild = defaults?.integer(forKey: "mainAppLastLaunchedBuild") ?? 0
         let tunnelBuild = AppConstants.appBuildNumber
+
+        // Don't DNS-block for build mismatch when device is unlocked — the kid
+        // has full access anyway, and blocking DNS during deploys is annoying.
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        if resolution.mode == .unlocked {
+            if activeBlockReasons.contains(.buildMismatch) {
+                NSLog("[Tunnel] Build mismatch cleared — device is unlocked, no point blocking DNS")
+                buildMismatchFirstDetectedAt = nil
+                setBlockReason(.buildMismatch, active: false)
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["build-mismatch"])
+            }
+            return
+        }
 
         if mainAppBuild > 0 && mainAppBuild < tunnelBuild {
             if buildMismatchFirstDetectedAt == nil {
@@ -828,20 +880,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 UNUserNotificationCenter.current().add(request)
             }
 
-            // After 2-minute grace, block internet
-            if !buildMismatchBlackholeActive,
+            // After 2-minute grace, block internet — but only if app is actually dead.
+            // If app is alive (writing timestamps), it can enforce via ManagedSettings
+            // even on an old build — DNS blocking is overkill.
+            let appRecentlyActive: Bool = {
+                let lastActive = defaults?.double(forKey: "mainAppLastActiveAt") ?? 0
+                return lastActive > 0 && (Date().timeIntervalSince1970 - lastActive) < 300 // 5 min
+            }()
+
+            if !activeBlockReasons.contains(.buildMismatch),
                let detected = buildMismatchFirstDetectedAt,
-               Date().timeIntervalSince(detected) > 120 {
-                NSLog("[Tunnel] Build mismatch grace expired: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — blocking internet")
-                buildMismatchBlackholeActive = true
-                reapplyNetworkSettings()
+               Date().timeIntervalSince(detected) > 120,
+               !appRecentlyActive {
+                NSLog("[Tunnel] Build mismatch grace expired + app dead: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — blocking internet")
+                setBlockReason(.buildMismatch, active: true)
+            } else if activeBlockReasons.contains(.buildMismatch) && appRecentlyActive {
+                NSLog("[Tunnel] Build mismatch: app is alive (can enforce shields) — releasing DNS block")
+                setBlockReason(.buildMismatch, active: false)
             }
         } else if buildMismatchFirstDetectedAt != nil {
             NSLog("[Tunnel] Build mismatch resolved: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — restoring internet")
             buildMismatchFirstDetectedAt = nil
-            buildMismatchBlackholeActive = false
-            reapplyNetworkSettings()
-            flushBlockStateToDefaults()
+            setBlockReason(.buildMismatch, active: false)
             Task { await sendHeartbeatFromTunnel(reason: "buildMismatchCleared") }
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["build-mismatch"])
         }
@@ -850,15 +910,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Consecutive checks where emergency enforcement conditions are met.
     /// Requires multiple checks to avoid false positives from normal iOS process lifecycle.
     private var emergencyCheckCount: Int = 0
-    private var emergencyBlackholeActive: Bool = false
-
-    /// Proxy-level DNS blocking when schedule says restricted/locked but the main app
-    /// isn't running to apply ManagedSettings. Unlike emergencyBlackholeActive (which
-    /// requires Monitor dead for 1 hour), this activates immediately when the app is dead
-    /// and the schedule says the device shouldn't be unlocked. Uses DNSProxy's blackhole
-    /// mode (Apple domains exempt) instead of system-level 127.0.0.1.
-    private var scheduleBlackholeActive: Bool = false
-
     /// Temporary DNS blackhole while ManagedSettings shields are being applied by Monitor.
     /// Set when tunnel processes a lock/restrict command. Cleared when Monitor confirms shields.
     struct PendingShieldConfirmation {
@@ -866,6 +917,116 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let requestedAt: Date
     }
     private var pendingShieldConfirmation: PendingShieldConfirmation?
+
+    // MARK: - DNS Block Reasons (consolidated)
+
+    /// Why DNS is being blackholed. Multiple reasons can be active simultaneously.
+    enum DNSBlockReason: String, CaseIterable, Comparable {
+        case permissionsRevoked      // FC auth explicitly denied
+        case buildMismatch           // App needs to launch on new build
+        case emergencyAppDead        // App + Monitor dead, device should be restricted
+        case scheduledLockedDown     // Schedule says lockedDown, app not running
+        case lockedDownMode          // Device is in lockedDown mode (parent command)
+        case parentCommand           // Legacy internetBlockedUntil flag
+        case pendingShieldConfirmation // Temporary block while Monitor applies shields
+
+        /// Priority order for human-readable description (lower = higher priority).
+        static func < (lhs: DNSBlockReason, rhs: DNSBlockReason) -> Bool {
+            let order: [DNSBlockReason] = [
+                .permissionsRevoked, .buildMismatch, .emergencyAppDead,
+                .scheduledLockedDown, .lockedDownMode, .parentCommand,
+                .pendingShieldConfirmation
+            ]
+            return (order.firstIndex(of: lhs) ?? 99) < (order.firstIndex(of: rhs) ?? 99)
+        }
+
+        var humanDescription: String {
+            switch self {
+            case .permissionsRevoked: return "FamilyControls permissions revoked"
+            case .buildMismatch: return "App update pending — open Big Brother"
+            case .emergencyAppDead: return "Emergency — app not running, shields down"
+            case .scheduledLockedDown: return "Schedule enforcement — app not running"
+            case .lockedDownMode: return "Locked Down mode active"
+            case .parentCommand: return "Internet blocked by parent"
+            case .pendingShieldConfirmation: return "Applying parental controls..."
+            }
+        }
+    }
+
+    /// Single source of truth for all DNS blackhole state.
+    private var activeBlockReasons: Set<DNSBlockReason> = []
+
+    /// Whether DNS should be blackholed (computed from activeBlockReasons).
+    private var shouldBlackhole: Bool { !activeBlockReasons.isEmpty }
+
+    /// Human-readable description of the highest-priority active block reason.
+    private var blockReasonDescription: String? {
+        activeBlockReasons.min()?.humanDescription
+    }
+
+    /// Tracks the last state sent to setTunnelNetworkSettings to avoid redundant calls.
+    private var lastAppliedBlackholeState: Bool = false
+
+    /// Add or remove a block reason. Only calls reapplyNetworkSettings() on actual change.
+    private func setBlockReason(_ reason: DNSBlockReason, active: Bool) {
+        let before = shouldBlackhole
+        if active {
+            activeBlockReasons.insert(reason)
+        } else {
+            activeBlockReasons.remove(reason)
+        }
+        let after = shouldBlackhole
+        if before != after {
+            reapplyNetworkSettings()
+        }
+        // Always flush so heartbeat picks up reason changes even without blackhole transition
+        flushBlockStateToDefaults()
+    }
+
+    /// Batch-update multiple block reasons. Single reapply at the end.
+    private func batchUpdateBlockReasons(add: Set<DNSBlockReason> = [], remove: Set<DNSBlockReason> = []) {
+        let before = shouldBlackhole
+        activeBlockReasons.formUnion(add)
+        activeBlockReasons.subtract(remove)
+        let after = shouldBlackhole
+        if before != after {
+            reapplyNetworkSettings()
+        }
+        flushBlockStateToDefaults()
+    }
+
+    /// Seed activeBlockReasons from persisted state at tunnel startup.
+    /// This ensures the proxy starts in the correct mode without waiting for the first liveness tick.
+    private func seedBlockReasonsOnStart() {
+        // Check lockedDown mode from persisted state
+        if let extState = storage.readExtensionSharedState(), extState.currentMode == .lockedDown {
+            activeBlockReasons.insert(.lockedDownMode)
+        } else if let snap = storage.readPolicySnapshot(),
+                  snap.effectivePolicy.resolvedMode == .lockedDown {
+            activeBlockReasons.insert(.lockedDownMode)
+        }
+
+        // Check legacy internetBlockedUntil
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if let unblockAt = defaults?.double(forKey: "internetBlockedUntil"),
+           unblockAt > 0, Date().timeIntervalSince1970 < unblockAt {
+            activeBlockReasons.insert(.parentCommand)
+        }
+
+        // FC auth check
+        let fcAuth = defaults?.string(forKey: "familyControlsAuthStatus")
+        if fcAuth == "denied" {
+            let resolution = ModeStackResolver.resolve(storage: storage)
+            if resolution.mode != .unlocked {
+                activeBlockReasons.insert(.permissionsRevoked)
+            }
+        }
+
+        lastAppliedBlackholeState = shouldBlackhole
+        if !activeBlockReasons.isEmpty {
+            NSLog("[Tunnel] Seeded block reasons: \(activeBlockReasons.map(\.rawValue).joined(separator: ", "))")
+        }
+    }
 
     /// Check if the tunnel should activate emergency DNS blackhole enforcement.
     /// Only triggers when: screen is unlocked, both app and Monitor are dead for
@@ -879,7 +1040,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let timeSinceStart = Date().timeIntervalSince(tunnelStartedAt)
         if timeSinceStart < 300 { // 5 minute grace period
             emergencyCheckCount = 0
-            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
+            if activeBlockReasons.contains(.emergencyAppDead) { deactivateEmergencyBlackhole() }
             return
         }
 
@@ -897,7 +1058,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // If device should be unlocked, no emergency needed
         guard resolution.mode != .unlocked else {
             emergencyCheckCount = 0
-            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
+            if activeBlockReasons.contains(.emergencyAppDead) { deactivateEmergencyBlackhole() }
             return
         }
 
@@ -911,7 +1072,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // If the main app is alive (IPC pings working), no emergency
         if mainAppAlive || appRecentlyActive {
             emergencyCheckCount = 0
-            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
+            if activeBlockReasons.contains(.emergencyAppDead) { deactivateEmergencyBlackhole() }
             return
         }
 
@@ -925,7 +1086,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         guard monitorDead else {
             emergencyCheckCount = 0
-            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
+            if activeBlockReasons.contains(.emergencyAppDead) { deactivateEmergencyBlackhole() }
             return
         }
 
@@ -934,21 +1095,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         guard emergencyCheckCount >= 5 else { return }
 
         // Activate emergency blackhole — only fire once, not every 30s.
-        guard !emergencyBlackholeActive else { return }
+        guard !activeBlockReasons.contains(.emergencyAppDead) else { return }
         NSLog("[Tunnel] EMERGENCY: App dead (age \(Int(appAge))s), Monitor dead (\(Int(monitorAge))s), screen unlocked, mode should be \(resolution.mode.rawValue) — activating DNS blackhole")
-        emergencyBlackholeActive = true
-        reapplyNetworkSettings()
+        setBlockReason(.emergencyAppDead, active: true)
 
         // Notify parent via CloudKit event (once)
         Task { await sendEmergencyAlert(resolution: resolution, monitorAge: Int(monitorAge)) }
     }
 
     private func deactivateEmergencyBlackhole() {
-        guard emergencyBlackholeActive else { return }
-        emergencyBlackholeActive = false
+        guard activeBlockReasons.contains(.emergencyAppDead) else { return }
         emergencyCheckCount = 0
-        reapplyNetworkSettings()
-        flushBlockStateToDefaults()
+        setBlockReason(.emergencyAppDead, active: false)
         Task { await sendHeartbeatFromTunnel(reason: "emergencyBlackholeCleared") }
         NSLog("[Tunnel] Emergency blackhole deactivated — normal enforcement resumed")
     }
@@ -958,15 +1116,135 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// tick delay causes stale "internet blocked" errors in the parent dashboard.
     private func flushBlockStateToDefaults() {
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        defaults?.set(isInternetBlocked || scheduleBlackholeActive, forKey: "tunnelInternetBlocked")
-        let reason = internetBlockedReason ?? (scheduleBlackholeActive ? "Schedule enforcement — app not running" : "")
-        defaults?.set(reason, forKey: "tunnelInternetBlockedReason")
+        defaults?.set(shouldBlackhole, forKey: "tunnelInternetBlocked")
+        defaults?.set(blockReasonDescription ?? "", forKey: "tunnelInternetBlockedReason")
     }
 
     /// Check if the tunnel should enforce the schedule via DNS when ManagedSettings
     /// can't be applied (app not running). Runs every 30 seconds.
     ///
     /// Unlike the emergency blackhole (requires Monitor dead 1hr + 5 checks), this
+    /// Relay enforcement refresh signals to the Monitor extension.
+    /// The tunnel runs persistently and checks every 30s. If the main app set the
+    /// needsEnforcementRefresh flag but the Monitor hasn't confirmed, the tunnel
+    /// stops/restarts reconciliation quarters to trigger the Monitor again.
+    private func relayEnforcementRefreshIfNeeded() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard let signalTime = defaults?.double(forKey: "needsEnforcementRefresh"),
+              signalTime > 0 else { return }
+
+        // Only relay recent signals (within 30 seconds — after that, give up)
+        let age = Date().timeIntervalSince1970 - signalTime
+        guard age < 30 else {
+            defaults?.removeObject(forKey: "needsEnforcementRefresh")
+            return
+        }
+
+        // Check if Monitor already confirmed
+        let confirmedAt = defaults?.double(forKey: "monitorEnforcementConfirmedAt") ?? 0
+        if confirmedAt >= signalTime {
+            // Monitor handled it — clear the flag
+            defaults?.removeObject(forKey: "needsEnforcementRefresh")
+            return
+        }
+
+        // Monitor hasn't confirmed yet — stop current reconciliation quarter to trigger it.
+        NSLog("[Tunnel] Relaying enforcement refresh (signal age: \(Int(age))s, no Monitor confirmation)")
+        let center = DeviceActivityCenter()
+        let hour = Calendar.current.component(.hour, from: Date())
+        let quarter = hour / 6
+        let quarterName = DeviceActivityName(rawValue: "bigbrother.reconciliation.q\(quarter)")
+        let reconciliation = center.activities.filter { $0.rawValue == quarterName.rawValue }
+        if !reconciliation.isEmpty {
+            center.stopMonitoring([quarterName])
+            NSLog("[Tunnel] Stopped \(quarterName.rawValue)")
+            // Re-register it
+            let startHour = quarter * 6
+            let schedule = DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: startHour, minute: 0),
+                intervalEnd: DateComponents(hour: startHour + 5, minute: 59),
+                repeats: true
+            )
+            try? center.startMonitoring(quarterName, during: schedule)
+        } else {
+            NSLog("[Tunnel] No active reconciliation to stop")
+        }
+
+        // Clear the flag so we don't keep retrying
+        defaults?.removeObject(forKey: "needsEnforcementRefresh")
+    }
+
+    /// Persistent enforcement verifier — runs every 30s on the liveness timer.
+    /// Compares expected mode (from snapshot) with actual shield state (from heartbeat).
+    /// If they don't match, keeps triggering the Monitor until enforcement is correct.
+    /// This is the LAST LINE OF DEFENSE — the tunnel is always running.
+    private func verifyEnforcementState() {
+        let storage = AppGroupStorage()
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+
+        // Skip verification during active temp unlock — the tunnel's ModeStackResolver
+        // can fail to read the temp unlock file, causing it to resolve as restricted
+        // and trigger the Monitor to re-apply shields during an active unlock.
+        // This was the root cause of the shield flip-flop.
+        let tempUnlock = storage.readTemporaryUnlockState()
+            ?? storage.readPolicySnapshot()?.temporaryUnlockState
+        if let temp = tempUnlock, temp.expiresAt > Date() {
+            return // Temp unlock active — don't interfere
+        }
+
+        // Read expected mode from ModeStackResolver (same logic all processes use)
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let expectedShieldsUp = resolution.mode != .unlocked
+
+        // Read actual shield state from what the main app last reported.
+        // The main app writes this on each enforcement apply and heartbeat.
+        let actualShieldsUp = defaults?.bool(forKey: "shieldsActiveAtLastHeartbeat") ?? false
+
+        // Also check the extension shared state for a more recent signal
+        if let extState = storage.readExtensionSharedState() {
+            let extExpectsShields = extState.currentMode != .unlocked
+            // If the extension state disagrees with ModeStackResolver, something is stale
+            if extExpectsShields != expectedShieldsUp {
+                NSLog("[Tunnel] verifyEnforcement: mode mismatch — resolver=\(resolution.mode.rawValue) extState=\(extState.currentMode.rawValue)")
+            }
+        }
+
+        // Check for mismatch
+        if expectedShieldsUp != actualShieldsUp {
+            // Throttle: don't trigger more than once per 30 seconds
+            let lastTrigger = defaults?.double(forKey: "tunnelEnforcementTriggerAt") ?? 0
+            let age = Date().timeIntervalSince1970 - lastTrigger
+            guard age >= 30 else { return }
+
+            NSLog("[Tunnel] verifyEnforcement: MISMATCH — expected shields \(expectedShieldsUp ? "UP" : "DOWN") but got \(actualShieldsUp ? "UP" : "DOWN") (mode=\(resolution.mode.rawValue))")
+            defaults?.set(Date().timeIntervalSince1970, forKey: "tunnelEnforcementTriggerAt")
+
+            // Set the enforcement refresh flag so the Monitor picks it up
+            defaults?.set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+
+            // Stop and restart current reconciliation quarter to trigger Monitor
+            let center = DeviceActivityCenter()
+            let hour = Calendar.current.component(.hour, from: Date())
+            let quarter = hour / 6
+            let quarterName = DeviceActivityName(rawValue: "bigbrother.reconciliation.q\(quarter)")
+            if center.activities.contains(quarterName) {
+                center.stopMonitoring([quarterName])
+                let startHour = quarter * 6
+                let schedule = DeviceActivitySchedule(
+                    intervalStart: DateComponents(hour: startHour, minute: 0),
+                    intervalEnd: DateComponents(hour: startHour + 5, minute: 59),
+                    repeats: true
+                )
+                try? center.startMonitoring(quarterName, during: schedule)
+                NSLog("[Tunnel] verifyEnforcement: triggered Monitor via \(quarterName.rawValue)")
+            }
+
+            // DON'T stop usage tracking — it can't be re-registered from the tunnel
+            // (requires event milestones that only ScheduleRegistrar knows).
+            // Stopping it permanently kills screen time tracking.
+        }
+    }
+
     /// activates immediately when the schedule says restricted/locked and the app is dead.
     /// Uses proxy-level blocking (Apple domains exempt) rather than system-level 127.0.0.1.
     private func checkScheduleEnforcement() {
@@ -984,12 +1262,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // lockedDown is an explicit parent-initiated total lockdown where DNS blocking is intentional.
         let shouldBlock = resolution.mode == .lockedDown
 
-        if shouldBlock != scheduleBlackholeActive {
-            scheduleBlackholeActive = shouldBlock
-            dnsProxy?.isBlackholeMode = shouldBlock || isInternetBlocked
-            flushBlockStateToDefaults()
+        let wasActive = activeBlockReasons.contains(.scheduledLockedDown)
+        if shouldBlock != wasActive {
             if shouldBlock {
                 NSLog("[Tunnel] Schedule enforcement DNS active — mode \(resolution.mode.rawValue), app not alive")
+                setBlockReason(.scheduledLockedDown, active: true)
                 Task { await sendHeartbeatFromTunnel(reason: "scheduleEnforcementActivated") }
                 // Notify the kid — tapping opens BB which restores full enforcement + DNS.
                 let notif = UNMutableNotificationContent()
@@ -1004,21 +1281,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 UNUserNotificationCenter.current().add(req)
             } else {
                 NSLog("[Tunnel] Schedule enforcement DNS cleared — \(resolution.mode == .unlocked ? "mode unlocked" : "app alive")")
+                setBlockReason(.scheduledLockedDown, active: false)
                 Task { await sendHeartbeatFromTunnel(reason: "scheduleEnforcementCleared") }
-            }
-        }
-
-        // Always sync DNS proxy with actual internet block state.
-        let actualBlocked = isInternetBlocked || scheduleBlackholeActive
-        if (dnsProxy?.isBlackholeMode ?? false) != actualBlocked {
-            dnsProxy?.isBlackholeMode = actualBlocked
-            flushBlockStateToDefaults()
-            if actualBlocked {
-                reapplyNetworkSettings()
-                NSLog("[Tunnel] DNS blackhole synced — lockedDown mode detected")
-            } else {
-                reapplyNetworkSettings()
-                NSLog("[Tunnel] DNS blackhole released — mode no longer blocked")
             }
         }
 
@@ -1057,17 +1321,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
            extState.writtenAt > pending.requestedAt {
             // Monitor confirmed! Release temporary DNS blackhole.
             pendingShieldConfirmation = nil
-            dnsProxy?.isBlackholeMode = isInternetBlocked // Revert to normal (lockedDown stays blocked)
-            reapplyNetworkSettings()
-            flushBlockStateToDefaults()
+            setBlockReason(.pendingShieldConfirmation, active: false)
             NSLog("[Tunnel] Shield confirmation received — releasing temporary DNS blackhole (\(Int(age))s)")
             return
         }
 
-        // Timeout after 2 minutes — keep DNS blocked and log
+        // Hard timeout after 5 minutes — release the block, Monitor may be dead
+        if age > 300 {
+            NSLog("[Tunnel] Shield confirmation HARD TIMEOUT after \(Int(age))s — releasing DNS block")
+            pendingShieldConfirmation = nil
+            setBlockReason(.pendingShieldConfirmation, active: false)
+            return
+        }
+
+        // Soft warning at 2 minutes
         if age > 120 {
-            NSLog("[Tunnel] Shield confirmation TIMEOUT after \(Int(age))s — keeping DNS blocked for safety")
-            // Don't clear pendingShieldConfirmation — keep checking
+            NSLog("[Tunnel] Shield confirmation waiting \(Int(age))s — Monitor may be slow")
         }
     }
 
@@ -1323,14 +1592,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         if synced > 0 {
-            // Keep unresolved reviews locally so ShieldConfiguration can still update names.
-            // Only clear resolved reviews — they don't need further local updates.
-            let remaining = reviews.filter { !$0.nameResolved }
-            if let encoded = try? JSONEncoder().encode(remaining) {
-                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
-            }
+            // Once synced to CloudKit, CLEAR the local file. The parent manages
+            // the CK record from here (approve/rename/delete). Re-uploading from
+            // the local file would resurrect reviews the parent already acted on.
+            try? storage.writeRawData(Data("[]".utf8), forKey: "pending_review_local.json")
             defaults?.removeObject(forKey: "pendingReviewNeedsSync")
-            NSLog("[Tunnel] Synced \(synced) pending reviews to CloudKit (\(reviews.filter(\.nameResolved).count) named, \(remaining.count) unresolved kept locally)")
+            NSLog("[Tunnel] Synced \(synced)/\(reviews.count) pending reviews to CloudKit — local file cleared")
         }
     }
 
@@ -1512,54 +1779,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let unblockAt = Date().addingTimeInterval(Double(durationSeconds))
             defaults?.set(unblockAt.timeIntervalSince1970, forKey: "internetBlockedUntil")
             NSLog("[Tunnel] Internet blocked for \(durationSeconds)s (until \(unblockAt))")
+            setBlockReason(.parentCommand, active: true)
         } else {
             defaults?.removeObject(forKey: "internetBlockedUntil")
             NSLog("[Tunnel] Internet unblocked")
+            setBlockReason(.parentCommand, active: false)
         }
-        // Reapply network settings with updated DNS
-        reapplyNetworkSettings()
     }
 
-    /// Check if internet should be blocked based on current enforcement mode.
-    /// Internet is blocked when: device is in .lockedDown mode, emergency blackhole is active,
-    /// or legacy internetBlockedUntil flag is set.
-    private var isInternetBlocked: Bool {
-        return internetBlockedReason != nil
-    }
 
-    /// Returns the reason DNS is blackholed, or nil if not blocked.
-    /// This reason is written to UserDefaults so the heartbeat can report it to the parent.
-    private var internetBlockedReason: String? {
-        // Permissions blackhole (FC auth revoked)
-        if permissionsBlackholeActive { return "FamilyControls permissions revoked" }
-        // Build mismatch blackhole (app needs to launch on new build)
-        if buildMismatchBlackholeActive { return "App update pending — open Big Brother" }
-        // Emergency blackhole (tunnel last-resort enforcement)
-        if emergencyBlackholeActive { return "Emergency — app not running, shields down" }
-        // Schedule enforcement blackhole (app dead, schedule says restricted)
-        if scheduleBlackholeActive { return "Schedule enforcement — app not running" }
-        // Primary: check current mode from policy snapshot or extension shared state
-        if let extState = storage.readExtensionSharedState(), extState.currentMode == .lockedDown {
-            return "Locked Down mode active"
-        }
-        if let snap = storage.readPolicySnapshot(),
-           snap.effectivePolicy.resolvedMode == .lockedDown {
-            return "Locked Down mode active"
-        }
-        // Legacy: check explicit internetBlockedUntil flag
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        guard let unblockTimestamp = defaults?.double(forKey: "internetBlockedUntil"),
-              unblockTimestamp > 0 else { return nil }
-        if Date().timeIntervalSince1970 >= unblockTimestamp {
-            defaults?.removeObject(forKey: "internetBlockedUntil")
-            return nil
-        }
-        return "Internet blocked by parent"
-    }
-
-    /// Whether the previous reapply had blackhole active. Used to detect transitions
-    /// into blackhole mode so we can force-drop existing TCP connections.
-    private var wasBlackholeActive: Bool = false
 
     /// Reapply tunnel network settings (DNS) based on current block/safe-search state.
     /// When transitioning INTO blackhole mode, tears down the network interface first
@@ -1567,19 +1795,26 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// reconnect, and new DNS lookups hit the blackhole. This prevents cached DNS /
     /// persistent connections from bypassing the block.
     private func reapplyNetworkSettings() {
-        let proxyBlackhole = isInternetBlocked || scheduleBlackholeActive
+        let wantBlackhole = shouldBlackhole
 
-        // Sync proxy blackhole mode
-        dnsProxy?.isBlackholeMode = proxyBlackhole
-        if proxyBlackhole {
-            NSLog("[Tunnel] DNS proxy blackhole active — \(isInternetBlocked ? "internet blocked" : "schedule enforcement")")
-        } else {
-            dnsProxy?.reconnectUpstream()
+        // Always sync proxy blackhole mode (cheap Bool assignment)
+        dnsProxy?.isBlackholeMode = wantBlackhole
+        if wantBlackhole {
+            NSLog("[Tunnel] DNS proxy blackhole active — reasons: \(activeBlockReasons.map(\.rawValue).joined(separator: ", "))")
+        }
+
+        // Always flush state to UserDefaults for heartbeat
+        flushBlockStateToDefaults()
+
+        // Skip setTunnelNetworkSettings() if blackhole state hasn't changed (rate-limit)
+        guard wantBlackhole != lastAppliedBlackholeState else {
+            networkSettingsNeedRetry = false
+            return
         }
 
         // Detect transition INTO blackhole — tear down interface to kill existing connections.
-        let enteringBlackhole = proxyBlackhole && !wasBlackholeActive
-        wasBlackholeActive = proxyBlackhole
+        let enteringBlackhole = wantBlackhole && !lastAppliedBlackholeState
+        lastAppliedBlackholeState = wantBlackhole
 
         let applySettings = { [weak self] in
             guard let self else { return }
@@ -1972,8 +2207,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let existingSnapshot = storage.readPolicySnapshot()
         let existingPolicy = existingSnapshot?.effectivePolicy
         let isTemp = actionType == "temporaryUnlock"
+        // returnToSchedule hands control back to the schedule; all other
+        // parent commands (setMode, lockUntil, etc.) override the schedule.
+        let authority: ControlAuthority = actionType == "returnToSchedule" ? .schedule : .parentManual
         let correctedPolicy = EffectivePolicy(
             resolvedMode: mode,
+            controlAuthority: authority,
             isTemporaryUnlock: isTemp,
             temporaryUnlockExpiresAt: isTemp ? storage.readTemporaryUnlockState()?.expiresAt : nil,
             shieldedCategoriesData: existingPolicy?.shieldedCategoriesData,
@@ -2007,22 +2246,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // DNS blackhole would cut ALL internet, which is wrong for restricted mode.
         if mode == .unlocked {
             // Release ALL blackholes — kid should have internet immediately
-            if emergencyBlackholeActive { deactivateEmergencyBlackhole() }
-            if scheduleBlackholeActive { scheduleBlackholeActive = false }
             pendingShieldConfirmation = nil
-            dnsProxy?.isBlackholeMode = false
-            reapplyNetworkSettings()
-            flushBlockStateToDefaults()
+            emergencyCheckCount = 0
+            let allReasons = Set(DNSBlockReason.allCases)
+            batchUpdateBlockReasons(remove: allReasons)
             NSLog("[Tunnel] DNS released — unlocked mode, shields will clear via Monitor")
         } else if mode == .lockedDown {
             // Permanent DNS blackhole — lockedDown means no internet
-            reapplyNetworkSettings()
-            flushBlockStateToDefaults()
+            setBlockReason(.lockedDownMode, active: true)
         } else {
             // Restricted/locked: Monitor applies ManagedSettings shields via stopMonitoring trigger.
             // No DNS blackhole — internet stays up, only app access changes.
-            reapplyNetworkSettings()
-            flushBlockStateToDefaults()
+            // Release lockedDown reason if transitioning from lockedDown to restricted/locked.
+            setBlockReason(.lockedDownMode, active: false)
             NSLog("[Tunnel] Mode \(mode.rawValue) — Monitor will apply shields via stopMonitoring trigger")
         }
 
@@ -2045,6 +2281,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         appProcessed.append(record.recordID.recordName)
         if appProcessed.count > 200 { appProcessed = Array(appProcessed.suffix(200)) }
         defaults?.set(appProcessed, forKey: "tunnelAppliedCommandIDs")
+        // Also add to tunnel's own processed set — prevents re-processing on next poll
+        // if the CK status save above failed (e.g., CK error 4).
+        var tunnelProcessed = defaults?.stringArray(forKey: "tunnelProcessedCommandIDs") ?? []
+        tunnelProcessed.append(record.recordID.recordName)
+        if tunnelProcessed.count > 200 { tunnelProcessed = Array(tunnelProcessed.suffix(200)) }
+        defaults?.set(tunnelProcessed, forKey: "tunnelProcessedCommandIDs")
 
         // Notify the kid about the mode change.
         let notifContent = UNMutableNotificationContent()
@@ -2093,10 +2335,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             "source": "vpnTunnel",
             "mainAppAlive": "\(mainAppAlive)",
             "tunnelOwnsHeartbeat": "\(tunnelOwnsHeartbeat)",
-            "buildMismatchBlackholeActive": "\(buildMismatchBlackholeActive)",
-            "emergencyBlackholeActive": "\(emergencyBlackholeActive)",
-            "scheduleBlackholeActive": "\(scheduleBlackholeActive)",
-            "isInternetBlocked": "\(isInternetBlocked)",
+            "dns.activeBlockReasons": activeBlockReasons.isEmpty ? "none" : activeBlockReasons.map(\.rawValue).sorted().joined(separator: ", "),
+            "dns.shouldBlackhole": "\(shouldBlackhole)",
+            "dns.proxyBlackholeMode": "\(dnsProxy?.isBlackholeMode ?? false)",
+            "dns.lastAppliedBlackholeState": "\(lastAppliedBlackholeState)",
+            "dns.upstreamState": "\(dnsProxy?.upstreamSessionState.map { "\($0)" } ?? "nil")",
+            "dns.pendingQueryCount": "\(dnsProxy?.pendingCount ?? 0)",
             "lastHeartbeatSentAt": "\(defaults?.double(forKey: "lastHeartbeatSentAt") ?? 0)",
             "mainAppLastActiveAt": "\(defaults?.double(forKey: "mainAppLastActiveAt") ?? 0)",
             "tunnelLastActiveAt": "\(defaults?.double(forKey: "tunnelLastActiveAt") ?? 0)",
@@ -2138,7 +2382,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // === AUTO-DIAGNOSIS ===
         var diagnosis: [String] = []
-        if modeResolution.mode == .unlocked && emergencyBlackholeActive {
+        if modeResolution.mode == .unlocked && activeBlockReasons.contains(.emergencyAppDead) {
             diagnosis.append("EMERGENCY BLACKHOLE ACTIVE but device should be unlocked — deactivating")
         }
         if let ext = storage.readExtensionSharedState(),
@@ -2174,7 +2418,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if let r = storage.readDeviceRestrictions() {
             flags["restrictions.denyAppRemoval"] = "\(r.denyAppRemoval)"
             flags["restrictions.denyExplicitContent"] = "\(r.denyExplicitContent)"
-            flags["restrictions.denyWebWhenLocked"] = "\(r.denyWebWhenLocked)"
+            flags["restrictions.denyWebWhenRestricted"] = "\(r.denyWebWhenRestricted)"
             flags["restrictions.lockAccounts"] = "\(r.lockAccounts)"
             flags["restrictions.requireAutoDateTime"] = "\(r.requireAutomaticDateAndTime)"
         } else {
@@ -2288,6 +2532,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         record["hbSource"] = "vpnTunnel"
         record["hbTunnel"] = 1 as NSNumber
 
+        // Extension build numbers — read from App Group (written by each extension when it runs)
+        let extDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let monBuild = extDefaults?.integer(forKey: "monitorBuildNumber") ?? 0
+        let shieldBuild = extDefaults?.integer(forKey: "shieldBuildNumber") ?? 0
+        let actionBuild = extDefaults?.integer(forKey: "shieldActionBuildNumber") ?? 0
+        if monBuild > 0 { record["hbMonitorBuild"] = monBuild as NSNumber }
+        if shieldBuild > 0 { record["hbShieldBuild"] = shieldBuild as NSNumber }
+        if actionBuild > 0 { record["hbShieldActionBuild"] = actionBuild as NSNumber }
+
         // FC auth type from App Group (written by main app)
         if let authType = defaults?.string(forKey: "fr.bigbrother.authorizationType") {
             record["hbFCAuthType"] = authType
@@ -2325,12 +2578,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         record["hbScreenTimeMins"] = defaults?.integer(forKey: screenTimeMinutesKey) as NSNumber?
         record["hbUnlockCount"] = defaults?.integer(forKey: screenTimeUnlockCountKey) as NSNumber?
 
-        // Device lock state (tunnel tracks this via Darwin notification)
-        var lockState: UInt64 = 0
-        if lockNotifyToken != NOTIFY_TOKEN_INVALID {
-            notify_get_state(lockNotifyToken, &lockState)
-        }
-        record["hbLocked"] = (lockState != 0 ? 1 : 0) as NSNumber
+        // Device lock state (read from App Group, written by main app's DeviceLockMonitor)
+        let isLocked = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .bool(forKey: "isDeviceLocked") ?? true
+        record["hbLocked"] = (isLocked ? 1 : 0) as NSNumber
 
         // Battery — changes while app is dead, parent wants current level
         let (batteryLevel, batteryCharging) = await MainActor.run {
@@ -2360,6 +2611,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // as-is from the record (may have previous main-app values).
 
         // DNS blocking state — the tunnel CAN report this directly
+        record["hbInetBlocked"] = (shouldBlackhole ? 1 : 0) as NSNumber
+        record["hbInternetBlockedReason"] = blockReasonDescription
         let dnsCount = storage.readEnforcementBlockedDomains().count
             + storage.readTimeLimitBlockedDomains().count
         if dnsCount > 0 {
@@ -2539,36 +2792,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let screenTimeUnlockCountKey = "screenUnlockCount"
 
     private func startScreenLockMonitoring() {
-        guard lockNotifyToken == NOTIFY_TOKEN_INVALID else { return }
-
-        notify_register_dispatch(
-            "com.apple.springboard.lockstate",
-            &lockNotifyToken,
-            DispatchQueue.main
-        ) { [weak self] token in
-            var state: UInt64 = 0
-            notify_get_state(token, &state)
-            let locked = state != 0
-            self?.handleScreenLockTransition(locked: locked)
-        }
-
-        // Query initial state.
-        if lockNotifyToken != NOTIFY_TOKEN_INVALID {
-            var state: UInt64 = 0
-            notify_get_state(lockNotifyToken, &state)
-            let locked = state != 0
-            dnsProxy?.isDeviceLocked = locked
-            if !locked {
-                lastUnlockAt = Date()
-            }
-            NSLog("[Tunnel] Screen lock monitoring started (initial: \(locked ? "locked" : "unlocked"))")
-        }
+        // Screen lock state is now read from App Group (written by main app's
+        // DeviceLockMonitor using public UIApplication.protectedData notifications).
+        // The tunnel polls this on each liveness tick instead of using the
+        // private com.apple.springboard.lockstate Darwin notification.
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let locked = defaults?.bool(forKey: "isDeviceLocked") ?? true
+        dnsProxy?.isDeviceLocked = locked
+        if !locked { lastUnlockAt = Date() }
+        NSLog("[Tunnel] Screen lock monitoring started (initial: \(locked ? "locked" : "unlocked"), from App Group)")
     }
 
     private func stopScreenLockMonitoring() {
-        if lockNotifyToken != NOTIFY_TOKEN_INVALID {
-            notify_cancel(lockNotifyToken)
-            lockNotifyToken = NOTIFY_TOKEN_INVALID
+        // No cleanup needed — we poll from App Group instead of using Darwin notifications.
+    }
+
+    /// Poll screen lock state from App Group (written by main app's DeviceLockMonitor).
+    private func pollScreenLockState() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let locked = defaults?.bool(forKey: "isDeviceLocked") ?? true
+        let wasLocked = dnsProxy?.isDeviceLocked ?? true
+        if locked != wasLocked {
+            handleScreenLockTransition(locked: locked)
         }
     }
 
@@ -2660,11 +2905,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let unlockTime = lastUnlockAt else { return }
         // Double-check screen state to prevent double-counting if lock handler
         // already cleared lastUnlockAt on a different dispatch.
-        var lockState: UInt64 = 0
-        if lockNotifyToken != NOTIFY_TOKEN_INVALID {
-            notify_get_state(lockNotifyToken, &lockState)
-        }
-        guard lockState == 0 else {
+        let screenLocked = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .bool(forKey: "isDeviceLocked") ?? true
+        guard !screenLocked else {
             // Screen is locked — lock handler already counted this session.
             lastUnlockAt = nil
             return

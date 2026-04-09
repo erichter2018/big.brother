@@ -629,6 +629,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return .applied
 
             case .setScheduleProfile(let profileID, let versionDate):
+                // 1. Update CloudKit device record so other syncs see the new assignment.
                 try await cloudKit.updateDeviceFields(
                     deviceID: enrollment.deviceID,
                     fields: [
@@ -636,7 +637,29 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                         CKFieldName.scheduleProfileVersion: versionDate as CKRecordValue
                     ]
                 )
-                eventLogger.log(.commandApplied, details: "Schedule profile set: \(profileID.uuidString.prefix(8))")
+
+                // 2. Fetch and register the profile LOCALLY so it takes effect immediately.
+                //    Without this, the 60s sync might read a stale CK cache and revert
+                //    to the old schedule before the new assignment propagates.
+                do {
+                    let profiles = try await cloudKit.fetchScheduleProfiles(familyID: enrollment.familyID)
+                    if let profile = profiles.first(where: { $0.id == profileID }) {
+                        ScheduleRegistrar.register(profile, storage: storage)
+                        eventLogger.log(.commandApplied, details: "Schedule profile set + registered: \(profile.name) (\(profileID.uuidString.prefix(8)))")
+                    } else {
+                        // Profile not found in CK — trigger async sync to retry later.
+                        eventLogger.log(.commandApplied, details: "Schedule profile set (CK field updated, profile fetch pending): \(profileID.uuidString.prefix(8))")
+                        DispatchQueue.main.async { [weak self] in
+                            self?.onScheduleSyncNeeded?()
+                        }
+                    }
+                } catch {
+                    // CK fetch failed — the 60s sync will pick it up eventually.
+                    eventLogger.log(.commandApplied, details: "Schedule profile set (profile fetch failed, will retry): \(profileID.uuidString.prefix(8))")
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onScheduleSyncNeeded?()
+                    }
+                }
                 return .applied
 
             case .clearScheduleProfile:
@@ -647,6 +670,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                         CKFieldName.scheduleProfileVersion: nil
                     ]
                 )
+                // Clear locally immediately so DeviceActivity schedules are removed.
+                ScheduleRegistrar.clearAll(storage: storage)
                 eventLogger.log(.commandApplied, details: "Schedule profile cleared")
                 return .applied
 
@@ -890,26 +915,54 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             NSLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): enforcement.apply() completed")
             try snapshotStore.markApplied()
 
-            // Verify write stuck — ManagedSettings writes from background can silently fail.
-            // Wait 1s for XPC round-trip, then read back with a FRESH store instance.
-            Thread.sleep(forTimeInterval: 1.0)
-            let verifyDiag = enforcement?.shieldDiagnostic()
-            let shouldBeShielded = effectiveMode != .unlocked
-            let isShielded = verifyDiag?.shieldsActive == true || verifyDiag?.categoryActive == true
-            if shouldBeShielded != isShielded {
-                NSLog("[CommandProcessor] POST-WRITE VERIFY FAILED — retrying (shields=\(isShielded), expected=\(shouldBeShielded))")
-                Thread.sleep(forTimeInterval: 0.5)
-                try enforcement?.apply(snapshot.effectivePolicy)
-                let retryDiag = enforcement?.shieldDiagnostic()
-                let retryOK = (retryDiag?.shieldsActive == true || retryDiag?.categoryActive == true) == shouldBeShielded
-                NSLog("[CommandProcessor] Retry result: \(retryOK ? "OK" : "STILL FAILED")")
-            } else {
-                NSLog("[CommandProcessor] Post-write verify OK")
+            // Verify write stuck — moved off main thread to avoid UI freeze.
+            // The Monitor trigger below is the real safety net for background writes.
+            let verifyEnforcement = enforcement
+            let verifyMode = effectiveMode
+            let verifySnapshot = snapshot
+            Task.detached {
+                try? await Task.sleep(for: .seconds(1))
+                let verifyDiag = verifyEnforcement?.shieldDiagnostic()
+                let shouldBeShielded = verifyMode != .unlocked
+                let isShielded = verifyDiag?.shieldsActive == true || verifyDiag?.categoryActive == true
+                if shouldBeShielded != isShielded {
+                    NSLog("[CommandProcessor] POST-WRITE VERIFY FAILED — retrying (shields=\(isShielded), expected=\(shouldBeShielded))")
+                    try? await Task.sleep(for: .seconds(0.5))
+                    try? verifyEnforcement?.apply(verifySnapshot.effectivePolicy)
+                    let retryDiag = verifyEnforcement?.shieldDiagnostic()
+                    let retryOK = (retryDiag?.shieldsActive == true || retryDiag?.categoryActive == true) == shouldBeShielded
+                    NSLog("[CommandProcessor] Retry result: \(retryOK ? "OK" : "STILL FAILED")")
+                } else {
+                    NSLog("[CommandProcessor] Post-write verify OK")
+                }
             }
 
             // Trigger the Monitor extension to apply enforcement from its privileged context.
             // The main app's enforcement.apply() above is best-effort (works in foreground).
+            let triggerTime = Date().timeIntervalSince1970
             triggerMonitorEnforcementRefresh()
+
+            // Verify the Monitor actually applied enforcement.
+            // Poll for up to 5s, retry trigger if no confirmation.
+            Task.detached {
+                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                var confirmed = false
+                for attempt in 1...5 {
+                    try? await Task.sleep(for: .seconds(1))
+                    let confirmedAt = defaults?.double(forKey: "monitorEnforcementConfirmedAt") ?? 0
+                    if confirmedAt >= triggerTime {
+                        NSLog("[CommandProcessor] Monitor confirmed enforcement after \(attempt)s")
+                        confirmed = true
+                        break
+                    }
+                }
+                if !confirmed {
+                    NSLog("[CommandProcessor] Monitor did NOT confirm after 5s — retrying trigger")
+                    // Re-trigger via UserDefaults flag — the tunnel or next Monitor callback will pick it up.
+                    UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                        .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+                }
+            }
 
             if output.modeChanged {
                 eventLogger.log(.modeChanged, details: "Mode changed from \(output.previousMode?.rawValue ?? "none") to \(effectiveMode.rawValue)")
@@ -1308,16 +1361,56 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Fires intervalDidEnd in the Monitor by stopping the currently-active reconciliation quarter.
     /// The Monitor re-applies enforcement from its privileged context, then re-registers the quarter.
     private func triggerMonitorEnforcementRefresh() {
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        defaults?.set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
 
         let center = DeviceActivityCenter()
         let activeReconciliation = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }
+        NSLog("[CommandProcessor] triggerMonitorRefresh: stopping \(activeReconciliation.count) reconciliation activities")
+
+        // Stop ONLY the current quarter — stopping all quarters was causing them
+        // to disappear entirely (re-registration didn't always stick).
         let hour = Calendar.current.component(.hour, from: Date())
         let quarter = hour / 6
         let quarterName = DeviceActivityName(rawValue: "bigbrother.reconciliation.q\(quarter)")
-        NSLog("[CommandProcessor] triggerMonitorRefresh: \(activeReconciliation.count) reconciliation activities, stopping q\(quarter)")
-        center.stopMonitoring([quarterName])
+
+        // Only stop if it's actually active
+        if activeReconciliation.contains(quarterName) {
+            center.stopMonitoring([quarterName])
+            NSLog("[CommandProcessor] Stopped \(quarterName.rawValue)")
+
+            // Re-register it immediately
+            let startHour = quarter * 6
+            let schedule = DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: startHour, minute: 0),
+                intervalEnd: DateComponents(hour: startHour + 5, minute: 59),
+                repeats: true
+            )
+            do {
+                try center.startMonitoring(quarterName, during: schedule)
+                NSLog("[CommandProcessor] Re-registered \(quarterName.rawValue)")
+            } catch {
+                NSLog("[CommandProcessor] Failed to re-register \(quarterName.rawValue): \(error.localizedDescription)")
+            }
+        } else {
+            NSLog("[CommandProcessor] Quarter \(quarterName.rawValue) not active — registering fresh")
+            // Register all quarters if none are active
+            let quarters: [(name: String, startHour: Int, endHour: Int)] = [
+                ("bigbrother.reconciliation.q0", 0, 5),
+                ("bigbrother.reconciliation.q1", 6, 11),
+                ("bigbrother.reconciliation.q2", 12, 17),
+                ("bigbrother.reconciliation.q3", 18, 23),
+            ]
+            for q in quarters {
+                let activityName = DeviceActivityName(rawValue: q.name)
+                let qSchedule = DeviceActivitySchedule(
+                    intervalStart: DateComponents(hour: q.startHour, minute: 0),
+                    intervalEnd: DateComponents(hour: q.endHour, minute: 59),
+                    repeats: true
+                )
+                try? center.startMonitoring(activityName, during: qSchedule)
+            }
+        }
     }
 
     /// Clear lockUntil state from UserDefaults. Must be called by any command that

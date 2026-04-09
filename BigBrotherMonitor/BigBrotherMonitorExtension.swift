@@ -13,7 +13,7 @@ import BigBrotherCore
 ///
 /// Responsibilities:
 /// - Read PolicySnapshot from App Group storage
-/// - Apply/clear ManagedSettings restrictions on the "schedule" store
+/// - Apply/clear ManagedSettings restrictions on the "enforcement" store
 /// - Append event log entries to App Group storage
 ///
 /// Constraints:
@@ -24,13 +24,10 @@ import BigBrotherCore
 class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     private let storage = AppGroupStorage()
-    /// Fresh ManagedSettingsStore instances on every access.
+    /// Fresh ManagedSettingsStore instance on every access.
     /// Cached instances risk stale XPC connections — the same bug that broke enforcement in the main app.
-    private var store: ManagedSettingsStore {
-        ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
-    }
-    private var baseStore: ManagedSettingsStore {
-        ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
+    private var enforcementStore: ManagedSettingsStore {
+        ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreEnforcement))
     }
     private lazy var keychain = KeychainManager()
 
@@ -53,10 +50,26 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Prefix used for timed lock (lockUntil) — auto-return to schedule.
     private let lockUntilPrefix = "bigbrother.lockuntil."
 
+    /// One-time migration: clear legacy named stores (base, schedule, tempUnlock)
+    /// so stale shields from the old multi-store layout don't linger.
+    private func migrateLegacyStoresIfNeeded() {
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        guard defaults?.bool(forKey: "migratedToSingleStore") != true else { return }
+        for name in AppConstants.legacyStoreNames {
+            ManagedSettingsStore(named: .init(name)).clearAllSettings()
+        }
+        defaults?.set(true, forKey: "migratedToSingleStore")
+        NSLog("[Monitor] Migrated: cleared legacy stores")
+    }
+
     override func intervalDidStart(for activity: DeviceActivityName) {
         // Record that the Monitor is alive (used by parent to detect force-close).
         let monitorDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         monitorDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+        monitorDefaults?.set(AppConstants.appBuildNumber, forKey: "monitorBuildNumber")
+
+        // Migrate legacy multi-store layout to single enforcement store.
+        migrateLegacyStoresIfNeeded()
 
         // Check if the main app needs to be launched after an update.
         checkAppLaunchNeeded()
@@ -76,15 +89,26 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // to apply ManagedSettings from its privileged context (background writes from
         // the main app are unreliable).
         if activity.rawValue.hasPrefix("bigbrother.enforcementRefresh") {
+            NSLog("[Monitor] enforcementRefresh FIRED for \(activity.rawValue)")
             let resolution = ModeStackResolver.resolve(storage: storage)
             let policy = storage.readPolicySnapshot()?.effectivePolicy
+            NSLog("[Monitor] enforcementRefresh: mode=\(resolution.mode.rawValue) reason=\(resolution.reason)")
             if resolution.mode == .unlocked {
                 clearAllShieldStores()
+                NSLog("[Monitor] enforcementRefresh: cleared all shields (unlocked)")
             } else {
                 applyShieldingToAllStores(mode: resolution.mode, policy: policy)
+                NSLog("[Monitor] enforcementRefresh: applied shields for \(resolution.mode.rawValue)")
             }
             updateSharedState(mode: resolution.mode)
+            // Confirm enforcement applied via UserDefaults — main app polls this.
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "monitorNeedsHeartbeat")
             logEvent(.policyReconciled, details: "Monitor enforcement refresh: \(resolution.mode.rawValue) (\(resolution.reason))")
+            // Clean up one-shot trigger activity
+            DeviceActivityCenter().stopMonitoring([activity])
             return
         }
 
@@ -135,6 +159,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     override func intervalDidEnd(for activity: DeviceActivityName) {
         checkEnforcementRefreshSignal()
 
+        // Enforcement refresh trigger ended (1-minute window expired or was stopped).
+        // Apply enforcement one more time as a safety net.
+        if activity.rawValue.hasPrefix("bigbrother.enforcementRefresh") {
+            NSLog("[Monitor] enforcementRefresh intervalDidEnd for \(activity.rawValue)")
+            let resolution = ModeStackResolver.resolve(storage: storage)
+            let policy = storage.readPolicySnapshot()?.effectivePolicy
+            if resolution.mode == .unlocked {
+                clearAllShieldStores()
+            } else {
+                applyShieldingToAllStores(mode: resolution.mode, policy: policy)
+            }
+            updateSharedState(mode: resolution.mode)
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
+            return
+        }
+
         // Reconciliation quarter ended — triggered by natural end OR by stopMonitoring from tunnel/main app.
         // This is the ON-DEMAND enforcement trigger. Apply shields from our privileged context.
         if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
@@ -150,6 +191,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 NSLog("[Monitor] Applied shields for \(resolution.mode.rawValue)")
             }
             updateSharedState(mode: resolution.mode)
+            // Confirm enforcement applied via UserDefaults — main app polls this.
+            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
             logEvent(.policyReconciled, details: "On-demand enforcement: \(resolution.mode.rawValue) (\(resolution.reason))")
             // Signal tunnel to send a confirmation heartbeat — Monitor can't make network calls.
             // Parent sees the confirmed mode within 30s (tunnel's next liveness tick).
@@ -200,8 +244,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
             updateSharedState(mode: mode)
         } else {
-            // No profile — clear the schedule store and default to restricted.
-            store.clearAllSettings()
+            // No profile — clear the enforcement store and default to restricted.
+            enforcementStore.clearAllSettings()
             updateSharedState(mode: .restricted)
         }
         logEvent(.scheduleEnded, details: "Schedule ended: \(activity.rawValue)")
@@ -234,7 +278,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        // Only handle usage tracking events.
+        // Per-app usage tracking for always-allowed apps.
+        // Event name format: "appusage.<fingerprint8>.<minutes>"
+        if activity.rawValue.hasPrefix("bigbrother.usagetracking"),
+           event.rawValue.hasPrefix("appusage.") {
+            handleAlwaysAllowedUsageMilestone(event: event)
+            return
+        }
+
+        // Only handle global usage tracking events.
         guard activity.rawValue.hasPrefix("bigbrother.usagetracking"),
               event.rawValue.hasPrefix("usage.") else { return }
 
@@ -390,13 +442,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Resolve the current mode — an essential window may be active.
-        let mode = profile.resolvedMode(at: Date())
+        // Use ModeStackResolver for ground truth — respects temp unlock, parent commands, etc.
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let mode = resolution.mode
         let policy = storage.readPolicySnapshot()?.effectivePolicy
 
         // Write snapshot FIRST so if extension is killed mid-operation,
         // the main app sees the intended state and won't undo it.
-        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: free window ended, mode → \(mode.rawValue)")
+        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: free window ended, mode → \(mode.rawValue) (\(resolution.reason))",
+                               controlAuthority: resolution.controlAuthority)
         updateSharedState(mode: mode)
 
         if mode == .unlocked {
@@ -409,7 +463,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
         }
 
-        logEvent(.scheduleEnded, details: "Unlocked window ended, mode \(mode.rawValue)")
+        logEvent(.scheduleEnded, details: "Unlocked window ended, mode \(mode.rawValue) (\(resolution.reason))")
         sendModeNotification(
             title: "Free Time Ended",
             body: mode == .unlocked ? "All apps are now accessible." : "Device locked — \(mode.displayName) mode active."
@@ -430,14 +484,14 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             ))
         }
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set("essentialStart", forKey: "lastShieldChangeReason")
-
         // Temporary unlock or timed unlock active — don't override with schedule.
         if hasActiveTemporaryMode() { return }
 
         // Manual mode override — skip schedule-driven changes.
         if !AppConstants.isScheduleDriven() { return }
+
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set("essentialStart", forKey: "lastShieldChangeReason")
 
         // lockedDown is parent-enforced maximum restriction — schedule must never weaken it.
         if storage.readPolicySnapshot()?.effectivePolicy.resolvedMode == .lockedDown { return }
@@ -509,14 +563,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // If in another locked window, stay locked.
         if profile.isInLockedWindow(at: Date()) { return }
 
+        // Use ModeStackResolver for ground truth — respects temp unlock, parent commands, etc.
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let mode = resolution.mode
+
         // Write snapshot FIRST so if extension is killed mid-operation,
         // the main app sees the intended state and won't undo it.
-        writeCorrectedSnapshot(mode: profile.lockedMode, trigger: "Monitor: locked window ended, mode → \(profile.lockedMode.rawValue)")
-        updateSharedState(mode: profile.lockedMode)
+        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: locked window ended, mode → \(mode.rawValue) (\(resolution.reason))",
+                               controlAuthority: resolution.controlAuthority)
+        updateSharedState(mode: mode)
 
         let policy = storage.readPolicySnapshot()?.effectivePolicy
-        applyShieldingToAllStores(mode: profile.lockedMode, policy: policy)
-        logEvent(.scheduleEnded, details: "Locked window ended, locked to \(profile.lockedMode.rawValue)")
+        if mode == .unlocked {
+            clearAllShieldStores()
+        } else {
+            applyShieldingToAllStores(mode: mode, policy: policy)
+        }
+        logEvent(.scheduleEnded, details: "Locked window ended, mode \(mode.rawValue) (\(resolution.reason))")
         sendModeNotification(
             title: "Locked Mode Ended",
             body: "Device returned to \(profile.lockedMode.displayName) mode."
@@ -635,9 +698,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         Thread.sleep(forTimeInterval: 1.0)
 
         // Use a fresh ManagedSettingsStore instance — the cached one may have stale auth state.
-        let freshBaseStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
-        let freshScheduleStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
-        _ = freshBaseStore; _ = freshScheduleStore // Force init
+        let freshEnforcementStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreEnforcement))
+        _ = freshEnforcementStore // Force init
 
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: mode, policy: policy)
@@ -645,17 +707,17 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Verify shields actually applied — .child FamilyControls auth can silently
         // reject ManagedSettings writes after temp unlock expiry. Retry with delay
         // to give iOS's auth daemon time to re-validate.
-        if mode != .unlocked && baseStore.shield.applicationCategories == nil {
+        if mode != .unlocked && enforcementStore.shield.applicationCategories == nil {
             logEvent(.enforcementDegraded, details: "Shield re-apply failed after temp unlock expiry — retrying in 2s")
             Thread.sleep(forTimeInterval: 2.0)
             applyShieldingToAllStores(mode: mode, policy: policy)
 
-            if baseStore.shield.applicationCategories == nil {
+            if enforcementStore.shield.applicationCategories == nil {
                 logEvent(.enforcementDegraded, details: "Shield re-apply failed on 2nd attempt — retrying in 5s")
                 Thread.sleep(forTimeInterval: 5.0)
                 applyShieldingToAllStores(mode: mode, policy: policy)
 
-                if baseStore.shield.applicationCategories == nil {
+                if enforcementStore.shield.applicationCategories == nil {
                     logEvent(.enforcementDegraded, details: "Shield re-apply FAILED 3x after temp unlock expiry — shields may be down")
                     // Write confirmed-down flag so tunnel can DNS-block immediately
                     defaults?.set(false, forKey: "shieldsActiveAtLastHeartbeat")
@@ -736,6 +798,47 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let existing = snapshot.usageByFingerprint[limit.fingerprint] ?? 0
         if minutes > existing {
             snapshot.usageByFingerprint[limit.fingerprint] = minutes
+            try? storage.writeAppUsageSnapshot(snapshot)
+        }
+    }
+
+    /// Handle per-app usage milestone for always-allowed apps.
+    /// Event name format: "appusage.<fingerprint8>.<minutes>"
+    private func handleAlwaysAllowedUsageMilestone(event: DeviceActivityEvent.Name) {
+        // Parse: "appusage.f042a04c.30" → fingerprint prefix "f042a04c", minutes 30
+        let parts = event.rawValue.split(separator: ".")
+        guard parts.count == 3,
+              let minutes = Int(parts[2]) else { return }
+        let fpPrefix = String(parts[1])
+
+        // Find the full fingerprint — match by prefix from allowed tokens
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        var matchedFingerprint: String?
+        if let tokenData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let tokens = try? decoder.decode(Set<ApplicationToken>.self, from: tokenData) {
+            for token in tokens {
+                if let encoded = try? encoder.encode(token) {
+                    let fp = TokenFingerprint.fingerprint(for: encoded)
+                    if fp.hasPrefix(fpPrefix) {
+                        matchedFingerprint = fp
+                        break
+                    }
+                }
+            }
+        }
+        guard let fingerprint = matchedFingerprint else { return }
+
+        // Update the usage snapshot
+        let today = Self.todayDateString()
+        var snapshot = storage.readAppUsageSnapshot() ?? AppUsageSnapshot(dateString: today)
+        if snapshot.dateString != today {
+            snapshot = AppUsageSnapshot(dateString: today)
+        }
+
+        let existing = snapshot.usageByFingerprint[fingerprint] ?? 0
+        if minutes > existing {
+            snapshot.usageByFingerprint[fingerprint] = minutes
             try? storage.writeAppUsageSnapshot(snapshot)
         }
     }
@@ -826,10 +929,20 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// the parent's explicit command takes priority over the schedule.
     private func hasActiveTemporaryMode() -> Bool {
         let now = Date()
-        if let temp = storage.readTemporaryUnlockState(), temp.expiresAt > now {
+        // Check temp unlock file, then snapshot fallback (file reads can fail in extensions).
+        let temp = storage.readTemporaryUnlockState()
+            ?? storage.readPolicySnapshot()?.temporaryUnlockState
+        if let temp, temp.expiresAt > now {
             return true
         }
         if let timed = storage.readTimedUnlockInfo(), now < timed.lockAt {
+            return true
+        }
+        // Also check snapshot's isTemporaryUnlock flag as last resort.
+        if let snapshot = storage.readPolicySnapshot(),
+           snapshot.effectivePolicy.isTemporaryUnlock,
+           let expiresAt = snapshot.effectivePolicy.temporaryUnlockExpiresAt,
+           expiresAt > now {
             return true
         }
         return false
@@ -1061,8 +1174,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     // MARK: - All-Store Shield Management
 
-    /// Clear shield properties on ALL named stores + default store.
-    /// Apply "wide open" shields — allows everything but keeps stores non-nil.
+    /// Apply "wide open" shields — allows everything but keeps the enforcement store non-nil.
     /// Avoids the clear-then-reapply race that silently breaks .child auth.
     private func applyWideOpenShields() {
         // Don't allow unlock if FamilyControls authorization is lost.
@@ -1086,22 +1198,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        // Set .all(except: everything) on base and schedule — keeps stores non-nil
-        for s in [baseStore, store] {
-            s.shield.applications = nil
-            s.shield.applicationCategories = allTokens.isEmpty ? nil : .all(except: allTokens)
-            s.shield.webDomainCategories = nil
-            s.shield.webDomains = nil
-        }
+        // Set .all(except: everything) on the enforcement store — keeps it non-nil
+        enforcementStore.shield.applications = nil
+        enforcementStore.shield.applicationCategories = allTokens.isEmpty ? nil : .all(except: allTokens)
+        enforcementStore.shield.webDomainCategories = nil
+        enforcementStore.shield.webDomains = nil
 
-        // Clear supplementary stores normally
-        let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
-        for s in [tempUnlockStore] {
-            s.shield.applications = nil
-            s.shield.applicationCategories = nil
-            s.shield.webDomainCategories = nil
-            s.shield.webDomains = nil
-        }
+        // Clear the default store
         let defaultStore = ManagedSettingsStore()
         defaultStore.shield.applications = nil
         defaultStore.shield.applicationCategories = nil
@@ -1113,17 +1216,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         try? storage.writeTimeLimitBlockedDomains([])
     }
 
-    /// ManagedSettings merges across stores with OR logic — if any store blocks, it's blocked.
+    /// Clear shield properties on the enforcement store + default store.
     /// NOTE: This fully clears stores to nil. Only used when the intent is to immediately
-    /// re-apply via applyShieldingToAllStores (which overwrites base/schedule without clearing).
+    /// re-apply via applyShieldingToAllStores (which overwrites the enforcement store).
     private func clearAllShieldStores() {
-        let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
-        for s in [tempUnlockStore] {
-            s.shield.applications = nil
-            s.shield.applicationCategories = nil
-            s.shield.webDomainCategories = nil
-            s.shield.webDomains = nil
-        }
+        enforcementStore.shield.applications = nil
+        enforcementStore.shield.applicationCategories = nil
+        enforcementStore.shield.webDomainCategories = nil
+        enforcementStore.shield.webDomains = nil
+
         let defaultStore = ManagedSettingsStore()
         defaultStore.shield.applications = nil
         defaultStore.shield.applicationCategories = nil
@@ -1135,7 +1236,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         try? storage.writeTimeLimitBlockedDomains([])
     }
 
-    /// Apply shields to BOTH base and schedule stores using the hybrid per-app + category strategy.
+    /// Apply shields to the enforcement store using the hybrid per-app + category strategy.
     /// Mirrors EnforcementServiceImpl.applyShield() logic.
     private static let maxShieldApplications = 50
 
@@ -1150,8 +1251,6 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     }
 
     private func applyShieldingToAllStores(mode: LockMode, policy: EffectivePolicy?) {
-        // Check if main app enforced very recently (within 2s) to avoid stomping on it.
-        // ManagedSettings OR-merges so both writing is safe, but we skip unnecessary work.
         let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
 
         // Force essential mode if permissions are missing.
@@ -1162,14 +1261,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             effectiveMode = mode
         }
 
-        // Clear tempUnlock + default stores to remove stale shields from other contexts.
-        // Do NOT clear base/schedule stores here — we overwrite them below in all code paths,
-        // and clearing first creates a window where shields are down if the extension is killed.
-        let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
-        tempUnlockStore.shield.applications = nil
-        tempUnlockStore.shield.applicationCategories = nil
-        tempUnlockStore.shield.webDomainCategories = nil
-        tempUnlockStore.shield.webDomains = nil
+        // Clear the default store to remove stale shields from other contexts.
+        // The enforcement store is overwritten below in all code paths.
         let defaultStore = ManagedSettingsStore()
         defaultStore.shield.applications = nil
         defaultStore.shield.applicationCategories = nil
@@ -1200,7 +1293,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
             // Web blocking: locked/lockedDown ALWAYS block web, restricted respects flag.
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let shouldBlockWeb = !allowExemptions || restrictions.denyWebWhenLocked
+            let shouldBlockWeb = !allowExemptions || restrictions.denyWebWhenRestricted
 
             if !pickerTokens.isEmpty && allowExemptions {
                 let tokensToBlock = pickerTokens.subtracting(allowedTokens)
@@ -1229,17 +1322,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                         ))
                     }
                 }
-                // Apply to both base and schedule stores for full coverage.
-                for s in [baseStore, store] {
-                    s.shield.applications = perAppTokens
-                    s.shield.applicationCategories = .all(except: allowedTokens)
-                    if shouldBlockWeb {
-                        s.shield.webDomainCategories = .all()
-                        // Note: per-domain exceptions require WebDomainTokens (picker-selected),
-                        // not WebDomain strings. Domain allowlist is enforced at the VPN/DNS layer.
-                    } else {
-                        s.shield.webDomainCategories = nil
-                    }
+                // Apply to the enforcement store.
+                enforcementStore.shield.applications = perAppTokens
+                enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
+                if shouldBlockWeb {
+                    enforcementStore.shield.webDomainCategories = .all()
+                    // Note: per-domain exceptions require WebDomainTokens (picker-selected),
+                    // not WebDomain strings. Domain allowlist is enforced at the VPN/DNS layer.
+                } else {
+                    enforcementStore.shield.webDomainCategories = nil
                 }
             } else {
                 var apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
@@ -1256,20 +1347,18 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     let keptNonExhausted = Set(Self.stableSorted(nonExhausted).prefix(remainingSlots))
                     apps = Set(Self.stableSorted(exhaustedTokens).prefix(exhaustedCount)).union(keptNonExhausted)
                 }
-                for s in [baseStore, store] {
-                    s.shield.applications = apps
-                    if allowedTokens.isEmpty {
-                        s.shield.applicationCategories = .all()
-                    } else {
-                        s.shield.applicationCategories = .all(except: allowedTokens)
-                    }
-                    if shouldBlockWeb {
-                        s.shield.webDomainCategories = .all()
-                        // Note: per-domain exceptions require WebDomainTokens (picker-selected),
-                        // not WebDomain strings. Domain allowlist is enforced at the VPN/DNS layer.
-                    } else {
-                        s.shield.webDomainCategories = nil
-                    }
+                enforcementStore.shield.applications = apps
+                if allowedTokens.isEmpty {
+                    enforcementStore.shield.applicationCategories = .all()
+                } else {
+                    enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
+                }
+                if shouldBlockWeb {
+                    enforcementStore.shield.webDomainCategories = .all()
+                    // Note: per-domain exceptions require WebDomainTokens (picker-selected),
+                    // not WebDomain strings. Domain allowlist is enforced at the VPN/DNS layer.
+                } else {
+                    enforcementStore.shield.webDomainCategories = nil
                 }
             }
 
@@ -1352,23 +1441,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         switch mode {
         case .unlocked:
-            store.clearAllSettings()
+            enforcementStore.clearAllSettings()
 
         case .restricted, .locked, .lockedDown:
             let allowExemptions = mode == .restricted
             let allowedTokens = allowExemptions ? collectAllowedTokens() : []
             if allowedTokens.isEmpty {
-                store.shield.applicationCategories = .all()
+                enforcementStore.shield.applicationCategories = .all()
             } else {
-                store.shield.applicationCategories = .all(except: allowedTokens)
+                enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
             }
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            if restrictions.denyWebWhenLocked {
-                store.shield.webDomainCategories = .all()
+            if restrictions.denyWebWhenRestricted {
+                enforcementStore.shield.webDomainCategories = .all()
                 // Note: per-domain exceptions require WebDomainTokens (picker-selected).
                 // Domain allowlist is enforced at the VPN/DNS layer.
             } else {
-                store.shield.webDomainCategories = nil
+                enforcementStore.shield.webDomainCategories = nil
             }
         }
     }
@@ -1379,10 +1468,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let decoder = JSONDecoder()
         var tokens = Set<ApplicationToken>()
 
-        // Permanently allowed apps.
+        // Permanently allowed apps — try direct file first.
         if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
            let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
             tokens.formUnion(allowed)
+        }
+
+        // Fallback: if file read returned empty, try the snapshot's embedded token data.
+        // The snapshot is a single JSON file that the main app writes atomically.
+        // This handles cases where App Group file reads are unreliable
+        // (e.g., CFPrefsPlistSource detach after iCloud changes).
+        if tokens.isEmpty,
+           let snapshot = storage.readPolicySnapshot(),
+           let tokenData = snapshot.effectivePolicy.allowedAppTokensData,
+           !tokenData.isEmpty,
+           let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: tokenData) {
+            tokens.formUnion(allowed)
+            NSLog("[Monitor] collectAllowedTokens: file read empty, loaded \(allowed.count) from snapshot fallback")
         }
 
         // Temporarily allowed apps (non-expired only).
@@ -1393,20 +1495,35 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
         }
 
+        NSLog("[Monitor] collectAllowedTokens: \(tokens.count) total (\(tokens.count) permanent + temp)")
         return tokens
     }
 
     // MARK: - Notifications
 
+    /// Last mode we notified about — prevents repeated notifications for the same mode.
+    /// Persisted in App Group so it survives Monitor process restarts.
+    private var lastNotifiedMode: String? {
+        get { UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "monitorLastNotifiedMode") }
+        set { UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(newValue, forKey: "monitorLastNotifiedMode") }
+    }
+
     private func sendModeNotification(title: String, body: String) {
+        // Dedup: skip if this is the same notification title we last sent.
+        // Titles encode the mode ("Free Time Started", "Locked Mode", etc.)
+        // so same title = same mode = duplicate.
+        if lastNotifiedMode == title { return }
+        lastNotifiedMode = title
+
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
         content.categoryIdentifier = "SCHEDULE_CHANGE"
 
+        // Fixed identifier — replaces previous notification instead of stacking.
         let request = UNNotificationRequest(
-            identifier: "schedule-\(UUID().uuidString)",
+            identifier: "monitor-mode-change",
             content: content,
             trigger: nil
         )
@@ -1442,21 +1559,43 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private func writeCorrectedSnapshot(mode: LockMode, trigger: String, controlAuthority: ControlAuthority = .schedule) {
         let existing = storage.readPolicySnapshot()
         let basePolicy = existing?.effectivePolicy
+
+        // Always reload allowed tokens from the file, not from the previous snapshot.
+        // The previous snapshot may have been for unlocked mode where allowedAppTokensData
+        // is nil. Using stale nil data causes the Monitor to lose token exemptions
+        // when transitioning unlocked → restricted.
+        let freshAllowedTokensData: Data? = {
+            if mode == .unlocked { return nil } // no tokens needed for unlocked
+            if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens), !data.isEmpty {
+                return data
+            }
+            // Fall back to existing snapshot data if file read fails
+            return basePolicy?.allowedAppTokensData
+        }()
+
+        // Preserve temp unlock state through snapshot writes.
+        // Without this, ModeStackResolver's snapshot fallback loses the temp unlock
+        // and resolves to restricted/locked instead of unlocked.
+        let currentTempUnlock: TemporaryUnlockState? = storage.readTemporaryUnlockState()
+            ?? existing?.temporaryUnlockState
+        let isTempUnlock = currentTempUnlock != nil && currentTempUnlock!.expiresAt > Date()
+
         let corrected = EffectivePolicy(
             resolvedMode: mode,
             controlAuthority: controlAuthority,
-            isTemporaryUnlock: false,
-            temporaryUnlockExpiresAt: nil,
+            isTemporaryUnlock: isTempUnlock,
+            temporaryUnlockExpiresAt: currentTempUnlock?.expiresAt,
             shieldedCategoriesData: basePolicy?.shieldedCategoriesData,
-            allowedAppTokensData: basePolicy?.allowedAppTokensData,
-            deviceRestrictions: basePolicy?.deviceRestrictions,
+            allowedAppTokensData: freshAllowedTokensData,
+            deviceRestrictions: basePolicy?.deviceRestrictions ?? storage.readDeviceRestrictions(),
             warnings: basePolicy?.warnings ?? [],
             policyVersion: (basePolicy?.policyVersion ?? 0) + 1
         )
         let snapshot = PolicySnapshot(
             source: .scheduleTransition,
             trigger: trigger,
-            effectivePolicy: corrected
+            effectivePolicy: corrected,
+            temporaryUnlockState: currentTempUnlock
         )
         do {
             try storage.commitCorrectedSnapshot(snapshot)
@@ -1486,6 +1625,20 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             policyVersion: snapshot?.effectivePolicy.policyVersion ?? 0
         )
         try? storage.writeExtensionSharedState(state)
+        // Write shield state for tunnel's enforcement verifier
+        let auditDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        auditDefaults?.set(mode != .unlocked, forKey: "shieldsActiveAtLastHeartbeat")
+
+        // Shield audit fingerprint — tracks that the Monitor applied shields and WHY.
+        let auditSource: String
+        if let reason = auditDefaults?.string(forKey: "lastShieldChangeReason") {
+            auditSource = "monitor.\(reason)"
+        } else {
+            auditSource = "monitor"
+        }
+        let tokenCount = mode == .unlocked ? 0 : collectAllowedTokens().count
+        let audit = "\(auditSource)|\(mode.rawValue)|\(mode != .unlocked ? "UP" : "DOWN")|\(tokenCount)tokens|\(Int(Date().timeIntervalSince1970))"
+        auditDefaults?.set(audit, forKey: "lastShieldAudit")
         requestHeartbeat()
     }
 

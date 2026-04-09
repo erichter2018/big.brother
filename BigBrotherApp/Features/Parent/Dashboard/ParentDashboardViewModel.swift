@@ -169,7 +169,13 @@ final class ParentDashboardViewModel: CommandSendable {
             if snapshot?.scheduleActiveChildIDs.contains(childKey) ?? true {
                 scheduleActiveChildren.insert(child.id)
             }
-            appState.expectedModes[child.id] = nil
+            // Set optimistic mode to what the schedule resolves to right now.
+            if let profileID = appState.childDevices.first(where: { $0.childProfileID == child.id })?.scheduleProfileID,
+               let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) {
+                appState.expectedModes[child.id] = (profile.resolvedMode(at: Date()), Date())
+            } else {
+                appState.expectedModes[child.id] = nil
+            }
             try? await appState.sendCommand(target: .child(child.id), action: .returnToSchedule)
         }
 
@@ -374,7 +380,12 @@ final class ParentDashboardViewModel: CommandSendable {
         let commandAction: CommandAction
         switch duration {
         case .returnToSchedule:
-            appState.expectedModes.removeValue(forKey: child.id)
+            if let profileID = appState.childDevices.first(where: { $0.childProfileID == child.id })?.scheduleProfileID,
+               let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) {
+                appState.expectedModes[child.id] = (profile.resolvedMode(at: Date()), Date())
+            } else {
+                appState.expectedModes.removeValue(forKey: child.id)
+            }
             scheduleActiveChildren.insert(child.id)
             commandAction = .returnToSchedule
             try? await appState.sendCommand(target: .child(child.id), action: commandAction)
@@ -568,7 +579,12 @@ final class ParentDashboardViewModel: CommandSendable {
         timedUnlockPhases.removeValue(forKey: child.id)
         timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
         lockDownExpiries.removeValue(forKey: child.id)
-        appState.expectedModes.removeValue(forKey: child.id)
+        if let profileID = appState.childDevices.first(where: { $0.childProfileID == child.id })?.scheduleProfileID,
+           let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) {
+            appState.expectedModes[child.id] = (profile.resolvedMode(at: Date()), Date())
+        } else {
+            appState.expectedModes.removeValue(forKey: child.id)
+        }
         scheduleActiveChildren.insert(child.id)
         let action: CommandAction = .returnToSchedule
         trackPendingCommand(action, target: .child(child.id))
@@ -587,7 +603,12 @@ final class ParentDashboardViewModel: CommandSendable {
             unlockExpiries.removeValue(forKey: child.id)
             timedUnlockPhases.removeValue(forKey: child.id)
             timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
-            appState.expectedModes.removeValue(forKey: child.id)
+            if let profileID = appState.childDevices.first(where: { $0.childProfileID == child.id })?.scheduleProfileID,
+               let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) {
+                appState.expectedModes[child.id] = (profile.resolvedMode(at: Date()), Date())
+            } else {
+                appState.expectedModes.removeValue(forKey: child.id)
+            }
             scheduleActiveChildren.insert(child.id)
             try? await appState.sendCommand(target: .child(child.id), action: .returnToSchedule)
         }
@@ -640,7 +661,7 @@ final class ParentDashboardViewModel: CommandSendable {
         case .lockedDown: modeLabel = "Locked Down"
         }
 
-        if let transition = profile.nextTransitionTime(from: self.now) {
+        if let transition = profile.nextTransitionTime(from: Date()) {
             let formatter = DateFormatter()
             formatter.dateFormat = "h:mm a"
             return ("\(modeLabel) until \(formatter.string(from: transition))", isFree)
@@ -804,11 +825,12 @@ final class ParentDashboardViewModel: CommandSendable {
             if confirmed {
                 appState.expectedModes.removeValue(forKey: childID)
                 pendingCommands.removeValue(forKey: childID)
-                scheduleActiveChildren.remove(childID)
+                // Don't remove from scheduleActiveChildren — if the confirmed mode
+                // came from returnToSchedule, the child IS schedule-active. Removing
+                // it kills the "Restricted until X:XX" status line.
             } else if now.timeIntervalSince(expected.sentAt) > timeout {
                 appState.expectedModes.removeValue(forKey: childID)
                 pendingCommands.removeValue(forKey: childID)
-                scheduleActiveChildren.remove(childID)
             }
         }
     }

@@ -28,6 +28,20 @@ final class ChildHomeViewModel {
     /// Stored property refreshed by the 1s timer so UI reacts to command changes.
     var isScheduleDriving = false
 
+    // MARK: - Pending App Reviews
+
+    /// Pending app reviews submitted by this child, refreshed periodically.
+    var pendingReviews: [PendingAppReview] = []
+
+    func refreshPendingReviews() {
+        guard let data = appState.storage.readRawData(forKey: "pending_review_local.json"),
+              let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data) else {
+            pendingReviews = []
+            return
+        }
+        pendingReviews = reviews.sorted { $0.createdAt > $1.createdAt }
+    }
+
     // MARK: - Parent Messages
 
     /// Undismissed messages from parents, newest first. Cached to avoid disk reads on every body eval.
@@ -178,8 +192,71 @@ final class ChildHomeViewModel {
             }
     }
 
+    // MARK: - Web & Internet Status
+
+    /// Allowed web domains read from App Group. Empty = all web blocked when restricted/locked.
+    var allowedWebDomains: [String] {
+        guard let data = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                .string(forKey: StorageKeys.allowedWebDomains)?
+                .data(using: .utf8),
+              let domains = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return domains.sorted()
+    }
+
+    /// Whether web browsing is currently blocked by ManagedSettings (webDomainCategories).
+    /// Only true when denyWebWhenRestricted is enabled, or in lockedDown mode.
+    var isWebBlocked: Bool {
+        guard currentMode != .unlocked else { return false }
+        if currentMode == .lockedDown { return true }
+        let restrictions = appState.storage.readDeviceRestrictions()
+        return restrictions?.denyWebWhenRestricted ?? false
+    }
+
+    /// Human-readable explanation of web status for the child.
+    var webStatusExplanation: String {
+        if currentMode == .lockedDown {
+            return "All internet access is paused."
+        }
+        if isWebBlocked {
+            return "Web browsing is paused during this period."
+        }
+        return "Web browsing is available."
+    }
+
+    /// When web access will next be available (next unlock window).
+    var webAvailableAt: String? {
+        guard isWebBlocked else { return nil }
+        if let profile = activeScheduleProfile,
+           let transition = profile.nextTransitionTime(from: now) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "h:mm a"
+            if Calendar.current.isDateInToday(transition) {
+                return "Available at \(formatter.string(from: transition))"
+            } else {
+                formatter.dateFormat = "E h:mm a"
+                return "Available \(formatter.string(from: transition))"
+            }
+        }
+        return nil
+    }
+
     var needsReauthorization: Bool {
-        appState.familyControlsAvailable && appState.enforcement?.authorizationStatus != .authorized
+        guard appState.familyControlsAvailable else { return false }
+        let current = appState.enforcement?.authorizationStatus ?? .notDetermined
+        if current == .authorized { return false }
+        // FC auth starts as notDetermined on launch and can take 30+ seconds
+        // to validate with Apple servers, especially for .child auth.
+        // If we have a persisted auth type (in either defaults store), we were
+        // previously authorized — don't show the permissions button for a transient delay.
+        let appGroupType = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .string(forKey: "fr.bigbrother.authorizationType")
+        let standardType = UserDefaults.standard.string(forKey: "fr.bigbrother.authorizationType")
+        if appGroupType == "child" || appGroupType == "individual"
+            || standardType == "child" || standardType == "individual" {
+            return false
+        }
+        // Never been authorized — genuinely needs setup
+        return true
     }
 
     /// Cached VPN status, refreshed periodically.
@@ -602,6 +679,7 @@ final class ChildHomeViewModel {
         refreshPINConfigured()
         refreshScheduleDriving()
         refreshMessages()
+        refreshPendingReviews()
         // Initialize phase without triggering transition actions.
         let startNow = Date()
         if let info = timedUnlockInfo {
@@ -622,6 +700,7 @@ final class ChildHomeViewModel {
                 self.scheduleCheckCounter += 1
                 if self.scheduleCheckCounter >= 10 {
                     self.refreshMessages()
+                    self.refreshPendingReviews()
                     self.scheduleCheckCounter = 0
                     self.appState.enforceScheduleTransition()
                 }

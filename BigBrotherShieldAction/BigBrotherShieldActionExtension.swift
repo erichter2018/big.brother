@@ -5,9 +5,12 @@ import notify
 
 class BigBrotherShieldActionExtension: ShieldActionDelegate {
 
-    private static let buildMarker = "shield-action-b310"
+    private static let buildMarker = "shield-action-b\(AppConstants.appBuildNumber)"
 
     override func handle(action: ShieldAction, for application: ApplicationToken, completionHandler: @escaping (ShieldActionResponse) -> Void) {
+        // Write build number so parent can verify extension version
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(AppConstants.appBuildNumber, forKey: "shieldActionBuildNumber")
         handleAction(action: action, token: application, completionHandler: completionHandler)
     }
 

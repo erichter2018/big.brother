@@ -7,7 +7,7 @@ import Foundation
 /// processes (main app, Monitor, Tunnel) agree on who is in charge.
 ///
 /// Priority order (ModeStackResolver):
-///   temporaryUnlock > timedUnlock > lockUntil > schedule > parentManual > failSafe
+///   temporaryUnlock > timedUnlock > lockUntil > parentManual > schedule > failSafe
 public enum ControlAuthority: String, Codable, Sendable, Equatable {
     /// Device follows the active schedule profile (default).
     case schedule

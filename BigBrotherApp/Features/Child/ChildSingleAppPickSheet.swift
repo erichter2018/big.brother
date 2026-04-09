@@ -17,6 +17,8 @@ struct ChildSingleAppPickSheet: View {
     @State private var nameFromCloudKit = false
     @State private var isSaving = false
     @State private var alreadyConfiguredMessage: String?
+    @State private var showNameRequired = false
+    @FocusState private var nameFieldFocused: Bool
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -63,6 +65,9 @@ struct ChildSingleAppPickSheet: View {
                         }
                         pickedToken = token
                         lookupExistingName(token: token)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            nameFieldFocused = true
+                        }
                     }
                 }
         }
@@ -76,6 +81,11 @@ struct ChildSingleAppPickSheet: View {
                     Text("Type the name of the app you selected")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if showNameRequired {
+                        Text("You must enter the app name before submitting")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 Section("Name This App") {
@@ -99,6 +109,10 @@ struct ChildSingleAppPickSheet: View {
                                 .textFieldStyle(.roundedBorder)
                                 .font(.subheadline)
                                 .autocorrectionDisabled()
+                                .focused($nameFieldFocused)
+                                .onChange(of: enteredName) { _, _ in
+                                    showNameRequired = false
+                                }
                         }
                     }
                 }
@@ -106,7 +120,11 @@ struct ChildSingleAppPickSheet: View {
 
             Button {
                 let name = enteredName.trimmingCharacters(in: .whitespaces)
-                guard !name.isEmpty else { return }
+                guard !name.isEmpty else {
+                    showNameRequired = true
+                    nameFieldFocused = true
+                    return
+                }
                 isSaving = true
                 onSubmit(token, name)
                 dismiss()
@@ -115,7 +133,7 @@ struct ChildSingleAppPickSheet: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(enteredName.trimmingCharacters(in: .whitespaces).isEmpty || isSaving)
+            .disabled(isSaving)
             .padding()
         }
     }
@@ -161,7 +179,9 @@ struct ChildSingleAppPickSheet: View {
         let storage = AppGroupStorage()
         let nameCache = storage.readAllCachedAppNames()
         let tokenKey = tokenData.base64EncodedString()
-        if let cached = nameCache[tokenKey], !cached.hasPrefix("App "), !cached.hasPrefix("Temporary") {
+        if let cached = nameCache[tokenKey],
+           cached != "App", !cached.hasPrefix("App "), !cached.hasPrefix("Temporary"),
+           cached.count > 2 {
             enteredName = cached
             nameFromCloudKit = true
             return

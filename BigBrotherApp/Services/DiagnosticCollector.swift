@@ -11,7 +11,8 @@ enum DiagnosticCollector {
 
     @MainActor
     static func collect(
-        appState: AppState
+        appState: AppState,
+        includeBreadcrumbs: Bool = false
     ) async -> DiagnosticReport {
         let storage = AppGroupStorage()
         let keychain = KeychainManager()
@@ -90,7 +91,8 @@ enum DiagnosticCollector {
         flags["motionMonitoringActive"] = "\(locationService?.motionMonitoringActive ?? false)"
 
         // Fetch breadcrumbs from CloudKit — last 48h for trip debugging
-        if let cloudKit = appState.cloudKit {
+        // Skipped by default (takes 15+ min) — only included for full reports.
+        if includeBreadcrumbs, let cloudKit = appState.cloudKit {
             let since = Date().addingTimeInterval(-48 * 3600)
             if let crumbs = try? await cloudKit.fetchLocationBreadcrumbs(deviceID: deviceID, since: since) {
                 let sorted = crumbs.sorted { $0.timestamp < $1.timestamp }
@@ -268,7 +270,7 @@ enum DiagnosticCollector {
             flags["restrictions.denyExplicitContent"] = "\(r.denyExplicitContent)"
             flags["restrictions.lockAccounts"] = "\(r.lockAccounts)"
             flags["restrictions.requireAutoDateTime"] = "\(r.requireAutomaticDateAndTime)"
-            flags["restrictions.denyWebWhenLocked"] = "\(r.denyWebWhenLocked)"
+            flags["restrictions.denyWebWhenRestricted"] = "\(r.denyWebWhenRestricted)"
         } else {
             flags["restrictions"] = "nil (using defaults)"
         }

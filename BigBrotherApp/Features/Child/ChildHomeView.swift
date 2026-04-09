@@ -26,7 +26,9 @@ struct ChildHomeView: View {
     @State private var showPINUnlock = false
     @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
     @State private var showSOSConfirmation = false
+    @State private var showAppVerification = false
     @State private var showPermissionFixer = false
+    @State private var launchGracePeriod = true
     @State private var sosSent = false
     @Environment(\.scenePhase) private var scenePhase
 
@@ -61,6 +63,9 @@ struct ChildHomeView: View {
                     // Internet block / enforcement status banner
                     internetStatusBanner
 
+                    // Web & internet status card (non-unlocked modes)
+                    webStatusCard
+
                     // Parent messages
                     ForEach(viewModel.undismissedMessages) { message in
                         parentMessageCard(message)
@@ -69,8 +74,27 @@ struct ChildHomeView: View {
                     // Info cards
                     infoCards
 
-                    // Request more apps button
+                    // Pending app reviews
+                    pendingReviewsCard
+
+                    // Request more apps button + verify button
+                    #if canImport(FamilyControls)
+                    HStack(spacing: 12) {
+                        requestMoreAppsButton
+                        Button {
+                            showAppVerification = true
+                        } label: {
+                            Label("Apps", systemImage: "checkmark.shield")
+                                .font(.subheadline)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.secondary)
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    #else
                     requestMoreAppsButton
+                    #endif
                     resetAllAppsButton
 
                     // Authorization warning (only when needed)
@@ -115,7 +139,7 @@ struct ChildHomeView: View {
                 .padding(.bottom, 16)
         }
         .overlay(alignment: .bottomTrailing) {
-            if viewModel.hasPermissionIssues {
+            if !launchGracePeriod && viewModel.hasPermissionIssues {
                 Button {
                     showPermissionFixer = true
                 } label: {
@@ -140,6 +164,11 @@ struct ChildHomeView: View {
         .sheet(isPresented: $showPermissionFixer) {
             PermissionFixerView(appState: viewModel.appState)
         }
+        #if canImport(FamilyControls)
+        .sheet(isPresented: $showAppVerification) {
+            AppVerificationView(appState: viewModel.appState)
+        }
+        #endif
         .sheet(isPresented: $showPINUnlock, onDismiss: {
             pinUnlockViewModel = nil
         }) {
@@ -187,6 +216,11 @@ struct ChildHomeView: View {
         #endif
         .onAppear {
             viewModel.startTimer()
+            // Don't show permissions button for 30s after launch —
+            // FC auth, location, VPN all start as "not ready" and settle quickly.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                launchGracePeriod = false
+            }
         }
         .onDisappear {
             viewModel.stopTimer()
@@ -330,7 +364,7 @@ struct ChildHomeView: View {
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
 
-            if viewModel.hasPermissionIssues && viewModel.currentMode != .unlocked {
+            if !launchGracePeriod && viewModel.hasPermissionIssues && viewModel.currentMode != .unlocked {
                 VStack(spacing: 4) {
                     Text("Permissions Required")
                         .font(.subheadline)
@@ -406,6 +440,52 @@ struct ChildHomeView: View {
         }
     }
 
+    @ViewBuilder
+    private var pendingReviewsCard: some View {
+        let reviews = viewModel.pendingReviews
+        if !reviews.isEmpty {
+            VStack(spacing: 0) {
+                HStack {
+                    Image(systemName: "clock.badge.questionmark")
+                        .foregroundStyle(.orange)
+                    Text("Pending Parent Approval")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+                ForEach(reviews) { review in
+                    HStack(spacing: 10) {
+                        Image(systemName: "app.fill")
+                            .font(.title3)
+                            .foregroundStyle(.white.opacity(0.5))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(review.appName)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.white)
+                            Text("Waiting for approval")
+                                .font(.caption)
+                                .foregroundStyle(.orange.opacity(0.8))
+                        }
+                        Spacer()
+                        Text(review.createdAt, style: .relative)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                }
+                .padding(.bottom, 8)
+            }
+            .background(.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .padding(.horizontal)
+        }
+    }
+
     /// Child can request ONE app at a time. Opens sheet with inline picker,
     /// auto-closes picker when one app selected, then shows naming view.
     @ViewBuilder
@@ -423,8 +503,6 @@ struct ChildHomeView: View {
         }
         .buttonStyle(.bordered)
         .tint(.blue)
-        .padding(.horizontal)
-        .padding(.top, 8)
         .sheet(isPresented: $showSingleAppPick) {
             ChildSingleAppPickSheet(
                 appState: viewModel.appState,
@@ -524,6 +602,9 @@ struct ChildHomeView: View {
         UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
             .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
 
+        // Refresh pending reviews immediately so card appears
+        viewModel.refreshPendingReviews()
+
         // Re-apply enforcement
         if let enforcement = viewModel.appState.enforcement,
            let snapshot = viewModel.appState.snapshotStore?.loadCurrentSnapshot() {
@@ -562,39 +643,11 @@ struct ChildHomeView: View {
     }
     #endif
 
+    // Reset All Apps button removed from child view — too dangerous.
+    // Available only via parent "Revoke All Apps" command.
     @ViewBuilder
     private var resetAllAppsButton: some View {
-        #if canImport(FamilyControls)
-        Button(role: .destructive) {
-            let storage = AppGroupStorage()
-            // Nuclear: clear everything app-related locally
-            try? storage.writeRawData(nil, forKey: StorageKeys.allowedAppTokens)
-            try? storage.writeRawData(nil, forKey: "allowedBundleIDs")
-            try? storage.writeRawData(nil, forKey: StorageKeys.familyActivitySelection)
-            try? storage.writeTemporaryAllowedApps([])
-            try? storage.writeAppTimeLimits([])
-            try? storage.writeTimeLimitExhaustedApps([])
-            // Clear pending review local file
-            try? storage.writeRawData(Data("[]".utf8), forKey: "pending_review_local.json")
-            // Deregister all time limit events
-            ScheduleRegistrar.registerTimeLimitEvents(limits: [])
-            // Re-apply enforcement immediately
-            Task {
-                if let enforcement = viewModel.appState.enforcement {
-                    if let snapshot = viewModel.appState.snapshotStore?.loadCurrentSnapshot() {
-                        try? enforcement.apply(snapshot.effectivePolicy)
-                    }
-                }
-            }
-        } label: {
-            Label("Reset All Allowed Apps", systemImage: "trash")
-                .font(.caption)
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.bordered)
-        .tint(.red)
-        .padding(.horizontal)
-        #endif
+        EmptyView()
     }
 
     /// All countdown-dependent cards. `now` comes from TimelineView so it's
@@ -775,6 +828,92 @@ struct ChildHomeView: View {
         .background(.green.opacity(0.12))
         .clipShape(RoundedRectangle(cornerRadius: 20))
         .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Web & Internet Status Card
+
+    @ViewBuilder
+    private var webStatusCard: some View {
+        if viewModel.isWebBlocked {
+            VStack(spacing: 12) {
+                // Header
+                HStack(spacing: 8) {
+                    Image(systemName: viewModel.currentMode == .lockedDown ? "wifi.slash" : "globe")
+                        .font(.title3)
+                        .foregroundStyle(webStatusColor)
+                    Text(webStatusTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                }
+
+                // Explanation
+                Text(viewModel.webStatusExplanation)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                // Allowed domains list (restricted mode with specific domains)
+                let domains = viewModel.allowedWebDomains
+                if viewModel.currentMode == .restricted && !domains.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Allowed sites:")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.5))
+                        ForEach(domains.prefix(8), id: \.self) { domain in
+                            HStack(spacing: 6) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.green.opacity(0.7))
+                                Text(domain)
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.7))
+                            }
+                        }
+                        if domains.count > 8 {
+                            Text("+ \(domains.count - 8) more")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.4))
+                        }
+                    }
+                }
+
+                // When it comes back
+                if let availableAt = viewModel.webAvailableAt {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.5))
+                        Text(availableAt)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+                    .padding(.top, 2)
+                }
+            }
+            .padding(16)
+            .background(webStatusColor.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .padding(.horizontal)
+        }
+    }
+
+    private var webStatusTitle: String {
+        switch viewModel.currentMode {
+        case .unlocked: return ""
+        case .restricted: return "Web Access Limited"
+        case .locked: return "Web Access Paused"
+        case .lockedDown: return "Internet Paused"
+        }
+    }
+
+    private var webStatusColor: Color {
+        switch viewModel.currentMode {
+        case .unlocked: return .green
+        case .restricted: return .blue
+        case .locked: return .purple
+        case .lockedDown: return .red
+        }
     }
 
     // MARK: - Schedule Card

@@ -12,8 +12,8 @@ final class DNSProxy {
     private let tunnelIP: Data = Data([198, 18, 0, 1])
     private let storage: AppGroupStorage
 
-    // Pending queries: txnID → (sourceIP, sourcePort, timestamp)
-    private var pending: [UInt16: (ip: Data, port: UInt16, at: Date)] = [:]
+    // Pending queries: txnID → (sourceIP, sourcePort, timestamp, original query)
+    private var pending: [UInt16: (ip: Data, port: UInt16, at: Date, query: Data)] = [:]
     private let pendingLock = NSLock()
 
     // Safe search cache (avoid disk I/O per query)
@@ -97,6 +97,31 @@ final class DNSProxy {
         upstreamSession = nil
     }
 
+    /// Periodic health check — call from the tunnel's liveness timer.
+    /// Detects stale upstream sessions and reconnects.
+    func healthCheck() {
+        guard let session = upstreamSession else {
+            NSLog("[DNSProxy] Health: no upstream session — reconnecting")
+            reconnectUpstream()
+            return
+        }
+        // Session stuck in non-ready state
+        if session.state == .cancelled || session.state == .failed {
+            NSLog("[DNSProxy] Health: upstream session \(session.state.rawValue) — reconnecting")
+            reconnectUpstream()
+            return
+        }
+        // Check for query blackhole: many pending queries = responses not arriving
+        pendingLock.lock()
+        let count = pending.count
+        let oldest = pending.values.min(by: { $0.at < $1.at })?.at
+        pendingLock.unlock()
+        if count > 20, let oldest, Date().timeIntervalSince(oldest) > 3 {
+            NSLog("[DNSProxy] Health: \(count) pending queries (oldest \(Int(Date().timeIntervalSince(oldest)))s) — upstream may be dead, reconnecting")
+            reconnectUpstream()
+        }
+    }
+
     /// Recreate the upstream UDP session after a network change (WiFi↔cellular).
     /// The old NWUDPSession becomes invalid when the network path changes.
     func reconnectUpstream() {
@@ -109,11 +134,21 @@ final class DNSProxy {
             guard let datagrams else { return }
             for d in datagrams { self?.onUpstreamResponse(d) }
         }, maxDatagrams: 64)
-        // Clear any stale pending queries
+        // Drain orphaned queries with REFUSED so clients get an immediate error
+        // instead of waiting for a timeout that never comes.
         pendingLock.lock()
+        let orphaned = pending
         pending.removeAll()
         pendingLock.unlock()
-        NSLog("[DNSProxy] Upstream reconnected → \(upstreamDNS.hostname)")
+        if !orphaned.isEmpty {
+            for (_, entry) in orphaned {
+                let refused = buildRefusedResponse(query: entry.query)
+                writeResponse(refused, destIP: entry.ip, destPort: entry.port)
+            }
+            NSLog("[DNSProxy] Upstream reconnected → \(upstreamDNS.hostname) (\(orphaned.count) orphaned queries refused)")
+        } else {
+            NSLog("[DNSProxy] Upstream reconnected → \(upstreamDNS.hostname)")
+        }
     }
 
     // MARK: - Packet Loop
@@ -143,25 +178,11 @@ final class DNSProxy {
         let txn = UInt16(dns[0]) << 8 | UInt16(dns[1])
         let domain = parseDomain(dns)
 
-        // Safe search: instant local reply
-        if let domain, let ip = checkSafeSearch(domain) {
-            let resp = buildDNSResponse(query: dns, ip: ip)
-            writeResponse(resp, destIP: srcIP, destPort: srcPort)
-            bgLog(domain)
-            return
-        }
+        // Priority order: enforcement blocks win over everything, then time limits,
+        // then blackhole, then safe search. A shielded app's domain should be REFUSED
+        // even if safe search would redirect it.
 
-        // Time-limit domain blocking: REFUSED for exhausted app domains.
-        // Uses REFUSED (not fake A record) so it works for both A and AAAA queries.
-        if let domain, isTimeLimitBlocked(domain) {
-            let resp = buildRefusedResponse(query: dns)
-            writeResponse(resp, destIP: srcIP, destPort: srcPort)
-            bgLog(domain)
-            return
-        }
-
-        // Enforcement domain blocking: block web versions of shielded apps.
-        // Uses REFUSED to handle both A and AAAA queries correctly.
+        // 1. Enforcement domain blocking: block web versions of shielded apps.
         if let domain, isEnforcementBlocked(domain) {
             let resp = buildRefusedResponse(query: dns)
             writeResponse(resp, destIP: srcIP, destPort: srcPort)
@@ -169,9 +190,15 @@ final class DNSProxy {
             return
         }
 
-        // DNS blackhole mode: REFUSE everything except Apple infrastructure.
-        // CloudKit, APNS, iCloud must always work so the device stays reachable
-        // for parent commands even when internet is blocked for enforcement.
+        // 2. Time-limit domain blocking: REFUSED for exhausted app domains.
+        if let domain, isTimeLimitBlocked(domain) {
+            let resp = buildRefusedResponse(query: dns)
+            writeResponse(resp, destIP: srcIP, destPort: srcPort)
+            bgLog(domain)
+            return
+        }
+
+        // 3. DNS blackhole mode: REFUSE everything except Apple infrastructure.
         if isBlackholeMode, let domain, !isBlackholeExempt(domain) {
             let resp = buildRefusedResponse(query: dns)
             writeResponse(resp, destIP: srcIP, destPort: srcPort)
@@ -179,21 +206,46 @@ final class DNSProxy {
             return
         }
 
-        // Store pending, forward upstream
+        // 4. Safe search: redirect search engines to safe-search IPs.
+        if let domain, let ip = checkSafeSearch(domain) {
+            let resp = buildDNSResponse(query: dns, ip: ip)
+            writeResponse(resp, destIP: srcIP, destPort: srcPort)
+            bgLog(domain)
+            return
+        }
+
+        // 5. Forward upstream
         pendingLock.lock()
-        pending[txn] = (ip: srcIP, port: srcPort, at: Date())
+        pending[txn] = (ip: srcIP, port: srcPort, at: Date(), query: dns)
         // Evict queries older than 5 seconds (timed out) and cap at 300
         let now = Date()
         if pending.count > 100 {
+            let stale = pending.filter { now.timeIntervalSince($0.value.at) >= 5 }
+            for (_, entry) in stale {
+                let refused = buildRefusedResponse(query: entry.query)
+                writeResponse(refused, destIP: entry.ip, destPort: entry.port)
+            }
             pending = pending.filter { now.timeIntervalSince($0.value.at) < 5 }
         }
         if pending.count > 300 {
-            // Still over cap after timeout eviction — drop oldest half
             let sorted = pending.sorted { $0.value.at < $1.value.at }
             let keepFrom = sorted.count / 2
+            let dropped = Array(sorted.prefix(keepFrom))
+            for (_, entry) in dropped {
+                let refused = buildRefusedResponse(query: entry.query)
+                writeResponse(refused, destIP: entry.ip, destPort: entry.port)
+            }
             pending = Dictionary(uniqueKeysWithValues: sorted.suffix(from: keepFrom).map { ($0.key, $0.value) })
         }
         pendingLock.unlock()
+
+        // Check session health before forwarding
+        if let session = upstreamSession {
+            if session.state == .cancelled || session.state == .failed {
+                NSLog("[DNSProxy] Upstream session dead (state=\(session.state.rawValue)) — reconnecting")
+                reconnectUpstream()
+            }
+        }
 
         upstreamSession?.writeDatagram(dns) { error in
             if let error {
@@ -586,13 +638,32 @@ final class DNSProxy {
 
     func cleanupStalePendingQueries() {
         pendingLock.lock()
-        let before = pending.count
+        _ = pending.count
         let now = Date()
+        let stale = pending.filter { now.timeIntervalSince($0.value.at) >= 5 }
         pending = pending.filter { now.timeIntervalSince($0.value.at) < 5 }
-        let after = pending.count
         pendingLock.unlock()
-        if before > after {
-            NSLog("[DNSProxy] Cleaned \(before - after) stale pending queries (\(after) remaining)")
+        // Send REFUSED for stale queries so clients get immediate error
+        for (_, entry) in stale {
+            let refused = buildRefusedResponse(query: entry.query)
+            writeResponse(refused, destIP: entry.ip, destPort: entry.port)
         }
+        if !stale.isEmpty {
+            NSLog("[DNSProxy] Cleaned \(stale.count) stale pending queries (\(pending.count) remaining)")
+        }
+    }
+
+    // MARK: - Diagnostics
+
+    /// Number of queries awaiting upstream response.
+    var pendingCount: Int {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        return pending.count
+    }
+
+    /// Current upstream session state for diagnostic reporting.
+    var upstreamSessionState: NWUDPSessionState? {
+        upstreamSession?.state
     }
 }

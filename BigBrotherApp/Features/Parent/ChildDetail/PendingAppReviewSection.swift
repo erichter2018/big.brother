@@ -80,10 +80,10 @@ struct PendingAppReviewSection: View {
                     } label: {
                         Text("Allow")
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(.green.opacity(0.9))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(Capsule().fill(.green))
+                            .background(RoundedRectangle(cornerRadius: 6).fill(.green.opacity(0.15)))
                     }
                     .buttonStyle(.plain)
 
@@ -96,10 +96,10 @@ struct PendingAppReviewSection: View {
                     } label: {
                         Text("Limit")
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(.blue.opacity(0.9))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(Capsule().fill(.blue))
+                            .background(RoundedRectangle(cornerRadius: 6).fill(.blue.opacity(0.15)))
                     }
 
                     Button {
@@ -107,10 +107,10 @@ struct PendingAppReviewSection: View {
                     } label: {
                         Text("Block")
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(.red.opacity(0.9))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(Capsule().fill(.red))
+                            .background(RoundedRectangle(cornerRadius: 6).fill(.red.opacity(0.15)))
                     }
                     .buttonStyle(.plain)
                 }

@@ -33,17 +33,21 @@ public enum ModeStackResolver {
         // reads stale file data and deletes the file while the main app just wrote
         // a new temp unlock, the new data is lost. Cleanup is done by the command
         // processor (setMode, returnToSchedule) which owns the state.
-        if let temp = storage.readTemporaryUnlockState() {
-            if temp.expiresAt > now {
-                return Resolution(
-                    mode: .unlocked,
-                    controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
-                    isTemporary: true,
-                    expiresAt: temp.expiresAt,
-                    reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
-                )
-            }
-            // Expired — fall through (but don't delete — command processor handles cleanup)
+        //
+        // Try the direct file first, then fall back to the snapshot's embedded copy.
+        // The file read can fail silently in extension contexts (App Group file locks,
+        // iOS data protection, CFPrefsPlistSource detach). The snapshot is a single
+        // atomic JSON file that's more reliably readable.
+        let temp: TemporaryUnlockState? = storage.readTemporaryUnlockState()
+            ?? storage.readPolicySnapshot()?.temporaryUnlockState
+        if let temp, temp.expiresAt > now {
+            return Resolution(
+                mode: .unlocked,
+                controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
+                isTemporary: true,
+                expiresAt: temp.expiresAt,
+                reason: "Temporary unlock (\(temp.origin.rawValue)), expires \(shortTime(temp.expiresAt))"
+            )
         }
 
         // 2. Active timed unlock (penalty + unlock phases)?
@@ -105,7 +109,25 @@ public enum ModeStackResolver {
             }
         }
 
-        // 4. Schedule-driven mode?
+        // 4. Explicit parent command? (setMode — overrides schedule until returnToSchedule)
+        //    If the snapshot was set by a parent command (not a schedule transition),
+        //    it takes priority. This ensures "set restricted" stays restricted even
+        //    when the schedule says "locked" at night.
+        if let snapshot = storage.readPolicySnapshot() {
+            let authority = snapshot.effectivePolicy.controlAuthority ?? .parentManual
+            if authority == .parentManual {
+                let mode = snapshot.effectivePolicy.resolvedMode
+                return Resolution(
+                    mode: mode,
+                    controlAuthority: .parentManual,
+                    isTemporary: false,
+                    expiresAt: nil,
+                    reason: "Parent command: \(mode.rawValue)"
+                )
+            }
+        }
+
+        // 5. Schedule-driven mode?
         let isScheduleDriven = AppConstants.isScheduleDriven()
 
         if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
@@ -119,10 +141,26 @@ public enum ModeStackResolver {
             )
         }
 
-        // 5. Explicit parent mode (non-schedule)
+        // 5b. Schedule-driven is OFF but we have a schedule profile.
+        // After returnToSchedule, the snapshot has .schedule authority with a
+        // point-in-time resolvedMode (e.g., "locked" from a locked window).
+        // With schedule-driven OFF, use the profile's lockedMode (the default
+        // outside any window) instead of the stale snapshot mode.
+        if !isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
+            let mode = profile.lockedMode
+            return Resolution(
+                mode: mode,
+                controlAuthority: .schedule,
+                isTemporary: false,
+                expiresAt: nil,
+                reason: "Schedule (manual): \(profile.name) → \(mode.rawValue)"
+            )
+        }
+
+        // 6. Other snapshot (no schedule profile available)
         if let snapshot = storage.readPolicySnapshot() {
             let mode = snapshot.effectivePolicy.resolvedMode
-            let authority = snapshot.effectivePolicy.controlAuthority ?? .parentManual
+            let authority = snapshot.effectivePolicy.controlAuthority ?? .schedule
             return Resolution(
                 mode: mode,
                 controlAuthority: authority,
@@ -132,7 +170,7 @@ public enum ModeStackResolver {
             )
         }
 
-        // 6. No state at all — safe default
+        // 7. No state at all — safe default
         return Resolution(
             mode: .restricted,
             controlAuthority: .failSafe,

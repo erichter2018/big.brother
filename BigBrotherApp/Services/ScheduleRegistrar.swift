@@ -29,8 +29,17 @@ enum ScheduleRegistrar {
     /// Suffix for the morning portion of a cross-midnight window.
     private static let morningSuffix = ".am"
 
+    /// Maximum schedule window registrations (unlocked + locked combined).
+    /// iOS DeviceActivityCenter has a ~20 activity cap per app. Reserve slots for:
+    ///   4 reconciliation activities + 1 usage tracking + N time limits.
+    /// 12 schedule windows leaves room for everything else.
+    private static let maxScheduleWindowRegistrations = 12
+
     /// Register DeviceActivity schedules for the given profile.
     /// Clears any previously registered schedule profile activities first.
+    /// If the profile has more windows than the cap allows, registers only the
+    /// next upcoming windows sorted by proximity to now. The reconciliation
+    /// callbacks (every 6 hours) re-register, keeping a rolling window.
     static func register(_ profile: ScheduleProfile, storage: any SharedStorageProtocol) {
         let center = DeviceActivityCenter()
 
@@ -40,14 +49,50 @@ enum ScheduleRegistrar {
         // Write the profile to App Group so the extension can read it.
         try? storage.writeActiveScheduleProfile(profile)
 
-        // Register one DeviceActivity per unlocked window.
-        for window in profile.unlockedWindows {
-            registerWindow(window, prefix: activityPrefix, label: "unlocked", center: center)
-        }
+        let totalWindows = profile.unlockedWindows.count + profile.lockedWindows.count
+        if totalWindows <= maxScheduleWindowRegistrations {
+            // Small schedule — register all windows.
+            for window in profile.unlockedWindows {
+                registerWindow(window, prefix: activityPrefix, label: "unlocked", center: center)
+            }
+            for window in profile.lockedWindows {
+                registerWindow(window, prefix: essentialPrefix, label: "locked", center: center)
+            }
+        } else {
+            // Large schedule — only register the next N upcoming windows.
+            // The Monitor uses ModeStackResolver + the stored profile to determine
+            // the correct mode, so even unregistered windows are handled on
+            // reconciliation callbacks.
+            let now = Date()
+            let cal = Calendar.current
+            let currentMinutes = cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now)
 
-        // Register one DeviceActivity per locked window.
-        for window in profile.lockedWindows {
-            registerWindow(window, prefix: essentialPrefix, label: "locked", center: center)
+            struct ScoredWindow {
+                let window: ActiveWindow
+                let isUnlocked: Bool
+                let minutesUntilStart: Int
+            }
+
+            var scored: [ScoredWindow] = []
+            for w in profile.unlockedWindows {
+                let startMin = w.startTime.hour * 60 + w.startTime.minute
+                let diff = (startMin - currentMinutes + 1440) % 1440
+                scored.append(ScoredWindow(window: w, isUnlocked: true, minutesUntilStart: diff))
+            }
+            for w in profile.lockedWindows {
+                let startMin = w.startTime.hour * 60 + w.startTime.minute
+                let diff = (startMin - currentMinutes + 1440) % 1440
+                scored.append(ScoredWindow(window: w, isUnlocked: false, minutesUntilStart: diff))
+            }
+
+            // Sort by proximity — register nearest transitions first.
+            scored.sort { $0.minutesUntilStart < $1.minutesUntilStart }
+
+            for item in scored.prefix(maxScheduleWindowRegistrations) {
+                let prefix = item.isUnlocked ? activityPrefix : essentialPrefix
+                let label = item.isUnlocked ? "unlocked" : "locked"
+                registerWindow(item.window, prefix: prefix, label: label, center: center)
+            }
         }
 
         // Register usage tracking milestones.
@@ -126,6 +171,13 @@ enum ScheduleRegistrar {
     ///
     /// Milestones: 15m, 30m, 45m, 1h, then every 30m up to 12h.
     static func registerUsageTracking() {
+        // Run on background thread — registering 600+ milestones blocks for 20-30s.
+        DispatchQueue.global(qos: .utility).async {
+            _registerUsageTrackingSync()
+        }
+    }
+
+    private static func _registerUsageTrackingSync() {
         let center = DeviceActivityCenter()
 
         // Remove any existing usage tracking schedule.
@@ -169,6 +221,32 @@ enum ScheduleRegistrar {
                 webDomains: [],
                 threshold: threshold
             )
+        }
+
+        // Per-app usage milestones for always-allowed apps.
+        // 15-minute intervals up to 6 hours per app. Fires eventDidReachThreshold
+        // in the Monitor, which writes usage to App Group for heartbeat reporting.
+        let storage = AppGroupStorage()
+        let decoder = JSONDecoder()
+        if let tokenData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let tokens = try? decoder.decode(Set<ApplicationToken>.self, from: tokenData) {
+            let encoder = JSONEncoder()
+            for token in tokens {
+                guard let encoded = try? encoder.encode(token) else { continue }
+                let fp = TokenFingerprint.fingerprint(for: encoded).prefix(8)
+                for m in stride(from: 15, through: 360, by: 15) {
+                    let eventName = DeviceActivityEvent.Name(rawValue: "appusage.\(fp).\(m)")
+                    var threshold = DateComponents()
+                    threshold.hour = m / 60
+                    threshold.minute = m % 60
+                    events[eventName] = DeviceActivityEvent(
+                        applications: [token],
+                        categories: [],
+                        webDomains: [],
+                        threshold: threshold
+                    )
+                }
+            }
         }
 
         do {

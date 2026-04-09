@@ -116,14 +116,24 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         guard let role = try? keychain.get(DeviceRole.self, forKey: StorageKeys.deviceRole),
               role == .child else { return }
 
+        // ManagedSettingsStores persist across launches. Only write to them if
+        // we're confident FC auth is ready — otherwise the existing shields from
+        // the previous session are still active and correct.
+        // After a deploy (terminate + relaunch), FC daemon may not be ready yet.
+        // Writing in that state triggers an NSAssertion crash.
+        // The normal flow (AppState.setupOnLaunch + AppLaunchRestorer) handles
+        // the full restoration once the app is fully initialized.
+        let authCenter = AuthorizationCenter.shared
+        guard authCenter.authorizationStatus == .approved else {
+            NSLog("[BigBrother] restoreEnforcementIfNeeded: FC auth not ready (status=\(authCenter.authorizationStatus.rawValue)) — previous shields still active, skipping write")
+            return
+        }
+
         let storage = AppGroupStorage()
 
         // Use ModeStackResolver as the single source of truth — it handles
         // temp unlocks, timed unlocks, lockUntil, schedule, and cleanup.
         let resolution = ModeStackResolver.resolve(storage: storage)
-
-        // If device should be unlocked (temp unlock, free window, etc.), clear shields.
-        // ModeStackResolver already checked expiry and cleaned up stale state.
 
         // Force essential mode if permissions are missing.
         let effectiveMode: LockMode
@@ -134,16 +144,18 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             effectiveMode = resolution.mode
         }
 
-        // Apply shields to ManagedSettingsStore.
-        let baseStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreBase))
-        let scheduleStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreSchedule))
-        let tempUnlockStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreTempUnlock))
+        // Apply shields to single enforcement store.
+        let enforcementStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreEnforcement))
 
-        // Clear temp unlock store (no active temp unlock at this point).
-        tempUnlockStore.shield.applications = nil
-        tempUnlockStore.shield.applicationCategories = nil
-        tempUnlockStore.shield.webDomainCategories = nil
-        tempUnlockStore.shield.webDomains = nil
+        // One-time migration: clear legacy stores (base, schedule, tempUnlock)
+        let migDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        if migDefaults?.bool(forKey: "migratedToSingleStore") != true {
+            for name in AppConstants.legacyStoreNames {
+                ManagedSettingsStore(named: .init(name)).clearAllSettings()
+            }
+            migDefaults?.set(true, forKey: "migratedToSingleStore")
+            NSLog("[BigBrother] restoreEnforcementIfNeeded: migrated legacy stores")
+        }
 
         switch effectiveMode {
         case .unlocked:
@@ -164,16 +176,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     allTokens.insert(token)
                 }
             }
-            for s in [baseStore, scheduleStore] {
-                s.shield.applications = nil
-                s.shield.applicationCategories = allTokens.isEmpty ? nil : .all(except: allTokens)
-                s.shield.webDomainCategories = nil
-                s.shield.webDomains = nil
-            }
-            tempUnlockStore.shield.applications = nil
-            tempUnlockStore.shield.applicationCategories = nil
-            tempUnlockStore.shield.webDomainCategories = nil
-            tempUnlockStore.shield.webDomains = nil
+            enforcementStore.shield.applications = nil
+            enforcementStore.shield.applicationCategories = allTokens.isEmpty ? nil : .all(except: allTokens)
+            enforcementStore.shield.webDomainCategories = nil
+            enforcementStore.shield.webDomains = nil
 
         case .restricted, .locked, .lockedDown:
             let allowExemptions = effectiveMode == .restricted
@@ -203,7 +209,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
             // Web blocking: locked/lockedDown ALWAYS block web, restricted respects flag.
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let shouldBlockWeb = !allowExemptions || restrictions.denyWebWhenLocked
+            let shouldBlockWeb = !allowExemptions || restrictions.denyWebWhenRestricted
 
             // Apply hybrid blocking (mirrors Monitor extension logic).
             if !pickerTokens.isEmpty && allowExemptions {
@@ -215,32 +221,18 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
                     perAppTokens = Set(sorted.prefix(50))
                 }
-                for s in [baseStore, scheduleStore] {
-                    s.shield.applications = perAppTokens
-                    s.shield.applicationCategories = .all(except: allowedTokens)
-                    if shouldBlockWeb {
-                        s.shield.webDomainCategories = .all()
-                        // Domain allowlist enforced at VPN/DNS layer, not ManagedSettings.
-                    } else {
-                        s.shield.webDomainCategories = nil
-                    }
-                }
+                enforcementStore.shield.applications = perAppTokens
+                enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
+                enforcementStore.shield.webDomainCategories = shouldBlockWeb ? .all() : nil
             } else {
                 let apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
-                for s in [baseStore, scheduleStore] {
-                    s.shield.applications = apps
-                    if allowedTokens.isEmpty {
-                        s.shield.applicationCategories = .all()
-                    } else {
-                        s.shield.applicationCategories = .all(except: allowedTokens)
-                    }
-                    if shouldBlockWeb {
-                        s.shield.webDomainCategories = .all()
-                        // Domain allowlist enforced at VPN/DNS layer, not ManagedSettings.
-                    } else {
-                        s.shield.webDomainCategories = nil
-                    }
+                enforcementStore.shield.applications = apps
+                if allowedTokens.isEmpty {
+                    enforcementStore.shield.applicationCategories = .all()
+                } else {
+                    enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
                 }
+                enforcementStore.shield.webDomainCategories = shouldBlockWeb ? .all() : nil
             }
 
             // Write DNS blocklist for the tunnel — previously missing from background restore.
@@ -596,6 +588,13 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 try? await Task.sleep(for: .seconds(5))
                 self.appState?.childConfirmationMessage = nil
             }
+            completionHandler()
+            return
+        }
+
+        // App review notification tap — navigate to child detail.
+        if let childProfileID = AppReviewNotificationService.handleTap(response) {
+            appState?.pendingChildNavigation = childProfileID
             completionHandler()
             return
         }

@@ -11,42 +11,56 @@ import notify
 class BigBrotherShieldExtension: ShieldConfigurationDataSource {
 
     override func configuration(shielding application: Application) -> ShieldConfiguration {
+        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            .set(AppConstants.appBuildNumber, forKey: "shieldBuildNumber")
         cacheAppIdentity(application: application)
         if let config = forceCloseShieldConfig { return config }
         if let config = timeLimitShieldConfig(application: application) { return config }
-        // Temporary diagnostic: show build marker + name to verify extension binary is updated
-        let name = application.localizedDisplayName ?? "nil"
-        let hasToken = application.token != nil
-        return ShieldConfiguration(
-            backgroundBlurStyle: .systemThickMaterial,
-            title: ShieldConfiguration.Label(text: name, color: .black),
-            subtitle: ShieldConfiguration.Label(text: "b310 | token:\(hasToken)", color: .gray),
-            primaryButtonLabel: ShieldConfiguration.Label(text: "OK", color: .white),
-            primaryButtonBackgroundColor: .systemBlue
-        )
+        if let config = pendingReviewShieldConfig(application: application) { return config }
+        return defaultShieldConfig(application: application)
     }
 
     override func configuration(shielding application: Application, in category: ActivityCategory) -> ShieldConfiguration {
         cacheAppIdentity(application: application)
         if let config = forceCloseShieldConfig { return config }
         if let config = timeLimitShieldConfig(application: application) { return config }
-        let name = application.localizedDisplayName ?? "nil"
-        let hasToken = application.token != nil
+        if let config = pendingReviewShieldConfig(application: application) { return config }
+        return defaultShieldConfig(application: application)
+    }
+
+    /// Standard shield for blocked apps — clean, user-friendly.
+    private func defaultShieldConfig(application: Application) -> ShieldConfiguration {
+        let storage = AppGroupStorage()
+        let shieldConfig = storage.readShieldConfiguration()
+        let title = shieldConfig?.title ?? "App Blocked"
+        let message = shieldConfig?.message ?? "This app is not available right now."
+
         return ShieldConfiguration(
             backgroundBlurStyle: .systemThickMaterial,
-            title: ShieldConfiguration.Label(text: name, color: .black),
-            subtitle: ShieldConfiguration.Label(text: "b310-cat | token:\(hasToken)", color: .gray),
+            title: ShieldConfiguration.Label(text: title, color: .black),
+            subtitle: ShieldConfiguration.Label(text: message, color: .secondaryLabel),
             primaryButtonLabel: ShieldConfiguration.Label(text: "OK", color: .white),
-            primaryButtonBackgroundColor: .systemBlue
+            primaryButtonBackgroundColor: .systemBlue,
+            secondaryButtonLabel: ShieldConfiguration.Label(text: "Ask for Access", color: .systemBlue)
         )
     }
 
     override func configuration(shielding webDomain: WebDomain) -> ShieldConfiguration {
-        return forceCloseShieldConfig ?? ShieldConfiguration()
+        return forceCloseShieldConfig ?? webShieldConfig
     }
 
     override func configuration(shielding webDomain: WebDomain, in category: ActivityCategory) -> ShieldConfiguration {
-        return forceCloseShieldConfig ?? ShieldConfiguration()
+        return forceCloseShieldConfig ?? webShieldConfig
+    }
+
+    private var webShieldConfig: ShieldConfiguration {
+        ShieldConfiguration(
+            backgroundBlurStyle: .systemThickMaterial,
+            title: ShieldConfiguration.Label(text: "Website Blocked", color: .black),
+            subtitle: ShieldConfiguration.Label(text: "Web browsing is not available right now.", color: .secondaryLabel),
+            primaryButtonLabel: ShieldConfiguration.Label(text: "OK", color: .white),
+            primaryButtonBackgroundColor: .systemBlue
+        )
     }
 
     /// Custom shield for apps that exhausted their daily time limit.

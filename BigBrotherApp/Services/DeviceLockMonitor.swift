@@ -1,9 +1,9 @@
 import Foundation
-import notify
+import UIKit
 import BigBrotherCore
 
-/// Monitors device lock/unlock state via Darwin notification center.
-/// Only runs on child devices. Tracks lock state for heartbeat reporting.
+/// Monitors device lock/unlock state using public APIs.
+/// Uses UIApplication protected data notifications (fires on lock/unlock).
 ///
 /// Note: Screen time accumulation (unlock→lock deltas) is handled exclusively
 /// by the VPN tunnel process, which reliably receives every transition even
@@ -11,8 +11,8 @@ import BigBrotherCore
 final class DeviceLockMonitor {
     static let shared = DeviceLockMonitor()
 
-    private(set) var isDeviceLocked: Bool = true // Default locked until proven otherwise
-    private var notifyToken: Int32 = NOTIFY_TOKEN_INVALID
+    private(set) var isDeviceLocked: Bool = false
+    private var observers: [NSObjectProtocol] = []
 
     /// Callback for driving monitor — fires on every lock/unlock transition.
     var onLockStateChanged: ((Bool) -> Void)?
@@ -20,43 +20,42 @@ final class DeviceLockMonitor {
     private init() {}
 
     func startMonitoring() {
-        guard notifyToken == NOTIFY_TOKEN_INVALID else { return }
+        guard observers.isEmpty else { return }
 
-        // Register for com.apple.springboard.lockstate.
-        // State 0 = unlocked, != 0 = locked.
-        notify_register_dispatch(
-            "com.apple.springboard.lockstate",
-            &notifyToken,
-            DispatchQueue.main
-        ) { [weak self] token in
-            var state: UInt64 = 0
-            notify_get_state(token, &state)
-            let locked = state != 0
-            self?.isDeviceLocked = locked
-            self?.onLockStateChanged?(locked)
-            #if DEBUG
-            print("[DeviceLockMonitor] Lock state changed: \(locked ? "locked" : "unlocked")")
-            #endif
+        // Protected data becomes unavailable when device is locked (with passcode).
+        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+
+        let willResign = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.isDeviceLocked = true
+            self?.onLockStateChanged?(true)
+            defaults?.set(true, forKey: "isDeviceLocked")
         }
 
-        // Query initial state immediately — the callback only fires on transitions.
-        if notifyToken != NOTIFY_TOKEN_INVALID {
-            var state: UInt64 = 0
-            notify_get_state(notifyToken, &state)
-            isDeviceLocked = state != 0
-            #if DEBUG
-            print("[DeviceLockMonitor] Initial state: \(state != 0 ? "locked" : "unlocked")")
-            #endif
+        let didBecome = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.isDeviceLocked = false
+            self?.onLockStateChanged?(false)
+            defaults?.set(false, forKey: "isDeviceLocked")
         }
+
+        observers = [willResign, didBecome]
+
+        // Set initial state from current protected data availability.
+        isDeviceLocked = !UIApplication.shared.isProtectedDataAvailable
     }
 
     /// No-op — screen time is now tracked exclusively by the VPN tunnel.
     func flushCurrentSession() {}
 
     func stopMonitoring() {
-        if notifyToken != NOTIFY_TOKEN_INVALID {
-            notify_cancel(notifyToken)
-            notifyToken = NOTIFY_TOKEN_INVALID
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
         }
+        observers = []
     }
 }

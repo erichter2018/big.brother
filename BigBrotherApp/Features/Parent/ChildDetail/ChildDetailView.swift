@@ -39,6 +39,20 @@ struct ChildDetailView: View {
                     remainingSeconds: viewModel.remainingUnlockSeconds
                 )
 
+                // CloudKit error banner
+                if let error = viewModel.cloudKitError {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                        Text(error)
+                        Spacer()
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .padding(10)
+                    .background(.red.opacity(0.8))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
                 // Issue alert — only visible when there's a problem
                 if !viewModel.deviceIssues.isEmpty {
                     deviceIssuePanel
@@ -1171,9 +1185,9 @@ struct ChildDetailView: View {
                     restrictionToggle("Auto Date & Time", icon: "clock.arrow.circlepath",
                                       isOn: viewModel.restrictions.requireAutomaticDateAndTime,
                                       toggle: { viewModel.toggleRestriction(\.requireAutomaticDateAndTime) })
-                    restrictionToggle("Block Web When Locked", icon: "globe.badge.chevron.backward",
-                                      isOn: viewModel.restrictions.denyWebWhenLocked,
-                                      toggle: { viewModel.toggleRestriction(\.denyWebWhenLocked) })
+                    restrictionToggle("Block Web When Restricted", icon: "globe.badge.chevron.backward",
+                                      isOn: viewModel.restrictions.denyWebWhenRestricted,
+                                      toggle: { viewModel.toggleRestriction(\.denyWebWhenRestricted) })
                     restrictionToggle("Block Web Games", icon: "gamecontroller",
                                       isOn: viewModel.restrictions.denyWebGamesWhenRestricted,
                                       toggle: { viewModel.toggleRestriction(\.denyWebGamesWhenRestricted) })
@@ -1514,37 +1528,47 @@ struct ChildDetailView: View {
 
     @ViewBuilder
     private func buildBadge(childBuild: Int?, heartbeat hb: DeviceHeartbeat? = nil) -> some View {
-        if viewModel.appState.debugMode, let childBuild {
+        if let childBuild {
+            let expected = AppConstants.appBuildNumber
             let isTunnel = hb?.heartbeatSource == "vpnTunnel"
-            let appBuild = hb?.mainAppLastLaunchedBuild
-            let tunnelBuild = childBuild  // appBuildNumber = sender's build
+            let appBuild = hb?.mainAppLastLaunchedBuild ?? childBuild
+            let tunnelBuild = isTunnel ? childBuild : (hb?.appBuildNumber ?? childBuild)
+            let mon = hb?.monitorBuildNumber
+            let shld = hb?.shieldBuildNumber
+            let act = hb?.shieldActionBuildNumber
 
-            // Show split view when tunnel and app have different builds
-            if isTunnel, let appBuild, appBuild != tunnelBuild {
-                HStack(spacing: 3) {
-                    HStack(spacing: 1) {
-                        Image(systemName: "iphone").font(.system(size: 7))
-                        Text("b\(appBuild)")
+            let allMatch = appBuild == expected
+                && tunnelBuild == expected
+                && (mon == nil || mon == expected)
+                && (shld == nil || shld == expected)
+                && (act == nil || act == expected)
+
+            VStack(alignment: .leading, spacing: 1) {
+                if allMatch {
+                    // Everything matches — compact green checkmark
+                    HStack(spacing: 2) {
+                        Text("b\(childBuild)")
+                        Image(systemName: "checkmark").foregroundStyle(.green)
                     }
-                    .foregroundStyle(appBuild == AppConstants.appBuildNumber ? Color.secondary : Color.orange)
-                    HStack(spacing: 1) {
-                        Image(systemName: "antenna.radiowaves.left.and.right").font(.system(size: 7))
-                        Text("b\(tunnelBuild)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                } else {
+                    // Show per-component breakdown
+                    let components: [(String, Int?)] = [
+                        ("app", appBuild),
+                        ("tun", tunnelBuild),
+                        ("mon", mon),
+                        ("shd", shld),
+                        ("act", act)
+                    ]
+                    let parts = components.compactMap { (name, build) -> String? in
+                        guard let b = build else { return nil }
+                        return b == expected ? "\(name):✓" : "\(name):\(b)"
                     }
-                    .foregroundStyle(tunnelBuild == AppConstants.appBuildNumber ? Color.secondary : Color.orange)
+                    Text(parts.joined(separator: " "))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
                 }
-                .font(.caption2)
-            } else {
-                let matches = childBuild == AppConstants.appBuildNumber
-                HStack(spacing: 2) {
-                    Text("b\(childBuild)")
-                    if matches {
-                        Image(systemName: "checkmark")
-                            .foregroundStyle(.green)
-                    }
-                }
-                .font(.caption2)
-                .foregroundStyle(matches ? Color.secondary : Color.orange)
             }
         }
     }

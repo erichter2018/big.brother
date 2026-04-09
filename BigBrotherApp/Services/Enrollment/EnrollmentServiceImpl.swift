@@ -113,7 +113,7 @@ final class EnrollmentServiceImpl: EnrollmentServiceProtocol {
 
         // Cache enrollment IDs in App Group so extensions can create events
         // without Keychain access (which can fail in extension context).
-        let cachedIDs = CachedEnrollmentIDs(deviceID: deviceID, familyID: invite.familyID)
+        let cachedIDs = CachedEnrollmentIDs(deviceID: deviceID, familyID: invite.familyID, deviceDisplayName: deviceDisplayName)
         if let data = try? JSONEncoder().encode(cachedIDs) {
             try? AppGroupStorage().writeRawData(data, forKey: StorageKeys.cachedEnrollmentIDs)
         }

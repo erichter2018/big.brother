@@ -90,14 +90,29 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
                 intervalEnd: DateComponents(hour: q.endHour, minute: 59),
                 repeats: true
             )
-            do {
-                try center.startMonitoring(activityName, during: schedule)
-                registered += 1
-                NSLog("[ScheduleManager] ✓ Registered \(q.name)")
-            } catch {
-                let msg = "\(q.name): \(error.localizedDescription)"
-                errors.append(msg)
-                NSLog("[ScheduleManager] ✗ FAILED \(msg)")
+
+            // Stop before re-registering — on iOS 18+, re-registering without
+            // stopping first can cause intervalDidStart to never fire.
+            center.stopMonitoring([activityName])
+
+            // Retry up to 3 times with 1s delay on "helper application" error.
+            // This is the recommended workaround for the deviceactivityd XPC flake.
+            for attempt in 1...3 {
+                do {
+                    try center.startMonitoring(activityName, during: schedule)
+                    registered += 1
+                    NSLog("[ScheduleManager] ✓ Registered \(q.name)\(attempt > 1 ? " (attempt \(attempt))" : "")")
+                    break
+                } catch {
+                    if attempt < 3 {
+                        NSLog("[ScheduleManager] ✗ \(q.name) attempt \(attempt) failed: \(error.localizedDescription) — retrying in 0.5s")
+                        usleep(500_000) // 0.5s — shorter than 1s to reduce UI freeze
+                    } else {
+                        let msg = "\(q.name): \(error.localizedDescription)"
+                        errors.append(msg)
+                        NSLog("[ScheduleManager] ✗ FAILED \(msg) (all 3 attempts)")
+                    }
+                }
             }
         }
 

@@ -171,6 +171,16 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// nil = old build that doesn't report this.
     public let locationAuthorization: String?
 
+    /// Extension build numbers — written to App Group by each extension when it runs.
+    public let monitorBuildNumber: Int?
+    public let shieldBuildNumber: Int?
+    public let shieldActionBuildNumber: Int?
+
+    /// Compact diagnostic snapshot — key enforcement state and recent logs.
+    /// Updated on every heartbeat. Parent can read this instantly without
+    /// requesting a full diagnostic report via command.
+    public let diagnosticSnapshot: String?
+
     public init(
         deviceID: DeviceID,
         familyID: FamilyID,
@@ -237,7 +247,11 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         locationTimestamp: Date? = nil,
         locationAddress: String? = nil,
         locationAccuracy: Double? = nil,
-        locationAuthorization: String? = nil
+        locationAuthorization: String? = nil,
+        monitorBuildNumber: Int? = nil,
+        shieldBuildNumber: Int? = nil,
+        shieldActionBuildNumber: Int? = nil,
+        diagnosticSnapshot: String? = nil
     ) {
         self.deviceID = deviceID
         self.familyID = familyID
@@ -305,6 +319,10 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.locationAddress = locationAddress
         self.locationAccuracy = locationAccuracy
         self.locationAuthorization = locationAuthorization
+        self.monitorBuildNumber = monitorBuildNumber
+        self.shieldBuildNumber = shieldBuildNumber
+        self.shieldActionBuildNumber = shieldActionBuildNumber
+        self.diagnosticSnapshot = diagnosticSnapshot
     }
 
     // MARK: - Backward-compatible Codable
@@ -344,6 +362,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case shieldedAppCount, shieldCategoryActive
         case latitude, longitude, locationTimestamp, locationAddress, locationAccuracy
         case locationAuthorization
+        case monitorBuildNumber, shieldBuildNumber, shieldActionBuildNumber
+        case diagnosticSnapshot
     }
 
     public init(from decoder: Decoder) throws {
@@ -414,5 +434,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         locationAddress = try container.decodeIfPresent(String.self, forKey: .locationAddress)
         locationAccuracy = try container.decodeIfPresent(Double.self, forKey: .locationAccuracy)
         locationAuthorization = try container.decodeIfPresent(String.self, forKey: .locationAuthorization)
+        monitorBuildNumber = try container.decodeIfPresent(Int.self, forKey: .monitorBuildNumber)
+        shieldBuildNumber = try container.decodeIfPresent(Int.self, forKey: .shieldBuildNumber)
+        shieldActionBuildNumber = try container.decodeIfPresent(Int.self, forKey: .shieldActionBuildNumber)
+        diagnosticSnapshot = try container.decodeIfPresent(String.self, forKey: .diagnosticSnapshot)
     }
 }

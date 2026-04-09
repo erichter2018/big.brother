@@ -587,7 +587,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         // delete any stale leftovers and re-create from scratch.
         let expectedIDs: Set<String> = deviceID != nil
             ? ["commands-\(familyID.rawValue)", "mode-commands-alert-\(familyID.rawValue)"]
-            : ["unlock-requests-v3-\(familyID.rawValue)", "heartbeats-v1-\(familyID.rawValue)"]
+            : ["unlock-requests-v3-\(familyID.rawValue)", "heartbeats-v1-\(familyID.rawValue)", "app-reviews-v1-\(familyID.rawValue)"]
 
         // Always log what we find for debugging push issues
         let existing: [CKSubscription]
@@ -728,6 +728,22 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             heartbeatNotifInfo.shouldSendContentAvailable = true
             heartbeatSub.notificationInfo = heartbeatNotifInfo
             subscriptionsToSave.append(heartbeatSub)
+
+            // Subscribe to new pending app reviews — fires when child submits a request.
+            let reviewPredicate = NSPredicate(
+                format: "%K == %@",
+                CKFieldName.familyID, familyID.rawValue
+            )
+            let reviewSub = CKQuerySubscription(
+                recordType: CKRecordType.pendingAppReview,
+                predicate: reviewPredicate,
+                subscriptionID: "app-reviews-v1-\(familyID.rawValue)",
+                options: [.firesOnRecordCreation]
+            )
+            let reviewNotifInfo = CKSubscription.NotificationInfo()
+            reviewNotifInfo.shouldSendContentAvailable = true
+            reviewSub.notificationInfo = reviewNotifInfo
+            subscriptionsToSave.append(reviewSub)
         }
 
         let op = CKModifySubscriptionsOperation(

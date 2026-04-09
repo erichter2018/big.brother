@@ -78,6 +78,7 @@ final class ScheduleOverviewViewModel {
                 action: .setScheduleProfile(profileID: profile.id, versionDate: versionDate)
             )
             // Update in-memory immediately for responsive UI.
+            appState.lastScheduleAssignmentAt = Date()
             for device in devices {
                 if let idx = appState.childDevices.firstIndex(where: { $0.id == device.id }) {
                     appState.childDevices[idx].scheduleProfileID = profile.id

@@ -78,6 +78,7 @@ final class ChildDetailViewModel: CommandSendable {
     var isSendingCommand = false
     var commandFeedback: String?
     var isCommandError = false
+    var cloudKitError: String?
     var timeline: [TimelineEntry] = []
     /// Daily screen time for the last 7 days (date → minutes). Loaded from CloudKit heartbeats.
     var weeklyScreenTime: [(date: Date, minutes: Int)] = []
@@ -154,6 +155,14 @@ final class ChildDetailViewModel: CommandSendable {
         self.grantedExtraMinutes = Self.loadGrantedExtra(childID: child.id)
         self.selfUnlockBudget = Self.loadSelfUnlockBudget(for: child.id)
         self.didFinishInit = true
+    }
+
+    private func showError(_ message: String) {
+        cloudKitError = message
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(5))
+            if cloudKitError == message { cloudKitError = nil }
+        }
     }
 
     // MARK: - Self Unlock Budget
@@ -300,9 +309,11 @@ final class ChildDetailViewModel: CommandSendable {
             async let e: () = loadEvents()
             async let s: () = loadWeeklyScreenTime()
             async let o: () = loadOnlineActivity()
-            async let t: () = loadTimeLimits()
+            // Time limits must load BEFORE pending reviews — the review filter
+            // checks timeLimitConfigs to hide already-approved apps.
+            await loadTimeLimits()
             async let p: () = loadPendingAppReviews()
-            _ = await (e, s, o, t, p)
+            _ = await (e, s, o, p)
         }
     }
 
@@ -314,7 +325,7 @@ final class ChildDetailViewModel: CommandSendable {
             Task { [weak self] in
                 await self?.loadEvents()
                 await self?.loadTimeLimits()
-                await self?.loadPendingAppReviews()
+                await self?.loadPendingAppReviews() // Must run after loadTimeLimits
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -529,7 +540,13 @@ final class ChildDetailViewModel: CommandSendable {
     func lockWithDuration(_ duration: LockDuration) async {
         switch duration {
         case .returnToSchedule:
-            appState.expectedModes.removeValue(forKey: child.id)
+            // Set optimistic mode to what the schedule resolves to right now.
+            if let profile = scheduleProfile {
+                let scheduleMode = profile.resolvedMode(at: Date())
+                appState.expectedModes[child.id] = (scheduleMode, Date())
+            } else {
+                appState.expectedModes.removeValue(forKey: child.id)
+            }
             await performCommand(.returnToSchedule, target: .child(child.id))
 
         case .indefinite:
@@ -855,16 +872,28 @@ final class ChildDetailViewModel: CommandSendable {
 
     func loadTimeLimits() async {
         guard let cloudKit = appState.cloudKit else { return }
-        if var configs = try? await cloudKit.fetchTimeLimitConfigs(childProfileID: child.id) {
-            // Pre-fill names from parent mapping for generic names
-            for i in configs.indices {
-                let saved = ParentAppNameMapping.resolvedName(for: configs[i].appName)
-                if saved != configs[i].appName {
-                    configs[i].appName = saved
-                    try? await cloudKit.saveTimeLimitConfig(configs[i])
-                }
-            }
+        if let configs = try? await cloudKit.fetchTimeLimitConfigs(childProfileID: child.id) {
             timeLimitConfigs = configs.sorted { $0.appName < $1.appName }
+        }
+
+        // Backfill categories for existing configs that don't have one
+        backfillCategories()
+    }
+
+    /// Look up App Store categories for configs missing them. Best-effort, saves to CK.
+    private func backfillCategories() {
+        let uncategorized = timeLimitConfigs.filter { $0.appCategory == nil && $0.isActive }
+        guard !uncategorized.isEmpty, let cloudKit = appState.cloudKit else { return }
+        Task {
+            for config in uncategorized {
+                guard let category = await AppStoreLookup.lookupCategory(appName: config.appName) else { continue }
+                guard let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) else { continue }
+                var updated = timeLimitConfigs[idx]
+                updated.appCategory = category
+                updated.updatedAt = Date()
+                try? await cloudKit.saveTimeLimitConfig(updated)
+                timeLimitConfigs[idx] = updated
+            }
         }
     }
 
@@ -877,7 +906,12 @@ final class ChildDetailViewModel: CommandSendable {
         var updated = config
         updated.dailyLimitMinutes = minutes
         updated.updatedAt = Date()
-        try? await cloudKit.saveTimeLimitConfig(updated)
+        do {
+            try await cloudKit.saveTimeLimitConfig(updated)
+        } catch {
+            showError("Failed to save time limit: \(error.localizedDescription)")
+            return
+        }
         if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
             timeLimitConfigs[idx] = updated
         }
@@ -894,7 +928,12 @@ final class ChildDetailViewModel: CommandSendable {
         var updated = config
         updated.isActive = false
         updated.updatedAt = Date()
-        try? await cloudKit.saveTimeLimitConfig(updated)
+        do {
+            try await cloudKit.saveTimeLimitConfig(updated)
+        } catch {
+            showError("Failed to remove time limit: \(error.localizedDescription)")
+            return
+        }
         if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
             timeLimitConfigs[idx] = updated
         }
@@ -906,11 +945,15 @@ final class ChildDetailViewModel: CommandSendable {
         var updated = config
         updated.appName = newName
         updated.updatedAt = Date()
-        try? await cloudKit.saveTimeLimitConfig(updated)
+        do {
+            try await cloudKit.saveTimeLimitConfig(updated)
+        } catch {
+            showError("Failed to rename app: \(error.localizedDescription)")
+            return
+        }
         if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
             timeLimitConfigs[idx] = updated
         }
-        ParentAppNameMapping.setName(newName, forFingerprint: config.appFingerprint)
         await sendAppNameToChild(name: newName, rawAppName: config.appName, deviceID: config.deviceID)
     }
 
@@ -921,7 +964,12 @@ final class ChildDetailViewModel: CommandSendable {
         var updated = config
         updated.dailyLimitMinutes = 0
         updated.updatedAt = Date()
-        try? await cloudKit.saveTimeLimitConfig(updated)
+        do {
+            try await cloudKit.saveTimeLimitConfig(updated)
+        } catch {
+            showError("Failed to save always-allowed: \(error.localizedDescription)")
+            return
+        }
         if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
             timeLimitConfigs[idx] = updated
         }
@@ -938,7 +986,12 @@ final class ChildDetailViewModel: CommandSendable {
         var updated = config
         updated.dailyLimitMinutes = minutes
         updated.updatedAt = Date()
-        try? await cloudKit.saveTimeLimitConfig(updated)
+        do {
+            try await cloudKit.saveTimeLimitConfig(updated)
+        } catch {
+            showError("Failed to save time limit: \(error.localizedDescription)")
+            return
+        }
         if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
             timeLimitConfigs[idx] = updated
         }
@@ -955,7 +1008,12 @@ final class ChildDetailViewModel: CommandSendable {
         var updated = config
         updated.isActive = false
         updated.updatedAt = Date()
-        try? await cloudKit.saveTimeLimitConfig(updated)
+        do {
+            try await cloudKit.saveTimeLimitConfig(updated)
+        } catch {
+            showError("Failed to revoke app: \(error.localizedDescription)")
+            return
+        }
         if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
             timeLimitConfigs[idx] = updated
         }
@@ -1360,9 +1418,6 @@ final class ChildDetailViewModel: CommandSendable {
 
     /// Apps selected by the child awaiting parent review.
     var pendingAppReviews: [PendingAppReview] = []
-    /// IDs of reviews the parent already acted on — filtered out even if CloudKit returns stale data.
-    private var dismissedReviewIDs: Set<UUID> = []
-
     var pendingReviewDiagnostic = ""
 
     func loadPendingAppReviews() async {
@@ -1371,13 +1426,19 @@ final class ChildDetailViewModel: CommandSendable {
             return
         }
         do {
+            // Fingerprints already approved (active in TimeLimitConfig) — safety net
+            // to hide reviews for apps that are already configured.
+            let approvedFingerprints = Set(timeLimitConfigs.filter(\.isActive).map(\.appFingerprint))
+
             let all = try await cloudKit.fetchPendingAppReviews(childProfileID: child.id)
-                .filter { !dismissedReviewIDs.contains($0.id) }
-            // Also deduplicate by fingerprint — keep only the latest per app
+                .filter { !approvedFingerprints.contains($0.appFingerprint) }
+
+            // Deduplicate by fingerprint — keep the one with latest updatedAt
+            // (preserves parent renames over older duplicates)
             var seen: [String: PendingAppReview] = [:]
             for review in all {
                 if let existing = seen[review.appFingerprint] {
-                    if review.createdAt > existing.createdAt { seen[review.appFingerprint] = review }
+                    if review.updatedAt > existing.updatedAt { seen[review.appFingerprint] = review }
                 } else {
                     seen[review.appFingerprint] = review
                 }
@@ -1385,7 +1446,15 @@ final class ChildDetailViewModel: CommandSendable {
             let deduped = Array(seen.values)
             let resolved = deduped.filter(\.nameResolved)
             pendingReviewDiagnostic = "CK: \(all.count) total, \(deduped.count) unique, \(resolved.count) named"
-            pendingAppReviews = deduped.sorted { $0.createdAt < $1.createdAt }
+            let sorted = deduped.sorted { $0.createdAt < $1.createdAt }
+            pendingAppReviews = sorted
+
+            // Notify parent of new reviews
+            AppReviewNotificationService.checkAndNotify(
+                reviews: sorted,
+                childName: child.name,
+                childProfileID: child.id
+            )
         } catch {
             pendingReviewDiagnostic = "CK ERROR: \(error.localizedDescription)"
         }
@@ -1398,28 +1467,41 @@ final class ChildDetailViewModel: CommandSendable {
         updated.appName = newName
         updated.nameResolved = true
         updated.updatedAt = Date()
-        pendingAppReviews[idx] = updated
-        // Update in CloudKit
-        if let cloudKit = appState.cloudKit {
-            try? await cloudKit.savePendingAppReview(updated)
+        guard let cloudKit = appState.cloudKit else { return }
+        do {
+            try await cloudKit.savePendingAppReview(updated)
+        } catch {
+            showError("Failed to rename review: \(error.localizedDescription)")
+            return
         }
+        pendingAppReviews[idx] = updated
     }
 
     /// Delete all pending app reviews for this child from CloudKit.
     func clearAllPendingReviews() async {
         guard let cloudKit = appState.cloudKit else { return }
-        // Mark all as dismissed so stale CloudKit reads don't resurrect them
-        for review in pendingAppReviews {
-            dismissedReviewIDs.insert(review.id)
-        }
         // Delete everything from CloudKit (fetch fresh to catch duplicates)
-        let allFromCK = (try? await cloudKit.fetchPendingAppReviews(childProfileID: child.id)) ?? []
-        for review in allFromCK {
-            dismissedReviewIDs.insert(review.id)
-            try? await cloudKit.deletePendingAppReview(review.id)
+        let allFromCK: [PendingAppReview]
+        do {
+            allFromCK = try await cloudKit.fetchPendingAppReviews(childProfileID: child.id)
+        } catch {
+            showError("Failed to fetch reviews: \(error.localizedDescription)")
+            return
         }
-        pendingAppReviews = []
-        pendingReviewDiagnostic = "Cleared"
+        var failures = 0
+        for review in allFromCK {
+            do {
+                try await cloudKit.deletePendingAppReview(review.id)
+            } catch {
+                failures += 1
+            }
+        }
+        if failures > 0 {
+            showError("Failed to delete \(failures) of \(allFromCK.count) reviews")
+        }
+        // Reload from CK to reflect actual state
+        await loadPendingAppReviews()
+        pendingReviewDiagnostic = failures == 0 ? "Cleared" : "Cleared with \(failures) errors"
     }
 
     /// Send the child app picker command to a specific device.
@@ -1429,6 +1511,8 @@ final class ChildDetailViewModel: CommandSendable {
 
     /// Parent decides on a pending app: allow always, time limit, or keep blocked.
     func reviewApp(_ review: PendingAppReview, disposition: AppDisposition, minutes: Int? = nil) async {
+        guard let cloudKit = appState.cloudKit else { return }
+
         // Send command to child device
         await performCommand(
             .reviewApp(fingerprint: review.appFingerprint, disposition: disposition, minutes: minutes),
@@ -1436,9 +1520,11 @@ final class ChildDetailViewModel: CommandSendable {
         )
 
         // Create or reactivate CloudKit config — source of truth for app status.
-        // Check for existing inactive config with same fingerprint to avoid duplicates.
-        if let cloudKit = appState.cloudKit, disposition != .keepBlocked {
+        if disposition != .keepBlocked {
             let dailyMinutes = disposition == .allowAlways ? 0 : (minutes ?? 60)
+
+            // Look up App Store category (best-effort, non-blocking on failure)
+            let category = await AppStoreLookup.lookupCategory(appName: review.appName)
 
             if let existingIdx = timeLimitConfigs.firstIndex(where: { $0.appFingerprint == review.appFingerprint }) {
                 // Reactivate existing config
@@ -1446,8 +1532,14 @@ final class ChildDetailViewModel: CommandSendable {
                 updated.dailyLimitMinutes = dailyMinutes
                 updated.isActive = true
                 updated.appName = review.appName
+                if let category { updated.appCategory = category }
                 updated.updatedAt = Date()
-                try? await cloudKit.saveTimeLimitConfig(updated)
+                do {
+                    try await cloudKit.saveTimeLimitConfig(updated)
+                } catch {
+                    showError("Failed to save app config: \(error.localizedDescription)")
+                    return
+                }
                 timeLimitConfigs[existingIdx] = updated
             } else {
                 // Create new config
@@ -1457,32 +1549,34 @@ final class ChildDetailViewModel: CommandSendable {
                     appFingerprint: review.appFingerprint,
                     appName: review.appName,
                     dailyLimitMinutes: dailyMinutes,
-                    isActive: true
+                    isActive: true,
+                    appCategory: category
                 )
-                try? await cloudKit.saveTimeLimitConfig(config)
+                do {
+                    try await cloudKit.saveTimeLimitConfig(config)
+                } catch {
+                    showError("Failed to save app config: \(error.localizedDescription)")
+                    return
+                }
                 timeLimitConfigs.append(config)
             }
         }
 
         // Delete the pending review from CloudKit
-        if let cloudKit = appState.cloudKit {
-            try? await cloudKit.deletePendingAppReview(review.id)
+        do {
+            try await cloudKit.deletePendingAppReview(review.id)
+        } catch {
+            showError("Failed to delete review: \(error.localizedDescription)")
+            return
         }
 
-        // Remove from local list and mark as dismissed so CloudKit stale reads don't bring it back
-        dismissedReviewIDs.insert(review.id)
-        // Also dismiss any duplicates with same fingerprint
-        pendingAppReviews.filter { $0.appFingerprint == review.appFingerprint }.forEach {
-            dismissedReviewIDs.insert($0.id)
-        }
+        // Only update local state after CK operations succeed
         pendingAppReviews.removeAll { $0.appFingerprint == review.appFingerprint }
 
-        // Delete ALL CloudKit records with this fingerprint (catches duplicates)
-        if let cloudKit = appState.cloudKit {
-            let allForChild = (try? await cloudKit.fetchPendingAppReviews(childProfileID: review.childProfileID)) ?? []
-            for dup in allForChild where dup.appFingerprint == review.appFingerprint {
-                try? await cloudKit.deletePendingAppReview(dup.id)
-            }
+        // Delete ALL CloudKit records with this fingerprint (best-effort, catches duplicates)
+        let allForChild = (try? await cloudKit.fetchPendingAppReviews(childProfileID: review.childProfileID)) ?? []
+        for dup in allForChild where dup.appFingerprint == review.appFingerprint {
+            try? await cloudKit.deletePendingAppReview(dup.id)
         }
     }
 

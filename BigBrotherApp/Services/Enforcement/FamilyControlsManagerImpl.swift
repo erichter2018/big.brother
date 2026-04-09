@@ -46,6 +46,7 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
         do {
             try await AuthorizationCenter.shared.requestAuthorization(for: .child)
             defaults.set("child", forKey: Self.authTypeKey)
+            UserDefaults.standard.set("child", forKey: Self.authTypeKey)
             defaults.removeObject(forKey: Self.authFailReasonKey)
             return
         } catch {
@@ -79,6 +80,7 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
         // Store "individual" as the type. The fail reason is stored separately
         // so the heartbeat authType stays clean for comparison.
         defaults.set("individual", forKey: Self.authTypeKey)
+        UserDefaults.standard.set("individual", forKey: Self.authTypeKey)
     }
 
     func observeAuthorizationChanges(handler: @escaping @Sendable (FCAuthorizationStatus) -> Void) {
@@ -116,6 +118,16 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
                 category: .auth,
                 message: "Authorization changed: \(currentHealth.currentState.rawValue) → \(updatedHealth.currentState.rawValue)"
             ))
+
+            // Clear persisted auth type on genuine revocation so PermissionFixerView re-appears.
+            if authState == .denied {
+                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                    .removeObject(forKey: Self.authTypeKey)
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .auth,
+                    message: "FamilyControls authorization revoked — cleared persisted auth type"
+                ))
+            }
         }
     }
 

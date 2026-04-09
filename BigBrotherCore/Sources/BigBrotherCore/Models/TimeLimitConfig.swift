@@ -16,6 +16,8 @@ public struct TimeLimitConfig: Codable, Sendable, Identifiable, Equatable {
     /// Daily time budget in minutes (shared across all devices).
     public var dailyLimitMinutes: Int
     public var isActive: Bool
+    /// App Store category from iTunes Search API (e.g. "Games", "Social Networking").
+    public var appCategory: String?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -28,6 +30,7 @@ public struct TimeLimitConfig: Codable, Sendable, Identifiable, Equatable {
         appName: String,
         dailyLimitMinutes: Int,
         isActive: Bool = true,
+        appCategory: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -39,6 +42,7 @@ public struct TimeLimitConfig: Codable, Sendable, Identifiable, Equatable {
         self.appName = appName
         self.dailyLimitMinutes = dailyLimitMinutes
         self.isActive = isActive
+        self.appCategory = appCategory
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

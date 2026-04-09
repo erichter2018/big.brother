@@ -246,6 +246,25 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
                 ],
                 lockedMode: .locked
             ),
+            ScheduleProfile(
+                familyID: familyID,
+                name: "Test (15-min cycles)",
+                unlockedWindows: (0..<24).map { hour in
+                    ActiveWindow(
+                        daysOfWeek: everyday,
+                        startTime: DayTime(hour: hour, minute: 0),
+                        endTime: DayTime(hour: hour, minute: 15)
+                    )
+                },
+                lockedWindows: (0..<24).map { hour in
+                    ActiveWindow(
+                        daysOfWeek: everyday,
+                        startTime: DayTime(hour: hour, minute: 30),
+                        endTime: DayTime(hour: hour, minute: 45)
+                    )
+                },
+                lockedMode: .restricted
+            ),
         ]
     }
 

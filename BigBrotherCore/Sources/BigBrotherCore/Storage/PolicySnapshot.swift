@@ -143,7 +143,7 @@ public struct PolicySnapshot: Sendable, Equatable {
         ]
         // Include restriction booleans so restriction changes trigger new snapshots.
         if let r = deviceRestrictions {
-            parts.append("\(r.denyAppRemoval):\(r.lockAccounts):\(r.requireAutomaticDateAndTime):\(r.denyWebWhenLocked)")
+            parts.append("\(r.denyAppRemoval):\(r.lockAccounts):\(r.requireAutomaticDateAndTime):\(r.denyWebWhenRestricted)")
         }
         return parts.joined(separator: ":")
     }

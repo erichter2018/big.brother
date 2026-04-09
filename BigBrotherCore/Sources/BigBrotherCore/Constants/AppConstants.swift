@@ -38,7 +38,7 @@ public enum AppConstants {
 
     /// Manual build number — bump each time you deploy new code during development.
     /// Both parent and child read this constant; matching numbers = same code.
-    public static let appBuildNumber = 331
+    public static let appBuildNumber = 385
 
     // MARK: - Enrollment
 
@@ -90,13 +90,22 @@ public enum AppConstants {
 
     // MARK: - ManagedSettings Store Names
 
-    /// Named store for base policy enforcement.
+    /// Single named store for ALL shield enforcement (apps, categories, web).
+    /// Replaces the old base/schedule/tempUnlock 3-store architecture.
+    /// ManagedSettingsStore uses "most restrictive wins" merge across named stores,
+    /// so multiple stores caused conflicts where one store's restrictions couldn't
+    /// be overridden by another. A single store eliminates this.
+    public static let managedSettingsStoreEnforcement = "enforcement"
+
+    /// Legacy store names to clear during migration. Remove after all devices update.
+    public static let legacyStoreNames = ["base", "schedule", "tempUnlock"]
+
+    // Deprecated — kept for migration only
+    @available(*, deprecated, message: "Use managedSettingsStoreEnforcement")
     public static let managedSettingsStoreBase = "base"
-
-    /// Named store for schedule-based enforcement (used by extension).
+    @available(*, deprecated, message: "Use managedSettingsStoreEnforcement")
     public static let managedSettingsStoreSchedule = "schedule"
-
-    /// Named store for temporary unlock.
+    @available(*, deprecated, message: "Use managedSettingsStoreEnforcement")
     public static let managedSettingsStoreTempUnlock = "tempUnlock"
 
     // MARK: - Heartbeat Retry
