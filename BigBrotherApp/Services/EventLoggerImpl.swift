@@ -122,7 +122,7 @@ final class EventLoggerImpl: EventLoggerProtocol {
                 #endif
 
                 // Only log diagnostic once per 10 minutes to avoid flooding.
-                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                let defaults = UserDefaults.appGroup
                 let lastFailLogKey = "eventUploadLastFailLogAt"
                 let lastFailLog = defaults?.object(forKey: lastFailLogKey) as? Date ?? .distantPast
                 if Date().timeIntervalSince(lastFailLog) > 600 {

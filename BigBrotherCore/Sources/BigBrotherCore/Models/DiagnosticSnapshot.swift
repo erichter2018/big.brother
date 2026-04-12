@@ -45,6 +45,12 @@ public struct DiagnosticSnapshot: Codable, Sendable {
     public let tunnelAge: Int?
     /// Whether the VPN tunnel is connected.
     public let tunnelConnected: Bool?
+    /// Seconds since the last APNs/CK push notification was received (nil if never).
+    /// Critical for diagnosing slow command delivery — if this is very stale,
+    /// the kid is not receiving pushes and is relying on tunnel/poll fallbacks.
+    public let lastPushAge: Int?
+    /// Seconds since the APNs token was registered (nil if never).
+    public let apnsTokenAge: Int?
 
     // MARK: - Schedule
 
@@ -84,6 +90,30 @@ public struct DiagnosticSnapshot: Codable, Sendable {
 
     /// Last 15 enforcement log entries (compact).
     public let recentLogs: [LogEntry]
+
+    // MARK: - Apply Timing (for test harness latency measurement)
+
+    /// When `EnforcementServiceImpl.apply()` started on the main app process, if any.
+    /// Set once per invocation; the test harness uses it to isolate ManagedSettings
+    /// write latency from CloudKit delivery latency.
+    public let applyStartedAt: Date?
+
+    /// When `EnforcementServiceImpl.apply()` finished (after verify + audit write).
+    /// Paired with `applyStartedAt` to compute the pure apply phase duration.
+    public let applyFinishedAt: Date?
+
+    // MARK: - Per-Token Verdicts (for automated shield testing)
+
+    /// For each app token known to enforcement (union of picker selection,
+    /// always-allowed list, and today's time-limit-exhausted list), the state
+    /// flags and the expected shield verdict for the current resolved mode.
+    /// Used by the test harness to assert that mode transitions actually
+    /// produce the right per-app behavior — the shape-only checks we had
+    /// before (appCount > 0, categoryActive) couldn't catch bugs where the
+    /// write looked right but the contents were wrong (e.g. empty allowed
+    /// set collapsing `restricted` to `locked`). Capped at 100 entries to
+    /// keep the embedded heartbeat JSON bounded.
+    public let tokenVerdicts: [TokenVerdict]
 
     // MARK: - Nested Types
 
@@ -132,16 +162,49 @@ public struct DiagnosticSnapshot: Codable, Sendable {
         }
     }
 
+    public struct TokenVerdict: Codable, Sendable, Equatable {
+        /// First 16 chars of the token's fingerprint (shared hashing with
+        /// `TokenFingerprint.fingerprint(for:)` elsewhere in the codebase).
+        public let fingerprint: String
+        /// Display name resolved from the App Group app-name cache. Absent
+        /// when the token has never been seen by the name harvester.
+        public let appName: String?
+        /// Token is in the parent's FamilyActivitySelection block list.
+        public let inPicker: Bool
+        /// Token is in the always-allowed list (file) OR in an active
+        /// temp-allowed entry.
+        public let inAllowed: Bool
+        /// Token's per-app time limit is exhausted for today.
+        public let inExhausted: Bool
+        /// Expected verdict for the current resolved mode:
+        /// `unlocked` → always `false` (allowed), `locked/lockedDown` → always
+        /// `true` (blocked), `restricted` → `true` unless `inAllowed && !inExhausted`.
+        public let expectedBlocked: Bool
+
+        public init(fingerprint: String, appName: String?, inPicker: Bool,
+                    inAllowed: Bool, inExhausted: Bool, expectedBlocked: Bool) {
+            self.fingerprint = fingerprint
+            self.appName = appName
+            self.inPicker = inPicker
+            self.inAllowed = inAllowed
+            self.inExhausted = inExhausted
+            self.expectedBlocked = expectedBlocked
+        }
+    }
+
     public init(
         mode: String, authority: String, reason: String, isTemporary: Bool, expiresAt: Date?,
         shieldsUp: Bool, shieldsExpected: Bool, shieldedAppCount: Int,
         categoryShieldActive: Bool, webBlocked: Bool, shieldReason: String?, shieldAudit: String?,
         builds: ComponentBuilds, monitorAge: Int?, tunnelAge: Int?, tunnelConnected: Bool?,
+        lastPushAge: Int? = nil, apnsTokenAge: Int? = nil,
         scheduleName: String?, scheduleDriven: Bool, scheduleWindow: String?,
         tempUnlockRemaining: Int?, tempUnlockOrigin: String?,
         denyWebWhenRestricted: Bool?, denyAppRemoval: Bool?,
         internetBlocked: Bool? = nil, internetBlockReason: String? = nil, dnsBlockedDomains: Int? = nil,
-        transitions: [TransitionEntry], recentLogs: [LogEntry]
+        transitions: [TransitionEntry], recentLogs: [LogEntry],
+        applyStartedAt: Date? = nil, applyFinishedAt: Date? = nil,
+        tokenVerdicts: [TokenVerdict] = []
     ) {
         self.mode = mode; self.authority = authority; self.reason = reason
         self.isTemporary = isTemporary; self.expiresAt = expiresAt
@@ -149,12 +212,17 @@ public struct DiagnosticSnapshot: Codable, Sendable {
         self.shieldedAppCount = shieldedAppCount; self.categoryShieldActive = categoryShieldActive
         self.webBlocked = webBlocked; self.shieldReason = shieldReason; self.shieldAudit = shieldAudit
         self.builds = builds; self.monitorAge = monitorAge; self.tunnelAge = tunnelAge
-        self.tunnelConnected = tunnelConnected; self.scheduleName = scheduleName
+        self.tunnelConnected = tunnelConnected
+        self.lastPushAge = lastPushAge; self.apnsTokenAge = apnsTokenAge
+        self.scheduleName = scheduleName
         self.scheduleDriven = scheduleDriven; self.scheduleWindow = scheduleWindow
         self.tempUnlockRemaining = tempUnlockRemaining; self.tempUnlockOrigin = tempUnlockOrigin
         self.denyWebWhenRestricted = denyWebWhenRestricted; self.denyAppRemoval = denyAppRemoval
         self.internetBlocked = internetBlocked; self.internetBlockReason = internetBlockReason
         self.dnsBlockedDomains = dnsBlockedDomains
         self.transitions = transitions; self.recentLogs = recentLogs
+        self.applyStartedAt = applyStartedAt
+        self.applyFinishedAt = applyFinishedAt
+        self.tokenVerdicts = tokenVerdicts
     }
 }

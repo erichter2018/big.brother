@@ -12,23 +12,38 @@ struct PermissionFixerView: View {
     @State private var currentStep = 0
     @State private var permissionsToFix: [PermissionItem] = []
     @State private var waitingForReturn = false
+    /// True while the system FamilyControls prompt is showing + Apple's
+    /// daemon finishes negotiation. The await can take 5-10s on real
+    /// devices (Apple-side, not ours), so we show a blocking spinner with
+    /// explanatory text so the kid doesn't think the app hung.
+    @State private var isGrantingFamilyControls = false
 
     var body: some View {
         NavigationView {
-            VStack(spacing: 0) {
-                if permissionsToFix.isEmpty {
-                    allDoneView
-                } else if currentStep < permissionsToFix.count {
-                    stepView(permissionsToFix[currentStep])
-                } else {
-                    allDoneView
+            ZStack {
+                VStack(spacing: 0) {
+                    if permissionsToFix.isEmpty {
+                        allDoneView
+                    } else if currentStep < permissionsToFix.count {
+                        stepView(permissionsToFix[currentStep])
+                    } else {
+                        allDoneView
+                    }
+                }
+
+                if isGrantingFamilyControls {
+                    familyControlsLoadingOverlay
                 }
             }
             .navigationTitle("Fix Permissions")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("Close") {
+                        clearOnboardingFlag()
+                        dismiss()
+                    }
+                    .disabled(isGrantingFamilyControls)
                 }
             }
         }
@@ -39,6 +54,31 @@ struct PermissionFixerView: View {
                 refreshPermissions()
             }
         }
+    }
+
+    /// Loading overlay shown during the FamilyControls authorization call.
+    /// That call can take 5-10 seconds on real devices while Apple's daemon
+    /// negotiates with iCloud and Family Sharing — without this, the UI
+    /// looks hung after the kid taps "Continue" on the system prompt.
+    private var familyControlsLoadingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+            VStack(spacing: 16) {
+                ProgressView()
+                    .scaleEffect(1.5)
+                    .tint(.white)
+                Text("Connecting to Screen Time…")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Text("This can take several seconds.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .padding(32)
+            .background(RoundedRectangle(cornerRadius: 16).fill(.black.opacity(0.7)))
+        }
+        .transition(.opacity)
     }
 
     // MARK: - Step View
@@ -136,11 +176,39 @@ struct PermissionFixerView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
             Spacer()
-            Button("Done") { dismiss() }
+            Button("Done") {
+                clearOnboardingFlag()
+                dismiss()
+            }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .padding(.horizontal, 24)
                 .padding(.bottom, 40)
+        }
+    }
+
+    private func clearOnboardingFlag() {
+        // Lift the auto-prompt suppression — fixer is done, normal flows can resume.
+        let defaults = UserDefaults.appGroup
+        defaults?.removeObject(forKey: "showPermissionFixerOnNextLaunch")
+        // Mark fixer as completed so AppDelegate won't re-arm the flag on cold launches
+        // when the FC daemon momentarily returns .notDetermined.
+        defaults?.set(true, forKey: "permissionFixerCompletedOnce")
+
+        // b439: Trigger an enforcement apply now that permissions are granted.
+        // During the fixer, handleAuthorizationChange and performForegroundSync
+        // skip enforcement work to avoid freezing the UI. Now that we're done,
+        // dispatch a one-time apply to a DETACHED background task so the fixer
+        // sheet dismiss doesn't freeze the UI. AppState is @MainActor, so a
+        // plain Task { } would run on the main thread and block for the
+        // duration of enforcement.apply() — which can be 6+ seconds when the
+        // deep daemon rescue fires on a freshly-authorized FC state.
+        let enforcement = appState.enforcement
+        let storage = appState.storage
+        Task.detached {
+            if let snapshot = storage.readPolicySnapshot() {
+                try? enforcement?.apply(snapshot.effectivePolicy)
+            }
         }
     }
 
@@ -208,9 +276,16 @@ struct PermissionFixerView: View {
     private func handleAction(_ item: PermissionItem) {
         switch item {
         case .familyControls:
+            isGrantingFamilyControls = true
             Task {
+                let startedAt = Date()
                 try? await appState.enforcement?.requestAuthorization()
-                await MainActor.run { refreshPermissions() }
+                let elapsed = Date().timeIntervalSince(startedAt)
+                NSLog("[PermissionFixer] FC auth round-trip: \(String(format: "%.2f", elapsed))s")
+                await MainActor.run {
+                    isGrantingFamilyControls = false
+                    refreshPermissions()
+                }
             }
 
         case .locationAlways(let current):

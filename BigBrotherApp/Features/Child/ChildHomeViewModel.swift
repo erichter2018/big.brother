@@ -63,12 +63,20 @@ final class ChildHomeViewModel {
     }
 
     var currentMode: LockMode {
-        appState.currentEffectivePolicy?.resolvedMode ?? .unlocked
+        // Default to .restricted (fail-safe) when policy hasn't loaded yet.
+        // Defaulting to .unlocked caused a confusing "unlocked" flash on launch.
+        // .restricted is safer and matches what most schedules use as their default.
+        appState.currentEffectivePolicy?.resolvedMode ?? .restricted
+    }
+
+    /// True until performRestoration completes — used to show "loading" state.
+    var isLoadingInitialState: Bool {
+        !appState.isRestored && appState.currentEffectivePolicy == nil
     }
 
     /// When the internet block expires (from VPN DNS blackhole). Nil if not blocked.
     var internetBlockedUntil: Date? {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         guard let timestamp = defaults?.double(forKey: "internetBlockedUntil"), timestamp > 0 else { return nil }
         let date = Date(timeIntervalSince1970: timestamp)
         return date > now ? date : nil
@@ -76,13 +84,13 @@ final class ChildHomeViewModel {
 
     /// Whether the VPN tunnel is actively blocking internet (any reason).
     var isTunnelInternetBlocked: Bool {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         return defaults?.bool(forKey: "tunnelInternetBlocked") == true
     }
 
     /// Human-readable reason the tunnel is blocking internet, if any.
     var tunnelInternetBlockedReason: String? {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         guard let reason = defaults?.string(forKey: "tunnelInternetBlockedReason"),
               !reason.isEmpty else { return nil }
         return reason
@@ -90,7 +98,7 @@ final class ChildHomeViewModel {
 
     /// Whether enforcement is currently being restored (app just came alive).
     var isRestoringEnforcement: Bool {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let lastActive = defaults?.double(forKey: "mainAppLastActiveAt") ?? 0
         let age = Date().timeIntervalSince1970 - lastActive
         // If app was inactive for >60s and just came back, we're restoring
@@ -196,7 +204,7 @@ final class ChildHomeViewModel {
 
     /// Allowed web domains read from App Group. Empty = all web blocked when restricted/locked.
     var allowedWebDomains: [String] {
-        guard let data = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        guard let data = UserDefaults.appGroup?
                 .string(forKey: StorageKeys.allowedWebDomains)?
                 .data(using: .utf8),
               let domains = try? JSONDecoder().decode([String].self, from: data) else { return [] }
@@ -248,7 +256,7 @@ final class ChildHomeViewModel {
         // to validate with Apple servers, especially for .child auth.
         // If we have a persisted auth type (in either defaults store), we were
         // previously authorized — don't show the permissions button for a transient delay.
-        let appGroupType = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        let appGroupType = UserDefaults.appGroup?
             .string(forKey: "fr.bigbrother.authorizationType")
         let standardType = UserDefaults.standard.string(forKey: "fr.bigbrother.authorizationType")
         if appGroupType == "child" || appGroupType == "individual"
@@ -492,7 +500,7 @@ final class ChildHomeViewModel {
         }
 
         // 2. Reset the UserDefaults keys for shield cache
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         defaults?.removeObject(forKey: "lastShielded.appName")
         defaults?.removeObject(forKey: "lastShielded.bundleID")
         defaults?.removeObject(forKey: "lastShielded.tokenBase64")
@@ -607,7 +615,7 @@ final class ChildHomeViewModel {
     }
 
     func refreshScheduleDriving() {
-        isScheduleDriving = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.bool(forKey: "scheduleDrivenMode") ?? true
+        isScheduleDriving = UserDefaults.appGroup?.bool(forKey: "scheduleDrivenMode") ?? true
         if let locService = appState.locationService {
             cachedLocationAuthStatus = locService.authorizationStatus
         }
@@ -626,11 +634,21 @@ final class ChildHomeViewModel {
             }
         }
 
-        // Write permission status to App Group so tunnel blocks internet when permissions are wrong.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let _ = defaults?.bool(forKey: "allPermissionsGranted") ?? true
+        // Write permission status to App Group.
+        // Two flags: enforcement-critical (FC ONLY) for Monitor's hard-lock
+        // override, and all-permissions for UI/advisory purposes. Location is
+        // for breadcrumbs/geofencing, not shield enforcement — it must NOT
+        // force-lock the device. Previously this flag also required
+        // location=Always, which silently promoted parent-issued .restricted
+        // commands to .locked inside the Monitor (b444 user-visible bug:
+        // "switching to restricted from locked didn't drop the individual
+        // shields"). Missing notifications, motion, or VPN should also NOT
+        // cause the Monitor to force-lock the device.
+        let defaults = UserDefaults.appGroup
         let isOK = !hasPermissionIssues
         defaults?.set(isOK, forKey: "allPermissionsGranted")
+        let enforcementOK = !needsReauthorization
+        defaults?.set(enforcementOK, forKey: "enforcementPermissionsOK")
 
         // Write per-permission snapshot for parent visibility via heartbeat
         var permStatus: [String: Bool] = [:]

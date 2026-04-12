@@ -47,16 +47,22 @@ enum UnlockRequestNotificationService {
         UNUserNotificationCenter.current().setNotificationCategories([category])
     }
 
-    /// Request notification permission if not already granted.
-    static func requestPermissionIfNeeded() {
-        let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .notDetermined else { return }
-            center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
-        }
-    }
-
     // MARK: - Posting Notifications
+
+    /// Shared dedup store. 10-minute content window catches the kid tapping
+    /// the same blocked app repeatedly. The `(deviceID, normalizedName)` and
+    /// `(deviceID, fingerprint)` axes each get their own content key so
+    /// either can suppress a duplicate.
+    private static let dedupStore = NotificationDedupStore(
+        configuration: .init(
+            notifiedIDsKey: "fr.bigbrother.notifiedUnlockRequests",
+            contentKeysKey: "fr.bigbrother.unlockRequestContentKeys",
+            maxNotifiedIDs: 200,
+            maxContentKeys: 200
+        )
+    )
+
+    private static let contentWindow: TimeInterval = 600
 
     /// Check for new unlock requests in event logs and post notifications.
     ///
@@ -76,58 +82,72 @@ enum UnlockRequestNotificationService {
 
         guard !unlockRequests.isEmpty else { return }
 
-        let notifiedKey = "fr.bigbrother.notifiedUnlockRequests"
-        let defaults = UserDefaults.standard
-        var notifiedIDs = Set(defaults.stringArray(forKey: notifiedKey) ?? [])
-
-        // Prune old entries (keep last 200).
-        if notifiedIDs.count > 200 {
-            notifiedIDs = Set(Array(notifiedIDs).suffix(200))
+        struct ToPost {
+            let requestID: UUID
+            let deviceID: DeviceID
+            let appName: String
+            let fingerprint: String?
+            let isMoreTimeRequest: Bool
         }
 
-        for request in unlockRequests {
-            let idString = request.id.uuidString
-            guard !notifiedIDs.contains(idString) else { continue }
+        let toPost: [ToPost] = dedupStore.withLock { state in
+            var items: [ToPost] = []
 
-            var appName = extractAppName(from: request.details)
-            let fingerprint = extractFingerprint(from: request.details)
-            let isTimeRequest = Self.isMoreTimeRequest(details: request.details)
+            for request in unlockRequests {
+                let idString = request.id.uuidString
+                guard !state.hasNotified(idString) else { continue }
 
-            // Resolve app name from TimeLimitConfig by fingerprint if ShieldAction returned generic name.
-            if (appName == "an app" || appName == "App" || appName.isEmpty), let fp = fingerprint,
-               let config = timeLimitConfigs.first(where: { $0.appFingerprint == fp }) {
-                appName = config.appName
+                var appName = extractAppName(from: request.details)
+                let fingerprint = extractFingerprint(from: request.details)
+                let isTimeRequest = Self.isMoreTimeRequest(details: request.details)
+
+                if (appName == "an app" || appName == "App" || appName.isEmpty), let fp = fingerprint,
+                   let config = timeLimitConfigs.first(where: { $0.appFingerprint == fp }) {
+                    appName = config.appName
+                }
+
+                let normalizedName = appName
+                    .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let nameKey = "unlock:name:\(request.deviceID.rawValue):\(normalizedName)"
+                let fpKey = "unlock:fp:\(request.deviceID.rawValue):\(fingerprint ?? "none")"
+
+                if state.isRecentContentKey(nameKey, within: contentWindow) ||
+                   state.isRecentContentKey(fpKey, within: contentWindow) {
+                    state.markNotified(idString)
+                    continue
+                }
+
+                guard request.timestamp.timeIntervalSinceNow > -1800 else {
+                    state.markNotified(idString)
+                    continue
+                }
+
+                state.recordContentKey(nameKey)
+                state.recordContentKey(fpKey)
+                state.markNotified(idString)
+                items.append(ToPost(
+                    requestID: request.id,
+                    deviceID: request.deviceID,
+                    appName: appName,
+                    fingerprint: fingerprint,
+                    isMoreTimeRequest: isTimeRequest
+                ))
             }
+            return items
+        }
 
-            let dedupeKey = "notified-\(request.deviceID.rawValue)-\(fingerprint ?? appName)"
-            let lastNotifiedTime = defaults.double(forKey: dedupeKey)
-            let now = Date().timeIntervalSince1970
-
-            if now - lastNotifiedTime < 30 {
-                notifiedIDs.insert(idString)
-                continue
-            }
-
-            // Only notify for requests from the last 30 minutes.
-            guard request.timestamp.timeIntervalSinceNow > -1800 else {
-                notifiedIDs.insert(idString)
-                continue
-            }
-
+        for item in toPost {
             postNotification(
-                requestID: request.id,
-                deviceID: request.deviceID,
+                requestID: item.requestID,
+                deviceID: item.deviceID,
                 childName: childName,
-                appName: appName,
-                fingerprint: fingerprint,
+                appName: item.appName,
+                fingerprint: item.fingerprint,
                 childProfileID: childProfileID,
-                isMoreTimeRequest: isTimeRequest
+                isMoreTimeRequest: item.isMoreTimeRequest
             )
-            notifiedIDs.insert(idString)
-            defaults.set(now, forKey: dedupeKey)
         }
-
-        defaults.set(Array(notifiedIDs), forKey: notifiedKey)
     }
 
     private static func postNotification(

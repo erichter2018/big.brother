@@ -15,6 +15,9 @@ final class VPNManagerService {
 
     /// Notification observer for status changes.
     private var statusObserver: Any?
+    /// Last status we logged — suppresses identical repeat log lines when the
+    /// system re-posts NEVPNStatusDidChange for a status that didn't change.
+    private var lastLoggedStatus: NEVPNStatus = .invalid
 
     init() {
         statusObserver = NotificationCenter.default.addObserver(
@@ -22,8 +25,23 @@ final class VPNManagerService {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            if let connection = notification.object as? NEVPNConnection {
-                self?.connectionStatus = connection.status
+            guard let self else { return }
+            guard let connection = notification.object as? NEVPNConnection else { return }
+            // Filter: only react to status changes on OUR tunnel. The observer
+            // fires for every VPN on the device (Private Relay, other VPN apps
+            // like NordVPN etc). Without this guard, one kid who had a second
+            // VPN installed produced 100+ "Status changed: 3" log entries per
+            // foreground sync because her other VPN was continuously re-
+            // posting its connected status.
+            if let tunnelProtocol = connection.manager.protocolConfiguration as? NETunnelProviderProtocol,
+               tunnelProtocol.providerBundleIdentifier != AppConstants.tunnelBundleID {
+                return
+            }
+            self.connectionStatus = connection.status
+            // Deduplicate identical consecutive statuses even for our own tunnel —
+            // iOS sometimes re-posts .connected during ping cycles.
+            if self.lastLoggedStatus != connection.status {
+                self.lastLoggedStatus = connection.status
                 #if DEBUG
                 print("[VPN] Status changed: \(connection.status.rawValue)")
                 #endif

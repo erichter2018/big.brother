@@ -35,6 +35,7 @@ struct ChildSummaryCard: View {
     var hasPendingRequests: Bool = false
     let debugMode: Bool
     var namedPlaces: [NamedPlace]?
+    @State private var locationExpanded = false
 
     // MARK: - Pre-computed values (computed once per render, not per-property)
 
@@ -133,12 +134,14 @@ struct ChildSummaryCard: View {
 
             let devInternetBlocked = hb.internetBlocked == true
             let devDnsCount = hb.dnsBlockedDomainCount ?? 0
+            let devFCDegraded = hb.fcAuthDegraded == true
 
             if devShieldsDown || devInternetBlocked {
                 deviceAlerts.append(DeviceAlert(
                     id: device.id,
                     isIPad: isIPad,
                     shieldsDown: devShieldsDown,
+                    fcAuthDegraded: devFCDegraded,
                     internetBlocked: devInternetBlocked,
                     internetBlockedReason: hb.internetBlockedReason,
                     dnsBlockedCount: devDnsCount
@@ -146,11 +149,15 @@ struct ChildSummaryCard: View {
             }
         }
 
+        // FC auth degradation — any device reporting degraded auth
+        let fcAuthDegraded = childHeartbeats.contains { $0.fcAuthDegraded == true }
+
         return PrecomputedValues(
             hasAnyPermissionIssue: permissionIssue,
             isOnOldBuild: onOldBuild,
             isTunnelOnlyUpdated: tunnelOnlyUpdated,
             isShieldMismatch: shieldMismatch,
+            isFCAuthDegraded: fcAuthDegraded,
             isAppForceClosed: appForceClosed,
             latestHeartbeatAge: heartbeatAge,
             isTunnelHeartbeat: heartbeatIsTunnel,
@@ -167,6 +174,7 @@ struct ChildSummaryCard: View {
         let id: DeviceID
         let isIPad: Bool
         let shieldsDown: Bool
+        let fcAuthDegraded: Bool
         let internetBlocked: Bool
         let internetBlockedReason: String?
         let dnsBlockedCount: Int
@@ -177,6 +185,7 @@ struct ChildSummaryCard: View {
         let isOnOldBuild: Bool
         let isTunnelOnlyUpdated: Bool
         let isShieldMismatch: Bool
+        let isFCAuthDegraded: Bool
         let isAppForceClosed: Bool
         let latestHeartbeatAge: TimeInterval?
         let isTunnelHeartbeat: Bool
@@ -241,8 +250,10 @@ struct ChildSummaryCard: View {
                                 HStack(spacing: 3) {
                                     Image(systemName: alert.isIPad ? "ipad" : "iphone")
                                         .font(.system(size: 9))
-                                    Text("shields down")
+                                    Text(alert.fcAuthDegraded ? "FC auth degraded — needs Screen Time toggle" : "shields down")
                                         .fontWeight(.semibold)
+                                        .lineLimit(2)
+                                        .minimumScaleFactor(0.7)
                                 }
                                 .foregroundStyle(.red)
                             }
@@ -264,9 +275,11 @@ struct ChildSummaryCard: View {
                 } else {
                     if cached.isShieldMismatch {
                         infoRow(icon: "shield.slash", color: .red) {
-                            Text("shields down")
+                            Text(cached.isFCAuthDegraded ? "FC auth degraded — needs Screen Time toggle" : "shields down")
                                 .foregroundStyle(.red)
                                 .fontWeight(.semibold)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.7)
                         }
                     }
                     if cached.isInternetBlocked && dominantMode != .lockedDown {
@@ -705,16 +718,27 @@ struct ChildSummaryCard: View {
     private var locationLine: some View {
         if let loc = locationInfo {
             infoRow(icon: "location.fill", color: Self.mutedBlue) {
-                HStack(spacing: 3) {
-                    Text("\(loc.address) \u{00B7} \(formatAge(loc.age))")
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let movement = movementIndicator {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 3) {
+                        Text("\(loc.address) \u{00B7} \(formatAge(loc.age))")
+                            .foregroundStyle(.secondary)
+                            .lineLimit(locationExpanded ? nil : 1)
+                            .truncationMode(.middle)
+                        if !locationExpanded, let movement = movementIndicator {
+                            Image(systemName: movement.icon)
+                                .font(.system(size: 9))
+                                .foregroundStyle(movement.color)
+                        }
+                    }
+                    if locationExpanded, let movement = movementIndicator {
                         Image(systemName: movement.icon)
                             .font(.system(size: 9))
                             .foregroundStyle(movement.color)
                     }
+                }
+                .animation(.easeInOut(duration: 0.2), value: locationExpanded)
+                .onTapGesture {
+                    withAnimation { locationExpanded.toggle() }
                 }
             }
         } else if isLocationExpected {

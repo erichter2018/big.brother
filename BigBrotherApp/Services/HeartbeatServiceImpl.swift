@@ -89,7 +89,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             guard let self else { return }
 
             // Write liveness timestamp for the VPN tunnel to read.
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
 
             // Ping the VPN tunnel (IPC liveness signal).
@@ -99,7 +99,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             // supposedly connected, the tunnel process is suspended. Restart it
             // to restore DNS (all DNS routes through the tunnel).
             let tunnelAge = Date().timeIntervalSince1970
-                - (UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                - (UserDefaults.appGroup?
                     .double(forKey: "tunnelLastActiveAt") ?? 0)
             if tunnelAge > 300, self.vpnManager?.isConnected == true {
                 Task {
@@ -137,7 +137,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     /// Positively acknowledge the current request token to prove liveness.
     /// Returns true only for recent requests (< 5 min) to trigger a forced heartbeat send.
     private func acknowledgeExtensionHeartbeatRequest() -> Bool {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
         guard let requestToken, !requestToken.isEmpty else { return false }
 
@@ -311,9 +311,12 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
         // Persist shield state so the tunnel can check it without ManagedSettings access.
         // Used to decide: if shields are up, don't DNS-block even if app is dead.
+        // Companion timestamp marks freshness so the tunnel can suppress stale
+        // "shields down" reports during mode transitions.
         if let shieldsActive {
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-                .set(shieldsActive, forKey: "shieldsActiveAtLastHeartbeat")
+            let shieldDefaults = UserDefaults.appGroup
+            shieldDefaults?.set(shieldsActive, forKey: "shieldsActiveAtLastHeartbeat")
+            shieldDefaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
         }
 
         // Schedule diagnostic — report what the child's LOCAL schedule says right now.
@@ -343,7 +346,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         }
 
         // Last shield change reason
-        let lastShieldChangeReason = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        let lastShieldChangeReason = UserDefaults.appGroup?
             .string(forKey: "lastShieldChangeReason")
 
         let heartbeat = DeviceHeartbeat(
@@ -352,9 +355,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             currentMode: currentMode,
             policyVersion: policyVersion,
             familyControlsAuthorized: enforcement?.authorizationStatus == .authorized,
-            familyControlsAuthType: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "fr.bigbrother.authorizationType"),
-            childAuthFailReason: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "fr.bigbrother.childAuthFailReason"),
-            permissionDetails: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "permissionSnapshot"),
+            familyControlsAuthType: UserDefaults.appGroup?.string(forKey: "fr.bigbrother.authorizationType"),
+            childAuthFailReason: UserDefaults.appGroup?.string(forKey: "fr.bigbrother.childAuthFailReason"),
+            permissionDetails: UserDefaults.appGroup?.string(forKey: "permissionSnapshot"),
             batteryLevel: Self.batteryLevel,
             isCharging: Self.isCharging,
             appBlockingConfigured: blockingConfig?.isConfigured,
@@ -385,10 +388,10 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             lastCommandProcessedAt: Self.lastCommandProcessedAt(from: storage),
             monitorLastActiveAt: Self.monitorLastActiveAt(),
             vpnDetected: VPNDetector.isVPNActive(),
-            internetBlocked: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            internetBlocked: UserDefaults.appGroup?
                 .bool(forKey: "tunnelInternetBlocked") == true ? true : nil,
             internetBlockedReason: {
-                let r = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                let r = UserDefaults.appGroup?
                     .string(forKey: "tunnelInternetBlockedReason")
                 return (r?.isEmpty == false) ? r : nil
             }(),
@@ -406,7 +409,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             timeZoneIdentifier: TimeZone.current.identifier,
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
-            screenUnlockCount: UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "screenUnlockCount"),
+            screenUnlockCount: UserDefaults.appGroup?.integer(forKey: "screenUnlockCount"),
             jailbreakDetected: JailbreakDetector.isJailbroken(),
             jailbreakReason: JailbreakDetector.detectedReason(),
             isDriving: locationService?.drivingMonitor?.isDriving == true ? true : nil,
@@ -429,18 +432,43 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             locationAccuracy: loc?.horizontalAccuracy,
             locationAuthorization: locationService?.authorizationStatusString,
             monitorBuildNumber: {
-                let b = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "monitorBuildNumber") ?? 0
+                let b = UserDefaults.appGroup?.integer(forKey: "monitorBuildNumber") ?? 0
                 return b > 0 ? b : nil
             }(),
             shieldBuildNumber: {
-                let b = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "shieldBuildNumber") ?? 0
+                let b = UserDefaults.appGroup?.integer(forKey: "shieldBuildNumber") ?? 0
                 return b > 0 ? b : nil
             }(),
             shieldActionBuildNumber: {
-                let b = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.integer(forKey: "shieldActionBuildNumber") ?? 0
+                let b = UserDefaults.appGroup?.integer(forKey: "shieldActionBuildNumber") ?? 0
                 return b > 0 ? b : nil
             }(),
-            diagnosticSnapshot: Self.buildDiagnosticSnapshot(storage: storage, shieldsActive: shieldsActive, currentMode: currentMode, webBlockingActive: webBlockingActive, denyAppRemovalActive: denyAppRemovalActive)
+            fcAuthDegraded: UserDefaults.appGroup?.bool(forKey: "fcAuthDegraded") == true ? true : nil,
+            ghostShieldsDetected: {
+                // Ghost shield = OS shielded an app our policy said should be allowed.
+                // Detected by ShieldConfiguration extension; written to App Group with
+                // a recent timestamp. Auto-expire after 24h so a one-time fluke doesn't
+                // pollute every heartbeat thereafter — but persistent issues keep firing
+                // and stay surfaced.
+                //
+                // b436 (audit fix): Bound age >= 0 to handle clock skew or
+                // corrupt future timestamps. Without this, a future timestamp
+                // would produce negative age which is < 86400 and would keep
+                // the flag true indefinitely.
+                let defaults = UserDefaults.appGroup
+                let lastSeen = defaults?.double(forKey: "ghostShieldsDetectedAt") ?? 0
+                guard lastSeen > 0 else { return nil }
+                let age = Date().timeIntervalSince1970 - lastSeen
+                return (age >= 0 && age < 86400) ? true : nil
+            }(),
+            diagnosticSnapshot: Self.buildDiagnosticSnapshot(
+                storage: storage,
+                enforcement: enforcement,
+                shieldsActive: shieldsActive,
+                currentMode: currentMode,
+                webBlockingActive: webBlockingActive,
+                denyAppRemovalActive: denyAppRemovalActive
+            )
         )
 
         do {
@@ -452,7 +480,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             // Record successful heartbeat timestamp so the Monitor can distinguish
             // between a truly force-closed app and one merely suspended by iOS.
             lastSendAt = Date()
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "lastHeartbeatSentAt")
 
             // Update device record with current OS version + model if changed.
@@ -485,6 +513,13 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     /// Uses ModeStackResolver to compute the correct mode from the stack files,
     /// then applies it if shields don't match. This is idempotent — if the Monitor
     /// already applied the correct state, this is a no-op.
+    ///
+    /// See `AppState.verifyAndFixEnforcement` for the full discussion of the
+    /// THREE overlapping reconcile paths and why they haven't been unified.
+    /// TL;DR: this is the post-heartbeat pass, `verifyAndFixEnforcement` is the
+    /// 60s safety-net timer, and `forceDaemonRescue` is the foreground-wake
+    /// daemon rescue. All three must stay consistent in the policy-construction
+    /// logic; ideally they share a helper eventually.
     private func reconcileEnforcement() {
         guard let enforcement else { return }
         let resolution = ModeStackResolver.resolve(storage: storage)
@@ -502,15 +537,26 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let snapshotStale = snapshotMode != resolution.mode
 
         if shouldBeShielded != isShielded || snapshotStale {
-            // Build a corrected policy with the right mode from ModeStackResolver
+            // Build a corrected policy with the right mode from ModeStackResolver.
+            //
+            // b459: ModeStackResolver.Resolution.isTemporary is true for
+            // BOTH "mode=unlocked via temp unlock" AND "mode=restricted
+            // via lockUntil/timedUnlock penalty". EffectivePolicy.isTemporaryUnlock
+            // must only be true in the first case — it's specifically
+            // "the mode is unlocked because a temp unlock is overriding
+            // the base mode". Copying `resolution.isTemporary` blindly
+            // meant that lockUntil-mode snapshots had `isTemporaryUnlock=true`
+            // while `resolvedMode=.restricted`, and downstream readers
+            // cleared shields on a locked device.
+            let effectivelyTempUnlock = resolution.isTemporary && resolution.mode == .unlocked
             let policyToApply: EffectivePolicy
             if snapshotStale {
                 let existing = snapshot.effectivePolicy
                 let corrected = EffectivePolicy(
                     resolvedMode: resolution.mode,
                     controlAuthority: resolution.controlAuthority,
-                    isTemporaryUnlock: resolution.isTemporary,
-                    temporaryUnlockExpiresAt: resolution.expiresAt,
+                    isTemporaryUnlock: effectivelyTempUnlock,
+                    temporaryUnlockExpiresAt: effectivelyTempUnlock ? resolution.expiresAt : nil,
                     shieldedCategoriesData: existing.shieldedCategoriesData,
                     allowedAppTokensData: existing.allowedAppTokensData,
                     warnings: existing.warnings,
@@ -545,22 +591,69 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     // MARK: - New App Detection
 
     /// Flush pending new-app detections written by the VPN tunnel's DNS proxy.
+    ///
+    /// b461: compare-and-swap the pending list instead of read → process →
+    /// remove. The tunnel (DNSProxy.recordDomain on bgQueue) appends to the
+    /// same UserDefaults key; the old read/remove pattern had a lost-write
+    /// race where the tunnel's append could land after our read but before
+    /// our remove, silently dropping the new app from the pending list.
+    /// We now read-then-overwrite with only the items we actually processed
+    /// removed from the list — entries appended after our read are
+    /// preserved for the next flush.
+    ///
+    /// Additional cross-app-process dedup at the event-log level: only log
+    /// a newAppDetected event if we haven't logged one for this app within
+    /// the last 6 hours. The notification layer also dedups semantically,
+    /// but logging sparingly keeps the activity feed cleaner too.
     private func flushNewAppDetections() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         guard let pending = defaults?.stringArray(forKey: "newAppDetections"),
               !pending.isEmpty else { return }
 
-        // Clear immediately to avoid duplicate processing.
-        defaults?.removeObject(forKey: "newAppDetections")
+        // Snapshot what we're about to process; anything the tunnel
+        // appends after this read stays in the list for the next flush.
+        let processing = pending
+        let uniqueNames = Set(processing).sorted()
 
-        // Deduplicate in case tunnel wrote the same app multiple times.
-        let unique = Set(pending)
-        for appName in unique.sorted() {
+        // Load the per-app flush-dedup map: appName → last-logged-epoch.
+        var logged = (defaults?.dictionary(forKey: "newAppLastLoggedAt") as? [String: Double]) ?? [:]
+        let now = Date().timeIntervalSince1970
+        let logWindow: TimeInterval = 6 * 3600
+        // Expire stale entries.
+        logged = logged.filter { now - $0.value < logWindow }
+
+        var freshlyLogged: [String] = []
+        for appName in uniqueNames {
+            if let last = logged[appName], now - last < logWindow {
+                #if DEBUG
+                print("[BigBrother] Skipping duplicate newAppDetected for \(appName) (last logged \(Int(now - last))s ago)")
+                #endif
+                continue
+            }
+            logged[appName] = now
             eventLogger?.log(.newAppDetected, details: "New app activity: \(appName)")
+            freshlyLogged.append(appName)
+        }
+
+        // Cap map at 500 entries to bound growth.
+        if logged.count > 500 {
+            logged = Dictionary(uniqueKeysWithValues: logged.sorted { $0.value > $1.value }.prefix(500).map { ($0.key, $0.value) })
+        }
+        defaults?.set(logged, forKey: "newAppLastLoggedAt")
+
+        // Compare-and-swap: re-read the pending list (it may have grown
+        // while we were processing) and write back only the entries we
+        // didn't process. Subtractive overwrite preserves late appends.
+        let afterFlush = (defaults?.stringArray(forKey: "newAppDetections") ?? [])
+            .filter { !processing.contains($0) }
+        if afterFlush.isEmpty {
+            defaults?.removeObject(forKey: "newAppDetections")
+        } else {
+            defaults?.set(afterFlush, forKey: "newAppDetections")
         }
 
         #if DEBUG
-        print("[BigBrother] Flushed \(unique.count) new app detections: \(unique.sorted().joined(separator: ", "))")
+        print("[BigBrother] Flushed \(freshlyLogged.count) new app detections (logged: \(freshlyLogged.joined(separator: ", "))), \(uniqueNames.count - freshlyLogged.count) suppressed as duplicates")
         #endif
     }
 
@@ -691,7 +784,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let osVersion = Self.currentOSVersion
         let model = Self.currentModelIdentifier
         let key = "lastReportedDeviceInfo"
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         let lastReported = defaults.string(forKey: key)
         let current = "\(osVersion)|\(model)"
         guard lastReported != current else { return }
@@ -719,12 +812,13 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     /// Machine-parseable on the parent side for rich UI rendering.
     private static func buildDiagnosticSnapshot(
         storage: any SharedStorageProtocol,
+        enforcement: (any EnforcementServiceProtocol)? = nil,
         shieldsActive: Bool?,
         currentMode: LockMode,
         webBlockingActive: Bool? = nil,
         denyAppRemovalActive: Bool? = nil
     ) -> String {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let now = Date()
 
         // Mode stack
@@ -804,6 +898,17 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             )
         }
 
+        // Push delivery diagnostics — critical for debugging slow command delivery.
+        let nowEpoch = Date().timeIntervalSince1970
+        let lastPushAge: Int? = {
+            let ts = defaults?.double(forKey: "lastPushReceivedAt") ?? 0
+            return ts > 0 ? Int(nowEpoch - ts) : nil
+        }()
+        let apnsTokenAge: Int? = {
+            let ts = defaults?.double(forKey: "apnsTokenRegisteredAt") ?? 0
+            return ts > 0 ? Int(nowEpoch - ts) : nil
+        }()
+
         let snapshot = DiagnosticSnapshot(
             mode: resolution.mode.rawValue,
             authority: resolution.controlAuthority.rawValue,
@@ -821,6 +926,8 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             monitorAge: monitorAge,
             tunnelAge: tunnelAge,
             tunnelConnected: defaults?.bool(forKey: "tunnelConnected"),
+            lastPushAge: lastPushAge,
+            apnsTokenAge: apnsTokenAge,
             scheduleName: profile?.name,
             scheduleDriven: scheduleDriven,
             scheduleWindow: scheduleWindow,
@@ -839,7 +946,16 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                 return count > 0 ? count : nil
             }(),
             transitions: recentTransitions,
-            recentLogs: recentLogs
+            recentLogs: recentLogs,
+            applyStartedAt: {
+                let ts = defaults?.double(forKey: "enforcementApplyStartedAt") ?? 0
+                return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+            }(),
+            applyFinishedAt: {
+                let ts = defaults?.double(forKey: "enforcementApplyFinishedAt") ?? 0
+                return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+            }(),
+            tokenVerdicts: enforcement?.computeTokenVerdicts(for: resolution.mode) ?? []
         )
 
         // JSON-encode — compact, no pretty print (saves ~30% space)
@@ -883,13 +999,13 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     }
 
     private static func lastCommandProcessedAt(from storage: any SharedStorageProtocol) -> Date? {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
         return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
     }
 
     private static func monitorLastActiveAt() -> Date? {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         let timestamp = defaults.double(forKey: "monitorLastActiveAt")
         return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
     }
@@ -915,7 +1031,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         // Flush any in-progress unlock session so the count is current.
         DeviceLockMonitor.shared.flushCurrentSession()
 
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         let dateKey = "screenTimeDate"
         let minutesKey = "screenTimeMinutes"
 

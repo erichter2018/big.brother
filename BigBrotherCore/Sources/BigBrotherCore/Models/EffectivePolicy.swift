@@ -19,7 +19,26 @@ public struct EffectivePolicy: Codable, Sendable, Equatable {
         controlAuthority ?? .schedule
     }
 
-    /// Whether this effective state is from a temporary unlock.
+    /// Whether this snapshot represents a temporary override that drops
+    /// shields to `.unlocked`. True ONLY when the resolver returned
+    /// `.unlocked` via a TemporaryUnlockState or the free phase of a
+    /// TimedUnlockInfo — i.e., the kid has free use of the device right
+    /// now, with a scheduled revert.
+    ///
+    /// ## NOT to be confused with `ModeStackResolver.Resolution.isTemporary`
+    ///
+    /// The resolver's `isTemporary` is true for ANY temporary resolution,
+    /// including the timed-unlock PENALTY phase (mode = restricted) and
+    /// the lockUntil window (mode = restricted). Those are still
+    /// "temporary" in the resolver sense but they are NOT temporary
+    /// unlocks — the device stays shielded.
+    ///
+    /// Copying `Resolution.isTemporary` directly into this field is the
+    /// bug that caused the b460 shield-drop incident: the enforcement
+    /// apply path saw `isTemporaryUnlock == true` on a restricted snapshot
+    /// and took an early-out that cleared shields, even though the kid
+    /// was supposed to be locked. Writers MUST check
+    /// `resolution.mode == .unlocked` before setting this to true.
     public let isTemporaryUnlock: Bool
 
     /// When the temporary unlock expires (nil if not a temp unlock).

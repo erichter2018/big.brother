@@ -651,6 +651,7 @@ struct RemoteDiagnosticsView: View {
         if let dns = s.dnsBlockedDomains, dns > 0 { lines.append("DNS Blocked: \(dns) domains") }
         lines.append("Builds: app=b\(s.builds.app) tunnel=b\(s.builds.tunnel) monitor=b\(s.builds.monitor) shield=b\(s.builds.shield) action=b\(s.builds.shieldAction)")
         lines.append("Monitor: \(s.monitorAge.map { "\($0)s ago" } ?? "?"), Tunnel: \(s.tunnelAge.map { "\($0)s ago" } ?? "?")")
+        lines.append("LastPush: \(s.lastPushAge.map { "\($0)s ago" } ?? "NEVER"), APNs: \(s.apnsTokenAge.map { "\($0)s ago" } ?? "NEVER")")
 
         if !s.transitions.isEmpty {
             lines.append("\n--- TRANSITIONS ---")

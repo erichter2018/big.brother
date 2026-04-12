@@ -49,8 +49,20 @@ public struct TemporaryUnlockState: Codable, Sendable, Equatable {
     public var isActive: Bool { !isExpired }
 
     /// Check expiry at a specific time (for testing / clock-edge handling).
+    /// Also validates monotonic uptime to detect clock manipulation: if the
+    /// wall clock says "not expired" but system uptime shows 1.5x the unlock
+    /// duration has elapsed, treat as expired (clock was set backward).
     public func isExpired(at time: Date) -> Bool {
-        time >= expiresAt
+        if time >= expiresAt { return true }
+        // Uptime-based cross-check for clock manipulation
+        if let uptimeAtStart {
+            let durationSeconds = expiresAt.timeIntervalSince(startedAt)
+            let uptimeElapsed = ProcessInfo.processInfo.systemUptime - uptimeAtStart
+            if uptimeElapsed > durationSeconds * 1.5 {
+                return true
+            }
+        }
+        return false
     }
 
     /// Duration remaining from a given time, clamped to zero.

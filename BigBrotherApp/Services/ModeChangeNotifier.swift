@@ -12,6 +12,9 @@ enum ModeChangeNotifier {
 
     /// Request notification permissions (called once during child setup).
     static func requestPermission() {
+        // Suppress during onboarding — PermissionFixerView walks through notifications.
+        let defaults = UserDefaults.appGroup
+        if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true { return }
         UNUserNotificationCenter.current().requestAuthorization(
             options: [.alert, .sound, .badge]
         ) { _, _ in }

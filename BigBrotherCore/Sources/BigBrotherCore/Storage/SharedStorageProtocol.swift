@@ -230,8 +230,18 @@ public protocol SharedStorageProtocol: Sendable {
     /// Written by ShieldAction, read by the main app to auto-show the picker.
     func readUnlockPickerPendingDate() -> Date?
 
+    /// Read the full pending state (timestamp + optional app name/bundle).
+    /// The optional name comes from ShieldConfiguration's Darwin notification
+    /// bridge, hinting which app the kid was trying to open.
+    func readUnlockPickerPending() -> UnlockPickerPending?
+
     /// Signal that the child tapped "Ask for More Time" on a shield.
     func writeUnlockPickerPending() throws
+
+    /// Signal that the child tapped "Ask for access" with a known app name.
+    /// Used by ShieldAction when iOS provided no token but a name was
+    /// resolved via the Darwin notification bridge.
+    func writeUnlockPickerPending(appName: String?, bundleID: String?) throws
 
     /// Clear the pending flag after the picker has been shown.
     func clearUnlockPickerPending() throws
@@ -335,6 +345,28 @@ extension SharedStorageProtocol {
         try SnapshotFileLock.withLock {
             let current = readPolicySnapshot()
 
+            // b462: record a SnapshotTransition entry on every corrected
+            // commit. Previously `commitCorrectedSnapshot` bypassed the
+            // history log — which meant the tunnel's dead-app CK command
+            // path, Monitor's writeCorrectedSnapshot, HeartbeatService's
+            // reconcile, and AppLaunchRestorer could all flip the
+            // snapshot's resolvedMode (including to .lockedDown) without
+            // leaving any breadcrumb. A parent debugging "my kid lost
+            // internet and I don't know why" would see a transition log
+            // that stopped hours before the actual bad commit. Writing a
+            // transition here closes that visibility gap — no matter which
+            // process wrote the snapshot, there's a row in history.
+            if let current {
+                let transition = SnapshotTransition.between(from: current, to: snapshot)
+                var history = readSnapshotHistory()
+                history.append(transition)
+                if history.count > AppConstants.snapshotHistoryMaxEntries {
+                    let overflow = history.count - AppConstants.snapshotHistoryMaxEntries
+                    history.removeFirst(overflow)
+                }
+                try? writeSnapshotHistory(history)
+            }
+
             // Ensure generation is higher than current to prevent staleness rejection.
             let nextGen: Int64
             if let current, snapshot.generation <= current.generation {
@@ -384,7 +416,7 @@ extension SharedStorageProtocol {
             try writePolicySnapshot(snap)
 
             // Derive scheduleDrivenMode from the snapshot's control authority.
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(snap.effectivePolicy.effectiveAuthority == .schedule, forKey: "scheduleDrivenMode")
 
             // Update extension shared state so all processes see the change.

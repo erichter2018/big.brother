@@ -23,7 +23,7 @@ final class DeviceLockMonitor {
         guard observers.isEmpty else { return }
 
         // Protected data becomes unavailable when device is locked (with passcode).
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
 
         let willResign = NotificationCenter.default.addObserver(
             forName: UIApplication.protectedDataWillBecomeUnavailableNotification,

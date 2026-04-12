@@ -1,7 +1,7 @@
 name: BigBrother
 settings:
   base:
-    CURRENT_PROJECT_VERSION: "385"
+    CURRENT_PROJECT_VERSION: "386"
     MARKETING_VERSION: "1.0.0"
 options:
   bundleIdPrefix: fr.bigbrother
@@ -89,6 +89,7 @@ targets:
         PRODUCT_NAME: BigBrother
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Y2G5FUN342
     info:
       path: BigBrotherApp/Info.plist
       properties:
@@ -170,6 +171,7 @@ targets:
         PRODUCT_NAME: BigBrotherMonitor
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Y2G5FUN342
         ENABLE_DEBUG_DYLIB: NO
         MERGED_BINARY_TYPE: none
     info:
@@ -217,6 +219,7 @@ targets:
         PRODUCT_NAME: BigBrotherShield
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Y2G5FUN342
         ENABLE_DEBUG_DYLIB: NO
         MERGED_BINARY_TYPE: none
     info:
@@ -264,6 +267,7 @@ targets:
         PRODUCT_NAME: BigBrotherActivityReport
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Y2G5FUN342
         ENABLE_DEBUG_DYLIB: NO
         MERGED_BINARY_TYPE: none
     info:
@@ -311,6 +315,7 @@ targets:
         PRODUCT_NAME: BigBrotherWidget
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Y2G5FUN342
         ENABLE_DEBUG_DYLIB: NO
         MERGED_BINARY_TYPE: none
     info:
@@ -353,6 +358,7 @@ targets:
         PRODUCT_NAME: BigBrotherShieldAction
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Y2G5FUN342
         ENABLE_DEBUG_DYLIB: NO
         MERGED_BINARY_TYPE: none
     info:
@@ -400,6 +406,7 @@ targets:
         PRODUCT_NAME: BigBrotherTunnel
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Y2G5FUN342
         ENABLE_DEBUG_DYLIB: NO
         MERGED_BINARY_TYPE: none
     info:

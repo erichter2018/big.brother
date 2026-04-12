@@ -81,7 +81,7 @@ public final class PolicySnapshotStore: @unchecked Sendable {
 
             // Derive scheduleDrivenMode from the snapshot's control authority.
             // This keeps the UserDefaults flag consistent without producers writing it directly.
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(snapshot.effectivePolicy.effectiveAuthority == .schedule, forKey: "scheduleDrivenMode")
 
             // Record transition
@@ -155,11 +155,20 @@ public final class PolicySnapshotStore: @unchecked Sendable {
 
     /// Sources that should always produce a commit even if fingerprint matches.
     /// These represent important lifecycle events worth recording.
+    ///
+    /// `.commandApplied` is included so that a parent-issued setMode that
+    /// resolves to the current mode (e.g., locked → locked because the kid is
+    /// already locked, or restricted → locked because of force-mode override)
+    /// still triggers `enforcement.apply` and a Monitor refresh. Without this,
+    /// repeat parent commands silently no-op even when the actual shield state
+    /// has drifted from the snapshot — so the user sends "lock" and nothing
+    /// happens because the snapshot already said "locked".
     private static let alwaysCommitSources: Set<SnapshotSource> = [
         .restoration,
         .authorizationChange,
         .failSafe,
         .temporaryUnlockExpired,
+        .commandApplied,
     ]
 
     private func appendTransition(_ transition: SnapshotTransition) throws {

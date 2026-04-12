@@ -4,6 +4,12 @@ import BigBrotherCore
 /// Parent dashboard — overview of all children with inline controls.
 struct ParentDashboardView: View {
     @Bindable var viewModel: ParentDashboardViewModel
+    /// b462: "Pause All" is destructive — it sends setMode(.lockedDown) to
+    /// every child device, which activates the tunnel's DNS blackhole and
+    /// knocks the kids offline. Parent reported accidentally hitting it
+    /// and losing internet for a kid. A `.confirmationDialog` forces a
+    /// deliberate tap before the command fires.
+    @State private var showPauseConfirmation: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -118,12 +124,15 @@ struct ParentDashboardView: View {
             if viewModel.familyPauseEnabled {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        Task {
-                            if viewModel.isFamilyPaused {
-                                await viewModel.unpauseAll()
-                            } else {
-                                await viewModel.pauseAll()
-                            }
+                        if viewModel.isFamilyPaused {
+                            // Unpausing just releases the family lockdown —
+                            // no confirmation needed, it's a relief action.
+                            Task { await viewModel.unpauseAll() }
+                        } else {
+                            // Pausing puts every kid into lockedDown mode,
+                            // which activates the DNS blackhole and cuts
+                            // all their internet. Confirm before firing.
+                            showPauseConfirmation = true
                         }
                     } label: {
                         Text(viewModel.isFamilyPaused ? "Unpause" : "Pause All")
@@ -150,6 +159,18 @@ struct ParentDashboardView: View {
                 viewModel: viewModel.appState.childDetailViewModel(forID: nav.child.id),
                 dominantMode: nav.mode
             )
+        }
+        .confirmationDialog(
+            "Pause All and lock down every child device?",
+            isPresented: $showPauseConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Pause All (1 hour)", role: .destructive) {
+                Task { await viewModel.pauseAll() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This immediately locks every child's device and cuts their internet for 1 hour. Use Unpause to release early.")
         }
         .refreshable {
             await viewModel.loadDashboard()

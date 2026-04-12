@@ -176,6 +176,17 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     public let shieldBuildNumber: Int?
     public let shieldActionBuildNumber: Int?
 
+    /// Whether FamilyControls auth is degraded — authorizationStatus says .approved
+    /// but ManagedSettingsStore writes silently fail. Requires Settings > Screen Time toggle.
+    public let fcAuthDegraded: Bool?
+
+    /// Whether ghost shields were detected — the OS rendered a shield for an app
+    /// our policy says should NOT be shielded. Strong evidence of an external
+    /// writer (Apple iCloud Screen Time sync from Family Sharing parent device,
+    /// or stale local Screen Time settings). b431+. Detected by the
+    /// ShieldConfiguration extension.
+    public let ghostShieldsDetected: Bool?
+
     /// Compact diagnostic snapshot — key enforcement state and recent logs.
     /// Updated on every heartbeat. Parent can read this instantly without
     /// requesting a full diagnostic report via command.
@@ -251,6 +262,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         monitorBuildNumber: Int? = nil,
         shieldBuildNumber: Int? = nil,
         shieldActionBuildNumber: Int? = nil,
+        fcAuthDegraded: Bool? = nil,
+        ghostShieldsDetected: Bool? = nil,
         diagnosticSnapshot: String? = nil
     ) {
         self.deviceID = deviceID
@@ -322,6 +335,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.monitorBuildNumber = monitorBuildNumber
         self.shieldBuildNumber = shieldBuildNumber
         self.shieldActionBuildNumber = shieldActionBuildNumber
+        self.fcAuthDegraded = fcAuthDegraded
+        self.ghostShieldsDetected = ghostShieldsDetected
         self.diagnosticSnapshot = diagnosticSnapshot
     }
 
@@ -363,6 +378,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case latitude, longitude, locationTimestamp, locationAddress, locationAccuracy
         case locationAuthorization
         case monitorBuildNumber, shieldBuildNumber, shieldActionBuildNumber
+        case fcAuthDegraded
+        case ghostShieldsDetected
         case diagnosticSnapshot
     }
 
@@ -437,6 +454,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         monitorBuildNumber = try container.decodeIfPresent(Int.self, forKey: .monitorBuildNumber)
         shieldBuildNumber = try container.decodeIfPresent(Int.self, forKey: .shieldBuildNumber)
         shieldActionBuildNumber = try container.decodeIfPresent(Int.self, forKey: .shieldActionBuildNumber)
+        fcAuthDegraded = try container.decodeIfPresent(Bool.self, forKey: .fcAuthDegraded)
+        ghostShieldsDetected = try container.decodeIfPresent(Bool.self, forKey: .ghostShieldsDetected)
         diagnosticSnapshot = try container.decodeIfPresent(String.self, forKey: .diagnosticSnapshot)
     }
 }

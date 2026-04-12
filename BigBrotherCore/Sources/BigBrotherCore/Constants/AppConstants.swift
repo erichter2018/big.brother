@@ -38,7 +38,7 @@ public enum AppConstants {
 
     /// Manual build number — bump each time you deploy new code during development.
     /// Both parent and child read this constant; matching numbers = same code.
-    public static let appBuildNumber = 385
+    public static let appBuildNumber = 468
 
     // MARK: - Enrollment
 
@@ -58,13 +58,13 @@ public enum AppConstants {
 
     // MARK: - Force-Close Detection
 
-    /// Heartbeat age threshold for force-close when device is locked (20 min).
+    /// Heartbeat age threshold for force-close when device is locked (10 min).
     /// Shorter than unlocked because a locked device has no reason to suspend the app.
-    public static let forceCloseThresholdLocked: TimeInterval = 1200
+    public static let forceCloseThresholdLocked: TimeInterval = 600
 
-    /// Heartbeat age threshold for force-close when device is unlocked (45 min).
-    /// Longer to avoid false positives from resource-intensive games suspending the app.
-    public static let forceCloseThresholdUnlocked: TimeInterval = 2700
+    /// Heartbeat age threshold for force-close when device is unlocked (20 min).
+    /// Balances detection speed against false positives from games suspending the app.
+    public static let forceCloseThresholdUnlocked: TimeInterval = 1200
 
     /// How old the extensionHeartbeatRequestedAt flag must be to confirm
     /// the main app never cleared it (reconciliation interval + buffer).
@@ -97,16 +97,12 @@ public enum AppConstants {
     /// be overridden by another. A single store eliminates this.
     public static let managedSettingsStoreEnforcement = "enforcement"
 
-    /// Legacy store names to clear during migration. Remove after all devices update.
+    /// Legacy store names to clear during migration. Still referenced by the
+    /// monitor and enforcement service migration paths so devices that
+    /// upgrade from an older build have their old stores cleared on first
+    /// launch. Safe to remove once every device in the fleet has been
+    /// through the single-store migration at least once.
     public static let legacyStoreNames = ["base", "schedule", "tempUnlock"]
-
-    // Deprecated — kept for migration only
-    @available(*, deprecated, message: "Use managedSettingsStoreEnforcement")
-    public static let managedSettingsStoreBase = "base"
-    @available(*, deprecated, message: "Use managedSettingsStoreEnforcement")
-    public static let managedSettingsStoreSchedule = "schedule"
-    @available(*, deprecated, message: "Use managedSettingsStoreEnforcement")
-    public static let managedSettingsStoreTempUnlock = "tempUnlock"
 
     // MARK: - Heartbeat Retry
 

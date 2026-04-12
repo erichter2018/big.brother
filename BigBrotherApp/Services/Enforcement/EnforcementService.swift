@@ -40,9 +40,25 @@ protocol EnforcementServiceProtocol {
     /// Read current shield state from ManagedSettingsStore for diagnostic reporting.
     func shieldDiagnostic() -> ShieldDiagnostic
 
+    /// Compute per-token shield verdicts (union of picker + always-allowed +
+    /// exhausted time-limit tokens, each stamped with the expected block
+    /// verdict for `mode`). Used by the heartbeat diagnostic snapshot and by
+    /// the automated test harness to assert that mode transitions produce
+    /// the correct per-app behavior.
+    func computeTokenVerdicts(for mode: LockMode) -> [DiagnosticSnapshot.TokenVerdict]
+
     /// Reset the nuclear enforcement throttle. Call on each fresh app launch
     /// so deploy-driven restarts get a clean slate of reset attempts.
     func resetThrottle()
+
+    /// Force the daemon rescue sequence unconditionally. Called on every
+    /// foreground sync so opening BB always attempts to un-wedge a stuck
+    /// ManagedSettings daemon. Idempotent: if the daemon is healthy this is
+    /// a few extra no-op writes. If it's wedged, the 4-step rescue ladder
+    /// (DeviceActivity kick, state-machine flush, clearAllSettings, auth
+    /// re-request) tries to kick it free without requiring any user action
+    /// beyond opening the app.
+    func forceDaemonRescue()
 }
 
 /// Snapshot of the current ManagedSettingsStore shield state for heartbeat diagnostics.

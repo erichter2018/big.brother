@@ -5,9 +5,33 @@ import BigBrotherCore
 
 /// Concrete wrapper around FamilyControls.AuthorizationCenter.
 ///
-/// Tries `.child` authorization first (requires Family Sharing child account).
-/// Falls back to `.individual` if `.child` fails. Persists which type was
-/// granted so the app knows whether system restrictions are enforceable.
+/// **Only `.individual` auth.** No fallback to `.child`. (b432.)
+///
+/// **Why `.individual` exclusively:**
+/// On `.child` auth, the device's ManagedSettingsStore is co-written by Apple's
+/// iCloud Screen Time sync from the Family Sharing parent's device. "Most
+/// restrictive wins" means our `clearAllSettings()` cannot remove shields the
+/// iCloud sync added. This caused a full week of daemon-corruption symptoms
+/// (b330–b430 chasing this). `.individual` auth is exclusive to this app per
+/// device, immune to Family Sharing Screen Time sync, and was introduced in
+/// iOS 16 specifically for "any device, including self-managed."
+///
+/// **No fallback to `.child`** because falling back puts us right back in the
+/// broken state we're trying to escape. If `.individual` fails (which research
+/// shows has no confirmed real-device cases on iOS 17+), we fail LOUDLY so the
+/// parent investigates immediately rather than silently degrading enforcement.
+/// The kid has no FC auth in that case, the parent dashboard surfaces "FC not
+/// authorized," and a reinstall is the documented recovery path.
+///
+/// **Tamper protection:** Screen Time passcode (set per-child) blocks the kid
+/// from getting into Settings > Screen Time > Apps With Screen Time Access at
+/// all, so the loss of `.child`'s implicit revoke protection doesn't matter
+/// in practice. App removal protection is still applied via `denyAppRemoval`
+/// from the default ManagedSettingsStore in EnforcementServiceImpl.
+///
+/// Persists which type was granted so the heartbeat reports authMode and the
+/// parent dashboard can show a "needs migration" banner if a child device is
+/// still on legacy `.child` auth from a pre-b431 install.
 final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked Sendable {
 
     private var changeHandler: (@Sendable (FCAuthorizationStatus) -> Void)?
@@ -36,51 +60,111 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
     }
 
     var isChildAuthorization: Bool {
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)!.string(forKey: Self.authTypeKey) == "child"
+        UserDefaults.appGroup!.string(forKey: Self.authTypeKey) == "child"
     }
 
     func requestAuthorization() async throws {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)!
+        let defaults = UserDefaults.appGroup!
 
-        // Try .child first (stronger — parent must authenticate, child can't revoke).
-        do {
-            try await AuthorizationCenter.shared.requestAuthorization(for: .child)
-            defaults.set("child", forKey: Self.authTypeKey)
-            UserDefaults.standard.set("child", forKey: Self.authTypeKey)
-            defaults.removeObject(forKey: Self.authFailReasonKey)
-            return
-        } catch {
-            // Map the error to a human-readable reason
-            let reason: String
-            let errorDesc = "\(error)"
-            if errorDesc.contains("restricted") {
-                reason = "Device restriction blocks Family auth (likely MDM profile e.g. OurPact)"
-            } else if errorDesc.contains("authorizationConflict") || errorDesc.contains("conflict") {
-                reason = "Another parental control app holds Family auth"
-            } else if errorDesc.contains("invalidAccountType") || errorDesc.contains("invalid") {
-                reason = "Device not signed into a child/teen Apple ID in Family Sharing"
-            } else if errorDesc.contains("authorizationCanceled") || errorDesc.contains("cancel") {
-                reason = "Parent canceled the authorization prompt"
-            } else if errorDesc.contains("network") {
-                reason = "Network error during Family auth — will retry next launch"
+        // b431: Critical guard. AuthorizationCenter.requestAuthorization() is
+        // a no-op on an already-approved device — it returns immediately
+        // without doing anything. If we BLINDLY called requestAuthorization(.individual)
+        // on a device that was previously approved as .child, the call would
+        // succeed and our code would mistakenly persist "individual" even though
+        // the underlying auth is still .child.
+        //
+        // To actually flip from .child → .individual, the FC auth needs to be
+        // revoked first (either by parent toggling Family Sharing > Screen Time
+        // > Apps With Screen Time Access > BB OFF, or by reinstalling the app).
+        // Then this method runs again with status == .notDetermined and the
+        // new flow can take effect.
+        let currentStatus = AuthorizationCenter.shared.authorizationStatus
+        let existingAuthType = defaults.string(forKey: Self.authTypeKey)
+        if currentStatus == .approved {
+            if let existingAuthType {
+                // Already approved with a known type — no-op. Don't lie about it.
+                try? storage?.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .auth,
+                    message: "requestAuthorization no-op (already approved as \(existingAuthType))",
+                    details: "In-place upgrade not possible — auth type can only change via revoke + re-auth (toggle Family Sharing FC off, or reinstall app)."
+                ))
+                return
             } else {
-                reason = "Family auth failed: \(error.localizedDescription)"
+                // Already approved but type is unknown (e.g., user granted via
+                // Settings without going through our prompt, or UserDefaults
+                // got cleared). We have no way to introspect the actual type
+                // through Apple's API — assume the legacy default (.child)
+                // and mark for migration to surface in the parent dashboard.
+                defaults.set("child", forKey: Self.authTypeKey)
+                UserDefaults.standard.set("child", forKey: Self.authTypeKey)
+                defaults.set(true, forKey: "fr.bigbrother.childAuthNeedsMigration")
+                defaults.set(Date().timeIntervalSince1970, forKey: "fr.bigbrother.childAuthNeedsMigrationAt")
+                try? storage?.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .auth,
+                    message: "Auth already approved with unknown type — defaulting to .child + marking for migration",
+                    details: "Reinstall to migrate to .individual."
+                ))
+                return
             }
-            defaults.set(reason, forKey: Self.authFailReasonKey)
-
-            try? storage?.appendDiagnosticEntry(DiagnosticEntry(
-                category: .auth,
-                message: "Child auth failed, falling back to Individual",
-                details: reason
-            ))
         }
 
-        // Fall back to .individual (self-regulation — user can revoke).
-        try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
-        // Store "individual" as the type. The fail reason is stored separately
-        // so the heartbeat authType stays clean for comparison.
-        defaults.set("individual", forKey: Self.authTypeKey)
-        UserDefaults.standard.set("individual", forKey: Self.authTypeKey)
+        // b432: ONLY .individual auth. No fallback to .child. See class doc.
+        // The .child path was the entire root cause of the b330-b430 corruption
+        // saga; falling back to it on `.individual` failure would silently put
+        // us back in the broken state. Better to fail loudly and force the
+        // parent to investigate (reinstall, check iCloud, etc.) than to
+        // silently degrade.
+        //
+        // b465 timing: this call is the source of the "huge delay during
+        // family permission" that the user reported. It can take 5-10s on
+        // real devices because Apple's daemon does Family Sharing / iCloud
+        // negotiation behind the scenes — unavoidable on our side. We log
+        // the wall-clock duration so future debug sessions can tell
+        // instantly whether the delay is inside Apple's call or our code.
+        let authStartedAt = Date()
+        NSLog("[BigBrother] requestAuthorization(.individual) START")
+        do {
+            try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
+            let elapsed = Date().timeIntervalSince(authStartedAt)
+            NSLog("[BigBrother] requestAuthorization(.individual) SUCCESS in \(String(format: "%.2f", elapsed))s")
+            defaults.set("individual", forKey: Self.authTypeKey)
+            UserDefaults.standard.set("individual", forKey: Self.authTypeKey)
+            defaults.removeObject(forKey: Self.authFailReasonKey)
+            // Clear any legacy migration flag from a pre-b431 install.
+            defaults.removeObject(forKey: "fr.bigbrother.childAuthNeedsMigration")
+            try? storage?.appendDiagnosticEntry(DiagnosticEntry(
+                category: .auth,
+                message: "Authorized as .individual in \(String(format: "%.2f", elapsed))s"
+            ))
+            return
+        } catch {
+            let elapsed = Date().timeIntervalSince(authStartedAt)
+            NSLog("[BigBrother] requestAuthorization(.individual) FAILED in \(String(format: "%.2f", elapsed))s: \(error.localizedDescription)")
+            // Map the error to a human-readable reason and surface it loudly.
+            // No fallback — this is a terminal failure. Parent must investigate.
+            let reason: String
+            let errorDesc = "\(error)"
+            if errorDesc.contains("invalidAccountType") || errorDesc.contains("invalid") {
+                reason = ".individual auth rejected by Apple (invalidAccountType). Investigate device iCloud state — reinstall or sign out/in."
+            } else if errorDesc.contains("authorizationCanceled") || errorDesc.contains("cancel") {
+                reason = "User canceled the .individual auth prompt. Open Big Brother again and approve."
+            } else if errorDesc.contains("restricted") {
+                reason = "Device restriction blocks .individual auth (likely MDM profile e.g. OurPact). Remove the profile and retry."
+            } else if errorDesc.contains("authorizationConflict") || errorDesc.contains("conflict") {
+                reason = "Another parental control app holds Family Controls auth. Uninstall the other app and retry."
+            } else if errorDesc.contains("network") {
+                reason = "Network error during .individual auth — will retry next launch."
+            } else {
+                reason = ".individual auth failed: \(error.localizedDescription)"
+            }
+            defaults.set(reason, forKey: Self.authFailReasonKey)
+            try? storage?.appendDiagnosticEntry(DiagnosticEntry(
+                category: .auth,
+                message: ".individual auth FAILED — no fallback, surfacing error",
+                details: reason
+            ))
+            throw error
+        }
     }
 
     func observeAuthorizationChanges(handler: @escaping @Sendable (FCAuthorizationStatus) -> Void) {
@@ -120,12 +204,17 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
             ))
 
             // Clear persisted auth type on genuine revocation so PermissionFixerView re-appears.
+            // b432: Must clear BOTH App Group and standard defaults — success
+            // paths write to both, so revoke must clear both. Otherwise the
+            // heartbeat (which reads UserDefaults.standard for isChildAuthorization)
+            // would keep reporting stale auth state for revoked devices.
             if authState == .denied {
-                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                UserDefaults.appGroup?
                     .removeObject(forKey: Self.authTypeKey)
+                UserDefaults.standard.removeObject(forKey: Self.authTypeKey)
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .auth,
-                    message: "FamilyControls authorization revoked — cleared persisted auth type"
+                    message: "FamilyControls authorization revoked — cleared persisted auth type (both stores)"
                 ))
             }
         }

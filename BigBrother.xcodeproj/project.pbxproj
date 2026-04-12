@@ -32,6 +32,7 @@
 		1A842D8C523CC78746CB9163 /* ParentAppNameMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BB7CF9073113D2C6EAD80E0 /* ParentAppNameMapping.swift */; };
 		1B1350B1188BD7AE8E142FB9 /* ScheduleOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A2B8283DF2B8F94B78B92F0 /* ScheduleOverviewView.swift */; };
 		1BAE60F19C6DC8BA80494E88 /* InsightsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93AB64D843657348AB731417 /* InsightsViewModel.swift */; };
+		1BE2F05891CDB5384CD712EF /* TestCommandReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02A2109AB6DE6F9248CA268B /* TestCommandReceiver.swift */; };
 		1BFBA110D23F08C3CADE0D16 /* ChildSingleAppPickSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2FC549E1F2A94442E2ADC0D /* ChildSingleAppPickSheet.swift */; };
 		1E0C0735CE0D055F49F92255 /* ManagedSettingsUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B8CE6210160D58C87F2CF988 /* ManagedSettingsUI.framework */; };
 		1E430872292AB065D4B6437B /* GlobalActionsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8409B59F82A2B2B02AED7631 /* GlobalActionsBar.swift */; };
@@ -43,6 +44,7 @@
 		2FAFBBB2E116F22FE3F34104 /* ScheduleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7425110E1AD24BCA7B6F62EE /* ScheduleManager.swift */; };
 		3052250EB127B85C0D3C219F /* HeartbeatProfileListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBE922CC1D119DC068B1B419 /* HeartbeatProfileListView.swift */; };
 		30858EE4CAFAC79BC85802B0 /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B33EA033B68C98649EBD6B4A /* DeviceActivity.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
+		317A71F4FFC231A9A45AD899 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF892F04356348343A6B65A4 /* WelcomeView.swift */; };
 		3308E59F7ACCD0BF5DFE020D /* DashboardLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34AEB9F51C295BF26A840E71 /* DashboardLayoutView.swift */; };
 		3393DC2D1111357C5DD347C5 /* DeviceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1DCDFE461F1C12A6D7B6DA0 /* DeviceMonitor.swift */; };
 		368FBAE7D4A201A2A4B789D7 /* ParentInviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF44812A1D9A0E3823406A7 /* ParentInviteView.swift */; };
@@ -201,6 +203,7 @@
 		FBB0ED519F73C07712C23DA4 /* BigBrotherApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3540B7DED0E46E1B9F57BD1 /* BigBrotherApp.swift */; };
 		FC956FC098D715B5EB59C6C9 /* EventTypeFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDA5283613E22E91A0CDF040 /* EventTypeFormatting.swift */; };
 		FCD95A39A429392AD275D90A /* ManagedSettings.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2F2C1FAF31FCCB98CFE58693 /* ManagedSettings.framework */; };
+		FE23146921F4339D975312F1 /* TunnelTestCommandReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED646A413500C5008EF33AF7 /* TunnelTestCommandReceiver.swift */; };
 		FFB776BB4C79FD9193DD222E /* NameMyAppsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7D78A40DA38C5873164B394 /* NameMyAppsView.swift */; };
 /* End PBXBuildFile section */
 
@@ -272,6 +275,7 @@
 		015EB5816D3D8D3395FF5305 /* ChildHomeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildHomeViewModel.swift; sourceTree = "<group>"; };
 		01C9F1411AF6064C30795A65 /* ScheduleTemplateListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleTemplateListView.swift; sourceTree = "<group>"; };
 		01DD1591B2240F1031E098A7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		02A2109AB6DE6F9248CA268B /* TestCommandReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestCommandReceiver.swift; sourceTree = "<group>"; };
 		046007F86CF46F5120A2EBCA /* PermissionsStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsStatusView.swift; sourceTree = "<group>"; };
 		04D234EF261F5F38369916E5 /* ChildSummaryCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildSummaryCard.swift; sourceTree = "<group>"; };
 		06E52FE51A69F22E4558B401 /* CommandProcessorImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandProcessorImpl.swift; sourceTree = "<group>"; };
@@ -440,6 +444,7 @@
 		EBE922CC1D119DC068B1B419 /* HeartbeatProfileListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeartbeatProfileListView.swift; sourceTree = "<group>"; };
 		ECC8AE34732E820D470DACBD /* ChildHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildHomeView.swift; sourceTree = "<group>"; };
 		ED0B79790676DE3996AF9691 /* ParentJoinView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentJoinView.swift; sourceTree = "<group>"; };
+		ED646A413500C5008EF33AF7 /* TunnelTestCommandReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelTestCommandReceiver.swift; sourceTree = "<group>"; };
 		EDA5283613E22E91A0CDF040 /* EventTypeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventTypeFormatting.swift; sourceTree = "<group>"; };
 		EF81945A93EAFCF8EE68AB47 /* EnrollmentCodeEntryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentCodeEntryView.swift; sourceTree = "<group>"; };
 		EF9656E40CEB33E61E39D9E3 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
@@ -453,6 +458,7 @@
 		FA178EAE5D1AD471940B5939 /* BigBrother.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BigBrother.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FBA4F5F43FA9EC59E65C9E79 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		FE86A1FEE3AF5EEAB849EF81 /* BigBrotherMonitor.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = BigBrotherMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		FF892F04356348343A6B65A4 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -603,6 +609,7 @@
 				3CEA41AEE818CDD3D848EC8A /* ScheduleRegistrar.swift */,
 				3BFFB0B7B48655244C0CA396 /* SpeedLimitService.swift */,
 				5A0BC10A81629745D210A6A0 /* SubscriptionManager.swift */,
+				02A2109AB6DE6F9248CA268B /* TestCommandReceiver.swift */,
 				8B0DBC61635D3A9E9DF2BC8D /* UnlockRequestNotificationService.swift */,
 				8D3FD2FDC0A9345100187E61 /* VPNManagerService.swift */,
 				D4410A3A4DE9602C784ED43B /* WeeklyDigestService.swift */,
@@ -775,6 +782,7 @@
 				DE5B1871C1F66FEF4A3237B5 /* ShieldApplicationsTestView.swift */,
 				BE7E38E7A8B13E8F0C24E7B3 /* TimeLimitSetupView.swift */,
 				80835F4F3592BD8FA99A77D4 /* UnlockRequestPickerView.swift */,
+				FF892F04356348343A6B65A4 /* WelcomeView.swift */,
 			);
 			path = Child;
 			sourceTree = "<group>";
@@ -911,6 +919,7 @@
 				1D41227A54F0B86A1736CFC5 /* DNSProxy.swift */,
 				01DD1591B2240F1031E098A7 /* Info.plist */,
 				545535D1C70ABF0A003B9E5B /* PacketTunnelProvider.swift */,
+				ED646A413500C5008EF33AF7 /* TunnelTestCommandReceiver.swift */,
 			);
 			path = BigBrotherTunnel;
 			sourceTree = "<group>";
@@ -1355,6 +1364,7 @@
 			files = (
 				2C2DC3DFB2D37A7069EE7A84 /* DNSProxy.swift in Sources */,
 				F7639CC871DA156BB8CB2007 /* PacketTunnelProvider.swift in Sources */,
+				FE23146921F4339D975312F1 /* TunnelTestCommandReceiver.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1539,6 +1549,7 @@
 				18E1CE741E8B697EDA04B8E9 /* SyncCoordinator.swift in Sources */,
 				997213C1D484F1F0BBE2D0E0 /* SyncCoordinatorImpl.swift in Sources */,
 				DA1B103BD0946CB1D5826811 /* TemporaryUnlockCard.swift in Sources */,
+				1BE2F05891CDB5384CD712EF /* TestCommandReceiver.swift in Sources */,
 				8A0E3B390E351F78F50E2026 /* TimeLimitSetupView.swift in Sources */,
 				B2C3E6FCA5D6DB5AAB9CB0BE /* TimerIntegrationConfig.swift in Sources */,
 				E3488D3570999C0B836F13FD /* TimerIntegrationService.swift in Sources */,
@@ -1550,6 +1561,7 @@
 				8903BDAC477CBE91C9A58BF1 /* WarningBanner.swift in Sources */,
 				51A1931A8FDE8FBA17C2A7B5 /* WebFilterConfigView.swift in Sources */,
 				4AC2F3C374264C0BACF56F06 /* WeeklyDigestService.swift in Sources */,
+				317A71F4FFC231A9A45AD899 /* WelcomeView.swift in Sources */,
 				C3D257A128479FDDDA3F0E0A /* WrappingHStack.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1595,6 +1607,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherWidget/BigBrotherWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherWidget/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1680,6 +1693,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShield/BigBrotherShield.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShield/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1700,6 +1714,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherActivityReport/BigBrotherActivityReport.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherActivityReport/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1720,6 +1735,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherMonitor/BigBrotherMonitor.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherMonitor/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1742,6 +1758,7 @@
 				CODE_SIGN_ENTITLEMENTS = BigBrotherApp/BigBrother.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				INFOPLIST_FILE = BigBrotherApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1759,6 +1776,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherTunnel/BigBrotherTunnel.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherTunnel/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1779,6 +1797,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShieldAction/BigBrotherShieldAction.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShieldAction/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1799,6 +1818,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherWidget/BigBrotherWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherWidget/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1819,6 +1839,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShield/BigBrotherShield.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShield/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1839,6 +1860,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherShieldAction/BigBrotherShieldAction.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherShieldAction/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1859,6 +1881,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherMonitor/BigBrotherMonitor.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherMonitor/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1879,6 +1902,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherTunnel/BigBrotherTunnel.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherTunnel/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1959,6 +1983,7 @@
 				CODE_SIGN_ENTITLEMENTS = BigBrotherApp/BigBrother.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				INFOPLIST_FILE = BigBrotherApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1976,6 +2001,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = BigBrotherActivityReport/BigBrotherActivityReport.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Y2G5FUN342;
 				ENABLE_DEBUG_DYLIB = NO;
 				INFOPLIST_FILE = BigBrotherActivityReport/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

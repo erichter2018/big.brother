@@ -9,11 +9,30 @@ import BigBrotherCore
 /// Same visual style as the parent naming sheet.
 struct ChildSingleAppPickSheet: View {
     let appState: AppState
+    /// Optional hint shown above the picker, e.g. when triggered by the
+    /// shield's "ask for access" flow ("Tap Roblox to re-request access").
+    let promptHint: String?
+    /// Optional starting text for the name field, used when ShieldConfiguration
+    /// already resolved the app's name.
+    let initialName: String
     let onSubmit: (ApplicationToken, String) -> Void
+
+    init(
+        appState: AppState,
+        promptHint: String? = nil,
+        initialName: String = "",
+        onSubmit: @escaping (ApplicationToken, String) -> Void
+    ) {
+        self.appState = appState
+        self.promptHint = promptHint
+        self.initialName = initialName
+        self.onSubmit = onSubmit
+        self._enteredName = State(initialValue: initialName)
+    }
 
     @State private var selection = FamilyActivitySelection()
     @State private var pickedToken: ApplicationToken?
-    @State private var enteredName = ""
+    @State private var enteredName: String
     @State private var nameFromCloudKit = false
     @State private var isSaving = false
     @State private var alreadyConfiguredMessage: String?
@@ -30,7 +49,7 @@ struct ChildSingleAppPickSheet: View {
                     pickerView
                 }
             }
-            .navigationTitle("Request an App")
+            .navigationTitle(promptHint != nil ? "Re-request Access" : "Request an App")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -43,10 +62,18 @@ struct ChildSingleAppPickSheet: View {
     @ViewBuilder
     private var pickerView: some View {
         VStack(spacing: 8) {
+            if let hint = promptHint {
+                Text(hint)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                    .padding(.top)
+            }
             Text("Select the app you want")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .padding(.top)
+                .padding(.top, promptHint == nil ? nil : 0)
 
             if let msg = alreadyConfiguredMessage {
                 Text(msg)
@@ -138,33 +165,46 @@ struct ChildSingleAppPickSheet: View {
         }
     }
 
-    /// Check if this token is already submitted, pending, or configured.
+    /// Check if this token is already FULLY configured AND named.
+    ///
+    /// We block re-pick only if we have a real cached name AND the token is in
+    /// allowedAppTokens or appTimeLimits with matching bytes. If the token is
+    /// allowed but has no usable cached name (e.g. it was added before we built
+    /// the naming flow), the user MUST be able to re-pick so the picker callback
+    /// can capture a fresh `Application(token:).localizedDisplayName` and write
+    /// it back to the cache. Without this exception, pre-naming-era apps are
+    /// permanently stuck as nameless ghosts in the allowed list.
     private func isAlreadyConfigured(token: ApplicationToken) -> Bool {
         let storage = AppGroupStorage()
         guard let tokenData = try? JSONEncoder().encode(token) else { return false }
-        let fingerprint = TokenFingerprint.fingerprint(for: tokenData)
+        let tokenKey = tokenData.base64EncodedString()
 
-        // In picker selection (already submitted)
-        if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
-           let existing = try? JSONDecoder().decode(FamilyActivitySelection.self, from: data),
-           existing.applicationTokens.contains(token) {
+        // Look up the cached name. If it's missing or just a placeholder
+        // ("App N", "Temporary X"), treat the token as needing re-pick so the
+        // user can re-name it during this picker interaction.
+        let cachedName = storage.readAllCachedAppNames()[tokenKey]
+        let hasUsableName: Bool = {
+            guard let name = cachedName?.trimmingCharacters(in: .whitespaces),
+                  !name.isEmpty else { return false }
+            if name.hasPrefix("App ") { return false }
+            if name.hasPrefix("Temporary") { return false }
+            if name == "App" || name == "Unknown" { return false }
             return true
-        }
-        // In pending review
-        if let data = storage.readRawData(forKey: "pending_review_local.json"),
-           let pending = try? JSONDecoder().decode([PendingAppReview].self, from: data),
-           pending.contains(where: { $0.appFingerprint == fingerprint }) {
-            return true
-        }
-        // Has time limit
-        if storage.readAppTimeLimits().contains(where: { $0.fingerprint == fingerprint }) {
-            return true
-        }
-        // In allowed tokens
+        }()
+        guard hasUsableName else { return false }
+
+        // In allowed tokens — fully working AND named, block re-pick.
         if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
            let allowed = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data),
            allowed.contains(token) {
             return true
+        }
+        // In time-limit list AND we can verify the token bytes match (not just
+        // a stale fingerprint from a pre-rotation install).
+        for limit in storage.readAppTimeLimits() {
+            if limit.tokenData.base64EncodedString() == tokenKey {
+                return true
+            }
         }
         return false
     }

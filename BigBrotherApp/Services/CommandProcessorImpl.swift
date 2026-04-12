@@ -154,6 +154,28 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
     }
 
+    #if DEBUG
+    /// Debug-only entry point for the automated shield test harness.
+    /// Bypasses CloudKit fetch and runs a single already-constructed command
+    /// through the same processing code path real parent commands use
+    /// (snapshot commit → enforcement.apply → shield write → heartbeat).
+    /// Called by TestCommandReceiver when a Darwin notification arrives
+    /// from `xcrun devicectl device notification post`.
+    func processTestCommand(_ command: RemoteCommand) async {
+        guard let enrollment = try? keychain.get(
+            ChildEnrollmentState.self,
+            forKey: StorageKeys.enrollmentState
+        ) else {
+            NSLog("[TestCommandReceiver] No enrollment — dropping test command \(command.id)")
+            return
+        }
+        beginEnforcementBatch()
+        defer { endEnforcementBatch() }
+        let result = await processCommand(command, enrollment: enrollment)
+        NSLog("[TestCommandReceiver] Processed \(command.action): \(result.logReason)")
+    }
+    #endif
+
     private func _processIncomingCommandsBody() async throws {
 
         guard let enrollment = try? keychain.get(
@@ -168,13 +190,30 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         )
 
         let processedIDs = storage.readProcessedCommandIDs()
+        // Also check tunnel's processed command IDs — tunnel processes mode commands
+        // from CloudKit polling when the main app is dead. Without this check, the
+        // main app would re-process commands the tunnel already applied.
+        // The tunnel writes the FULL recordName ("BBRemoteCommand_<UUID>") which
+        // would never match the bare UUID string we compare against. Strip the
+        // prefix here so dedup actually works — without this, every mode command
+        // the tunnel processed got re-applied by the app on next poll, inflating
+        // policyVersion by thousands and burning the daemon.
+        let tunnelDefaults = UserDefaults.appGroup
+        let rawTunnelProcessed = tunnelDefaults?.stringArray(forKey: "tunnelAppliedCommandIDs") ?? []
+        let tunnelProcessed = Set(rawTunnelProcessed.map { entry in
+            entry.hasPrefix("BBRemoteCommand_")
+                ? String(entry.dropFirst("BBRemoteCommand_".count))
+                : entry
+        })
 
         #if DEBUG
-        print("[BigBrother] Found \(commands.count) pending commands, \(processedIDs.count) already processed")
+        print("[BigBrother] Found \(commands.count) pending commands, \(processedIDs.count) app + \(tunnelProcessed.count) tunnel already processed")
         #endif
 
-        // Filter out already-processed commands.
-        let unprocessed = commands.filter { !processedIDs.contains($0.id) }
+        // Filter out already-processed commands (by app OR tunnel).
+        let unprocessed = commands.filter {
+            !processedIDs.contains($0.id) && !tunnelProcessed.contains($0.id.uuidString)
+        }
 
         // Drop commands past their explicit expiry (default 24 hours from issuedAt).
         // Do NOT use an arbitrary shorter cutoff — devices can be offline for hours
@@ -259,14 +298,78 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
         #endif
 
+        var modeCommandResult: CommandProcessingResult?
+        // Open an enforcement batch around the whole command loop. Per-handler
+        // calls to reapplyCurrentEnforcement() are coalesced inside the batch
+        // and a single apply runs at the end. Prevents the burst-write daemon
+        // corruption pattern that breaks ManagedSettings under rapid command
+        // processing (~30 reviewApp calls in ~5 minutes degraded the agent).
+        beginEnforcementBatch()
+        defer { endEnforcementBatch() }
+
+        // Poison-pill: if the same command UUID has been processed >3 times in
+        // the recent history (e.g. tunnel/app dedup mismatch, CK status update
+        // perpetually failing), force-mark it processed locally and skip. Stops
+        // runaway loops that inflate policyVersion and exhaust the FC daemon.
+        //
+        // UserDefaults round-trips Int values as NSNumber, so we map through
+        // NSNumber on read — the naive `as? [String: Int]` cast fails silently
+        // and the counter never accumulates.
+        let poisonKey = "fr.bigbrother.commandProcessCounts"
+        let poisonDefaults = UserDefaults.appGroup
+        var processCounts: [String: Int] = {
+            guard let raw = poisonDefaults?.dictionary(forKey: poisonKey) else { return [:] }
+            var out: [String: Int] = [:]
+            for (k, v) in raw {
+                if let n = v as? NSNumber { out[k] = n.intValue }
+                else if let i = v as? Int { out[k] = i }
+            }
+            return out
+        }()
+        defer {
+            // Trim the counter map to last 100 entries to prevent unbounded growth.
+            if processCounts.count > 100 {
+                let trimmed = processCounts.sorted { $0.value > $1.value }.prefix(100)
+                processCounts = Dictionary(uniqueKeysWithValues: trimmed.map { ($0.key, $0.value) })
+            }
+            poisonDefaults?.set(processCounts, forKey: poisonKey)
+        }
+
         for command in sorted {
             #if DEBUG
             print("[BigBrother] Processing command: \(command.action), id=\(command.id)")
             #endif
+            // Increment the counter and check the threshold BEFORE processing.
+            let pkey = command.id.uuidString
+            let count = (processCounts[pkey] ?? 0) + 1
+            processCounts[pkey] = count
+            if count > 3 {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "POISON-PILL: command \(command.id.uuidString.prefix(8)) processed \(count)x — force-marking and skipping",
+                    details: "Action: \(command.action). Likely cause: tunnel/app dedup mismatch or CK status update failing repeatedly."
+                ))
+                try? storage.markCommandProcessed(command.id)
+                try? await cloudKit.updateCommandStatus(command.id, status: .applied)
+                continue
+            }
             let result = await processCommand(command, enrollment: enrollment)
+            if command.action.isModeCommand { modeCommandResult = result }
             #if DEBUG
             print("[BigBrother] Command result: \(result.logReason)")
             #endif
+
+            // Mark processed IMMEDIATELY after applying — before receipt upload.
+            // If the app is killed between apply and mark, the command would be
+            // re-processed on next sync (double-granting time, resetting timers).
+            do {
+                try storage.markCommandProcessed(command.id)
+            } catch {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "Failed to mark command \(command.id) as processed: \(error.localizedDescription)"
+                ))
+            }
 
             // Post receipt and update the command's CloudKit status so it's no longer
             // returned by fetchPendingCommands on subsequent polls.
@@ -278,11 +381,15 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     status: receiptStatus,
                     reason: result == .applied ? nil : result.logReason
                 )
-                // Retry receipt upload — parent needs confirmation the command was processed.
+                // Save the receipt (child-owned record type). Retry up to 3x
+                // on transient errors. The receipt is the authoritative signal
+                // to the parent that this command was processed — the parent
+                // reads receipts to update its own dashboard state.
+                var receiptSaved = false
                 for attempt in 1...3 {
                     do {
                         try await cloudKit.saveReceipt(receipt)
-                        try await cloudKit.updateCommandStatus(command.id, status: receiptStatus)
+                        receiptSaved = true
                         break
                     } catch {
                         if attempt == 3 {
@@ -292,15 +399,29 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                         }
                     }
                 }
-            }
 
-            do {
-                try storage.markCommandProcessed(command.id)
-            } catch {
-                try? storage.appendDiagnosticEntry(DiagnosticEntry(
-                    category: .command,
-                    message: "Failed to mark command \(command.id) as processed: \(error.localizedDescription)"
-                ))
+                // Separately attempt the command-status update. This is a
+                // convenience for the parent dashboard (so the command record
+                // flips from "pending" to "applied"), but it's NOT the
+                // authoritative path — the receipt is. On multi-iCloud-account
+                // families, the child does NOT own the BBRemoteCommand record
+                // (the parent created it), so this write throws "WRITE operation
+                // not permitted". We silently swallow that error instead of
+                // retrying — the parent will still see the correct state via
+                // the receipt (saved above).
+                if receiptSaved {
+                    do {
+                        try await cloudKit.updateCommandStatus(command.id, status: receiptStatus)
+                    } catch {
+                        let desc = error.localizedDescription.lowercased()
+                        if desc.contains("permission") || desc.contains("not permitted") {
+                            // Expected on multi-account families. Receipt is the
+                            // authoritative signal — nothing else to do.
+                        } else {
+                            eventLogger.log(.commandFailed, details: "updateCommandStatus failed for \(command.id): \(error.localizedDescription)")
+                        }
+                    }
+                }
             }
 
             // Log diagnostic.
@@ -311,10 +432,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             ))
         }
 
-        // Now that the winning mode command has been processed, mark superseded ones.
-        // Deferred from earlier so that if the winner fails, we could fall back (not yet
-        // implemented, but this ordering is safer than pre-emptive superseding).
-        for cmd in supersededModeCommands {
+        // Only supersede older mode commands if the winner was durably applied.
+        // If the winner failed (bad signature, execution failure), keep the older
+        // commands available for reprocessing on the next sync cycle.
+        let shouldSupersede = modeCommandResult == .applied || modeCommandResult == .ignoredDuplicate || modeCommandResult == nil
+        if !shouldSupersede && !supersededModeCommands.isEmpty {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .command,
+                message: "Mode command failed (\(modeCommandResult?.logReason ?? "unknown")) — keeping \(supersededModeCommands.count) superseded commands for fallback"
+            ))
+        }
+        for cmd in supersededModeCommands where shouldSupersede {
             #if DEBUG
             print("[BigBrother] Superseded mode command: \(cmd.action.displayDescription) (id=\(cmd.id))")
             #endif
@@ -335,13 +463,24 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         // Record last command processing time for heartbeat reporting.
         if !sorted.isEmpty {
-            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+            let defaults = UserDefaults.appGroup ?? .standard
             defaults.set(Date().timeIntervalSince1970, forKey: "fr.bigbrother.lastCommandProcessedAt")
 
             // Send heartbeat immediately so parent sees the confirmed mode change.
             onRequestHeartbeat?()
         }
+
+        // DO NOT call trimUnusedSelectionTokens here. The trim was based on a
+        // backwards assumption: it dropped any picker token NOT in allowedTokens
+        // / appTimeLimits / pending. But the picker selection IS the universe of
+        // "apps to block" — picker tokens that aren't in the allowed list are
+        // exactly the apps that SHOULD be shielded. Running trim on every command
+        // batch nuked the entire picker selection in locked mode (where allowed
+        // is always empty), leaving Apps: 0 and triggering the verification
+        // false-failure loop. Revoke-side cleanup (handleBlockManagedApp removing
+        // matching tokens from selection) is sufficient and correct.
     }
+
 
     func process(_ command: RemoteCommand) async throws -> CommandReceipt {
         guard let enrollment = try? keychain.get(
@@ -413,8 +552,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 }
             } else {
                 // Device is enrolled but has no trusted keys — Keychain may have been wiped
-                // (e.g., MDM removal clears Keychain entries). Accept command with warning.
-                // Rejecting here bricks the device — parent can't send ANY commands.
+                // (e.g., MDM removal clears Keychain entries). Accept with warning for now.
+                // TODO: Once all devices have signing keys re-enrolled, switch to rejecting
+                // unsigned mode commands here (S3 in AUDIT_TODO.md).
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .command,
                     message: "WARNING: No trusted public keys in Keychain — accepting command \(command.id) unsigned. Re-enroll to restore key verification."
@@ -436,8 +576,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 } catch {
                     // Retry once — file might be locked by another process
                     try? storage.clearTemporaryUnlockState()
-                    // Nuclear: overwrite with nil data to ensure the file is gone
-                    try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
+                    // Nuclear: delete via typed API (correct filename)
+                    try? storage.clearTemporaryUnlockState()
                     try? storage.appendDiagnosticEntry(DiagnosticEntry(
                         category: .command,
                         message: "Failed to clear temp unlock during setMode (retried): \(error.localizedDescription)"
@@ -447,7 +587,6 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     try storage.clearTimedUnlockInfo()
                 } catch {
                     try? storage.clearTimedUnlockInfo()
-                    try? storage.writeRawData(nil, forKey: "timedUnlockInfo.json")
                 }
                 clearLockUntilState()
                 cancelNonScheduleActivities()
@@ -742,7 +881,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return .applied
 
             case .setLocationMode(let mode):
-                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                UserDefaults.appGroup?
                     .set(mode.rawValue, forKey: "locationTrackingMode")
                 DispatchQueue.main.async { [weak self] in
                     self?.onLocationModeChanged?(mode)
@@ -765,7 +904,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return .applied
 
             case .setHomeLocation(let latitude, let longitude):
-                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                let defaults = UserDefaults.appGroup
                 defaults?.set(latitude, forKey: "homeLatitude")
                 defaults?.set(longitude, forKey: "homeLongitude")
                 // Trigger LocationService to register the geofence immediately.
@@ -784,7 +923,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .setDrivingSettings(let settings):
                 if let data = try? JSONEncoder().encode(settings) {
-                    UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                    UserDefaults.appGroup?
                         .set(data, forKey: "drivingSettings")
                 }
                 eventLogger.log(.commandApplied, details: "Driving settings updated: speed limit \(Int(settings.speedThresholdMPH)) mph")
@@ -798,7 +937,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return .applied
 
             case .setSafeSearch(let enabled):
-                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                UserDefaults.appGroup?
                     .set(enabled, forKey: "safeSearchEnabled")
                 // Restart the VPN tunnel to pick up the new DNS settings
                 DispatchQueue.main.async { [weak self] in
@@ -869,7 +1008,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             effectiveMode = mode
         }
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set("command", forKey: "lastShieldChangeReason")
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
@@ -890,8 +1029,16 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // NOT here. applyMode() is also called by lockUntil and timedUnlock which should
         // NOT clear the stack — they're pushing onto it.
 
+        // Pass the raw always-allowed tokens data through the pipeline so the
+        // snapshot's effectivePolicy.allowedAppTokensData is populated. The
+        // Monitor extension uses this as a fallback when its App Group file
+        // read returns empty (extension context file coordination quirks).
+        // Without this, Monitor's fallback was always nil and its second-pass
+        // writes collapsed restricted → locked by losing the exception set.
+        let allowedAppTokensData = storage.readRawData(forKey: StorageKeys.allowedAppTokens)
         let inputs = PolicyPipelineCoordinator.Inputs(
             basePolicy: policy,
+            alwaysAllowedTokensData: allowedAppTokensData,
             capabilities: capabilities,
             temporaryUnlockState: nil,
             authorizationHealth: storage.readAuthorizationHealth(),
@@ -917,18 +1064,37 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             // Verify write stuck — moved off main thread to avoid UI freeze.
             // The Monitor trigger below is the real safety net for background writes.
+            //
+            // IMPORTANT: both retry loops re-read the CURRENT snapshot instead
+            // of applying the captured one. If a newer command was committed
+            // while this task was sleeping, our captured snapshot is stale and
+            // re-applying it would stomp the newer state. Re-reading ensures
+            // we only ever apply the authoritative latest state — if it
+            // matches ours, great; if it's been superseded, the newer
+            // command's own retry loop is responsible for it and we exit.
             let verifyEnforcement = enforcement
-            let verifyMode = effectiveMode
-            let verifySnapshot = snapshot
+            let verifySnapshotStore = snapshotStore
+            let committedVersion = snapshot.effectivePolicy.policyVersion
             Task.detached {
                 try? await Task.sleep(for: .seconds(1))
+                guard let currentSnap = verifySnapshotStore.loadCurrentSnapshot(),
+                      currentSnap.effectivePolicy.policyVersion == committedVersion else {
+                    NSLog("[CommandProcessor] Post-write verify SKIPPED — newer snapshot superseded v\(committedVersion)")
+                    return
+                }
                 let verifyDiag = verifyEnforcement?.shieldDiagnostic()
-                let shouldBeShielded = verifyMode != .unlocked
+                let shouldBeShielded = currentSnap.effectivePolicy.resolvedMode != .unlocked
                 let isShielded = verifyDiag?.shieldsActive == true || verifyDiag?.categoryActive == true
                 if shouldBeShielded != isShielded {
                     NSLog("[CommandProcessor] POST-WRITE VERIFY FAILED — retrying (shields=\(isShielded), expected=\(shouldBeShielded))")
                     try? await Task.sleep(for: .seconds(0.5))
-                    try? verifyEnforcement?.apply(verifySnapshot.effectivePolicy)
+                    // Re-read again — another command may have landed in the 0.5s sleep.
+                    guard let stillCurrent = verifySnapshotStore.loadCurrentSnapshot(),
+                          stillCurrent.effectivePolicy.policyVersion == committedVersion else {
+                        NSLog("[CommandProcessor] Post-write verify retry SKIPPED — newer snapshot superseded v\(committedVersion)")
+                        return
+                    }
+                    try? verifyEnforcement?.apply(stillCurrent.effectivePolicy)
                     let retryDiag = verifyEnforcement?.shieldDiagnostic()
                     let retryOK = (retryDiag?.shieldsActive == true || retryDiag?.categoryActive == true) == shouldBeShielded
                     NSLog("[CommandProcessor] Retry result: \(retryOK ? "OK" : "STILL FAILED")")
@@ -942,12 +1108,20 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             let triggerTime = Date().timeIntervalSince1970
             triggerMonitorEnforcementRefresh()
 
-            // Verify the Monitor actually applied enforcement.
-            // Poll for up to 5s, retry trigger if no confirmation.
+            // Verify the Monitor actually applied enforcement within the
+            // background-task window (~20s of polling). The scheduled
+            // enforcementRefresh activity fires ~90s from now, so if the main
+            // app gets suspended during the wait, the Monitor still wakes
+            // itself and applies shields — we don't need to hold the process
+            // alive to wait for it. Inside the window, retry the main-app
+            // write every 3s as a best-effort backstop in case FC auth / XPC
+            // recovers during the wait. Retries re-read the current snapshot
+            // so we never stomp a newer command with this task's stale one.
+            let maxAttempts = 20
             Task.detached {
-                let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                let defaults = UserDefaults.appGroup
                 var confirmed = false
-                for attempt in 1...5 {
+                for attempt in 1...maxAttempts {
                     try? await Task.sleep(for: .seconds(1))
                     let confirmedAt = defaults?.double(forKey: "monitorEnforcementConfirmedAt") ?? 0
                     if confirmedAt >= triggerTime {
@@ -955,12 +1129,22 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                         confirmed = true
                         break
                     }
+                    // Exit the loop early if a newer snapshot superseded ours —
+                    // that command's own retry loop now owns recovery.
+                    guard let currentSnap = verifySnapshotStore.loadCurrentSnapshot(),
+                          currentSnap.effectivePolicy.policyVersion == committedVersion else {
+                        NSLog("[CommandProcessor] Monitor confirm loop exiting — newer snapshot superseded v\(committedVersion)")
+                        return
+                    }
+                    if attempt % 3 == 0 {
+                        let isUnlockRetry = currentSnap.effectivePolicy.resolvedMode == .unlocked
+                        NSLog("[CommandProcessor] \(isUnlockRetry ? "Unlock" : "Lock") not confirmed after \(attempt)s — retrying main-app apply")
+                        try? verifyEnforcement?.apply(currentSnap.effectivePolicy)
+                    }
                 }
                 if !confirmed {
-                    NSLog("[CommandProcessor] Monitor did NOT confirm after 5s — retrying trigger")
-                    // Re-trigger via UserDefaults flag — the tunnel or next Monitor callback will pick it up.
-                    UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-                        .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+                    NSLog("[CommandProcessor] Monitor not confirmed within main-app window; scheduled refresh (~90s) will handle it")
+                    defaults?.set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
                 }
             }
 
@@ -1022,7 +1206,6 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         // Clear any existing timed unlock / lockUntil to prevent conflicts.
         try? storage.clearTimedUnlockInfo()
-        try? storage.writeRawData(nil, forKey: "timedUnlockInfo.json")
         clearLockUntilState()
 
         // Create durable temp unlock state.
@@ -1048,6 +1231,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         let inputs = PolicyPipelineCoordinator.Inputs(
             basePolicy: policy,
+            alwaysAllowedTokensData: storage.readRawData(forKey: StorageKeys.allowedAppTokens),
             capabilities: capabilities,
             temporaryUnlockState: unlockState,
             authorizationHealth: storage.readAuthorizationHealth(),
@@ -1087,6 +1271,40 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             // Snapshot collision — still must apply enforcement so the unlock takes effect.
             if let snapshot = snapshotStore.loadCurrentSnapshot() {
                 try enforcement?.apply(snapshot.effectivePolicy)
+            }
+        }
+
+        // Trigger Monitor to clear shields from its privileged context.
+        // Same confirmation handshake as applyMode — without this, stale shields
+        // can remain after the unlock is "applied" from the main app.
+        let triggerTime = Date().timeIntervalSince1970
+        triggerMonitorEnforcementRefresh()
+
+        Task.detached { [weak self] in
+            let defaults = UserDefaults.appGroup
+            var confirmed = false
+            for attempt in 1...10 {
+                try? await Task.sleep(for: .seconds(1))
+                let confirmedAt = defaults?.double(forKey: "monitorEnforcementConfirmedAt") ?? 0
+                if confirmedAt >= triggerTime {
+                    NSLog("[CommandProcessor] Monitor confirmed temp unlock enforcement after \(attempt)s")
+                    confirmed = true
+                    break
+                }
+                // Retry clear from app every 3s as backup
+                if attempt % 3 == 0 {
+                    NSLog("[CommandProcessor] Temp unlock not confirmed after \(attempt)s — retrying clear")
+                    if let snap = self?.snapshotStore.loadCurrentSnapshot() {
+                        try? self?.enforcement?.apply(snap.effectivePolicy)
+                    }
+                }
+                if attempt % 5 == 0 {
+                    self?.triggerMonitorEnforcementRefresh()
+                }
+            }
+            if !confirmed {
+                NSLog("[CommandProcessor] Monitor did NOT confirm temp unlock after 10s — flag set")
+                defaults?.set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
             }
         }
 
@@ -1180,6 +1398,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         let inputs = PolicyPipelineCoordinator.Inputs(
             basePolicy: policy,
+            alwaysAllowedTokensData: storage.readRawData(forKey: StorageKeys.allowedAppTokens),
             capabilities: capabilities,
             temporaryUnlockState: unlockState,
             authorizationHealth: storage.readAuthorizationHealth(),
@@ -1232,7 +1451,6 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     ) throws {
         // Clear all competing state — timedUnlock overrides everything.
         try? storage.clearTemporaryUnlockState()
-        try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
         clearLockUntilState()
 
         // Account for delivery delay.
@@ -1325,11 +1543,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Falls back to dailyMode if no profile is assigned.
     private func applyReturnToSchedule(enrollment: ChildEnrollmentState, commandID: UUID) throws {
         // Clear any temporary unlock / timed unlock / lockUntil state.
-        // Retry + nuclear fallback to handle file lock contention.
         try? storage.clearTemporaryUnlockState()
-        try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
         try? storage.clearTimedUnlockInfo()
-        try? storage.writeRawData(nil, forKey: "timedUnlockInfo.json")
         clearLockUntilState()
 
         // Cancel any active temp/timed/lockuntil DeviceActivity schedules
@@ -1340,7 +1555,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // forces a re-fetch from CloudKit. This catches stale schedules when
         // the parent edited the profile but the child hasn't synced yet.
         let versionKey = "scheduleProfileVersion.\(enrollment.deviceID.rawValue)"
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.removeObject(forKey: versionKey)
+        UserDefaults.appGroup?.removeObject(forKey: versionKey)
 
         // Read the active schedule profile and re-register DeviceActivity intervals
         // so upcoming transitions (e.g., restricted → locked at bedtime) fire correctly.
@@ -1361,62 +1576,41 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// Fires intervalDidEnd in the Monitor by stopping the currently-active reconciliation quarter.
     /// The Monitor re-applies enforcement from its privileged context, then re-registers the quarter.
     private func triggerMonitorEnforcementRefresh() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        defaults?.set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+        // Schedule a near-future one-shot DeviceActivity that fires intervalDidStart
+        // in the Monitor extension, which applies enforcement from its privileged
+        // context. This replaces the old stopMonitoring/re-register-quarter trick
+        // which was silently a no-op on iOS 17+ (stopMonitoring doesn't fire
+        // intervalDidEnd; re-registering a schedule whose start is in the past
+        // doesn't fire intervalDidStart). See scheduleEnforcementRefreshActivity.
+        scheduleEnforcementRefreshActivity(source: "cmdProc.trigger")
 
+        // Self-heal: make sure all 4 reconciliation quarters are registered so
+        // the natural 6-hour fallback keeps working. Registering an activity that
+        // already exists is a no-op.
         let center = DeviceActivityCenter()
-        let activeReconciliation = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }
-        NSLog("[CommandProcessor] triggerMonitorRefresh: stopping \(activeReconciliation.count) reconciliation activities")
-
-        // Stop ONLY the current quarter — stopping all quarters was causing them
-        // to disappear entirely (re-registration didn't always stick).
-        let hour = Calendar.current.component(.hour, from: Date())
-        let quarter = hour / 6
-        let quarterName = DeviceActivityName(rawValue: "bigbrother.reconciliation.q\(quarter)")
-
-        // Only stop if it's actually active
-        if activeReconciliation.contains(quarterName) {
-            center.stopMonitoring([quarterName])
-            NSLog("[CommandProcessor] Stopped \(quarterName.rawValue)")
-
-            // Re-register it immediately
-            let startHour = quarter * 6
-            let schedule = DeviceActivitySchedule(
-                intervalStart: DateComponents(hour: startHour, minute: 0),
-                intervalEnd: DateComponents(hour: startHour + 5, minute: 59),
+        let existing = center.activities
+        let quarters: [(name: String, startHour: Int, endHour: Int)] = [
+            ("bigbrother.reconciliation.q0", 0, 5),
+            ("bigbrother.reconciliation.q1", 6, 11),
+            ("bigbrother.reconciliation.q2", 12, 17),
+            ("bigbrother.reconciliation.q3", 18, 23),
+        ]
+        for q in quarters {
+            let activityName = DeviceActivityName(rawValue: q.name)
+            if existing.contains(activityName) { continue }
+            let qSchedule = DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: q.startHour, minute: 0),
+                intervalEnd: DateComponents(hour: q.endHour, minute: 59),
                 repeats: true
             )
-            do {
-                try center.startMonitoring(quarterName, during: schedule)
-                NSLog("[CommandProcessor] Re-registered \(quarterName.rawValue)")
-            } catch {
-                NSLog("[CommandProcessor] Failed to re-register \(quarterName.rawValue): \(error.localizedDescription)")
-            }
-        } else {
-            NSLog("[CommandProcessor] Quarter \(quarterName.rawValue) not active — registering fresh")
-            // Register all quarters if none are active
-            let quarters: [(name: String, startHour: Int, endHour: Int)] = [
-                ("bigbrother.reconciliation.q0", 0, 5),
-                ("bigbrother.reconciliation.q1", 6, 11),
-                ("bigbrother.reconciliation.q2", 12, 17),
-                ("bigbrother.reconciliation.q3", 18, 23),
-            ]
-            for q in quarters {
-                let activityName = DeviceActivityName(rawValue: q.name)
-                let qSchedule = DeviceActivitySchedule(
-                    intervalStart: DateComponents(hour: q.startHour, minute: 0),
-                    intervalEnd: DateComponents(hour: q.endHour, minute: 59),
-                    repeats: true
-                )
-                try? center.startMonitoring(activityName, during: qSchedule)
-            }
+            try? center.startMonitoring(activityName, during: qSchedule)
         }
     }
 
     /// Clear lockUntil state from UserDefaults. Must be called by any command that
     /// overrides the lockUntil (setMode, returnToSchedule, temporaryUnlock, timedUnlock).
     private func clearLockUntilState() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         defaults?.removeObject(forKey: "lockUntilPreviousMode")
         defaults?.removeObject(forKey: "lockUntilExpiresAt")
     }
@@ -1449,14 +1643,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // lockUntil is temporary — it pushes onto the stack and restores prior mode at expiry.
         // Clear any active temp/timed unlock — lockUntil overrides them.
         try? storage.clearTemporaryUnlockState()
-        try? storage.writeRawData(nil, forKey: "temporaryUnlockState.json")
         try? storage.clearTimedUnlockInfo()
-        try? storage.writeRawData(nil, forKey: "timedUnlockInfo.json")
         cancelNonScheduleActivities()
 
         // Save prior mode and expiry for restoration + self-healing.
         let priorMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
-        let lockDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let lockDefaults = UserDefaults.appGroup
         lockDefaults?.set(priorMode.rawValue, forKey: "lockUntilPreviousMode")
         lockDefaults?.set(date.timeIntervalSince1970, forKey: "lockUntilExpiresAt")
 
@@ -1628,7 +1820,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     }
 
     /// Handle "allow managed app" — resolve cached token(s) by app name and add them
-    /// to the permanent allow list for this device.
+    /// to the permanent allow list for this device. Also removes stale tokens for the
+    /// same app name (token rotation cleanup).
     private func handleAllowManagedApp(appName: String) -> CommandProcessingResult {
         guard Self.isUsefulAppName(appName) else {
             return .failedValidation(reason: "Refusing to allow unusable app name: \(appName)")
@@ -1640,6 +1833,24 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         var allowedTokens = loadAllowedTokens()
         let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        // Garbage collect: remove stale tokens that resolve to nil Application
+        // (token rotation aftermath — old tokens that no longer reference any app).
+        let cache = storage.readAllCachedAppNames()
+        let normalizedTarget = Self.normalizeAppName(appName)
+        var staleRemoved = 0
+        allowedTokens = allowedTokens.filter { token in
+            guard let data = try? encoder.encode(token) else { return false }
+            let key = data.base64EncodedString()
+            // If the cached name for this token matches the target app, and we have
+            // a fresh match below, drop the stale entry.
+            if let cachedName = cache[key], Self.normalizeAppName(cachedName) == normalizedTarget {
+                staleRemoved += 1
+                return false
+            }
+            return true
+        }
 
         for match in matches {
             guard let token = try? decoder.decode(ApplicationToken.self, from: match.tokenData) else {
@@ -1648,11 +1859,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             allowedTokens.insert(token)
         }
 
-        guard let data = try? JSONEncoder().encode(allowedTokens) else {
+        guard let data = try? encoder.encode(allowedTokens) else {
             return .failedExecution(reason: "Failed to encode allowed tokens")
         }
 
         try? storage.writeRawData(data, forKey: StorageKeys.allowedAppTokens)
+        if staleRemoved > 0 {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .command,
+                message: "Allowed \(appName): added \(matches.count) fresh token(s), dropped \(staleRemoved) stale"
+            ))
+        }
         reapplyCurrentEnforcement()
         return .applied
     }
@@ -1711,6 +1928,25 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         let normalizedName = Self.normalizeAppName(appName)
         let tokenKeys = Set(matches.map { $0.tokenData.base64EncodedString() })
+
+        // Also remove the matching tokens from familyActivitySelection. Without
+        // this, the picker thinks the app is "still configured" and refuses to
+        // let the child re-pick it later — leaving stale tokens that bloat the
+        // selection forever.
+        if let selData = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+           var selection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: selData) {
+            let encoder = JSONEncoder()
+            let beforeCount = selection.applicationTokens.count
+            selection.applicationTokens = selection.applicationTokens.filter { token in
+                guard let data = try? encoder.encode(token) else { return true }
+                return !tokenKeys.contains(data.base64EncodedString())
+            }
+            if selection.applicationTokens.count != beforeCount,
+               let encoded = try? encoder.encode(selection) {
+                try? storage.writeRawData(encoded, forKey: StorageKeys.familyActivitySelection)
+            }
+        }
+
         let tempEntries = storage.readTemporaryAllowedApps()
         let filteredEntries = tempEntries.filter { entry in
             let entryKey = entry.tokenData.base64EncodedString()
@@ -1774,7 +2010,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
 
         // Also store in UserDefaults for extension access
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         var nameMap = defaults?.dictionary(forKey: "tokenToAppName") as? [String: String] ?? [:]
         // Store with fingerprint as key (extension can look up by fingerprint too)
         nameMap["fp:\(fingerprint)"] = name
@@ -1793,7 +2029,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         try? storage.writeTemporaryAllowedApps([])
         try? storage.writeAppTimeLimits([])
         try? storage.writeTimeLimitExhaustedApps([])
-        ScheduleRegistrar.registerTimeLimitEvents(limits: [])
+        requestRegisterTimeLimitEvents([])
         reapplyCurrentEnforcement()
         eventLogger.log(.commandApplied, details: "All apps and time limits revoked")
         return .applied
@@ -1832,21 +2068,42 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             allowedTokens = existing
         }
 
-        // Find the token for this fingerprint from any source
+        // Find the token for this fingerprint from any source.
+        // Token rotation breaks fingerprint match — fall back to fresh tokens
+        // from event log + pending unlock requests + name cache via app name lookup.
+        let appNameForLookup: String = {
+            // Try to find a known app name for this fingerprint to use as fallback
+            if let limit = limits.first(where: { $0.fingerprint == fingerprint }) {
+                return limit.appName
+            }
+            for event in storage.readPendingEventLogs() where event.eventType == .unlockRequested {
+                guard let details = event.details, let found = extractTokenFromDetails(details) else { continue }
+                if TokenFingerprint.fingerprint(for: found.tokenData) == fingerprint {
+                    return found.appName
+                }
+            }
+            for req in storage.readPendingUnlockRequests() {
+                if TokenFingerprint.fingerprint(for: req.tokenData) == fingerprint {
+                    return req.appName
+                }
+            }
+            return ""
+        }()
+
         let token: ApplicationToken? = {
-            // From time limits
+            // 1. Time limits (old token, may match)
             if let limit = limits.first(where: { $0.fingerprint == fingerprint }),
                let t = try? decoder.decode(ApplicationToken.self, from: limit.tokenData) {
                 return t
             }
-            // From allowed list (check each token's fingerprint)
+            // 2. Allowed list (old token, may match)
             for t in allowedTokens {
                 if let data = try? encoder.encode(t),
                    TokenFingerprint.fingerprint(for: data) == fingerprint {
                     return t
                 }
             }
-            // From picker selection
+            // 3. Picker selection (old token, may match)
             if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
                let sel = try? decoder.decode(FamilyActivitySelection.self, from: data) {
                 for t in sel.applicationTokens {
@@ -1856,8 +2113,44 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     }
                 }
             }
+            // 4. FRESH token via event log direct fingerprint match
+            for event in storage.readPendingEventLogs() where event.eventType == .unlockRequested {
+                guard let details = event.details, let found = extractTokenFromDetails(details) else { continue }
+                if TokenFingerprint.fingerprint(for: found.tokenData) == fingerprint,
+                   let t = try? decoder.decode(ApplicationToken.self, from: found.tokenData) {
+                    return t
+                }
+            }
+            // 5. FRESH token via PendingUnlockRequest direct fingerprint match
+            for req in storage.readPendingUnlockRequests() {
+                if TokenFingerprint.fingerprint(for: req.tokenData) == fingerprint,
+                   let t = try? decoder.decode(ApplicationToken.self, from: req.tokenData) {
+                    return t
+                }
+            }
+            // 6. Last resort: name-based lookup (handles token rotation across app updates).
+            // findTokensForAppName searches name cache + pending requests + event logs.
+            if !appNameForLookup.isEmpty {
+                let matches = findTokensForAppName(appNameForLookup)
+                if let firstMatch = matches.first,
+                   let t = try? decoder.decode(ApplicationToken.self, from: firstMatch.tokenData) {
+                    return t
+                }
+            }
             return nil
         }()
+
+        // Surface the silent-failure case explicitly. Without this, a stale
+        // fingerprint (post-reinstall token rotation) returns .applied with no
+        // visible side effects — the parent thinks the command worked, the
+        // shield never drops, and there's no log line to debug from.
+        if token == nil {
+            return .failedValidation(
+                reason: "reviewApp: no token bound to fingerprint \(fingerprint.prefix(8)) " +
+                        "(stale fingerprint? token rotation after reinstall?) — " +
+                        "name fallback was: '\(appNameForLookup)'"
+            )
+        }
 
         // Clean up: remove from ALL lists first (clean transition)
         if let token {
@@ -1913,7 +2206,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
             let today = f.string(from: Date())
             // Check screen time milestones for approximate usage
-            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            let defaults = UserDefaults.appGroup
             let _ = defaults?.integer(forKey: "screenTimeMinutes") ?? 0
             // If we can't determine exact per-app usage, check if the app was previously
             // in the exhausted list (re-adding after grant extra time).
@@ -1937,7 +2230,22 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
 
         try? storage.writeTimeLimitExhaustedApps(exhausted)
-        ScheduleRegistrar.registerTimeLimitEvents(limits: limits)
+        requestRegisterTimeLimitEvents(limits)
+
+        // Remove the matching pending review from the kid's local file so the
+        // "Pending Parent Approval" card stops showing this app the moment the
+        // parent decides. Without this, the card stays stale until the next
+        // foreground sync wipes the entire file (which has its own bugs).
+        // Match by fingerprint — the parent acted on this exact fingerprint.
+        if let data = storage.readRawData(forKey: "pending_review_local.json"),
+           var pending = try? JSONDecoder().decode([PendingAppReview].self, from: data) {
+            let before = pending.count
+            pending.removeAll { $0.appFingerprint == fingerprint }
+            if pending.count != before, let encoded = try? JSONEncoder().encode(pending) {
+                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+            }
+        }
+
         reapplyCurrentEnforcement()
         eventLogger.log(.commandApplied, details: "App \(disposition.rawValue): fp \(fingerprint.prefix(8))\(minutes.map { " \($0)m" } ?? "")")
         return .applied
@@ -1958,7 +2266,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         // Store extra time separately (date-keyed so it resets at midnight).
         // Do NOT modify limits[idx].dailyLimitMinutes — that's the permanent base limit.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
         let todayKey = "extraTime.\(fingerprint).\(f.string(from: Date()))"
         let existing = defaults?.integer(forKey: todayKey) ?? 0
@@ -1967,7 +2275,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Re-register DeviceActivityEvent with effective threshold (base + extra)
         var adjustedLimits = limits
         adjustedLimits[idx].dailyLimitMinutes += existing + extraMinutes
-        ScheduleRegistrar.registerTimeLimitEvents(limits: adjustedLimits)
+        requestRegisterTimeLimitEvents(adjustedLimits)
 
         reapplyCurrentEnforcement()
         eventLogger.log(.timeLimitExtended, details: "\(limits[idx].appName): +\(extraMinutes) min today (base \(limits[idx].dailyLimitMinutes) + \(existing + extraMinutes) extra)")
@@ -1982,7 +2290,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         // Persist name + token for future re-add.
         if let removed {
-            let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            let defaults = UserDefaults.appGroup
             var nameMap = (defaults?.dictionary(forKey: "harvestedAppNames") as? [String: String]) ?? [:]
             nameMap[removed.fingerprint] = removed.appName
             defaults?.set(nameMap, forKey: "harvestedAppNames")
@@ -2018,7 +2326,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
 
         // Re-register remaining limits
-        ScheduleRegistrar.registerTimeLimitEvents(limits: limits)
+        requestRegisterTimeLimitEvents(limits)
 
         reapplyCurrentEnforcement()
         eventLogger.log(.commandApplied, details: "Time limit removed: \(removed?.appName ?? fingerprint)")
@@ -2062,22 +2370,75 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
     /// Re-apply enforcement so ManagedSettingsStore picks up changes.
     /// Called after any change to allowed app lists or device restrictions.
-    /// Always applies — device restrictions are active even in unlocked mode.
-    /// Returns false if enforcement fails (caller should report failure).
+    /// Set to true while we're processing a batch of commands. Per-handler calls
+    /// to reapplyCurrentEnforcement() during this window are coalesced into a
+    /// single deferred apply at end of batch. Each ManagedSettings write goes
+    /// through one XPC pipe to ManagedSettingsAgent — under burst load, repeated
+    /// writes degrade the daemon and shields silently stop applying. Coalescing
+    /// to ONE write per batch eliminates the burst pattern entirely.
+    private var batchInProgress = false
+    private var batchNeedsReapply = false
+    private var batchPendingTimeLimits: [AppTimeLimit]?
+
+    private func beginEnforcementBatch() {
+        batchInProgress = true
+        batchNeedsReapply = false
+        batchPendingTimeLimits = nil
+    }
+
+    private func endEnforcementBatch() {
+        let needs = batchNeedsReapply
+        let pendingLimits = batchPendingTimeLimits
+        batchInProgress = false
+        batchNeedsReapply = false
+        batchPendingTimeLimits = nil
+        if let pendingLimits {
+            ScheduleRegistrar.registerTimeLimitEvents(limits: pendingLimits)
+        }
+        if needs {
+            _ = performReapplyNow()
+        }
+    }
+
+    /// Coalesce DeviceActivityCenter.startMonitoring across a command batch.
+    /// Each call to startMonitoring on an already-monitored activity internally
+    /// fires stopMonitoring → intervalDidEnd → Monitor extension writes the
+    /// SAME enforcement store from a different process → cross-process write
+    /// race that degrades the ManagedSettings agent. Defer to one call per batch.
+    private func requestRegisterTimeLimitEvents(_ limits: [AppTimeLimit]) {
+        if batchInProgress {
+            batchPendingTimeLimits = limits
+            return
+        }
+        ScheduleRegistrar.registerTimeLimitEvents(limits: limits)
+    }
+
     @discardableResult
     private func reapplyCurrentEnforcement() -> Bool {
+        if batchInProgress {
+            batchNeedsReapply = true
+            return true
+        }
+        return performReapplyNow()
+    }
+
+    private func performReapplyNow() -> Bool {
         guard let snapshot = snapshotStore.loadCurrentSnapshot() else { return false }
         // Use ModeStackResolver as ground truth — the snapshot may have stale
         // isTemporaryUnlock or mode from a previous command. Without this,
         // revokeAllApps can trigger applyWideOpenShields() via a stale snapshot.
         let resolution = ModeStackResolver.resolve(storage: storage)
+        // Derive temp unlock from ModeStackResolver (checks expiry), NOT file existence.
+        // A stale temp-unlock file (failed delete) must not cause shields to clear.
+        let activeTempUnlock = resolution.isTemporary ? storage.readTemporaryUnlockState() : nil
+        let isTempUnlock = activeTempUnlock != nil && resolution.controlAuthority == .temporaryUnlock
         var policy = snapshot.effectivePolicy
-        if resolution.mode != policy.resolvedMode || (!policy.isTemporaryUnlock && storage.readTemporaryUnlockState() == nil) {
+        if resolution.mode != policy.resolvedMode || policy.isTemporaryUnlock != isTempUnlock {
             policy = EffectivePolicy(
                 resolvedMode: resolution.mode,
                 controlAuthority: resolution.controlAuthority,
-                isTemporaryUnlock: storage.readTemporaryUnlockState() != nil,
-                temporaryUnlockExpiresAt: storage.readTemporaryUnlockState()?.expiresAt,
+                isTemporaryUnlock: isTempUnlock,
+                temporaryUnlockExpiresAt: activeTempUnlock?.expiresAt,
                 shieldedCategoriesData: policy.shieldedCategoriesData,
                 allowedAppTokensData: policy.allowedAppTokensData,
                 deviceRestrictions: policy.deviceRestrictions,
@@ -2141,6 +2502,35 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             append(tokenData: found.tokenData, appName: found.appName)
         }
 
+        // Fallback: cross-reference pending_review_local.json (which has appFingerprint
+        // + appName but no raw tokenData) against the picker's familyActivitySelection
+        // (which has tokens but no names). Compute fingerprint per token, match to a
+        // pending review by name, recover the tokenData. This rescues apps that were
+        // added via submitSingleApp before we started caching names there.
+        if results.isEmpty,
+           let reviewData = storage.readRawData(forKey: "pending_review_local.json"),
+           let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: reviewData) {
+            let matchingFingerprints = Set(
+                reviews
+                    .filter { Self.normalizeAppName($0.appName) == normalizedName }
+                    .map(\.appFingerprint)
+            )
+            if !matchingFingerprints.isEmpty,
+               let selData = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+               let selection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: selData) {
+                let encoder = JSONEncoder()
+                for token in selection.applicationTokens {
+                    guard let tokenData = try? encoder.encode(token) else { continue }
+                    let fp = TokenFingerprint.fingerprint(for: tokenData)
+                    if matchingFingerprints.contains(fp) {
+                        // Cache it now so subsequent lookups skip this fallback path.
+                        storage.cacheAppName(appName, forTokenKey: tokenData.base64EncodedString())
+                        append(tokenData: tokenData, appName: appName)
+                    }
+                }
+            }
+        }
+
         return results
     }
 
@@ -2171,7 +2561,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
         
         // Fallback: check shared defaults.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         return defaults?.string(forKey: "lastShielded.bundleID")
     }
 
@@ -2203,16 +2593,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
     }
 
-    /// Returns true if critical permissions are missing (FamilyControls or location not "Always").
-    /// Used to block unlock and force essential mode until the child grants permissions.
+    /// Returns true if FamilyControls authorization is missing.
+    /// Used to block temporary unlock commands and force essential mode until
+    /// the child grants FC. Location is NOT included — it's for breadcrumbs
+    /// and geofencing, not shield enforcement, and was previously causing
+    /// every parent-issued .restricted command to silently force-convert to
+    /// .locked when the kid had Location set to "While Using" (b445 bug).
     private func hasPermissionDeficiency() -> Bool {
-        // FamilyControls must be authorized
         if let enforcement, enforcement.authorizationStatus != .authorized {
-            return true
-        }
-        // Location must be "Always" (not denied, not whenInUse, not notDetermined)
-        let locStatus = CLLocationManager().authorizationStatus
-        if locStatus != .authorizedAlways {
             return true
         }
         return false

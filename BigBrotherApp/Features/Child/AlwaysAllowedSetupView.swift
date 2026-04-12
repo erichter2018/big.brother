@@ -81,9 +81,44 @@ struct AlwaysAllowedSetupView: View {
     private func loadExisting() {
         // Pre-populate with currently allowed tokens so the picker shows
         // previously selected apps as already checked. New picks are additive.
+        // Loading into FamilyActivitySelection refreshes stale tokens —
+        // the picker resolves tokens against the current app catalog.
         if let data = appState.storage.readRawData(forKey: StorageKeys.allowedAppTokens),
            let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data) {
+            // Build name map BEFORE loading into selection (stale tokens vanish on load).
+            let encoder = JSONEncoder()
+            let nameCache = appState.storage.readAllCachedAppNames()
+            var tokenNames: [String: String] = [:]  // tokenKey -> appName
+            for token in tokens {
+                if let tokenData = try? encoder.encode(token) {
+                    let key = tokenData.base64EncodedString()
+                    tokenNames[key] = nameCache[key] ?? "Unknown app"
+                }
+            }
+
+            let beforeCount = tokens.count
             selection.applicationTokens = tokens
+            let afterCount = selection.applicationTokens.count
+
+            if afterCount < beforeCount {
+                // Identify which tokens disappeared (stale).
+                let survivingKeys = Set(selection.applicationTokens.compactMap { token -> String? in
+                    guard let d = try? encoder.encode(token) else { return nil }
+                    return d.base64EncodedString()
+                })
+                let staleNames = tokenNames
+                    .filter { !survivingKeys.contains($0.key) }
+                    .map(\.value)
+                    .sorted()
+
+                let nameList = staleNames.joined(separator: ", ")
+                feedbackMessage = "Stale tokens (\(staleNames.count)): \(nameList). Re-select these apps."
+                try? appState.storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Stale allowed tokens: \(staleNames.joined(separator: ", "))",
+                    details: "\(beforeCount) stored, \(afterCount) resolved, \(staleNames.count) stale"
+                ))
+            }
         }
     }
 

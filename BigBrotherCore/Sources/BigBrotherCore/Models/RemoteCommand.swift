@@ -176,7 +176,7 @@ public enum CommandAction: Codable, Sendable, Equatable {
         case .setHeartbeatProfile: return "setHeartbeatProfile"
         case .setAllowedWebDomains: return "setAllowedWebDomains"
         case .addTrustedSigningKey: return "addTrustedSigningKey"
-        case .sendMessage: return "sendMessage"
+        case .sendMessage(let text): return "sendMessage.\(text.hashValue)"
         case .setLocationMode: return "setLocationMode"
         case .requestLocation: return "requestLocation"
         case .requestPermissions: return "requestPermissions"

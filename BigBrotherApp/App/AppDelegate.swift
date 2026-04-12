@@ -25,15 +25,27 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // FIRST THING: detect "needs guided setup" state synchronously and set the
+        // suppression flag BEFORE any service can fire a permission prompt.
+        // Without this, motion/location prompts triggered later by service
+        // configuration fire at once on a fresh reinstall, flooding the user
+        // with simultaneous system dialogs.
+        Self.setGuidedSetupFlagIfNeeded()
+
         // Register for remote notifications to receive CloudKit silent pushes.
         BackgroundRefreshHandler.registerForRemoteNotifications()
 
         // Register BGTask for periodic heartbeat (child devices).
         registerBackgroundTasks()
 
-        // Register unlock request notification category and set delegate.
+        // Register unlock request notification category so `UNNotificationResponse`
+        // actions (15m / 1h / Allow always) are available whenever the app
+        // delivers a notification. Note: we do NOT ask for notification
+        // permission here. That request is deferred to PermissionFixerView
+        // so the kid sees an explanatory screen before the system prompt
+        // fires, and the request happens from an explicit tap. Auto-firing
+        // on every launch was the behavior the user flagged as noisy.
         UnlockRequestNotificationService.registerCategory()
-        UnlockRequestNotificationService.requestPermissionIfNeeded()
         UNUserNotificationCenter.current().delegate = self
 
         // Detect location-based relaunch. iOS kills the app and relaunches it
@@ -60,7 +72,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         let tokenString = deviceToken.map { String(format: "%02x", $0) }.joined()
         NSLog("[BigBrother] APNs token registered: \(tokenString.prefix(16))...")
         // Write to App Group so diagnostic can report push status
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "apnsTokenRegisteredAt")
     }
 
@@ -69,7 +81,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
         NSLog("[BigBrother] APNs registration FAILED: \(error.localizedDescription)")
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set("failed: \(error.localizedDescription)", forKey: "apnsTokenError")
     }
 
@@ -79,7 +91,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
         NSLog("[BigBrother] PUSH RECEIVED: didReceiveRemoteNotification")
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "lastPushReceivedAt")
 
         guard let appState else {
@@ -102,27 +114,89 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    // MARK: - Guided Setup Detection
+
+    /// Synchronously detect "needs guided setup" and set the suppression flag
+    /// BEFORE any other code runs that might trigger system permission prompts.
+    ///
+    /// On a fresh reinstall, FC auth is reset to .notDetermined while the App Group
+    /// UserDefaults and Keychain (enrollment) survive. We detect that state here and
+    /// flip the flag so notifications/location/motion/FC/VPN prompts all suppress
+    /// themselves until PermissionFixerView walks the user through them one at a time.
+    static func setGuidedSetupFlagIfNeeded() {
+        let keychain = KeychainManager()
+        guard let role = try? keychain.get(DeviceRole.self, forKey: StorageKeys.deviceRole),
+              role == .child else { return }
+        let defaults = UserDefaults.appGroup
+
+        // b439 (reinstall detection): Check if this is a fresh install or reinstall.
+        // The App Group UserDefaults survive reinstall (where permissionFixerCompletedOnce
+        // lives), but UserDefaults.standard is scoped to the app sandbox and IS wiped on
+        // reinstall. We use a token in .standard as the authoritative "this install"
+        // marker. On a reinstall, ALL permissions (VPN, Location, Motion, Notifications)
+        // need to be re-granted since they're tied to the app sandbox, AND the
+        // `permissionFixerCompletedOnce` flag in the App Group would otherwise falsely
+        // claim the fixer already ran. Force the fixer to run on any fresh install or
+        // reinstall regardless of FC status — we CAN'T trust FC auth as a reinstall
+        // signal because iCloud Screen Time sync can preserve it across reinstalls.
+        let installTokenKey = "fr.bigbrother.installToken"
+        if UserDefaults.standard.string(forKey: installTokenKey) == nil {
+            defaults?.removeObject(forKey: "permissionFixerCompletedOnce")
+            defaults?.set(true, forKey: "showPermissionFixerOnNextLaunch")
+            UserDefaults.standard.set(UUID().uuidString, forKey: installTokenKey)
+            NSLog("[BigBrother] AppDelegate: fresh install/reinstall detected — forced showPermissionFixerOnNextLaunch, cleared permissionFixerCompletedOnce")
+            return
+        }
+
+        // Not a fresh install. Respect the user's previous fixer completion — cold-start
+        // FC daemon can briefly report .notDetermined even when auth is actually approved,
+        // and we don't want to keep re-showing the "All Set" sheet on every foreground.
+        if defaults?.bool(forKey: "permissionFixerCompletedOnce") == true { return }
+        let fcStatus = AuthorizationCenter.shared.authorizationStatus
+        if fcStatus != .approved {
+            defaults?.set(true, forKey: "showPermissionFixerOnNextLaunch")
+            NSLog("[BigBrother] AppDelegate: FC auth=\(fcStatus.rawValue) — setting guided setup flag to suppress prompts")
+        }
+    }
+
     // MARK: - Background Enforcement Restoration
 
     /// Lightweight enforcement restoration that runs directly from didFinishLaunching.
     /// Does NOT depend on AppState or the SwiftUI view hierarchy.
     ///
-    /// This mirrors the Monitor extension's applyShieldingToAllStores() logic:
-    /// reads policy state from App Group storage and applies shields directly
-    /// to ManagedSettingsStore. Idempotent — safe to run even when the foreground
-    /// .task-based restoration will also run.
+    /// b431: This used to duplicate ~150 lines of EnforcementServiceImpl.apply()
+    /// logic, which created two separate writers to the same ManagedSettingsStore
+    /// within the same process. Any divergence between AppDelegate's copy and
+    /// EnforcementServiceImpl was a self-race waiting to happen. We now funnel
+    /// through the canonical EnforcementServiceImpl.apply() path so there is a
+    /// single writer in the main app process. The Monitor extension is a
+    /// separate process and still has its own writer (which we can't unify
+    /// without cross-process coordination).
+    ///
+    /// IMPORTANT: Do NOT perform nuclear resets or ManagedSettingsStore writes from
+    /// background launches (push, BGTask, geofence). ManagedSettings writes are
+    /// unreliable when backgrounded, and the existing shields from the previous
+    /// session persist across launches — not writing is safer than writing wrong
+    /// values that silently fail. Only the foreground path + Monitor should write.
     private func restoreEnforcementIfNeeded() {
         let keychain = KeychainManager()
         guard let role = try? keychain.get(DeviceRole.self, forKey: StorageKeys.deviceRole),
               role == .child else { return }
 
+        // b439: If the guided setup fixer is about to run (fresh install /
+        // reinstall), skip restoration entirely. The fixer will re-run
+        // enforcement after the user has granted FC auth. Applying here would
+        // trigger the deep-rescue recovery path which fires Screen Time
+        // prompts ahead of the stepwise fixer flow.
+        let defaults = UserDefaults.appGroup
+        if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+            NSLog("[BigBrother] restoreEnforcementIfNeeded: guided setup active — deferring to PermissionFixerView")
+            return
+        }
+
         // ManagedSettingsStores persist across launches. Only write to them if
         // we're confident FC auth is ready — otherwise the existing shields from
         // the previous session are still active and correct.
-        // After a deploy (terminate + relaunch), FC daemon may not be ready yet.
-        // Writing in that state triggers an NSAssertion crash.
-        // The normal flow (AppState.setupOnLaunch + AppLaunchRestorer) handles
-        // the full restoration once the app is fully initialized.
         let authCenter = AuthorizationCenter.shared
         guard authCenter.authorizationStatus == .approved else {
             NSLog("[BigBrother] restoreEnforcementIfNeeded: FC auth not ready (status=\(authCenter.authorizationStatus.rawValue)) — previous shields still active, skipping write")
@@ -137,150 +211,108 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         // Force essential mode if permissions are missing.
         let effectiveMode: LockMode
-        let permDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let permDefaults = UserDefaults.appGroup
         if permDefaults?.bool(forKey: "allPermissionsGranted") == false && resolution.mode != .locked {
             effectiveMode = .locked
         } else {
             effectiveMode = resolution.mode
         }
 
-        // Apply shields to single enforcement store.
-        let enforcementStore = ManagedSettingsStore(named: .init(AppConstants.managedSettingsStoreEnforcement))
+        // Check if we're actually in the foreground. ManagedSettings writes from
+        // background launches (push, BGTask, geofence) are unreliable and can race
+        // with the Monitor extension. Existing shields persist across launches, so
+        // skipping the write is safer than writing wrong values that silently fail.
+        //
+        // b432: Use UIApplication.applicationState as the authoritative signal.
+        // The previous version used `mainAppLastForegroundAt < 5s` which fails on
+        // every cold launch (the timestamp is from the PREVIOUS session and is
+        // always > 5s old), so cold-launch repair was never running. Apple sets
+        // applicationState to .background only for background-launched apps;
+        // user-initiated launches start in .inactive transitioning to .active.
+        let uiAppState = UIApplication.shared.applicationState
+        let isLikelyForeground = uiAppState != .background
 
-        // One-time migration: clear legacy stores (base, schedule, tempUnlock)
-        let migDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if migDefaults?.bool(forKey: "migratedToSingleStore") != true {
-            for name in AppConstants.legacyStoreNames {
-                ManagedSettingsStore(named: .init(name)).clearAllSettings()
-            }
-            migDefaults?.set(true, forKey: "migratedToSingleStore")
-            NSLog("[BigBrother] restoreEnforcementIfNeeded: migrated legacy stores")
-        }
+        if !isLikelyForeground {
+            // Background launch — don't touch ManagedSettingsStore. Schedule a
+            // near-future one-shot DeviceActivity so the Monitor can apply
+            // enforcement from its privileged context. The old stopMonitoring
+            // trick didn't reliably wake the Monitor on iOS 17+.
+            NSLog("[BigBrother] restoreEnforcementIfNeeded: background launch (state=\(uiAppState.rawValue)) — scheduling Monitor refresh")
+            scheduleEnforcementRefreshActivity(source: "appDelegate.bgLaunch")
+        } else {
+            // Foreground — apply via canonical EnforcementServiceImpl path.
+            // SINGLE WRITER within main app process. EnforcementServiceImpl
+            // handles legacy store migration, mode dispatch, applyShield,
+            // applyWebBlocking, applyRestrictions, post-write verification,
+            // and ghost shield detection — everything we used to duplicate here.
+            //
+            // b432 (audit fix): Set mainAppLastForegroundAt BEFORE calling
+            // apply(). EnforcementServiceImpl's internal verification-recovery
+            // path uses this timestamp to decide whether it can safely do a
+            // nuclear reset (foreground-only, since background writes silently
+            // fail). On cold launch the timestamp is from a previous session,
+            // so apply() would misclassify us as "background" exactly when we
+            // most need the recovery. We already verified via
+            // UIApplication.applicationState that this is a foreground launch,
+            // so setting the timestamp is accurate.
+            UserDefaults.appGroup?
+                .set(Date().timeIntervalSince1970, forKey: "mainAppLastForegroundAt")
 
-        switch effectiveMode {
-        case .unlocked:
-            // Free window or unlocked — set wide-open shields instead of clearing.
-            // Avoids .child auth re-validation race on re-apply.
-            let decoder = JSONDecoder()
-            var allTokens = Set<ApplicationToken>()
-            if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
-               let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
-                allTokens.formUnion(allowed)
-            }
-            if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
-               let selection = try? decoder.decode(FamilyActivitySelection.self, from: data) {
-                allTokens.formUnion(selection.applicationTokens)
-            }
-            for limit in storage.readAppTimeLimits() {
-                if let token = try? decoder.decode(ApplicationToken.self, from: limit.tokenData) {
-                    allTokens.insert(token)
-                }
-            }
-            enforcementStore.shield.applications = nil
-            enforcementStore.shield.applicationCategories = allTokens.isEmpty ? nil : .all(except: allTokens)
-            enforcementStore.shield.webDomainCategories = nil
-            enforcementStore.shield.webDomains = nil
+            let fcManager = FamilyControlsManagerImpl(storage: storage)
+            let enforcement = EnforcementServiceImpl(storage: storage, fcManager: fcManager)
 
-        case .restricted, .locked, .lockedDown:
-            let allowExemptions = effectiveMode == .restricted
-            let decoder = JSONDecoder()
-
-            // Collect allowed tokens (parent-approved apps).
-            var allowedTokens = Set<ApplicationToken>()
-            if allowExemptions {
-                if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
-                   let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
-                    allowedTokens.formUnion(allowed)
-                }
-                let tempEntries = storage.readTemporaryAllowedApps()
-                for entry in tempEntries where entry.isValid {
-                    if let token = try? decoder.decode(ApplicationToken.self, from: entry.tokenData) {
-                        allowedTokens.insert(token)
-                    }
-                }
-            }
-
-            // Load picker tokens (FamilyActivitySelection).
-            var pickerTokens = Set<ApplicationToken>()
-            if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
-               let selection = try? decoder.decode(FamilyActivitySelection.self, from: data) {
-                pickerTokens = selection.applicationTokens
-            }
-
-            // Web blocking: locked/lockedDown ALWAYS block web, restricted respects flag.
+            // Build EffectivePolicy from current resolved state. Pull
+            // allowedAppTokensData and policyVersion from the snapshot when
+            // available so the apply path has the same context as a foreground
+            // sync would.
+            let snapshot = storage.readPolicySnapshot()
             let restrictions = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-            let shouldBlockWeb = !allowExemptions || restrictions.denyWebWhenRestricted
+            let isTempUnlock = resolution.isTemporary && effectiveMode == .unlocked
+            let policy = EffectivePolicy(
+                resolvedMode: effectiveMode,
+                controlAuthority: resolution.controlAuthority,
+                isTemporaryUnlock: isTempUnlock,
+                temporaryUnlockExpiresAt: resolution.expiresAt,
+                allowedAppTokensData: snapshot?.effectivePolicy.allowedAppTokensData,
+                deviceRestrictions: restrictions,
+                policyVersion: snapshot?.effectivePolicy.policyVersion ?? 0
+            )
 
-            // Apply hybrid blocking (mirrors Monitor extension logic).
-            if !pickerTokens.isEmpty && allowExemptions {
-                let tokensToBlock = pickerTokens.subtracting(allowedTokens)
-                let perAppTokens: Set<ApplicationToken>
-                if tokensToBlock.count <= 50 {
-                    perAppTokens = tokensToBlock
-                } else {
-                    let sorted = tokensToBlock.sorted { $0.hashValue < $1.hashValue }
-                    perAppTokens = Set(sorted.prefix(50))
-                }
-                enforcementStore.shield.applications = perAppTokens
-                enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
-                enforcementStore.shield.webDomainCategories = shouldBlockWeb ? .all() : nil
-            } else {
-                let apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
-                enforcementStore.shield.applications = apps
-                if allowedTokens.isEmpty {
-                    enforcementStore.shield.applicationCategories = .all()
-                } else {
-                    enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
-                }
-                enforcementStore.shield.webDomainCategories = shouldBlockWeb ? .all() : nil
-            }
-
-            // Write DNS blocklist for the tunnel — previously missing from background restore.
-            // Without this, shields are restored but DNS blocking stays empty until foreground.
-            let encoder = JSONEncoder()
-            let cache = storage.readAllCachedAppNames()
-            let shieldedTokens = pickerTokens.subtracting(allowedTokens)
-            var shieldedNames = Set<String>()
-            for token in shieldedTokens {
-                if let data = try? encoder.encode(token) {
-                    let key = data.base64EncodedString()
-                    if let name = cache[key], !name.hasPrefix("App ") {
-                        shieldedNames.insert(name)
-                    }
+            // b439: Dispatch the apply() to a background queue. didFinishLaunching
+            // runs on the main thread; a direct call here freezes the UI for 6+
+            // seconds if apply() falls into the deep daemon rescue. Mark the
+            // restoration timestamp BEFORE dispatching so AppLaunchRestorer's
+            // 2-second skip window still covers the race against a later
+            // performRestoration() call. The apply happens asynchronously; the
+            // UI comes up immediately.
+            UserDefaults.appGroup?
+                .set(Date().timeIntervalSince1970, forKey: "appDelegateRestorationAt")
+            let capturedEnforcement = enforcement
+            let capturedPolicy = policy
+            let capturedMode = effectiveMode
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try capturedEnforcement.apply(capturedPolicy)
+                    NSLog("[BigBrother] restoreEnforcementIfNeeded: applied via EnforcementServiceImpl (background), mode=\(capturedMode.rawValue) reason=\(resolution.reason)")
+                } catch {
+                    NSLog("[BigBrother] restoreEnforcementIfNeeded: enforcement.apply failed: \(error.localizedDescription)")
+                    try? AppGroupStorage().appendDiagnosticEntry(DiagnosticEntry(
+                        category: .enforcement,
+                        message: "AppDelegate restore enforcement.apply failed",
+                        details: "mode=\(capturedMode.rawValue) error=\(error.localizedDescription)"
+                    ))
                 }
             }
-            var blockedDomains = Set<String>()
-            for name in shieldedNames {
-                blockedDomains.formUnion(DomainCategorizer.domainsForApp(name))
-            }
-            blockedDomains.formUnion(DomainCategorizer.dohResolverDomains)
-            if restrictions.denyWebGamesWhenRestricted {
-                blockedDomains.formUnion(DomainCategorizer.webGamingDomains)
-            }
-            // Only write if we computed something, or if the existing list is empty.
-            // Preserves existing blocklist if our name cache is empty (cold start).
-            if !blockedDomains.isEmpty || storage.readEnforcementBlockedDomains().isEmpty {
-                try? storage.writeEnforcementBlockedDomains(blockedDomains)
-            }
-        }
 
-        // Apply device restrictions on the default store.
-        let r = storage.readDeviceRestrictions() ?? DeviceRestrictions()
-        let defaultStore = ManagedSettingsStore()
-        defaultStore.application.denyAppRemoval = r.denyAppRemoval ? true : nil
-        defaultStore.media.denyExplicitContent = r.denyExplicitContent ? true : nil
-        defaultStore.account.lockAccounts = r.lockAccounts ? true : nil
-        defaultStore.dateAndTime.requireAutomaticDateAndTime = r.requireAutomaticDateAndTime ? true : nil
-
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set("backgroundRestore", forKey: "lastShieldChangeReason")
+            UserDefaults.appGroup?
+                .set("backgroundRestore", forKey: "lastShieldChangeReason")
+        } // end isLikelyForeground
 
         // Re-register reconciliation schedules so the Monitor extension keeps firing
         // even if DeviceActivity registrations were lost during an Xcode deploy or update.
         reregisterReconciliationSchedule()
 
         // If we were dead and the tunnel flagged us, grab location immediately.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
         if let diedAt = defaults?.double(forKey: "appDiedNeedLocationAt"), diedAt > 0 {
             defaults?.removeObject(forKey: "appDiedNeedLocationAt")
             // CLLocationManager is already running from startContinuousTracking.
@@ -714,7 +746,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private static func didProcessCommands(since date: Date) -> Bool {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
         guard timestamp > 0 else { return false }
         return Date(timeIntervalSince1970: timestamp) >= date

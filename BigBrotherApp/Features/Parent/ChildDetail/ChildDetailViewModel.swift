@@ -72,6 +72,16 @@ struct TimelineEntry: Identifiable {
 
 @Observable @MainActor
 final class ChildDetailViewModel: CommandSendable {
+    /// Session-level dedupe for auto-re-approve. Survives view re-creation but
+    /// resets on app restart. Prevents repeated command floods when the parent
+    /// reopens the same child detail page.
+    private static var autoApprovedSession: Set<UUID> = []
+
+    /// b436 (audit fix): Cross-call per-app-name dedupe. Reentrant calls to
+    /// loadPendingAppReviews during an `await performCommand` suspension
+    /// would otherwise pick up the same app via a different review ID.
+    private static var autoApprovedSessionAppNames: Set<String> = []
+
     let appState: AppState
     let child: ChildProfile
 
@@ -1426,17 +1436,94 @@ final class ChildDetailViewModel: CommandSendable {
             return
         }
         do {
-            // Fingerprints already approved (active in TimeLimitConfig) — safety net
-            // to hide reviews for apps that are already configured.
-            let approvedFingerprints = Set(timeLimitConfigs.filter(\.isActive).map(\.appFingerprint))
+            // Show reviews even for already-approved apps — a review for an approved app
+            // means the token rotated (stale) and needs refreshing. Previously these were
+            // hidden, leaving the parent with a blue dot they couldn't act on. The actual
+            // dedupe is by app NAME below (approvedAppNames), since fingerprint changes
+            // when the token rotates.
 
             let all = try await cloudKit.fetchPendingAppReviews(childProfileID: child.id)
-                .filter { !approvedFingerprints.contains($0.appFingerprint) }
+
+            // Auto-re-approve apps that are already configured — refreshes stale tokens
+            // without requiring parent action. The child gets immediate relief.
+            // Match by app NAME (not fingerprint) because token rotation changes the fingerprint.
+            //
+            // CRITICAL: Throttle commands AND dedupe across calls. Sending many
+            // commands in rapid succession corrupts the child's ManagedSettings daemon.
+            let approvedAppNames = Set(timeLimitConfigs.filter(\.isActive).map { $0.appName.lowercased() })
+            let candidates = all.filter {
+                $0.nameResolved && approvedAppNames.contains($0.appName.lowercased())
+            }
+            // Session-level dedupe — never re-send for the same review ID twice.
+            // b436 (audit fix): ALSO dedupe by app name at session level. Without
+            // this, a concurrent second call to loadPendingAppReviews (e.g., from
+            // the 30s auto-refresh firing while we're suspended on await
+            // performCommand) could queue duplicate allow commands for the SAME
+            // app via different review IDs. The first call marked review A's ID
+            // but hadn't yet marked app "Safari" in a cross-call set, so the
+            // second call sees review B (different ID, same app) as unprocessed.
+            let unsent = candidates.filter {
+                !Self.autoApprovedSession.contains($0.id) &&
+                !Self.autoApprovedSessionAppNames.contains($0.appName.lowercased())
+            }
+            // Per-app dedupe — only send ONE command per app name (not one per review)
+            var seenAppNames = Set<String>()
+            let toSend = unsent.filter { review in
+                let key = review.appName.lowercased()
+                return seenAppNames.insert(key).inserted
+            }
+            // b436 (audit fix): Mark ALL to-send review IDs AND app names in the
+            // cross-call session sets BEFORE the first await so a reentrant call
+            // sees them as already-processed. Previously we only marked inside
+            // the loop, leaving a suspension window where a concurrent call
+            // could pick up the same reviews.
+            for review in toSend {
+                Self.autoApprovedSession.insert(review.id)
+                Self.autoApprovedSessionAppNames.insert(review.appName.lowercased())
+            }
+            for review in unsent where !toSend.contains(where: { $0.id == review.id }) {
+                Self.autoApprovedSession.insert(review.id)
+                Self.autoApprovedSessionAppNames.insert(review.appName.lowercased())
+            }
+            // Group by deviceID and send ONE batched .reviewApps per device.
+            // Sending 18 separate reviewApp commands creates 18 CK records and
+            // 18 alert pushes; iOS heavily throttles bursts of pushes, so the
+            // child's app may not wake until minutes later (the timeline showed
+            // a ~4 minute delay between parent SENT and child APPLIED). Batching
+            // collapses to 1 record + 1 push + 1 wake event.
+            let toSendByDevice = Dictionary(grouping: toSend, by: { $0.deviceID })
+            for (deviceID, reviews) in toSendByDevice {
+                let decisions = reviews.map {
+                    AppReviewDecision(
+                        fingerprint: $0.appFingerprint,
+                        disposition: .allowAlways,
+                        minutes: nil
+                    )
+                }
+                await performCommand(
+                    .reviewApps(decisions: decisions),
+                    target: .device(deviceID)
+                )
+                for review in reviews {
+                    try? await cloudKit.deletePendingAppReview(review.id)
+                }
+                NSLog("[ChildDetail] Auto-re-approved \(reviews.count) apps for device \(deviceID.rawValue.prefix(8)) in one batch")
+            }
+            // Delete the duplicate (same-app-name) reviews we marked earlier but
+            // didn't send a command for. Session marking was already done before
+            // the loop above (b436 audit fix).
+            for review in unsent where !toSend.contains(where: { $0.id == review.id }) {
+                try? await cloudKit.deletePendingAppReview(review.id)
+            }
+
+            let remaining = all.filter { review in
+                !review.nameResolved || !approvedAppNames.contains(review.appName.lowercased())
+            }
 
             // Deduplicate by fingerprint — keep the one with latest updatedAt
             // (preserves parent renames over older duplicates)
             var seen: [String: PendingAppReview] = [:]
-            for review in all {
+            for review in remaining {
                 if let existing = seen[review.appFingerprint] {
                     if review.updatedAt > existing.updatedAt { seen[review.appFingerprint] = review }
                 } else {
@@ -1445,7 +1532,8 @@ final class ChildDetailViewModel: CommandSendable {
             }
             let deduped = Array(seen.values)
             let resolved = deduped.filter(\.nameResolved)
-            pendingReviewDiagnostic = "CK: \(all.count) total, \(deduped.count) unique, \(resolved.count) named"
+            let autoApproved = all.count - remaining.count
+            pendingReviewDiagnostic = "CK: \(all.count) total, \(autoApproved) auto-re-approved, \(deduped.count) unique, \(resolved.count) named"
             let sorted = deduped.sorted { $0.createdAt < $1.createdAt }
             pendingAppReviews = sorted
 
@@ -1590,13 +1678,6 @@ final class ChildDetailViewModel: CommandSendable {
 
     /// Re-request permissions for a specific device.
     func requestPermissions(for device: ChildDevice) async {
-        await performCommand(.requestPermissions, target: .device(device.id))
-    }
-
-    /// Request a device to re-authorize FamilyControls, attempting .child first.
-    /// Use this to upgrade from .individual to .child after adding the kid to Family Sharing.
-    /// Parent must be physically at the child device to approve the .child authorization.
-    func requestReauthorization(for device: ChildDevice) async {
         await performCommand(.requestPermissions, target: .device(device.id))
     }
 

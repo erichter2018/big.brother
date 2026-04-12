@@ -117,6 +117,7 @@ final class LocalParentUnlockViewModel {
 
         let inputs = PolicyPipelineCoordinator.Inputs(
             basePolicy: policy,
+            alwaysAllowedTokensData: appState.storage.readRawData(forKey: StorageKeys.allowedAppTokens),
             capabilities: capabilities,
             temporaryUnlockState: unlockState,
             authorizationHealth: appState.storage.readAuthorizationHealth(),

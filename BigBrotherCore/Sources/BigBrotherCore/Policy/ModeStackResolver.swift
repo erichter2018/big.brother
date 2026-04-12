@@ -6,8 +6,47 @@ import Foundation
 /// to compute what mode the device should be in RIGHT NOW. Any process (main app,
 /// Monitor extension, VPN tunnel) can call this and get the same deterministic answer.
 ///
-/// Also cleans up expired temporary state as a side effect — if a temp unlock expired
-/// but the Monitor missed the callback, calling this function fixes the state.
+/// This function is STRICTLY READ-ONLY — it never writes to App Group or UserDefaults.
+/// Multiple processes (main app, Monitor, tunnel) call this concurrently; any writes
+/// would create cross-process races. Cleanup of expired state is done by the command
+/// processor via cleanupExpiredLockUntil().
+///
+/// ## Relationship to other "mode" concepts
+///
+/// The codebase has several overlapping notions of "what mode is the device in":
+///
+/// - `ModeStackResolver.resolve(storage:)` → **THIS** — the authoritative
+///   answer to "what mode SHOULD the device be in right now, accounting for
+///   the full stack of overrides." Every enforcement decision, every heartbeat
+///   that reports the current mode, every DNS-blackhole check should come
+///   through here.
+///
+/// - `PolicySnapshot.effectivePolicy.resolvedMode` — the mode at the moment
+///   the snapshot was COMMITTED. May be stale relative to lockUntil / timed
+///   unlock / temporary unlock expiries. Read this only when you specifically
+///   want "the mode the writer meant when they committed the snapshot"
+///   (e.g., dashboards showing snapshot history, auditing a past decision).
+///
+/// - `ExtensionSharedState.currentMode` — the monitor's cached view of the
+///   mode at the last `apply()`. Used by the monitor as a shield-selection
+///   cache and by the tunnel's `seedBlockReasonsOnStart` as a seed signal
+///   when no resolver call has run yet. Do NOT read this as "what mode is
+///   the device in" — it will drift from the resolver's answer.
+///
+/// - `ScheduleProfile.resolvedMode(at:)` — a LAYER inside the resolver. Only
+///   reflects the schedule, not temporary overrides. Read directly only when
+///   you specifically need "what the schedule alone says" (e.g., heartbeat's
+///   `scheduleResolvedMode` field, which is explicitly separate from
+///   `currentMode`).
+///
+/// - `EffectivePolicy.isTemporaryUnlock` — a BOOL on the snapshot that
+///   means "this snapshot represents a temporary override to unlocked",
+///   distinct from `Resolution.isTemporary` which is true for ANY temporary
+///   resolution. See EffectivePolicy.swift for the trap that bit us in b460.
+///
+/// Rule of thumb: if you're asking "what mode is the device in?" call
+/// `resolve()`. If you're asking "what does this specific component
+/// think?" read that component's field directly.
 public enum ModeStackResolver {
 
     public struct Resolution {
@@ -24,7 +63,7 @@ public enum ModeStackResolver {
     }
 
     /// Resolve the current mode from the stack of state files in App Group storage.
-    /// Cleans up expired temporary state as a side effect.
+    /// Pure read-only resolver — no side effects, no writes.
     public static func resolve(storage: any SharedStorageProtocol, now: Date = Date()) -> Resolution {
 
         // 1. Active temporary unlock (parent-initiated, PIN, or self-unlock)?
@@ -40,7 +79,7 @@ public enum ModeStackResolver {
         // atomic JSON file that's more reliably readable.
         let temp: TemporaryUnlockState? = storage.readTemporaryUnlockState()
             ?? storage.readPolicySnapshot()?.temporaryUnlockState
-        if let temp, temp.expiresAt > now {
+        if let temp, !temp.isExpired(at: now) {
             return Resolution(
                 mode: .unlocked,
                 controlAuthority: temp.origin == .selfUnlock ? .selfUnlock : .temporaryUnlock,
@@ -76,16 +115,14 @@ public enum ModeStackResolver {
         }
 
         // 3. Active lockUntil? (parent locked device until a specific time)
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        if let lockUntilMode = defaults?.string(forKey: "lockUntilPreviousMode") {
-            // Check persisted expiry — if past, self-heal by clearing the flag.
+        // READ-ONLY: resolve() must never write to UserDefaults. Multiple processes
+        // call this concurrently. Cleanup is done by cleanupExpiredLockUntil().
+        let defaults = UserDefaults.appGroup
+        if let _ = defaults?.string(forKey: "lockUntilPreviousMode") {
             if let expiryInterval = defaults?.object(forKey: "lockUntilExpiresAt") as? Double {
                 let expiresAt = Date(timeIntervalSince1970: expiryInterval)
-                if expiresAt <= now {
-                    // Expired — clean up and fall through to schedule/snapshot.
-                    defaults?.removeObject(forKey: "lockUntilPreviousMode")
-                    defaults?.removeObject(forKey: "lockUntilExpiresAt")
-                } else {
+                if expiresAt > now {
+                    let lockUntilMode = defaults?.string(forKey: "lockUntilPreviousMode") ?? "restricted"
                     return Resolution(
                         mode: .restricted,
                         controlAuthority: .lockUntil,
@@ -94,17 +131,17 @@ public enum ModeStackResolver {
                         reason: "lockUntil active until \(shortTime(expiresAt)) (reverts to \(lockUntilMode))"
                     )
                 }
+                // Expired — fall through to schedule/snapshot. Cleanup happens elsewhere.
             } else {
-                // Legacy: no expiry stored. Apply a 24-hour failsafe so the device
-                // doesn't stay locked forever if the DeviceActivity schedule was lost.
+                // Legacy: no expiry stored. Treat as 24h failsafe without writing.
                 let failsafeExpiry = now.addingTimeInterval(AppConstants.defaultCommandExpirySeconds)
-                defaults?.set(failsafeExpiry.timeIntervalSince1970, forKey: "lockUntilExpiresAt")
+                let lockUntilMode = defaults?.string(forKey: "lockUntilPreviousMode") ?? "restricted"
                 return Resolution(
                     mode: .restricted,
                     controlAuthority: .lockUntil,
                     isTemporary: true,
                     expiresAt: failsafeExpiry,
-                    reason: "lockUntil active (reverts to \(lockUntilMode)), 24h failsafe applied"
+                    reason: "lockUntil active (reverts to \(lockUntilMode)), 24h failsafe (no persisted expiry)"
                 )
             }
         }
@@ -147,7 +184,7 @@ public enum ModeStackResolver {
         // With schedule-driven OFF, use the profile's lockedMode (the default
         // outside any window) instead of the stale snapshot mode.
         if !isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
-            let mode = profile.lockedMode
+            let mode = profile.lockedMode == .unlocked ? .restricted : profile.lockedMode
             return Resolution(
                 mode: mode,
                 controlAuthority: .schedule,
@@ -178,6 +215,20 @@ public enum ModeStackResolver {
             expiresAt: nil,
             reason: "No state — defaulting to restricted"
         )
+    }
+
+    /// Clean up expired lockUntil state from UserDefaults.
+    /// Call ONLY from the main app's command processor — not from extensions.
+    public static func cleanupExpiredLockUntil(now: Date = Date()) {
+        let defaults = UserDefaults.appGroup
+        guard defaults?.string(forKey: "lockUntilPreviousMode") != nil else { return }
+        if let expiryInterval = defaults?.object(forKey: "lockUntilExpiresAt") as? Double {
+            let expiresAt = Date(timeIntervalSince1970: expiryInterval)
+            if expiresAt <= now {
+                defaults?.removeObject(forKey: "lockUntilPreviousMode")
+                defaults?.removeObject(forKey: "lockUntilExpiresAt")
+            }
+        }
     }
 
     private static func shortTime(_ date: Date) -> String {

@@ -22,12 +22,18 @@ struct ChildHomeView: View {
     @State private var singleAppToken: ApplicationToken?
     @State private var singleAppName = ""
     @State private var singleAppSaving = false
+    /// Hint shown above the picker when triggered by the shield's "ask for
+    /// access" flow. Carries the app name resolved by ShieldConfiguration.
+    @State private var singleAppPromptHint: String?
     #endif
     @State private var showPINUnlock = false
     @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
     @State private var showSOSConfirmation = false
+    @State private var showPauseConfirmation = false
+    @State private var restrictionsPaused = false
     @State private var showAppVerification = false
     @State private var showPermissionFixer = false
+    @State private var showWelcome = false
     @State private var launchGracePeriod = true
     @State private var sosSent = false
     @Environment(\.scenePhase) private var scenePhase
@@ -134,9 +140,12 @@ struct ChildHomeView: View {
             }
         }
         .overlay(alignment: .bottomLeading) {
-            sosButton
-                .padding(.leading, 16)
-                .padding(.bottom, 16)
+            HStack(spacing: 8) {
+                sosButton
+                pauseRestrictionsButton
+            }
+            .padding(.leading, 16)
+            .padding(.bottom, 16)
         }
         .overlay(alignment: .bottomTrailing) {
             if !launchGracePeriod && viewModel.hasPermissionIssues {
@@ -163,6 +172,14 @@ struct ChildHomeView: View {
         }
         .sheet(isPresented: $showPermissionFixer) {
             PermissionFixerView(appState: viewModel.appState)
+        }
+        .fullScreenCover(isPresented: $showWelcome) {
+            WelcomeView {
+                showWelcome = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    showPermissionFixer = true
+                }
+            }
         }
         #if canImport(FamilyControls)
         .sheet(isPresented: $showAppVerification) {
@@ -221,6 +238,18 @@ struct ChildHomeView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
                 launchGracePeriod = false
             }
+            // First-launch flow: show the WelcomeView intro screen BEFORE
+            // PermissionFixerView so the kid (or parent) understands what's
+            // about to be asked for. WelcomeView's "Get started" button
+            // dismisses itself and triggers the fixer. The fresh-install
+            // flag is cleared here so we don't re-show on normal relaunches.
+            let defaults = UserDefaults.appGroup
+            if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
+                defaults?.removeObject(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    showWelcome = true
+                }
+            }
         }
         .onDisappear {
             viewModel.stopTimer()
@@ -233,6 +262,31 @@ struct ChildHomeView: View {
                 // Push notifications are unreliable — this ensures commands
                 // from parent are processed within seconds, always.
                 viewModel.appState.startForegroundCommandPoll()
+                // Auto-show always-allowed picker if stale tokens detected.
+                let defaults = UserDefaults.appGroup
+                if defaults?.bool(forKey: "allowedTokensNeedRefresh") == true {
+                    defaults?.removeObject(forKey: "allowedTokensNeedRefresh")
+                    showAlwaysAllowedSetup = true
+                }
+                // Auto-show the single-app picker if the kid just tapped
+                // "Ask for access" on a category-shielded app. ShieldAction
+                // wrote the picker-pending flag because iOS doesn't pass an
+                // ApplicationToken for category-only blocks; the kid needs to
+                // re-pick the app via the picker so we capture a fresh token,
+                // which the parent's reviewApp pipeline can resolve.
+                #if canImport(FamilyControls)
+                if let pending = viewModel.appState.storage.readUnlockPickerPending(),
+                   pending.isRecent {
+                    singleAppSelection = FamilyActivitySelection()
+                    singleAppToken = nil
+                    singleAppName = pending.appName ?? ""
+                    singleAppPromptHint = pending.appName.map {
+                        "Tap \"\($0)\" in the picker to re-request access."
+                    } ?? "Tap the app you wanted to open to re-request access."
+                    showSingleAppPick = true
+                    try? viewModel.appState.storage.clearUnlockPickerPending()
+                }
+                #endif
             } else if newPhase == .background {
                 viewModel.appState.stopForegroundCommandPoll()
             }
@@ -263,6 +317,58 @@ struct ChildHomeView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will immediately alert your parents with your current location.")
+        }
+    }
+
+    private var pauseRestrictionsButton: some View {
+        Button {
+            showPauseConfirmation = true
+        } label: {
+            Image(systemName: restrictionsPaused ? "play.fill" : "pause.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(restrictionsPaused ? Color.green.opacity(0.8) : Color.orange.opacity(0.8))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .alert(restrictionsPaused ? "Resume Restrictions?" : "Pause Restrictions?", isPresented: $showPauseConfirmation) {
+            Button(restrictionsPaused ? "Resume" : "Pause", role: restrictionsPaused ? nil : .destructive) {
+                Task { await togglePauseRestrictions() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(restrictionsPaused
+                 ? "This will re-enable all restrictions."
+                 : "This will temporarily disable all restrictions. Your parents will be notified.")
+        }
+    }
+
+    private func togglePauseRestrictions() async {
+        if restrictionsPaused {
+            // Resume: re-apply enforcement from current snapshot
+            restrictionsPaused = false
+            if let snapshot = viewModel.appState.snapshotStore?.loadCurrentSnapshot() {
+                try? viewModel.appState.enforcement?.apply(snapshot.effectivePolicy)
+            }
+            viewModel.appState.eventLogger?.log(.commandApplied, details: "Restrictions resumed by child")
+
+            // Tell tunnel to re-enable DNS enforcement
+            let defaults = UserDefaults.appGroup
+            defaults?.removeObject(forKey: "restrictionsPausedByChild")
+        } else {
+            // Pause: clear all shields + DNS blocking
+            restrictionsPaused = true
+            try? viewModel.appState.enforcement?.clearAllRestrictions()
+
+            // Tell tunnel to stop DNS blocking
+            let defaults = UserDefaults.appGroup
+            defaults?.set(Date().timeIntervalSince1970, forKey: "restrictionsPausedByChild")
+
+            // Notify parent via event log
+            viewModel.appState.eventLogger?.log(.authorizationLost, details: "RESTRICTIONS PAUSED BY CHILD — testing/emergency mode")
+
+            // Force immediate heartbeat so parent sees it
+            try? await viewModel.appState.heartbeatService?.sendNow(force: true)
         }
     }
 
@@ -495,6 +601,7 @@ struct ChildHomeView: View {
             singleAppSelection = FamilyActivitySelection()
             singleAppToken = nil
             singleAppName = ""
+            singleAppPromptHint = nil
             showSingleAppPick = true
         } label: {
             Label("Request an App", systemImage: "plus.app")
@@ -503,9 +610,13 @@ struct ChildHomeView: View {
         }
         .buttonStyle(.bordered)
         .tint(.blue)
-        .sheet(isPresented: $showSingleAppPick) {
+        .sheet(isPresented: $showSingleAppPick, onDismiss: {
+            singleAppPromptHint = nil
+        }) {
             ChildSingleAppPickSheet(
                 appState: viewModel.appState,
+                promptHint: singleAppPromptHint,
+                initialName: singleAppName,
                 onSubmit: { token, name in
                     submitSingleApp(token: token, name: name)
                 }
@@ -526,29 +637,44 @@ struct ChildHomeView: View {
         guard let tokenData = try? encoder.encode(token) else { return }
         let fingerprint = TokenFingerprint.fingerprint(for: tokenData)
 
-        // Check ALL sources to prevent duplicate submissions
-        // 1. Already in local pending review queue
-        if let pendingData = storage.readRawData(forKey: "pending_review_local.json"),
-           let pending = try? JSONDecoder().decode([PendingAppReview].self, from: pendingData),
-           pending.contains(where: { $0.appFingerprint == fingerprint }) {
-            return
+        // Only block submission if this exact token is already in the working
+        // allowed set or has a matching time-limit binding AND we already have
+        // a usable cached name for it. Pre-naming-era allowed apps with no name
+        // (or just "App N") MUST be re-pickable so the user can give them a
+        // real name on this pass. Stale picker-selection entries and stale
+        // pending reviews never block — those need fresh PendingAppReviews to
+        // re-bind rotated tokens.
+        let tokenKey = tokenData.base64EncodedString()
+        let cachedName = storage.readAllCachedAppNames()[tokenKey]
+        let hasUsableCachedName: Bool = {
+            guard let n = cachedName?.trimmingCharacters(in: .whitespaces),
+                  !n.isEmpty else { return false }
+            if n.hasPrefix("App ") { return false }
+            if n.hasPrefix("Temporary") { return false }
+            if n == "App" || n == "Unknown" { return false }
+            return true
+        }()
+        if hasUsableCachedName {
+            if let allowedData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+               let allowedTokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: allowedData),
+               allowedTokens.contains(token) {
+                return
+            }
+            for limit in storage.readAppTimeLimits() {
+                if limit.tokenData.base64EncodedString() == tokenKey {
+                    return
+                }
+            }
         }
-        // 2. Already in picker selection (submitted previously, even if synced to CloudKit)
-        if let pickerData = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
-           let existing = try? JSONDecoder().decode(FamilyActivitySelection.self, from: pickerData),
-           existing.applicationTokens.contains(token) {
-            return
-        }
-        // 3. Already has a time limit configured
-        let existingLimits = storage.readAppTimeLimits()
-        if existingLimits.contains(where: { $0.fingerprint == fingerprint }) {
-            return
-        }
-        // 4. Already in always-allowed set
-        if let allowedData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
-           let allowedTokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: allowedData),
-           allowedTokens.contains(token) {
-            return
+        // Drop any existing pending review with the same fingerprint — it's stale.
+        // We're about to write a fresh one with the current token bytes.
+        var existingPending: [PendingAppReview] = {
+            guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
+            return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
+        }()
+        existingPending.removeAll { $0.appFingerprint == fingerprint }
+        if let encoded = try? JSONEncoder().encode(existingPending) {
+            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
         }
 
         // Add to picker selection for enforcement
@@ -563,6 +689,12 @@ struct ChildHomeView: View {
         if let encoded = try? encoder.encode(pickerSelection) {
             try? storage.writeRawData(encoded, forKey: StorageKeys.familyActivitySelection)
         }
+
+        // Cache the name keyed by tokenData base64 so findTokensForAppName can resolve
+        // it later when the parent's auto-approve sends allowManagedApp(appName:).
+        // Without this, picker-captured names live only in pending_review_local.json
+        // and CommandProcessor's name lookup misses them entirely.
+        storage.cacheAppName(name, forTokenKey: tokenData.base64EncodedString())
 
         // Create pending review with the name the child entered
         let review = PendingAppReview(
@@ -599,16 +731,25 @@ struct ChildHomeView: View {
         if let encoded = try? JSONEncoder().encode(pending) {
             try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
         }
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
 
         // Refresh pending reviews immediately so card appears
         viewModel.refreshPendingReviews()
 
-        // Re-apply enforcement
-        if let enforcement = viewModel.appState.enforcement,
-           let snapshot = viewModel.appState.snapshotStore?.loadCurrentSnapshot() {
-            try? enforcement.apply(snapshot.effectivePolicy)
+        // Re-apply enforcement. b439: MUST dispatch to a detached background
+        // task — apply() is synchronous, takes the static applyLock, and can
+        // fall into the deep daemon rescue (6+ seconds of Thread.sleep). This
+        // runs inside the "Submit for Review" button action on the MainActor,
+        // so a direct call freezes the UI and makes the submit look stuck.
+        // Some apps (fast apply path) appear to work; others (slow/rescue
+        // path) hang for up to a minute. Detaching the apply fixes the hang.
+        let enforcementRef = viewModel.appState.enforcement
+        let storageRef = viewModel.appState.storage
+        Task.detached {
+            if let snapshot = storageRef.readPolicySnapshot() {
+                try? enforcementRef?.apply(snapshot.effectivePolicy)
+            }
         }
 
         // Push to CloudKit

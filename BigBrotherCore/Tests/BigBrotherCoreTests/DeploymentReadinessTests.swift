@@ -38,16 +38,6 @@ struct DeploymentReadinessTests {
         #expect(AppConstants.shieldActionBundleID == "\(app).shield-action")
     }
 
-    @Test("ManagedSettings store names are distinct")
-    func managedSettingsStoreNames() {
-        let names = [
-            AppConstants.managedSettingsStoreBase,
-            AppConstants.managedSettingsStoreSchedule,
-            AppConstants.managedSettingsStoreTempUnlock,
-        ]
-        #expect(Set(names).count == 3, "Store names must be unique")
-    }
-
     // MARK: - Storage Keys
 
     @Test("Keychain keys use consistent prefix")

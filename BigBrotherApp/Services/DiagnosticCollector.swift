@@ -16,7 +16,7 @@ enum DiagnosticCollector {
     ) async -> DiagnosticReport {
         let storage = AppGroupStorage()
         let keychain = KeychainManager()
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
 
         // Enrollment
         let enrollment = try? keychain.get(
@@ -316,7 +316,7 @@ enum DiagnosticCollector {
             vpnTunnelStatus: vpnStatus,
             familyControlsAuth: {
                 let status = authStatus?.rawValue ?? "unknown"
-                let authType = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "fr.bigbrother.authorizationType") ?? "unknown"
+                let authType = UserDefaults.appGroup?.string(forKey: "fr.bigbrother.authorizationType") ?? "unknown"
                 return "\(status) (\(authType))"
             }(),
             currentMode: snapshot?.effectivePolicy.resolvedMode.rawValue ?? "unknown",

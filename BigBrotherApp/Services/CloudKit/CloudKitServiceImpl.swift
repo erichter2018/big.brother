@@ -149,39 +149,46 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         // hundreds of already-processed commands on every 5-second poll.
         let cutoff = Date().addingTimeInterval(-24 * 3600) as NSDate
 
-        // 1. Device-specific commands (familyID validated to prevent cross-family injection)
-        let devicePred = NSPredicate(
-            format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
-            CKFieldName.targetType, "device",
-            CKFieldName.targetID, deviceID.rawValue,
-            CKFieldName.familyID, familyID.rawValue,
-            CKFieldName.status, CommandStatus.pending.rawValue,
-            CKFieldName.issuedAt, cutoff
+        // Run all 3 sub-queries in parallel. Sequential CK queries cost 1-3
+        // seconds each (round trip + indexing), so 3 queries serially used
+        // 3-9 seconds for every poll cycle. Parallel = ~max(query) instead
+        // of sum(query). This is the dominant latency in mode-transition
+        // wake paths — collapsing it speeds up "kid opens app and waits for
+        // mode change" by 6+ seconds.
+        async let deviceCmds: [CKRecord] = query(
+            CKRecordType.remoteCommand,
+            predicate: NSPredicate(
+                format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
+                CKFieldName.targetType, "device",
+                CKFieldName.targetID, deviceID.rawValue,
+                CKFieldName.familyID, familyID.rawValue,
+                CKFieldName.status, CommandStatus.pending.rawValue,
+                CKFieldName.issuedAt, cutoff
+            )
         )
-        let deviceCmds = try await query(CKRecordType.remoteCommand, predicate: devicePred)
-
-        // 2. Child-profile commands (familyID validated to prevent cross-family injection)
-        let childPred = NSPredicate(
-            format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
-            CKFieldName.targetType, "child",
-            CKFieldName.targetID, childProfileID.rawValue,
-            CKFieldName.familyID, familyID.rawValue,
-            CKFieldName.status, CommandStatus.pending.rawValue,
-            CKFieldName.issuedAt, cutoff
+        async let childCmds: [CKRecord] = query(
+            CKRecordType.remoteCommand,
+            predicate: NSPredicate(
+                format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
+                CKFieldName.targetType, "child",
+                CKFieldName.targetID, childProfileID.rawValue,
+                CKFieldName.familyID, familyID.rawValue,
+                CKFieldName.status, CommandStatus.pending.rawValue,
+                CKFieldName.issuedAt, cutoff
+            )
         )
-        let childCmds = try await query(CKRecordType.remoteCommand, predicate: childPred)
-
-        // 3. Global commands
-        let globalPred = NSPredicate(
-            format: "%K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
-            CKFieldName.targetType, "all",
-            CKFieldName.familyID, familyID.rawValue,
-            CKFieldName.status, CommandStatus.pending.rawValue,
-            CKFieldName.issuedAt, cutoff
+        async let globalCmds: [CKRecord] = query(
+            CKRecordType.remoteCommand,
+            predicate: NSPredicate(
+                format: "%K == %@ AND %K == %@ AND %K == %@ AND %K >= %@",
+                CKFieldName.targetType, "all",
+                CKFieldName.familyID, familyID.rawValue,
+                CKFieldName.status, CommandStatus.pending.rawValue,
+                CKFieldName.issuedAt, cutoff
+            )
         )
-        let globalCmds = try await query(CKRecordType.remoteCommand, predicate: globalPred)
 
-        let allRecords = deviceCmds + childCmds + globalCmds
+        let allRecords = try await deviceCmds + childCmds + globalCmds
         return allRecords.compactMap(CKRecordConversion.remoteCommand)
     }
 
@@ -589,6 +596,19 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             ? ["commands-\(familyID.rawValue)", "mode-commands-alert-\(familyID.rawValue)"]
             : ["unlock-requests-v3-\(familyID.rawValue)", "heartbeats-v1-\(familyID.rawValue)", "app-reviews-v1-\(familyID.rawValue)"]
 
+        // FORCE-REBIND: After a fresh install, the APNs device token rotates,
+        // but the existing CK subscription on the server is still bound to the
+        // OLD token. Pushes get delivered to the dead token and silently
+        // dropped — the kid never wakes for hours. We detect "fresh install
+        // since last subscription bind" via a UserDefaults.standard token (which
+        // is wiped on reinstall, unlike App Group). If the token is missing or
+        // doesn't match, force delete + recreate so the fresh APNs token gets
+        // bound to a fresh subscription.
+        let bindMarkerKey = "fr.bigbrother.subscriptionBindToken"
+        let installToken = UserDefaults.standard.string(forKey: "fr.bigbrother.installToken")
+        let lastBindToken = UserDefaults.standard.string(forKey: bindMarkerKey)
+        let needsRebind = installToken != nil && installToken != lastBindToken
+
         // Always log what we find for debugging push issues
         let existing: [CKSubscription]
         do {
@@ -602,16 +622,21 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         let existingIDs = Set(existing.map(\.subscriptionID))
         let hasAllExpected = expectedIDs.isSubset(of: existingIDs)
 
-        if hasAllExpected {
+        if hasAllExpected && !needsRebind {
             NSLog("[BigBrother] CK subscriptions all present (\(expectedIDs)) — push should work")
             // Even if subscription exists, ensure APNs token is fresh
             await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
             return
         }
 
-        // Subscription(s) missing — nuke everything and re-create with fresh APNs token.
-        let missing = expectedIDs.subtracting(existingIDs)
-        NSLog("[BigBrother] CK subscriptions missing: \(missing) from \(existing.count) subs — deleting stale + re-registering")
+        // Subscription(s) missing OR fresh install — nuke everything and re-create
+        // so the new APNs token is bound to fresh subscriptions on the CK server.
+        if needsRebind {
+            NSLog("[BigBrother] CK subscriptions FORCE REBIND: fresh install detected (token \(installToken?.prefix(8) ?? "nil") != \(lastBindToken?.prefix(8) ?? "nil")) — deleting + re-creating to refresh APNs binding")
+        } else {
+            let missing = expectedIDs.subtracting(existingIDs)
+            NSLog("[BigBrother] CK subscriptions missing: \(missing) from \(existing.count) subs — deleting stale + re-registering")
+        }
         await deleteAllSubscriptions()
         await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
 
@@ -766,6 +791,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 }
             }
             database.add(op)
+        }
+
+        // Mark this install token as bound, so future launches don't force
+        // another rebind unless the install token rotates again (next reinstall).
+        if let installToken {
+            UserDefaults.standard.set(installToken, forKey: bindMarkerKey)
+            NSLog("[BigBrother] CK subscription bind marker set to install token \(installToken.prefix(8))")
         }
     }
 

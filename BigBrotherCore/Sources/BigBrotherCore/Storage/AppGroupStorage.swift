@@ -167,15 +167,14 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     // at startup so extensions only ever append to an existing file.
 
     public func appendPendingUnlockRequest(_ request: PendingUnlockRequest) throws {
-        lock.lock()
-        defer { lock.unlock() }
-
-        var entries: [PendingUnlockRequest] = read(FileName.pendingUnlockRequests) ?? []
-        entries.append(request)
-        if entries.count > 50 {
-            entries = Array(entries.suffix(50))
+        try withFileLock(name: "unlockrequests.lock") {
+            var entries: [PendingUnlockRequest] = read(FileName.pendingUnlockRequests) ?? []
+            entries.append(request)
+            if entries.count > 50 {
+                entries = Array(entries.suffix(50))
+            }
+            try writeAtomically(entries, to: FileName.pendingUnlockRequests)
         }
-        try writeAtomically(entries, to: FileName.pendingUnlockRequests)
     }
 
     public func readPendingUnlockRequests() -> [PendingUnlockRequest] {
@@ -187,12 +186,11 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     }
 
     public func removePendingUnlockRequest(id: UUID) throws {
-        lock.lock()
-        defer { lock.unlock() }
-
-        var entries: [PendingUnlockRequest] = read(FileName.pendingUnlockRequests) ?? []
-        entries.removeAll { $0.id == id }
-        try writeAtomically(entries, to: FileName.pendingUnlockRequests)
+        try withFileLock(name: "unlockrequests.lock") {
+            var entries: [PendingUnlockRequest] = read(FileName.pendingUnlockRequests) ?? []
+            entries.removeAll { $0.id == id }
+            try writeAtomically(entries, to: FileName.pendingUnlockRequests)
+        }
     }
 
     // MARK: - Shielded App Name Cache
@@ -246,16 +244,25 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     // MARK: - Unlock Picker Pending Flag
 
     public func readUnlockPickerPendingDate() -> Date? {
+        readUnlockPickerPending()?.requestedAt
+    }
+
+    public func readUnlockPickerPending() -> UnlockPickerPending? {
         let url = fileURL(for: FileName.unlockPickerPending)
         guard let data = try? Data(contentsOf: url),
               let wrapper = try? decoder.decode(UnlockPickerPending.self, from: data) else {
             return nil
         }
-        return wrapper.requestedAt
+        return wrapper
     }
 
     public func writeUnlockPickerPending() throws {
         let wrapper = UnlockPickerPending(requestedAt: Date())
+        try writeAtomically(wrapper, to: FileName.unlockPickerPending)
+    }
+
+    public func writeUnlockPickerPending(appName: String?, bundleID: String?) throws {
+        let wrapper = UnlockPickerPending(requestedAt: Date(), appName: appName, bundleID: bundleID)
         try writeAtomically(wrapper, to: FileName.unlockPickerPending)
     }
 
@@ -453,22 +460,20 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
     }
 
     public func markCommandProcessed(_ id: UUID) throws {
-        lock.lock()
-        defer { lock.unlock() }
-
-        var entries: [ProcessedCommandEntry] = read(FileName.processedCommands) ?? []
-        guard !entries.contains(where: { $0.id == id }) else { return }
-        entries.append(ProcessedCommandEntry(id: id, processedAt: Date()))
-        try writeAtomically(entries, to: FileName.processedCommands)
+        try withFileLock(name: "commands.lock") {
+            var entries: [ProcessedCommandEntry] = read(FileName.processedCommands) ?? []
+            guard !entries.contains(where: { $0.id == id }) else { return }
+            entries.append(ProcessedCommandEntry(id: id, processedAt: Date()))
+            try writeAtomically(entries, to: FileName.processedCommands)
+        }
     }
 
     public func pruneProcessedCommands(olderThan cutoff: Date) throws {
-        lock.lock()
-        defer { lock.unlock() }
-
-        var entries: [ProcessedCommandEntry] = read(FileName.processedCommands) ?? []
-        entries.removeAll { $0.processedAt < cutoff }
-        try writeAtomically(entries, to: FileName.processedCommands)
+        try withFileLock(name: "commands.lock") {
+            var entries: [ProcessedCommandEntry] = read(FileName.processedCommands) ?? []
+            entries.removeAll { $0.processedAt < cutoff }
+            try writeAtomically(entries, to: FileName.processedCommands)
+        }
     }
 
     // MARK: - Temporary Unlock State

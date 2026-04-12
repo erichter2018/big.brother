@@ -124,7 +124,7 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol, @unchecked Sendable {
             forKey: StorageKeys.enrollmentState
         ) else { return }
 
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
 
         do {
             let devices = try await cloudKit.fetchDevices(familyID: enrollment.familyID)
@@ -200,6 +200,7 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol, @unchecked Sendable {
 
         let inputs = PolicyPipelineCoordinator.Inputs(
             basePolicy: remotePolicy,
+            alwaysAllowedTokensData: storage.readRawData(forKey: StorageKeys.allowedAppTokens),
             capabilities: capabilities,
             temporaryUnlockState: storage.readTemporaryUnlockState(),
             authorizationHealth: storage.readAuthorizationHealth(),
@@ -230,7 +231,7 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol, @unchecked Sendable {
     }
 
     private static func didProcessCommands(since date: Date) -> Bool {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
         guard timestamp > 0 else { return false }
         return Date(timeIntervalSince1970: timestamp) >= date

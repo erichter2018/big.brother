@@ -23,7 +23,7 @@ enum AppNameHarvester {
         var count = 0
 
         // Persist to the shared fingerprint→name map in UserDefaults (App Group).
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         var nameMap = (defaults?.dictionary(forKey: "harvestedAppNames") as? [String: String]) ?? [:]
 
         for application in selection.applications {
@@ -48,14 +48,14 @@ enum AppNameHarvester {
 
     /// Look up a harvested name by fingerprint.
     static func name(forFingerprint fingerprint: String) -> String? {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let nameMap = (defaults?.dictionary(forKey: "harvestedAppNames") as? [String: String]) ?? [:]
         return nameMap[fingerprint]
     }
 
     /// All harvested names (fingerprint → name).
     static var allNames: [String: String] {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         return (defaults?.dictionary(forKey: "harvestedAppNames") as? [String: String]) ?? [:]
     }
 }

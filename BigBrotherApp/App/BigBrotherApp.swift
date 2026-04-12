@@ -86,9 +86,16 @@ struct BigBrotherApp: App {
             return
         }
 
+        #if DEBUG
+        // Install Darwin notification observers used by test_shield_cycle.sh
+        // to inject mode-change commands without going through CloudKit.
+        // Debug builds only — observer code is compiled out of release.
+        TestCommandReceiver.install(appState: appState)
+        #endif
+
         // Record that the main app launched with this build number.
         // The Monitor extension checks this to prompt re-launch after updates.
-        let launchDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let launchDefaults = UserDefaults.appGroup
         launchDefaults?.set(AppConstants.appBuildNumber, forKey: "mainAppLastLaunchedBuild")
 
         // Clear build-mismatch DNS block if the Monitor set it (update is now complete).
@@ -119,29 +126,35 @@ struct BigBrotherApp: App {
             }
         }
 
-        // --- UI-presenting requests (MUST run on MainActor, NOT in Task.detached) ---
+        // --- UI-presenting requests ---
+        // DO NOT auto-fire multiple system prompts here — that floods the user with
+        // simultaneous "Allow X" dialogs that are confusing and easy to mis-tap.
+        // Instead, the PermissionFixerView walks through them one at a time.
+        //
+        // Detect "needs guided setup" by checking if FamilyControls auth is missing
+        // or notDetermined. This works correctly even after app delete + reinstall
+        // (App Group UserDefaults persist, but FC auth is reset on reinstall).
         if appState.deviceRole == .child {
-            // Request notification permission. This presents a system dialog.
-            _LaunchLog.log("Child: requesting notification permission (MainActor)")
-            ModeChangeNotifier.requestPermission()
+            let permDefaults = UserDefaults.appGroup
+            // b437 (parity fix): Respect `permissionFixerCompletedOnce` the same
+            // way AppDelegate.setGuidedSetupFlagIfNeeded does. Without this,
+            // a cold-start FC daemon briefly reporting .notDetermined would
+            // re-arm the guided setup flag even though the user already
+            // completed the fixer — pop the sheet up unnecessarily.
+            let alreadyCompletedOnce = permDefaults?.bool(forKey: "permissionFixerCompletedOnce") == true
+            let fcAuthStatus = appState.enforcement?.authorizationStatus
+            let needsGuidedSetup = fcAuthStatus != .authorized
 
-            // Request FamilyControls authorization if needed. This presents
-            // the system "Allow Parental Controls" dialog.
-            if appState.familyControlsAvailable {
-                let authStatus = appState.enforcement?.authorizationStatus
-                if authStatus != .authorized {
-                    _LaunchLog.log("Child: requesting FamilyControls authorization (MainActor)")
-                    do {
-                        try await appState.enforcement?.requestAuthorization()
-                        _LaunchLog.log("Child: FamilyControls authorized")
-                    } catch {
-                        _LaunchLog.log("Child: FamilyControls auth failed: \(error) — user can retry via UI")
-                    }
-                } else {
-                    _LaunchLog.log("Child: FamilyControls already authorized")
-                }
+            if needsGuidedSetup && !alreadyCompletedOnce {
+                // Set a flag the ChildHomeView reads to auto-show the fixer.
+                // ALL other auto-prompts (notifications, location, FC auth) check
+                // this flag and suppress themselves until the fixer takes over.
+                permDefaults?.set(true, forKey: "showPermissionFixerOnNextLaunch")
+                _LaunchLog.log("Child: needs guided setup (FC auth=\(fcAuthStatus?.rawValue ?? "nil")) — will auto-show PermissionFixerView")
+            } else if needsGuidedSetup && alreadyCompletedOnce {
+                _LaunchLog.log("Child: FC auth=\(fcAuthStatus?.rawValue ?? "nil") but permissionFixerCompletedOnce — not re-arming (user can open fixer manually if needed)")
             } else {
-                _LaunchLog.log("Child: FamilyControls not available (missing entitlement or parent device)")
+                _LaunchLog.log("Child: FC auth OK — no guided setup needed")
             }
         }
 

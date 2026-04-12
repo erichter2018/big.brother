@@ -36,11 +36,42 @@ struct AppLaunchRestorer {
 
     /// Run the full restoration flow. Should be called on app launch for child devices.
     func restore() {
+        let defaults = UserDefaults.appGroup
+
+        // b439 (onboarding fix): Skip restoration entirely if guided setup is
+        // active. Applying enforcement before the user has granted FC auth
+        // would trigger the deep-rescue recovery path (verification fails →
+        // recovery → probe → rescue → Step 4 AuthorizationCenter prompt),
+        // firing Screen Time prompts ahead of the stepwise fixer flow.
+        if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+            NSLog("[AppLaunchRestorer] Skipping — guided setup active, PermissionFixerView will handle enforcement after permissions are granted")
+            return
+        }
+
+        // b434 (audit fix): Skip heavy restoration if AppDelegate.restoreEnforcementIfNeeded
+        // just ran in the foreground branch. AppDelegate runs synchronously in
+        // didFinishLaunching and writes "appDelegateRestorationAt" on successful
+        // apply. Without this guard, the Main queue's performRestoration kicks
+        // AppLaunchRestorer.restore() on a background queue shortly after, which
+        // races with AppDelegate's writes to ManagedSettingsStore (multiple
+        // concurrent writers). This skip still allows the safety-net 3s delayed
+        // re-restoration to run fully (by which point AppDelegate's timestamp
+        // will be > 2s old).
+        let appDelegateRestoreAt = defaults?.double(forKey: "appDelegateRestorationAt") ?? 0
+        let appDelegateRanRecently = appDelegateRestoreAt > 0 &&
+            Date().timeIntervalSince1970 - appDelegateRestoreAt < 2.0
+        if appDelegateRanRecently {
+            NSLog("[AppLaunchRestorer] Skipping — AppDelegate.restoreEnforcementIfNeeded ran \(Int(Date().timeIntervalSince1970 - appDelegateRestoreAt))s ago (avoiding concurrent writer race)")
+            // Still reset the throttle so the next launch has a fresh budget.
+            enforcement.resetThrottle()
+            return
+        }
+
         // Reset enforcement throttle on every fresh launch so deploy-driven restarts
         // don't exhaust the nuclear reset budget across separate app launches.
         enforcement.resetThrottle()
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set("launchRestore", forKey: "lastShieldChangeReason")
 
         guard let enrollment = try? keychain.get(
@@ -77,6 +108,7 @@ struct AppLaunchRestorer {
             let source: SnapshotSource = resolution.mode == .unlocked ? .temporaryUnlockStarted : .temporaryUnlockExpired
             let inputs = PolicyPipelineCoordinator.Inputs(
                 basePolicy: policy,
+                alwaysAllowedTokensData: storage.readRawData(forKey: StorageKeys.allowedAppTokens),
                 capabilities: capabilities,
                 temporaryUnlockState: temporaryUnlockState,
                 authorizationHealth: authHealth,
@@ -134,6 +166,7 @@ struct AppLaunchRestorer {
             )
             let inputs = PolicyPipelineCoordinator.Inputs(
                 basePolicy: policy,
+                alwaysAllowedTokensData: storage.readRawData(forKey: StorageKeys.allowedAppTokens),
                 capabilities: capabilities,
                 authorizationHealth: authHealth,
                 deviceID: enrollment.deviceID,
@@ -167,6 +200,7 @@ struct AppLaunchRestorer {
             )
             let inputs = PolicyPipelineCoordinator.Inputs(
                 basePolicy: policy,
+                alwaysAllowedTokensData: storage.readRawData(forKey: StorageKeys.allowedAppTokens),
                 capabilities: capabilities,
                 authorizationHealth: authHealth,
                 deviceID: enrollment.deviceID,
@@ -240,11 +274,11 @@ struct AppLaunchRestorer {
     /// Catches cases where the Monitor extension crashed during a transition.
     private func reconcileScheduleState() {
         guard let profile = storage.readActiveScheduleProfile() else { return }
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set("launchRestore", forKey: "lastShieldChangeReason")
 
         // Don't override manual mode commands (parent sent setMode directly).
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         if defaults.object(forKey: "scheduleDrivenMode") != nil && !defaults.bool(forKey: "scheduleDrivenMode") {
             return
         }

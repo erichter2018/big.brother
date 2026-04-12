@@ -96,7 +96,9 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         if isExceptionDate(date, calendar: calendar) { return .unlocked }
         if isInUnlockedWindow(at: date, calendar: calendar) { return .unlocked }
         if isInLockedWindow(at: date, calendar: calendar) { return .locked }
-        return lockedMode
+        // Safety net: lockedMode should never be .unlocked — that defeats the
+        // purpose of a schedule. Older profiles may have this from a data bug.
+        return lockedMode == .unlocked ? .restricted : lockedMode
     }
 
     /// Returns the next time the mode will change. Considers free windows,

@@ -133,7 +133,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         locationManager.showsBackgroundLocationIndicator = false
 
         // Restore persisted mode, defaulting to .continuous on child devices.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         if let raw = defaults?.string(forKey: "locationTrackingMode"),
            let saved = LocationTrackingMode(rawValue: raw) {
             setMode(saved)
@@ -170,7 +170,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
 
     func setMode(_ newMode: LocationTrackingMode) {
         mode = newMode
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(newMode.rawValue, forKey: "locationTrackingMode")
 
         switch newMode {
@@ -194,8 +194,13 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
 
     private func requestAlwaysAuthIfNeeded() {
         let status = locationManager.authorizationStatus
+        // Suppress auto-prompts during the guided onboarding window — the
+        // PermissionFixerView walks the user through location auth in sequence.
+        let defaults = UserDefaults.appGroup
+        let suppressUntilFixerDone = defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true
         switch status {
         case .notDetermined:
+            if suppressUntilFixerDone { return }
             // On iOS, requestAlwaysAuthorization() shows the full 3-option dialog
             // (Allow Once / While Using / Always) if called before requestWhenInUseAuthorization().
             locationManager.requestAlwaysAuthorization()
@@ -240,6 +245,14 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
                 print("[LocationService] CoreMotion activity NOT available on this device")
             }
             #endif
+            return
+        }
+        // Suppress the motion permission prompt during guided onboarding —
+        // PermissionFixerView walks the user through this. startActivityUpdates
+        // triggers the system dialog as a side effect when status is .notDetermined.
+        let suppressDefaults = UserDefaults.appGroup
+        if suppressDefaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true,
+           CMMotionActivityManager.authorizationStatus() == .notDetermined {
             return
         }
         motionMonitoringActive = true
@@ -368,7 +381,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
 
     /// Registers a geofence around the home location if coordinates are stored in App Group defaults.
     private func registerHomeGeofenceIfConfigured() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         guard let lat = defaults?.object(forKey: "homeLatitude") as? Double,
               let lon = defaults?.object(forKey: "homeLongitude") as? Double else {
             logDiag("No home coordinates configured — skipping geofence")
@@ -565,7 +578,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         }
         // Persist places for lookup on entry/exit
         if let data = try? JSONEncoder().encode(places) {
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(data, forKey: "namedPlaces")
         }
         #if DEBUG
@@ -577,7 +590,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     private func namedPlace(for regionID: String) -> NamedPlace? {
         guard regionID.hasPrefix(Self.namedPlacePrefix) else { return nil }
         let idStr = String(regionID.dropFirst(Self.namedPlacePrefix.count))
-        guard let data = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        guard let data = UserDefaults.appGroup?
             .data(forKey: "namedPlaces"),
               let places = try? JSONDecoder().decode([NamedPlace].self, from: data) else { return nil }
         return places.first { $0.id.uuidString == idStr }

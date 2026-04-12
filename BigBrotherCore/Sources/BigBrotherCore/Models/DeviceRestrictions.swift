@@ -25,10 +25,10 @@ public struct DeviceRestrictions: Codable, Sendable, Equatable {
     }
 
     public init(
-        denyAppRemoval: Bool = false,
+        denyAppRemoval: Bool = true,
         denyExplicitContent: Bool = false,
-        lockAccounts: Bool = false,
-        requireAutomaticDateAndTime: Bool = false,
+        lockAccounts: Bool = true,
+        requireAutomaticDateAndTime: Bool = true,
         denyWebWhenRestricted: Bool = false,
         denyWebGamesWhenRestricted: Bool = false
     ) {

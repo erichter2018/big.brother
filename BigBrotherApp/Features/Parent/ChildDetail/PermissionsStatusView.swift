@@ -24,11 +24,39 @@ struct PermissionsStatusView: View {
                 permissionRow(
                     "Parental Controls",
                     icon: "shield.checkered",
-                    status: hb.familyControlsAuthorized ? .ok : .critical,
+                    // b431: .individual is preferred (immune to iCloud Screen
+                    // Time sync writers from Family Sharing parent device).
+                    // .child is treated as a warning state — device should be
+                    // reinstalled to migrate. Both are still "authorized", just
+                    // .child has a known co-writer conflict.
+                    status: hb.familyControlsAuthorized
+                        ? (hb.isChildAuthorization == true ? .warning : .ok)
+                        : .critical,
                     detail: hb.familyControlsAuthorized
-                        ? (hb.isChildAuthorization == true ? "Child auth" : "Individual auth")
+                        ? (hb.isChildAuthorization == true
+                            ? "Child auth — reinstall to migrate"
+                            : "Individual auth")
                         : "Not authorized"
                 )
+
+                // b431: Ghost shield warning — OS shielded an app our policy
+                // said should be allowed. Strong evidence of an external writer
+                // (Apple iCloud Screen Time sync from Family Sharing parent device).
+                if hb.ghostShieldsDetected == true {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.shield.fill")
+                            .foregroundStyle(.red)
+                            .frame(width: 20)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Ghost shields detected")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.red)
+                            Text("The OS is shielding apps our policy says should be allowed. Likely cause: Apple iCloud Screen Time sync from a Family Sharing parent device. Reinstall to migrate to .individual auth and eliminate the conflict.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
 
                 permissionRow(
                     "Location",

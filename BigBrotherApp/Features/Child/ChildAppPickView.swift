@@ -251,7 +251,7 @@ struct ChildAppPickView: View {
                 try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
             // Also signal tunnel for redundant sync
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
         }
 

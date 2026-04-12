@@ -2,6 +2,7 @@ import Foundation
 import CloudKit
 import CoreLocation
 import DeviceActivity
+import FamilyControls
 import UIKit
 import Observation
 import UserNotifications
@@ -483,11 +484,11 @@ final class AppState {
 
             // Write FC auth status to App Group so the tunnel diagnostic can report it.
             let authStatus = impl.authorizationStatus
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(authStatus.rawValue, forKey: "familyControlsAuthStatus")
 
             fcManager.observeAuthorizationChanges { [weak self] newStatus in
-                UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                UserDefaults.appGroup?
                     .set(newStatus.rawValue, forKey: "familyControlsAuthStatus")
                 Task { @MainActor [weak self] in
                     self?.handleAuthorizationChange(newStatus)
@@ -653,7 +654,7 @@ final class AppState {
 
             // Copy home coordinates to App Group so LocationService can register geofence.
             // Parent stores per-device, but LocationService reads from App Group (child convention).
-            let debugDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+            let debugDefaults = UserDefaults.appGroup
             for (key, value) in UserDefaults.standard.dictionaryRepresentation() {
                 if key.hasPrefix("homeLatitude."), let lat = value as? Double {
                     let suffix = String(key.dropFirst("homeLatitude.".count))
@@ -719,7 +720,7 @@ final class AppState {
                     let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
                     let status = try? await container.accountStatus()
                     let statusKey = "lastCKAccountStatus"
-                    let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+                    let defaults = UserDefaults.appGroup
                     let previous = defaults?.integer(forKey: statusKey) ?? -1
                     let current = status?.rawValue ?? -1
                     defaults?.set(current, forKey: statusKey)
@@ -804,23 +805,43 @@ final class AppState {
         }
     }
 
-    /// Sync pending app reviews to CloudKit. Once uploaded, clear the local file.
-    /// The parent manages CK records from here — re-uploading would resurrect
-    /// reviews the parent already acted on.
+    /// Sync pending app reviews to CloudKit. Reviews stay in the local file
+    /// until the parent acts (handleReviewApp removes them). The local file is
+    /// the kid's source of truth for the "Pending Parent Approval" card —
+    /// wiping after upload made the card go blank as soon as the kid foregrounded
+    /// the app, which hides legitimate pending requests until the parent acts.
     private func syncResolvedPendingReviews() async {
         guard let cloudKit else { return }
         guard let data = storage.readRawData(forKey: "pending_review_local.json"),
               let localReviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
               !localReviews.isEmpty else { return }
 
-        var synced = 0
-        for review in localReviews {
-            if let _ = try? await cloudKit.savePendingAppReview(review) {
-                synced += 1
+        // Backfill the name cache. Cross-reference each review's appFingerprint
+        // against familyActivitySelection's tokens to recover the tokenData,
+        // then cache (tokenKey → name). Without this, findTokensForAppName
+        // fails when the parent's auto-approve sends allowManagedApp.
+        if let selData = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+           let selection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: selData) {
+            let encoder = JSONEncoder()
+            let resolvedReviews = localReviews.filter { $0.nameResolved }
+            let nameByFingerprint = Dictionary(
+                uniqueKeysWithValues: resolvedReviews.map { ($0.appFingerprint, $0.appName) }
+            )
+            for token in selection.applicationTokens {
+                guard let tokenData = try? encoder.encode(token) else { continue }
+                let fp = TokenFingerprint.fingerprint(for: tokenData)
+                if let name = nameByFingerprint[fp] {
+                    storage.cacheAppName(name, forTokenKey: tokenData.base64EncodedString())
+                }
             }
         }
-        if synced > 0 {
-            try? storage.writeRawData(Data("[]".utf8), forKey: "pending_review_local.json")
+
+        // Upload each review (idempotent — savePendingAppReview uses upsert
+        // semantics so re-uploading an existing record is harmless). DO NOT
+        // wipe the file afterwards; handleReviewApp removes individual entries
+        // when the parent decides on each one.
+        for review in localReviews {
+            _ = try? await cloudKit.savePendingAppReview(review)
         }
     }
 
@@ -944,14 +965,14 @@ final class AppState {
 
         // Ping tunnel immediately on launch — clears DNS blackhole ASAP.
         vpnManager?.sendPing()
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
 
         // One-time migration: denyWebWhenRestricted used to default to true, which was wrong.
         // Reset it to false on all existing devices so web isn't blocked unless the parent
         // explicitly enables it. Future setRestrictions commands will set the correct value.
         let migrationKey = "migration_denyWebWhenLocked_default_fixed"
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         if defaults?.bool(forKey: migrationKey) != true {
             var r = storage.readDeviceRestrictions() ?? DeviceRestrictions()
             if r.denyWebWhenRestricted {
@@ -966,6 +987,18 @@ final class AppState {
             return
         }
 
+        // Pre-load the snapshot from disk synchronously (fast — just file read).
+        // This populates the UI immediately so the home screen shows the correct
+        // mode instead of the "loading" placeholder for 30+ seconds.
+        if let snapshot = snapshotStore.loadCurrentSnapshot() {
+            currentEffectivePolicy = snapshot.effectivePolicy
+            activeWarnings = snapshot.effectivePolicy.warnings
+        }
+
+        // Move the actual enforcement restoration to a background thread.
+        // restorer.restore() makes synchronous ManagedSettings reads/writes which
+        // can hang for 20-30 seconds when familycontrolsd is slow or degraded.
+        // Running it on the main thread freezes the UI on every launch.
         let restorer = AppLaunchRestorer(
             keychain: keychain,
             storage: storage,
@@ -973,15 +1006,27 @@ final class AppState {
             eventLogger: eventLogger,
             snapshotStore: snapshotStore
         )
-        restorer.restore()
+        // Wrap the call in a nonisolated function so the @Sendable closure
+        // doesn't capture the non-Sendable AppLaunchRestorer struct directly.
+        let runRestore: @Sendable () -> Void = {
+            restorer.restore()
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            runRestore()
+            // After restoration, refresh the snapshot in case it changed.
+            if let snapshot = snapshotStore.loadCurrentSnapshot() {
+                DispatchQueue.main.async {
+                    self?.currentEffectivePolicy = snapshot.effectivePolicy
+                    self?.activeWarnings = snapshot.effectivePolicy.warnings
+                }
+            }
+        }
 
         // Register the hourly reconciliation schedule so the monitor extension
         // periodically verifies enforcement state, even if the app isn't running.
         if familyControlsAvailable {
             // Move ALL DeviceActivity registration to background thread.
             // startMonitoring() is synchronous and can block for 20-30s with many milestones.
-            // The existing shields persist at the OS level so enforcement is maintained
-            // during the brief window before registration completes.
             DispatchQueue.global(qos: .userInitiated).async {
                 let scheduleManager = ScheduleManagerImpl()
                 do {
@@ -1000,12 +1045,6 @@ final class AppState {
                 NSLog("[BigBrother] Active activities: \(allActivities.count) total, \(reconciliation.count) reconciliation, \(usage.count) usage tracking")
                 for a in reconciliation { NSLog("[BigBrother]   reconciliation: \(a.rawValue)") }
             }
-        }
-
-        // Update runtime state from restored snapshot.
-        if let snapshot = snapshotStore.loadCurrentSnapshot() {
-            currentEffectivePolicy = snapshot.effectivePolicy
-            activeWarnings = snapshot.effectivePolicy.warnings
         }
 
         isRestored = true
@@ -1049,7 +1088,7 @@ final class AppState {
         // constant, we're running old code after a devicectl install (the tunnel
         // restarts with new code but the app process may be resumed stale).
         // Force exit so iOS relaunches with the new binary.
-        let tunnelBuild = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        let tunnelBuild = UserDefaults.appGroup?
             .integer(forKey: "tunnelBuildNumber") ?? 0
         if tunnelBuild > AppConstants.appBuildNumber {
             exit(0)
@@ -1058,8 +1097,9 @@ final class AppState {
         // Ping tunnel IMMEDIATELY — before any async work. This clears schedule
         // DNS blackhole the instant the kid opens the app, not 30+ seconds later.
         vpnManager?.sendPing()
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-            .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+        let fgDefaults = UserDefaults.appGroup
+        fgDefaults?.set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+        fgDefaults?.set(Date().timeIntervalSince1970, forKey: "mainAppLastForegroundAt")
 
         Task {
             defer {
@@ -1068,58 +1108,88 @@ final class AppState {
                 }
             }
 
-            // 1. FIRST: process commands immediately — this is what the parent is waiting for.
-            // Don't make them wait for schedule sync or enforcement verification.
+            // b439: If the guided setup fixer is about to run, SKIP all
+            // enforcement/VPN/rescue work. Applying enforcement before the user
+            // has granted FC/Location/Motion/Notifications/VPN causes:
+            //   - Screen Time prompts fired from the deep-rescue XPC poke
+            //   - VPN install dialogs firing before the fixer can render its cards
+            //   - A 60-second "locked-looking" UI while verification + recovery
+            //     + rescue all run pointlessly
+            // We still process incoming commands + sync schedule + send heartbeat
+            // so the parent dashboard gets fresh data.
+            let syncDefaults = UserDefaults.appGroup
+            let fixerActive = syncDefaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true
+
+            // CRITICAL PATH: process commands immediately — this is what the
+            // parent is waiting for. processIncomingCommands handles its own
+            // enforcement.apply() call internally via reapplyCurrentEnforcement,
+            // so by the time this returns, the snapshot AND shields are updated.
+            // Refresh UI right after so the user sees the new mode within
+            // ~milliseconds of command processing finishing.
             try? await commandProcessor?.processIncomingCommands()
+            await MainActor.run { self.refreshLocalState() }
 
-            // 1b. Sync resolved pending app reviews to CloudKit.
-            // ShieldAction writes resolved names to local file; we push to CloudKit here.
-            await syncResolvedPendingReviews()
-
-            // 2. Sync schedule + restrictions from CloudKit
-            await syncScheduleProfile()
-
-            // 4. Re-apply enforcement — use ModeStackResolver as ground truth.
-            let resolution = ModeStackResolver.resolve(storage: storage)
-            if let snapshot = snapshotStore?.loadCurrentSnapshot() {
-                if snapshot.effectivePolicy.resolvedMode != resolution.mode {
-                    let corrected = EffectivePolicy(
-                        resolvedMode: resolution.mode,
-                        isTemporaryUnlock: resolution.isTemporary,
-                        temporaryUnlockExpiresAt: resolution.expiresAt,
-                        shieldedCategoriesData: snapshot.effectivePolicy.shieldedCategoriesData,
-                        allowedAppTokensData: snapshot.effectivePolicy.allowedAppTokensData,
-                        warnings: snapshot.effectivePolicy.warnings,
-                        policyVersion: snapshot.effectivePolicy.policyVersion + 1
-                    )
-                    let correctedSnapshot = PolicySnapshot(
-                        source: .restoration,
-                        trigger: "Foreground sync: corrected \(snapshot.effectivePolicy.resolvedMode.rawValue) → \(resolution.mode.rawValue)",
-                        effectivePolicy: corrected
-                    )
-                    _ = try? storage.commitCorrectedSnapshot(correctedSnapshot)
-                    try? enforcement?.apply(corrected)
-                } else {
-                    try? enforcement?.apply(snapshot.effectivePolicy)
-                }
+            if fixerActive {
+                // Skip enforcement/VPN/rescue until guided setup finishes.
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Foreground sync: guided setup active, skipping enforcement/VPN/rescue steps"
+                ))
+                // Fire-and-forget heartbeat so the parent sees liveness.
+                let hbService = heartbeatService
+                Task.detached { try? await hbService?.sendNow(force: true) }
+                vpnManager?.sendPing()
+                return
             }
 
-            // 5. Ensure VPN is installed
-            if let vpn = vpnManager {
-                if !(await vpn.isConfigured()) {
-                    try? await vpn.installAndStart()
-                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
-                        category: .enforcement,
-                        message: "VPN was missing — reinstalled during foreground sync"
-                    ))
+            // EVERYTHING BELOW IS NON-CRITICAL — fire and forget. The user
+            // already sees the correct mode at this point. The remaining work
+            // is best-effort housekeeping (CK syncs, daemon rescue, heartbeat,
+            // VPN install). Awaiting any of it serially used to add 6-15s of
+            // pointless blocking after the mode change had already taken
+            // effect locally.
+            let storageRef = storage
+            Task.detached { [weak self] in
+                await self?.syncResolvedPendingReviews()
+                await self?.syncScheduleProfile()
+
+                // Verify enforcement vs ModeStackResolver. Normally redundant
+                // (commandProcessor.apply already handled the mode change),
+                // but catches stale snapshot/resolution drift caused by
+                // schedule transitions or temp-unlock expiry that nothing
+                // else nudges.
+                await MainActor.run { self?.verifyAndFixEnforcement() }
+
+                // Daemon rescue on every foreground wake — idempotent on a
+                // healthy daemon, un-wedges a stuck one. Uses Thread.sleep
+                // internally, MUST run off main actor (Task.detached gives
+                // us that for free).
+                if let enf = await self?.enforcement {
+                    enf.forceDaemonRescue()
                 }
+
+                // Ensure VPN tunnel is installed.
+                if let vpn = await self?.vpnManager {
+                    if !(await vpn.isConfigured()) {
+                        try? await vpn.installAndStart()
+                        try? storageRef.appendDiagnosticEntry(DiagnosticEntry(
+                            category: .enforcement,
+                            message: "VPN was missing — reinstalled during foreground sync"
+                        ))
+                    }
+                }
+
+                // Heartbeat so parent sees state immediately.
+                try? await self?.heartbeatService?.sendNow(force: true)
+
+                // Ping the tunnel to clear any stale blackholes.
+                await MainActor.run { self?.vpnManager?.sendPing() }
+
+                // Final UI refresh in case schedule sync changed mode.
+                await MainActor.run { self?.refreshLocalState() }
             }
 
-            // 6. Verify enforcement matches ModeStackResolver
-            verifyAndFixEnforcement()
-
-            // 6b. DeviceActivity health check — re-register if activities vanished.
-            // Runs on background thread to avoid blocking (retry sleeps in registration).
+            // DeviceActivity health check — re-register if activities vanished.
             #if canImport(DeviceActivity)
             DispatchQueue.global(qos: .utility).async {
                 let daCenter = DeviceActivityCenter()
@@ -1128,7 +1198,6 @@ final class AppState {
                     NSLog("[AppState] DeviceActivity health check: only \(reconciliationCount)/4 — re-registering")
                     try? ScheduleManagerImpl().registerReconciliationSchedule()
                 }
-                // Also re-register usage tracking if missing
                 let usageCount = daCenter.activities.filter { $0.rawValue.hasPrefix("bigbrother.usagetracking") }.count
                 if usageCount == 0 {
                     NSLog("[AppState] DeviceActivity health check: usage tracking missing — re-registering")
@@ -1136,16 +1205,6 @@ final class AppState {
                 }
             }
             #endif
-
-            // 7. Send heartbeat so parent sees updated state immediately
-            try? await heartbeatService?.sendNow(force: true)
-
-            // 8. Ping the VPN tunnel to clear any stale blackholes
-            vpnManager?.sendPing()
-
-            await MainActor.run {
-                self.refreshLocalState()
-            }
         }
     }
 
@@ -1154,7 +1213,7 @@ final class AppState {
     /// parent-chosen enforcement immediately instead of waiting for the next
     /// reconciliation cycle.
     func handleMainAppResponsive(reapplyEnforcement: Bool) {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         if let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken"),
            !requestToken.isEmpty {
             defaults?.set(requestToken, forKey: "extensionHeartbeatAcknowledgedToken")
@@ -1177,6 +1236,13 @@ final class AppState {
     /// Install the VPN tunnel, retrying on failure.
     /// If the user denies the VPN permission dialog, retries every 60 seconds
     /// until the VPN is configured. Also retries on each app launch.
+    ///
+    /// b439 (onboarding fix): If the guided setup flag is set (fresh install /
+    /// reinstall), do NOT trigger the "Add VPN Configurations?" system dialog
+    /// here — it would fire before the PermissionFixerView has a chance to
+    /// render, ahead of the stepwise permission flow. The fixer has its own
+    /// VPN step that calls installAndStart() in the right sequence. We still
+    /// start an existing tunnel if one is already configured (no prompt).
     private func ensureVPNInstalled(_ vpn: VPNManagerService) {
         Task {
             // Check if already configured — no prompt needed
@@ -1191,6 +1257,17 @@ final class AppState {
                     print("[BigBrother] VPN tunnel start failed: \(error.localizedDescription)")
                     #endif
                 }
+                return
+            }
+
+            // Not configured. If PermissionFixerView is about to run, let it
+            // handle the install in its step — don't fire the VPN system dialog
+            // out of order.
+            let defaults = UserDefaults.appGroup
+            if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+                #if DEBUG
+                print("[BigBrother] VPN install deferred — PermissionFixerView will handle it")
+                #endif
                 return
             }
 
@@ -1292,6 +1369,37 @@ final class AppState {
         guard deviceRole == .child else { return }
         guard let enforcement, let eventLogger, let snapshotStore else { return }
 
+        // b439 (UI freeze fix): If the guided setup fixer is active, defer
+        // all enforcement work. This handler runs on @MainActor when the FC
+        // auth status changes — which happens every time the user taps "Grant
+        // Access" in the fixer's FC step. The enforcement.clearAllRestrictions()
+        // + enforcement.apply() calls below take the static applyLock and can
+        // fall into the deep daemon rescue (~6s of Thread.sleep per rescue
+        // attempt, with retries), all on the main thread. Net result: the UI
+        // freezes for 30-60+ seconds after each permission grant.
+        //
+        // During guided setup, skip the enforcement work entirely. The fixer
+        // completes, the flag clears, and the next scenePhase=.active cycle
+        // triggers a full apply() on a detached task via performForegroundSync.
+        // We still update the allPermissionsGranted flags so services know
+        // the auth state has changed.
+        let fixerActiveDefaults = UserDefaults.appGroup
+        let fixerActive = fixerActiveDefaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true
+        if fixerActive {
+            if newStatus == .denied || newStatus == .notDetermined {
+                eventLogger.log(.familyControlsAuthChanged, details: "Authorization changed during guided setup")
+                fixerActiveDefaults?.set(false, forKey: "allPermissionsGranted")
+                fixerActiveDefaults?.set(false, forKey: "enforcementPermissionsOK")
+            } else if newStatus == .authorized {
+                eventLogger.log(.authorizationRestored, details: "Authorization granted during guided setup")
+                fixerActiveDefaults?.set(true, forKey: "allPermissionsGranted")
+                fixerActiveDefaults?.set(true, forKey: "enforcementPermissionsOK")
+                // Update diagnostic write only — no enforcement.apply() here.
+                NSLog("[BigBrother] handleAuthorizationChange: FC authorized during guided setup — deferring enforcement to post-fixer")
+            }
+            return
+        }
+
         let authHealth = storage.readAuthorizationHealth()
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
 
@@ -1300,8 +1408,9 @@ final class AppState {
             // Also log as authorizationLost so parent gets a critical notification
             eventLogger.log(.authorizationLost, details: "FamilyControls authorization revoked — shields may be down")
             // Signal tunnel to block internet immediately
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-                .set(false, forKey: "allPermissionsGranted")
+            let permDefaults = UserDefaults.appGroup
+            permDefaults?.set(false, forKey: "allPermissionsGranted")
+            permDefaults?.set(false, forKey: "enforcementPermissionsOK")
             // Force heartbeat so parent sees revocation immediately
             Task { try? await heartbeatService?.sendNow(force: true) }
 
@@ -1318,6 +1427,7 @@ final class AppState {
                 )
                 let inputs = PolicyPipelineCoordinator.Inputs(
                     basePolicy: policy,
+                    alwaysAllowedTokensData: storage.readRawData(forKey: StorageKeys.allowedAppTokens),
                     capabilities: capabilities,
                     temporaryUnlockState: storage.readTemporaryUnlockState(),
                     authorizationHealth: authHealth,
@@ -1331,10 +1441,16 @@ final class AppState {
                 do {
                     let result = try snapshotStore.commit(output.snapshot)
                     if case .committed(let committed) = result {
-                        try? enforcement.apply(committed.effectivePolicy)
-                        try? snapshotStore.markApplied()
-                        currentEffectivePolicy = committed.effectivePolicy
-                        activeWarnings = committed.effectivePolicy.warnings
+                        // b439: Dispatch apply() off the main thread.
+                        let enf = enforcement
+                        let appliedPolicy = committed.effectivePolicy
+                        let capturedSnapshotStore = snapshotStore
+                        Task.detached {
+                            try? enf.apply(appliedPolicy)
+                            try? capturedSnapshotStore.markApplied()
+                        }
+                        currentEffectivePolicy = appliedPolicy
+                        activeWarnings = appliedPolicy.warnings
                     }
                 } catch {
                     // Log but don't crash.
@@ -1343,8 +1459,9 @@ final class AppState {
         } else if newStatus == .authorized {
             eventLogger.log(.authorizationRestored, details: "Authorization restored")
             // Signal tunnel to unblock internet
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
-                .set(true, forKey: "allPermissionsGranted")
+            let permDefaults = UserDefaults.appGroup
+            permDefaults?.set(true, forKey: "allPermissionsGranted")
+            permDefaults?.set(true, forKey: "enforcementPermissionsOK")
 
             // Force heartbeat so parent sees restoration immediately
             Task { try? await heartbeatService?.sendNow(force: true) }
@@ -1354,11 +1471,10 @@ final class AppState {
             try? ScheduleManagerImpl().registerReconciliationSchedule()
             NSLog("[BigBrother] Reconciliation schedules registered after auth restored")
 
-            // After FC auth is restored, ManagedSettingsStore may be corrupted.
-            // Nuke all stores first, then re-apply from scratch.
-            try? enforcement.clearAllRestrictions()
-
             // Re-apply enforcement now that authorization is available.
+            // b439: Dispatch the clearAllRestrictions + apply chain to a
+            // detached task — both take the static applyLock and can block
+            // the main thread for 6+ seconds (deep daemon rescue).
             if let snapshot = currentSnapshot {
                 let policy = Policy(
                     targetDeviceID: snapshot.deviceID ?? DeviceID(rawValue: "unknown"),
@@ -1371,6 +1487,7 @@ final class AppState {
                 )
                 let inputs = PolicyPipelineCoordinator.Inputs(
                     basePolicy: policy,
+                    alwaysAllowedTokensData: storage.readRawData(forKey: StorageKeys.allowedAppTokens),
                     capabilities: capabilities,
                     temporaryUnlockState: storage.readTemporaryUnlockState(),
                     authorizationHealth: authHealth,
@@ -1384,10 +1501,19 @@ final class AppState {
                 do {
                     let result = try snapshotStore.commit(output.snapshot)
                     if case .committed(let committed) = result {
-                        try? enforcement.apply(committed.effectivePolicy)
-                        try? snapshotStore.markApplied()
-                        currentEffectivePolicy = committed.effectivePolicy
-                        activeWarnings = committed.effectivePolicy.warnings
+                        let enf = enforcement
+                        let appliedPolicy = committed.effectivePolicy
+                        let capturedSnapshotStore = snapshotStore
+                        Task.detached {
+                            // After FC auth is restored, ManagedSettingsStore
+                            // may be corrupted — nuke all stores first, then
+                            // re-apply from scratch.
+                            try? enf.clearAllRestrictions()
+                            try? enf.apply(appliedPolicy)
+                            try? capturedSnapshotStore.markApplied()
+                        }
+                        currentEffectivePolicy = appliedPolicy
+                        activeWarnings = appliedPolicy.warnings
                     }
                 } catch {
                     // Log but don't crash.
@@ -1530,8 +1656,27 @@ final class AppState {
         // Check for new unlock requests and post notifications.
         checkForUnlockRequestNotifications(familyID: familyID)
 
+        // Check for new pending app reviews and post notifications.
+        // Push subscription wakes the app, but the notification post lives in
+        // ChildDetailViewModel which only runs when that view is open. Without
+        // this hook, parent only sees pending requests by manually opening the
+        // child's detail screen.
+        await checkForPendingAppReviewNotifications()
+
         // Ensure child devices have the latest parent PIN hash.
         await syncPINToChildDevices()
+
+        // Pre-process driving routes and speed limits in background.
+        // Runs on a background queue, throttled internally (skips if already running).
+        // Populates RouteCache and SpeedLimitService disk cache so LocationMapView
+        // loads instantly when the parent opens a child's driving history.
+        if let familyID = parentState?.familyID {
+            RouteProcessingService.shared.processIfNeeded(
+                cloudKit: cloudKit,
+                childDevices: childDevices,
+                familyID: familyID
+            )
+        }
 
         // Clean up stale pending commands — throttled to once per 5 minutes.
         let cleanupKey = "fr.bigbrother.lastCleanupAt"
@@ -1766,6 +1911,23 @@ final class AppState {
                 if hasRequests { pendingChildIDs.insert(profile.id) }
             }
             await MainActor.run { childrenWithPendingRequests = pendingChildIDs }
+        }
+    }
+
+    /// Fetch pending app reviews for all children and post local notifications
+    /// for any new ones. Called from refreshDashboard so the parent gets a banner
+    /// without needing to open ChildDetailView. Dedup is handled inside
+    /// AppReviewNotificationService via UserDefaults-tracked IDs + fingerprints.
+    private func checkForPendingAppReviewNotifications() async {
+        guard let cloudKit else { return }
+        for profile in childProfiles {
+            let reviews = (try? await cloudKit.fetchPendingAppReviews(childProfileID: profile.id)) ?? []
+            guard !reviews.isEmpty else { continue }
+            AppReviewNotificationService.checkAndNotify(
+                reviews: reviews,
+                childName: profile.name,
+                childProfileID: profile.id
+            )
         }
     }
 
@@ -2097,9 +2259,31 @@ final class AppState {
             }
 
             guard let profileID = myDevice.scheduleProfileID else {
-                // No schedule profile assigned — clear any existing registration.
+                // No schedule profile assigned — clear any existing registration
+                // and recompute effective mode so the device doesn't stay in a stale
+                // schedule-driven state (e.g., overlocked after schedule removal).
                 if familyControlsAvailable {
                     ScheduleRegistrar.clearAll(storage: storage)
+                }
+                let resolution = ModeStackResolver.resolve(storage: storage)
+                if let snapshot = snapshotStore?.loadCurrentSnapshot(),
+                   snapshot.effectivePolicy.resolvedMode != resolution.mode {
+                    let corrected = EffectivePolicy(
+                        resolvedMode: resolution.mode,
+                        controlAuthority: resolution.controlAuthority,
+                        shieldedCategoriesData: snapshot.effectivePolicy.shieldedCategoriesData,
+                        allowedAppTokensData: snapshot.effectivePolicy.allowedAppTokensData,
+                        deviceRestrictions: snapshot.effectivePolicy.deviceRestrictions,
+                        warnings: [],
+                        policyVersion: snapshot.effectivePolicy.policyVersion + 1
+                    )
+                    let snap = PolicySnapshot(
+                        source: .restoration,
+                        trigger: "Schedule profile cleared — recomputed mode to \(resolution.mode.rawValue)",
+                        effectivePolicy: corrected
+                    )
+                    _ = try? storage.commitCorrectedSnapshot(snap)
+                    try? enforcement?.apply(corrected)
                 }
                 return
             }
@@ -2109,7 +2293,7 @@ final class AppState {
 
             // Skip CloudKit fetch if profile ID and version match what we have locally.
             let localVersionKey = "scheduleProfileVersion.\(enrollment.deviceID.rawValue)"
-            let localVersion = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            let localVersion = UserDefaults.appGroup?
                 .object(forKey: localVersionKey) as? Date
             if let current = currentProfile,
                current.id == profileID,
@@ -2152,7 +2336,7 @@ final class AppState {
                 scheduleNextScheduleBGTask()
                 // Cache the version so we skip redundant fetches.
                 if let deviceVersion = myDevice.scheduleProfileVersion {
-                    UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+                    UserDefaults.appGroup?
                         .set(deviceVersion, forKey: localVersionKey)
                 }
                 #if DEBUG
@@ -2241,6 +2425,31 @@ final class AppState {
     /// Compares ModeStackResolver (what SHOULD be enforced) against actual
     /// ManagedSettingsStore state. If they disagree, re-applies enforcement.
     /// This is the safety net for missed Monitor callbacks.
+    ///
+    /// ## Related reconcile paths — keep in sync
+    ///
+    /// There are currently THREE overlapping reconcile paths in the main app.
+    /// If you change the logic here, audit the other two:
+    ///
+    /// 1. `AppState.verifyAndFixEnforcement` (this method) — 60s timer safety
+    ///    net. Has command-recent grace (10s), direct temp-unlock file
+    ///    short-circuit, and lockUntil cleanup.
+    /// 2. `HeartbeatServiceImpl.reconcileEnforcement` — runs after every
+    ///    successful heartbeat (~5 min). Simpler — no grace period, no
+    ///    lockUntil cleanup. Intended as a post-heartbeat "while we're
+    ///    awake, make sure shields match resolver" pass.
+    /// 3. `EnforcementServiceImpl.forceDaemonRescue` — runs on every
+    ///    foreground wake. Non-destructive if shields already match what
+    ///    the snapshot's `resolvedMode` says. NOT driven by the resolver
+    ///    (uses the snapshot directly) because the rescue is about the
+    ///    daemon itself wedging, not about stack drift.
+    ///
+    /// These three should eventually share a single
+    /// `reconcileFromResolver(_:trigger:)` helper on EnforcementServiceImpl
+    /// so the "build corrected policy → apply → commit snapshot → log"
+    /// sequence lives in one place. Not done yet because the three paths
+    /// have different threading (main-actor vs Task.detached) and
+    /// different preconditions that need careful untangling.
     private func verifyAndFixEnforcement() {
         guard deviceRole == .child, let enforcement else { return }
 
@@ -2250,7 +2459,7 @@ final class AppState {
         // where ModeStackResolver may see stale state from a different process).
         // 10s is enough to prevent races while allowing rapid command correction.
         // Post-write verification (1s retry) handles immediate write failures.
-        let cmdDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let cmdDefaults = UserDefaults.appGroup
         let lastCommandAt = cmdDefaults?.double(forKey: "fr.bigbrother.lastCommandProcessedAt") ?? 0
         if Date().timeIntervalSince1970 - lastCommandAt < 10 {
             return
@@ -2265,8 +2474,13 @@ final class AppState {
             let tempDiag = enforcement.shieldDiagnostic()
             let isShielded = tempDiag.shieldsActive || tempDiag.categoryActive
             if isShielded {
-                // Shields are UP but temp unlock is active — clear all shields
-                try? enforcement.clearAllRestrictions()
+                // Shields are UP but temp unlock is active — clear all shields.
+                // b439: Dispatch to detached task — clearAllRestrictions takes
+                // the static applyLock and can block the main thread.
+                let enf = enforcement
+                Task.detached {
+                    try? enf.clearAllRestrictions()
+                }
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .enforcement,
                     message: "Temp unlock override",
@@ -2276,6 +2490,9 @@ final class AppState {
             return // Temp unlock is active — don't let anything else override it
         }
 
+        // Periodic cleanup of expired lockUntil state (resolve() is read-only).
+        ModeStackResolver.cleanupExpiredLockUntil()
+
         let resolution = ModeStackResolver.resolve(storage: storage)
 
         let diag = enforcement.shieldDiagnostic()
@@ -2283,17 +2500,32 @@ final class AppState {
         let isShielded = diag.shieldsActive || diag.categoryActive
 
         if shouldBeShielded != isShielded {
-            // Mismatch — fix it
+            // Mismatch — fix it.
+            //
+            // b459: isTemporaryUnlock MUST only be true when the resolved
+            // mode is actually .unlocked. ModeStackResolver.Resolution.isTemporary
+            // can be true for lockUntil and timedUnlock penalty modes where
+            // the resolved mode is .restricted — if we copied isTemporary
+            // through naively, apply()'s old early-return (and any other
+            // reader) would clearAllShieldStores on a locked device.
+            let effectivelyTempUnlock = resolution.isTemporary && resolution.mode == .unlocked
             let corrected = EffectivePolicy(
                 resolvedMode: resolution.mode,
-                isTemporaryUnlock: resolution.isTemporary,
-                temporaryUnlockExpiresAt: resolution.expiresAt,
+                isTemporaryUnlock: effectivelyTempUnlock,
+                temporaryUnlockExpiresAt: effectivelyTempUnlock ? resolution.expiresAt : nil,
                 shieldedCategoriesData: snapshotStore?.loadCurrentSnapshot()?.effectivePolicy.shieldedCategoriesData,
                 allowedAppTokensData: snapshotStore?.loadCurrentSnapshot()?.effectivePolicy.allowedAppTokensData,
                 warnings: [],
                 policyVersion: (snapshotStore?.loadCurrentSnapshot()?.effectivePolicy.policyVersion ?? 0) + 1
             )
-            try? enforcement.apply(corrected)
+            // b439: Dispatch the heavy apply() to a detached task so we don't
+            // block the main thread. apply() takes the static applyLock and
+            // can fall into the deep daemon rescue (6+ seconds).
+            let enf = enforcement
+            let capturedCorrected = corrected
+            Task.detached {
+                try? enf.apply(capturedCorrected)
+            }
 
             // Update snapshot so it matches reality
             let snap = PolicySnapshot(
@@ -2313,7 +2545,7 @@ final class AppState {
             eventLogger?.log(.enforcementDegraded, details: "Shields were \(isShielded ? "up" : "down") but should be \(shouldBeShielded ? "up" : "down") — auto-corrected (mode: \(resolution.mode.rawValue))")
 
             // Write mainAppLastActiveAt so tunnel knows we're alive and fixing things
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
 
             // Force heartbeat so parent sees corrected state immediately
@@ -2394,7 +2626,7 @@ final class AppState {
         try? storage.clearTimedUnlockInfo()
         try? storage.clearTemporaryUnlockState()
         guard enforcement != nil else { return }
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         let isScheduleDriven = defaults.object(forKey: "scheduleDrivenMode") == nil
             || defaults.bool(forKey: "scheduleDrivenMode")
         let mode: LockMode
@@ -2449,7 +2681,7 @@ final class AppState {
         if storage.readTimedUnlockInfo() != nil { return }
         // Don't override manual mode commands (parent sent setMode directly).
         // scheduleDrivenMode is set to false by setMode and true by returnToSchedule.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier) ?? .standard
+        let defaults = UserDefaults.appGroup ?? .standard
         if defaults.object(forKey: "scheduleDrivenMode") != nil && !defaults.bool(forKey: "scheduleDrivenMode") {
             return
         }

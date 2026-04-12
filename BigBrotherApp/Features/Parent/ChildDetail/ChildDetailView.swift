@@ -1304,13 +1304,24 @@ struct ChildDetailView: View {
                             Label("Revoke All Allowed Apps", systemImage: "xmark.circle")
                         }
 
-                        // Re-authorize as .child if currently .individual
+                        // b431: .individual is now preferred (immune to iCloud
+                        // Screen Time sync writers). If a device is still on
+                        // .child auth, it should be reinstalled to migrate.
+                        // No in-place upgrade button — there's no clean way to
+                        // switch auth types without reinstall, and a partial
+                        // migration could leave the kid unprotected.
                         if let hb = viewModel.heartbeat(for: device),
-                           hb.familyControlsAuthType != "child" {
-                            Button {
-                                Task { await viewModel.requestReauthorization(for: device) }
-                            } label: {
-                                Label("Upgrade to Family Auth", systemImage: "lock.shield")
+                           hb.isChildAuthorization == true {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Legacy auth (.child) — reinstall recommended")
+                                        .font(.caption.weight(.semibold))
+                                    Text("This device's Screen Time auth is co-written by Family Sharing iCloud sync. Reinstall Big Brother on this device to migrate to .individual auth.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
 

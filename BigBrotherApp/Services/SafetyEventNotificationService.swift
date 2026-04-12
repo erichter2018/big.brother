@@ -21,50 +21,99 @@ enum SafetyEventNotificationService {
         .familyControlsAuthChanged,
     ]
 
+    /// Shared dedup store. See `NotificationDedupStore` for how read-modify-write
+    /// on `safetyNotifiedEventIDs` / `safetySemanticKeys` is serialized across
+    /// concurrent callers (DeviceMonitor polling vs parent opening the Activity
+    /// tab). Previously both call sites did a non-atomic read → decide → write
+    /// sequence and raced; the store closes that gap for all three notification
+    /// services uniformly.
+    private static let dedupStore = NotificationDedupStore(
+        configuration: .init(
+            notifiedIDsKey: "safetyNotifiedEventIDs",
+            contentKeysKey: "safetySemanticKeys",
+            maxNotifiedIDs: 500,
+            maxContentKeys: 200
+        )
+    )
+
+    private static let semanticWindow: TimeInterval = 6 * 3600
+
     /// Check recent events and post notifications for safety-relevant ones.
-    /// Deduplicates by event ID to avoid repeat notifications.
+    ///
+    /// Deduplicates on TWO axes:
+    /// 1. Event ID (catches exact replays of the same event record).
+    /// 2. Semantic key (catches the multi-device case where kid's phone
+    ///    and iPad both see "Instagram" for the first time, producing two
+    ///    different event IDs with identical child+type+details — without
+    ///    this dedup the parent gets two notifications for the same
+    ///    observed activity).
+    ///
+    /// Semantic keys expire after 6 hours — after that, the same app
+    /// reappearing is treated as genuinely new activity worth notifying
+    /// about again.
     static func checkAndNotify(
         events: [EventLogEntry],
         childName: String,
         namedPlaces: [NamedPlace] = []
     ) {
+        let now = Date()
         let defaults = UserDefaults.standard
-        var notifiedIDs = Set(defaults.stringArray(forKey: "safetyNotifiedEventIDs") ?? [])
 
-        for event in events {
-            guard notifiableTypes.contains(event.eventType) else { continue }
-            let idStr = event.id.uuidString
-            guard !notifiedIDs.contains(idStr) else { continue }
-            // Only notify for events in the last hour (avoid stale batch)
-            guard Date().timeIntervalSince(event.timestamp) < 3600 else { continue }
+        let toPost: [EventLogEntry] = dedupStore.withLock { state in
+            var items: [EventLogEntry] = []
 
-            // Respect per-place notification toggles for arrival/departure events.
-            if event.eventType == .namedPlaceArrival || event.eventType == .namedPlaceDeparture {
-                if let details = event.details,
-                   let place = namedPlaces.first(where: { details.contains($0.name) }) {
-                    if event.eventType == .namedPlaceArrival && !place.notifyArrival { continue }
-                    if event.eventType == .namedPlaceDeparture && !place.notifyDeparture { continue }
+            for event in events {
+                guard notifiableTypes.contains(event.eventType) else { continue }
+                let idStr = event.id.uuidString
+                guard !state.hasNotified(idStr) else { continue }
+                // Only notify for events in the last hour (avoid stale batch)
+                guard now.timeIntervalSince(event.timestamp) < 3600 else { continue }
+
+                // Respect per-place notification toggles for arrival/departure events.
+                if event.eventType == .namedPlaceArrival || event.eventType == .namedPlaceDeparture {
+                    if let details = event.details,
+                       let place = namedPlaces.first(where: { details.contains($0.name) }) {
+                        if event.eventType == .namedPlaceArrival && !place.notifyArrival { continue }
+                        if event.eventType == .namedPlaceDeparture && !place.notifyDeparture { continue }
+                    }
                 }
-            }
 
-            // Debounce enforcementDegraded: max one per hour per device.
-            // These fire on transient app deaths that often self-resolve.
-            if event.eventType == .enforcementDegraded {
-                let key = "lastEnforcementDegradedNotif_\(event.deviceID.rawValue)"
-                let lastNotif = defaults.double(forKey: key)
-                if lastNotif > 0 && Date().timeIntervalSince1970 - lastNotif < 3600 { continue }
-                defaults.set(Date().timeIntervalSince1970, forKey: key)
-            }
+                // Debounce enforcementDegraded: max one per hour per device.
+                // These fire on transient app deaths that often self-resolve.
+                if event.eventType == .enforcementDegraded {
+                    let key = "lastEnforcementDegradedNotif_\(event.deviceID.rawValue)"
+                    let lastNotif = defaults.double(forKey: key)
+                    if lastNotif > 0 && now.timeIntervalSince1970 - lastNotif < 3600 { continue }
+                    defaults.set(now.timeIntervalSince1970, forKey: key)
+                }
 
-            notifiedIDs.insert(idStr)
+                let semanticKey = Self.semanticKey(childName: childName, eventType: event.eventType, details: event.details)
+                if state.isRecentContentKey(semanticKey, within: semanticWindow) {
+                    // Mark as notified so we don't re-check on the next call,
+                    // even though we suppressed the user-facing notification.
+                    state.markNotified(idStr)
+                    continue
+                }
+                state.recordContentKey(semanticKey)
+                state.markNotified(idStr)
+                items.append(event)
+            }
+            return items
+        }
+
+        for event in toPost {
             postNotification(for: event, childName: childName)
         }
+    }
 
-        // Cap stored IDs to last 500
-        if notifiedIDs.count > 500 {
-            notifiedIDs = Set(notifiedIDs.suffix(500))
-        }
-        defaults.set(Array(notifiedIDs), forKey: "safetyNotifiedEventIDs")
+    /// Build a stable semantic-dedup key from the child, event type, and
+    /// detail string. Two events from different devices that describe the
+    /// same observation will produce the same key.
+    private static func semanticKey(childName: String, eventType: EventType, details: String?) -> String {
+        let normalizedDetails = (details ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return "\(childName.lowercased())|\(eventType.rawValue)|\(normalizedDetails)"
     }
 
     private static func postNotification(for event: EventLogEntry, childName: String) {

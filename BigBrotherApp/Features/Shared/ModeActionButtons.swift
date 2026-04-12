@@ -40,6 +40,10 @@ struct ModeActionButtons: View {
                 Button { onTemporaryUnlock(24 * 3600) } label: {
                     Label("24 hours", systemImage: "clock.badge.checkmark")
                 }
+                Divider()
+                Button { onSetMode(.unlocked) } label: {
+                    Label("Indefinite (until I restrict)", systemImage: "lock.open.fill")
+                }
             } label: {
                 VStack(spacing: 2) {
                     Image(systemName: "lock.open").font(.subheadline)

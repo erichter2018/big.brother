@@ -9,7 +9,7 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
 
     override func handle(action: ShieldAction, for application: ApplicationToken, completionHandler: @escaping (ShieldActionResponse) -> Void) {
         // Write build number so parent can verify extension version
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(AppConstants.appBuildNumber, forKey: "shieldActionBuildNumber")
         handleAction(action: action, token: application, completionHandler: completionHandler)
     }
@@ -123,7 +123,7 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         try? storage.writeTimeLimitExhaustedApps(exhausted)
 
         // Signal Monitor to re-apply enforcement.
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
 
         // Update local pending review with resolved name for CloudKit sync.
@@ -204,7 +204,7 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
             if let encoded = try? JSONEncoder().encode(reviews) {
                 try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
             diag(storage, "Resolved pending review (fp match): \(identity.name) fp=\(fp.prefix(8)) src=\(identity.source)")
             return
@@ -222,7 +222,7 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
             if let encoded = try? JSONEncoder().encode(reviews) {
                 try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
             diag(storage, "Resolved pending review (fallback): \(identity.name) src=\(identity.source)")
         }
@@ -249,9 +249,12 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
             return
         }
 
-        // Always set picker pending — fallback path if Keychain bridge fails.
+        // Always set picker pending — fallback path that the main app picks up
+        // on next foreground to auto-show the re-pick sheet. Include the
+        // resolved app name so the kid sees a hint about which app to tap.
+        let resolvedName: String? = identity.name.isEmpty || identity.name == "App" ? nil : identity.name
         do {
-            try storage.writeUnlockPickerPending()
+            try storage.writeUnlockPickerPending(appName: resolvedName, bundleID: identity.bundleID)
         } catch {
             diag(storage, "CRITICAL: Failed to write unlock picker pending flag: \(error.localizedDescription)")
         }
@@ -277,10 +280,14 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
                 diag(storage, "Unlock request FAILED — child's request may not reach parent (src: \(identity.source))")
             }
         } else {
-            // --- No token: picker-only flow ---
-            // Do NOT create an unlockRequested event (parent can't approve without token).
-            // The picker will create the proper event when child opens BigBrother.
-            diag(storage, "No token — picker-only flow (no event created)")
+            // --- No token: picker-pending flow ---
+            // iOS only passes ApplicationToken to ShieldAction for apps blocked
+            // via shield.applications. Apps blocked via the category catch-all
+            // (.all(except: …)) get a category token only — useless for the
+            // unlock request. We can't create a proper unlock event from here,
+            // so we set the picker-pending flag with whatever name we resolved
+            // and rely on the kid foregrounding BB to see the re-pick sheet.
+            diag(storage, "No token — picker-pending flow (kid will be prompted to re-pick on next foreground)")
         }
 
         // Call completion synchronously — extensions have very limited execution time

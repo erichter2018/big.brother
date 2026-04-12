@@ -9,8 +9,25 @@ import Foundation
 ///
 /// Written by the main app whenever enforcement state changes.
 /// Read by extensions on demand.
+///
+/// ## This is a CACHE, not a source of truth
+///
+/// `currentMode` below is the mode the last writer committed, which can
+/// drift from what `ModeStackResolver.resolve()` would say right now
+/// (temp unlock expired, schedule window rolled over, lockUntil elapsed).
+/// Consumers asking "what mode is the device in?" should call
+/// `ModeStackResolver.resolve(storage:)` instead of reading this field
+/// directly. The one legitimate use is the ShieldConfiguration extension,
+/// which runs on every shield render and cannot afford the full resolver
+/// I/O — it treats this as an acceptable staleness trade-off.
+///
+/// The tunnel's `seedBlockReasonsOnStart` reads `currentMode` as a seed
+/// signal, but cross-checks against freshness (see `seedBlockReasonsOnStart`
+/// for the 2h staleness threshold).
 public struct ExtensionSharedState: Codable, Sendable, Equatable {
-    /// The currently enforced lock mode.
+    /// Mode at the last enforcement write. See the type-level note above:
+    /// do NOT use this as "what mode is the device in right now" — call
+    /// `ModeStackResolver.resolve()` for that.
     public let currentMode: LockMode
 
     /// Whether a temporary unlock is active.

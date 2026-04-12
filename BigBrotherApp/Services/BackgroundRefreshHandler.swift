@@ -91,14 +91,22 @@ enum BackgroundRefreshHandler {
                 return aps["alert"] != nil
             }()
 
-            // Process commands IMMEDIATELY. No debounce, no sleep.
-            // The parent just sent a command and is waiting. Every millisecond counts.
             NSLog("[BigBrother] Push received (child, \(isAlertPush ? "alert" : "silent")) — processing commands NOW")
 
             // Suppress duplicate local notifications when the alert push already showed a banner.
             let processor = await MainActor.run { appState.commandProcessor as? CommandProcessorImpl }
             if isAlertPush { processor?.suppressModeNotifications = true }
 
+            // Call processIncomingCommands directly. The previous "fast path"
+            // (direct fetch by recordID + process()) bypassed the ProcessingGate
+            // and the mode-command coalescing inside processIncomingCommands —
+            // when the parent sent rapid mode changes (locked → unlocked →
+            // restricted in a few seconds), each push handler raced ahead with
+            // the SPECIFIC command in its push payload, with no dedup or
+            // ordering guarantees, and intermediate states overwrote the
+            // intended final mode. processIncomingCommands always picks the
+            // LATEST mode command in CK and processes it under the gate, so
+            // rapid sequences settle on the last command issued.
             do {
                 try await appState.commandProcessor?.processIncomingCommands()
                 processor?.suppressModeNotifications = false

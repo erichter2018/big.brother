@@ -53,7 +53,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// One-time migration: clear legacy named stores (base, schedule, tempUnlock)
     /// so stale shields from the old multi-store layout don't linger.
     private func migrateLegacyStoresIfNeeded() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         guard defaults?.bool(forKey: "migratedToSingleStore") != true else { return }
         for name in AppConstants.legacyStoreNames {
             ManagedSettingsStore(named: .init(name)).clearAllSettings()
@@ -64,7 +64,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     override func intervalDidStart(for activity: DeviceActivityName) {
         // Record that the Monitor is alive (used by parent to detect force-close).
-        let monitorDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let monitorDefaults = UserDefaults.appGroup
         monitorDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
         monitorDefaults?.set(AppConstants.appBuildNumber, forKey: "monitorBuildNumber")
 
@@ -73,6 +73,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Check if the main app needs to be launched after an update.
         checkAppLaunchNeeded()
+
+        // R9 fix: Verify reconciliation registrations on EVERY callback.
+        // App reinstalls kill extension processes, which can lose DeviceActivity
+        // registrations. Without reconciliation, the Monitor stops firing and
+        // enforcement drifts. This self-heals by re-registering if missing.
+        ensureReconciliationRegistered()
 
         // Tunnel signals "enforcement dirty" when it handles grantExtraTime/blockAppForToday.
         // The tunnel can't write ManagedSettings — we must do it here on the next callback.
@@ -102,9 +108,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
             updateSharedState(mode: resolution.mode)
             // Confirm enforcement applied via UserDefaults — main app polls this.
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "monitorNeedsHeartbeat")
             logEvent(.policyReconciled, details: "Monitor enforcement refresh: \(resolution.mode.rawValue) (\(resolution.reason))")
             // Clean up one-shot trigger activity
@@ -157,6 +163,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     }
 
     override func intervalDidEnd(for activity: DeviceActivityName) {
+        let monitorDefaults = UserDefaults.appGroup
+        monitorDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+
+        // R9 fix: self-heal reconciliation registrations on every callback.
+        ensureReconciliationRegistered()
+
         checkEnforcementRefreshSignal()
 
         // Enforcement refresh trigger ended (1-minute window expired or was stopped).
@@ -171,7 +183,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 applyShieldingToAllStores(mode: resolution.mode, policy: policy)
             }
             updateSharedState(mode: resolution.mode)
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
             return
         }
@@ -192,12 +204,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
             updateSharedState(mode: resolution.mode)
             // Confirm enforcement applied via UserDefaults — main app polls this.
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
             logEvent(.policyReconciled, details: "On-demand enforcement: \(resolution.mode.rawValue) (\(resolution.reason))")
             // Signal tunnel to send a confirmation heartbeat — Monitor can't make network calls.
             // Parent sees the confirmed mode within 30s (tunnel's next liveness tick).
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "monitorNeedsHeartbeat")
             reregisterReconciliationQuarter(activity)
             return
@@ -253,7 +265,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     override func intervalWillEndWarning(for activity: DeviceActivityName) {
         checkEnforcementRefreshSignal()
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
 
         // Reconciliation quarter warning — 3 hours before end = mid-quarter enforcement check.
@@ -295,7 +307,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         guard let minutes = Int(minuteString) else { return }
 
         // Write the highest milestone reached to App Group so the heartbeat can relay it.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let today = Self.todayDateString()
         let dateKey = "screenTimeDate"
         let minutesKey = "screenTimeMinutes"
@@ -315,7 +327,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         // Record Monitor activity timestamp.
-        let monitorDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let monitorDefaults = UserDefaults.appGroup
         monitorDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
 
         // Piggyback enforcement reconciliation on usage tracking callbacks.
@@ -343,7 +355,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             ))
         }
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set("freeWindowStart", forKey: "lastShieldChangeReason")
 
         // Temporary unlock or timed unlock active — don't override with schedule.
@@ -419,7 +431,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set("freeWindowEnd", forKey: "lastShieldChangeReason")
 
         // Temporary unlock or timed unlock active — don't override with schedule.
@@ -459,7 +471,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             applyShieldingToAllStores(mode: mode, policy: policy)
         }
         if mode != .unlocked {
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
         }
 
@@ -490,7 +502,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Manual mode override — skip schedule-driven changes.
         if !AppConstants.isScheduleDriven() { return }
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set("essentialStart", forKey: "lastShieldChangeReason")
 
         // lockedDown is parent-enforced maximum restriction — schedule must never weaken it.
@@ -541,7 +553,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             ))
         }
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set("essentialEnd", forKey: "lastShieldChangeReason")
 
         // Temporary unlock or timed unlock active — don't override with schedule.
@@ -589,7 +601,27 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     // MARK: - Timed Unlock (Penalty Offset)
 
     /// Penalty served — unlock the device.
+    ///
+    /// b459: must re-check the full mode stack before unlocking. A naive
+    /// clearAllShieldStores at penalty end can unlock a device that was
+    /// put into `.lockedDown` by the parent while the penalty timer was
+    /// still running — the full resolver has to see the whole stack, not
+    /// just the timed unlock bit. If resolver says we should still be
+    /// locked, respect that and leave shields up.
     private func handleTimedUnlockStart(_ activity: DeviceActivityName) {
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        if resolution.mode != .unlocked {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Timed unlock: penalty served but mode stack still resolves to \(resolution.mode.rawValue) — keeping shields UP",
+                details: resolution.reason
+            ))
+            let policy = storage.readPolicySnapshot()?.effectivePolicy
+            applyShieldingToAllStores(mode: resolution.mode, policy: policy)
+            updateSharedState(mode: resolution.mode)
+            logEvent(.scheduleTriggered, details: "Timed unlock: penalty served but \(resolution.mode.rawValue) override — shields kept")
+            return
+        }
         clearAllShieldStores()
         updateSharedState(mode: .unlocked)
         logEvent(.scheduleTriggered, details: "Timed unlock: penalty served, device unlocked")
@@ -642,7 +674,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         try? storage.clearTimedUnlockInfo()
         try? storage.clearTemporaryUnlockState()
         if mode != .unlocked {
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+            UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
         }
         logEvent(.scheduleEnded, details: "Timed unlock ended, mode \(mode.rawValue)")
@@ -659,7 +691,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let previousMode = unlockState?.previousMode ?? .restricted
 
         let mode: LockMode
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
 
         if AppConstants.isScheduleDriven(), let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
@@ -705,23 +737,28 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         applyShieldingToAllStores(mode: mode, policy: policy)
 
         // Verify shields actually applied — .child FamilyControls auth can silently
-        // reject ManagedSettings writes after temp unlock expiry. Retry with delay
-        // to give iOS's auth daemon time to re-validate.
+        // reject ManagedSettings writes after temp unlock expiry. Retry with exponential
+        // backoff up to ~30s total (Apple FC auth daemon can take 10-30s to re-validate).
         if mode != .unlocked && enforcementStore.shield.applicationCategories == nil {
-            logEvent(.enforcementDegraded, details: "Shield re-apply failed after temp unlock expiry — retrying in 2s")
-            Thread.sleep(forTimeInterval: 2.0)
-            applyShieldingToAllStores(mode: mode, policy: policy)
-
-            if enforcementStore.shield.applicationCategories == nil {
-                logEvent(.enforcementDegraded, details: "Shield re-apply failed on 2nd attempt — retrying in 5s")
-                Thread.sleep(forTimeInterval: 5.0)
+            let retryDelays: [TimeInterval] = [2, 3, 5, 8, 13]
+            for (i, delay) in retryDelays.enumerated() {
+                logEvent(.enforcementDegraded, details: "Shield re-apply failed after temp unlock expiry — retry \(i + 1)/\(retryDelays.count) in \(Int(delay))s")
+                Thread.sleep(forTimeInterval: delay)
                 applyShieldingToAllStores(mode: mode, policy: policy)
 
-                if enforcementStore.shield.applicationCategories == nil {
-                    logEvent(.enforcementDegraded, details: "Shield re-apply FAILED 3x after temp unlock expiry — shields may be down")
-                    // Write confirmed-down flag so tunnel can DNS-block immediately
-                    defaults?.set(false, forKey: "shieldsActiveAtLastHeartbeat")
+                if enforcementStore.shield.applicationCategories != nil {
+                    break // Shields applied successfully
                 }
+            }
+
+            if enforcementStore.shield.applicationCategories == nil {
+                logEvent(.enforcementDegraded, details: "Shield re-apply FAILED \(retryDelays.count)x after temp unlock expiry — scheduling fallback")
+                // Write confirmed-down flag so tunnel can DNS-block immediately.
+                // Companion timestamp marks this as fresh authoritative evidence.
+                defaults?.set(false, forKey: "shieldsActiveAtLastHeartbeat")
+                defaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
+                // Set refresh flag so the next Monitor callback retries immediately
+                defaults?.set(true, forKey: "needsEnforcementRefresh")
             }
         }
 
@@ -740,25 +777,33 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     /// Lock-until timer expired — restore prior mode from stack.
     /// Uses schedule if schedule-driven, saved previousMode if manual, or .restricted as fallback.
+    ///
+    /// b459: clean up saved state FIRST so ModeStackResolver doesn't still
+    /// see lockUntil as active on the next resolve, then use the full
+    /// resolver (not just profile.resolvedMode) so any higher-priority
+    /// state — parent lockedDown command, active temp unlock, etc. — is
+    /// respected. The old path called `profile.resolvedMode(at: Date())`
+    /// which knows only about the schedule and ignores parent overrides.
+    /// That meant a parent who locked down the device while a lockUntil
+    /// was active would have the device unlock when the lockUntil expired,
+    /// because the profile thought it was in a free window.
     private func handleLockUntilExpired(_ activity: DeviceActivityName) {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
-        let mode: LockMode
-        if AppConstants.isScheduleDriven(), let profile = storage.readActiveScheduleProfile() {
-            mode = profile.resolvedMode(at: Date())
-        } else if let savedRaw = defaults?.string(forKey: "lockUntilPreviousMode"),
-                  let saved = LockMode(rawValue: savedRaw) {
-            mode = saved
-        } else {
-            mode = .restricted
-        }
-
-        // Clean up saved state
+        let defaults = UserDefaults.appGroup
+        // Clean up saved state first so ModeStackResolver doesn't see
+        // stale lockUntil bits when we call it below.
         defaults?.removeObject(forKey: "lockUntilPreviousMode")
         defaults?.removeObject(forKey: "lockUntilExpiresAt")
 
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let mode = resolution.mode
+
         // Write snapshot FIRST so if extension is killed mid-operation,
         // the main app sees the intended state and won't undo it.
-        writeCorrectedSnapshot(mode: mode, trigger: "Monitor: lockUntil expired, mode → \(mode.rawValue)")
+        writeCorrectedSnapshot(
+            mode: mode,
+            trigger: "Monitor: lockUntil expired, mode → \(mode.rawValue) (\(resolution.reason))",
+            controlAuthority: resolution.controlAuthority
+        )
         updateSharedState(mode: mode)
 
         if mode == .unlocked {
@@ -767,7 +812,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             let policy = storage.readPolicySnapshot()?.effectivePolicy
             applyShieldingToAllStores(mode: mode, policy: policy)
         }
-        logEvent(.scheduleEnded, details: "Lock-until expired, mode: \(mode.rawValue)")
+        logEvent(.scheduleEnded, details: "Lock-until expired, mode: \(mode.rawValue) (\(resolution.reason))")
         sendModeNotification(
             title: mode == .unlocked ? "Free Time Started" : "Lock Period Ended",
             body: mode == .unlocked ? "All apps are now accessible." : "\(mode.displayName) mode active."
@@ -882,7 +927,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Log event
         logEvent(.timeLimitExhausted, details: "\(limit.appName): \(limit.dailyLimitMinutes) min limit reached")
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
     }
 
@@ -905,7 +950,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: policy?.resolvedMode ?? .restricted, policy: policy)
 
-        UserDefaults(suiteName: AppConstants.appGroupIdentifier)?
+        UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
     }
 
@@ -980,7 +1025,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// The tunnel handles grantExtraTime/blockAppForToday but can't write ManagedSettings.
     /// It sets this flag so the Monitor re-applies on its next callback (any callback).
     private func checkEnforcementRefreshSignal() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         guard let signalTime = defaults?.double(forKey: "needsEnforcementRefresh"),
               signalTime > 0 else { return }
 
@@ -1013,12 +1058,25 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        // Re-apply enforcement from current state
+        // Re-apply enforcement from current state.
+        //
+        // b459: when the refresh signal fires with resolver reporting
+        // `.unlocked`, use applyWideOpenShields instead of destructively
+        // clearing. This is a "refresh" — a best-effort sync — not a
+        // definitive unlock event. If the resolver is wrong (stale temp
+        // unlock file, race condition), a full clear here would drop
+        // shields on a device that should still be locked. applyWideOpenShields
+        // keeps the store populated with an `.all(except: everything)`
+        // sentinel that functionally allows every app but leaves the
+        // daemon's shield state non-nil, so the next real mode change can
+        // apply shields without first rebuilding daemon context from
+        // scratch. Matches the same decision we made for the main app's
+        // forceDaemonRescue: only destructively clear when we're certain.
         let resolution = ModeStackResolver.resolve(storage: storage)
         let policy = storage.readPolicySnapshot()?.effectivePolicy
 
         if resolution.mode == .unlocked {
-            clearAllShieldStores()
+            applyWideOpenShields()
             updateSharedState(mode: .unlocked)
         } else {
             applyShieldingToAllStores(mode: resolution.mode, policy: policy)
@@ -1037,7 +1095,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Uses ModeStackResolver for deterministic mode resolution from App Group files.
     /// Also cleans up expired temporary state as a side effect.
     private func reconcile() {
-        let reconcileDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let reconcileDefaults = UserDefaults.appGroup
         reconcileDefaults?.set("reconcile", forKey: "lastShieldChangeReason")
         // Update Monitor heartbeat so the tunnel knows we're alive.
         // Without this, the tunnel's 1-hour "Monitor dead" threshold triggers
@@ -1081,9 +1139,21 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Apply the resolved mode
+        // Apply the resolved mode.
+        //
+        // b459: reconcile() is a PERIODIC safety net — not a definitive
+        // mode-change event. When the resolver reports `.unlocked` here,
+        // use `applyWideOpenShields` instead of `clearAllShieldStores`.
+        // Reconciliation runs every few minutes on various Monitor
+        // callbacks; if it ever misreads the current mode (stale temp
+        // unlock file, race with main-app writes), a hard clear would
+        // drop shields on a locked device. applyWideOpenShields leaves
+        // the shield store populated so the daemon keeps context and
+        // the next real mode change re-applies cleanly. Definitive
+        // unlock events (handleUnlockedWindowStart, handleTimedUnlockStart)
+        // still use clearAllShieldStores — those are explicit transitions.
         if resolution.mode == .unlocked {
-            clearAllShieldStores()
+            applyWideOpenShields()
             updateSharedState(
                 mode: .unlocked,
                 isTemporaryUnlock: resolution.isTemporary,
@@ -1109,7 +1179,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         guard expectedMode != currentMode else { return }
 
         // Throttle: re-register at most once per 30 minutes
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let lastReregAt = defaults?.double(forKey: "lastScheduleReregisteredAt") ?? 0
         let elapsed = Date().timeIntervalSince1970 - lastReregAt
         guard elapsed > 1800 else { return }
@@ -1178,11 +1248,14 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Avoids the clear-then-reapply race that silently breaks .child auth.
     private func applyWideOpenShields() {
         // Don't allow unlock if FamilyControls authorization is lost.
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let snapshot = storage.readPolicySnapshot()
         let fcRevoked = snapshot?.authorizationHealth?.isAuthorized == false
-        let flagSaysMissing = defaults?.bool(forKey: "allPermissionsGranted") == false
-        if fcRevoked || (flagSaysMissing && snapshot?.authorizationHealth == nil) {
+        // Use enforcement-critical flag (FC + location only), NOT allPermissionsGranted
+        // which includes non-critical permissions (motion, VPN, notifications).
+        // Missing notifications should NOT cause the device to be force-locked.
+        let enforcementPermsMissing = defaults?.object(forKey: "enforcementPermissionsOK") as? Bool == false
+        if fcRevoked || (enforcementPermsMissing && snapshot?.authorizationHealth == nil) {
             let policy = snapshot?.effectivePolicy
             applyShieldingToAllStores(mode: .locked, policy: policy)
             return
@@ -1211,6 +1284,17 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         defaultStore.shield.webDomainCategories = nil
         defaultStore.shield.webDomains = nil
 
+        // b459: set the shieldStoreWideOpen flag so the app-side
+        // shieldDiagnostic() recognizes this populated-but-functionally-open
+        // store as "not shielded". Without this, the main app's periodic
+        // verifier would see `applicationCategories != nil` after the
+        // Monitor wrote wide-open, decide shields were wrongly UP in
+        // unlocked mode, and "fix" it with a destructive clear —
+        // reintroducing the relock-failure race that applyWideOpenShields
+        // existed to avoid in the first place. Keeping the flag in sync
+        // across processes closes that cross-process divergence.
+        defaults?.set(true, forKey: "shieldStoreWideOpen")
+
         // Clear DNS blocklists
         try? storage.writeEnforcementBlockedDomains([])
         try? storage.writeTimeLimitBlockedDomains([])
@@ -1219,6 +1303,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Clear shield properties on the enforcement store + default store.
     /// NOTE: This fully clears stores to nil. Only used when the intent is to immediately
     /// re-apply via applyShieldingToAllStores (which overwrites the enforcement store).
+    ///
+    /// b434 (audit fix): Added parity with main app's clearAllShieldStores —
+    /// also clears the probe recovery store (enforcement.recovery) AND clears
+    /// legacy stores (base, schedule, tempUnlock) on every call, not just
+    /// during one-time migration. "Most-restrictive wins" merge means any
+    /// stale data in any store will keep shields active even after our
+    /// explicit clear of the primary enforcement store.
     private func clearAllShieldStores() {
         enforcementStore.shield.applications = nil
         enforcementStore.shield.applicationCategories = nil
@@ -1230,6 +1321,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         defaultStore.shield.applicationCategories = nil
         defaultStore.shield.webDomainCategories = nil
         defaultStore.shield.webDomains = nil
+
+        // Defensive clear of the recovery probe store (see
+        // EnforcementServiceImpl.clearAllShieldStores for full rationale).
+        let recoveryStore = ManagedSettingsStore(named: .init("enforcement.recovery"))
+        recoveryStore.shield.applications = nil
+        recoveryStore.shield.applicationCategories = nil
+        recoveryStore.shield.webDomainCategories = nil
+        recoveryStore.shield.webDomains = nil
+
+        // Clear legacy named stores on every call (not just during migration).
+        for name in AppConstants.legacyStoreNames {
+            let legacy = ManagedSettingsStore(named: .init(name))
+            legacy.shield.applications = nil
+            legacy.shield.applicationCategories = nil
+            legacy.shield.webDomainCategories = nil
+            legacy.shield.webDomains = nil
+        }
 
         // Clear BOTH DNS blocklists — enforcement AND time-limit.
         try? storage.writeEnforcementBlockedDomains([])
@@ -1251,11 +1359,22 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     }
 
     private func applyShieldingToAllStores(mode: LockMode, policy: EffectivePolicy?) {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
 
-        // Force essential mode if permissions are missing.
+        // b459: clear the shieldStoreWideOpen flag — real shields are about
+        // to be applied. If Monitor previously wrote wide-open sentinel and
+        // set the flag, leaving it set would make the main-app shieldDiagnostic
+        // falsely report "no shields active" even after we've populated the
+        // store with real category shields. Matches the main app's own
+        // applyShield which also clears this flag on entry.
+        defaults?.set(false, forKey: "shieldStoreWideOpen")
+
+        // Force essential mode only if FamilyControls authorization is missing.
+        // The enforcementPermissionsOK flag is now FC-only (post-b444 fix).
+        // Location/motion/VPN/notifications are NOT enforcement-critical and
+        // must NOT cause restricted-mode commands to silently promote to locked.
         let effectiveMode: LockMode
-        if defaults?.bool(forKey: "allPermissionsGranted") == false && mode != .locked {
+        if defaults?.object(forKey: "enforcementPermissionsOK") as? Bool == false && mode != .locked {
             effectiveMode = .locked
         } else {
             effectiveMode = mode
@@ -1322,13 +1441,18 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                         ))
                     }
                 }
-                // Apply to the enforcement store.
-                enforcementStore.shield.applications = perAppTokens
+                // Apply to the enforcement store. Empty set → nil for parity
+                // with main app: Apple treats them equivalently in docs, but
+                // nil is the canonical "no explicit apps" value and avoids
+                // any implementation-defined cache behavior.
+                enforcementStore.shield.applications = perAppTokens.isEmpty ? nil : perAppTokens
                 enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Monitor applyShieldingToAllStores WROTE: shield.applications=\(perAppTokens.count) + .all(except: \(allowedTokens.count))"
+                ))
                 if shouldBlockWeb {
                     enforcementStore.shield.webDomainCategories = .all()
-                    // Note: per-domain exceptions require WebDomainTokens (picker-selected),
-                    // not WebDomain strings. Domain allowlist is enforced at the VPN/DNS layer.
                 } else {
                     enforcementStore.shield.webDomainCategories = nil
                 }
@@ -1347,16 +1471,18 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                     let keptNonExhausted = Set(Self.stableSorted(nonExhausted).prefix(remainingSlots))
                     apps = Set(Self.stableSorted(exhaustedTokens).prefix(exhaustedCount)).union(keptNonExhausted)
                 }
-                enforcementStore.shield.applications = apps
+                enforcementStore.shield.applications = (apps?.isEmpty == true) ? nil : apps
                 if allowedTokens.isEmpty {
                     enforcementStore.shield.applicationCategories = .all()
                 } else {
                     enforcementStore.shield.applicationCategories = .all(except: allowedTokens)
                 }
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Monitor applyShieldingToAllStores WROTE: shield.applications=\(apps?.count ?? 0) + \(allowedTokens.isEmpty ? ".all()" : ".all(except: \(allowedTokens.count))")"
+                ))
                 if shouldBlockWeb {
                     enforcementStore.shield.webDomainCategories = .all()
-                    // Note: per-domain exceptions require WebDomainTokens (picker-selected),
-                    // not WebDomain strings. Domain allowlist is enforced at the VPN/DNS layer.
                 } else {
                     enforcementStore.shield.webDomainCategories = nil
                 }
@@ -1504,8 +1630,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Last mode we notified about — prevents repeated notifications for the same mode.
     /// Persisted in App Group so it survives Monitor process restarts.
     private var lastNotifiedMode: String? {
-        get { UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.string(forKey: "monitorLastNotifiedMode") }
-        set { UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(newValue, forKey: "monitorLastNotifiedMode") }
+        get { UserDefaults.appGroup?.string(forKey: "monitorLastNotifiedMode") }
+        set { UserDefaults.appGroup?.set(newValue, forKey: "monitorLastNotifiedMode") }
     }
 
     private func sendModeNotification(title: String, body: String) {
@@ -1533,7 +1659,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Request an immediate heartbeat from the main app by writing a flag to App Group.
     /// The main app checks this every 30 seconds and sends a forced heartbeat if set.
     private func requestHeartbeat() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
         let ackToken = defaults?.string(forKey: "extensionHeartbeatAcknowledgedToken")
 
@@ -1576,15 +1702,28 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Preserve temp unlock state through snapshot writes.
         // Without this, ModeStackResolver's snapshot fallback loses the temp unlock
         // and resolves to restricted/locked instead of unlocked.
+        //
+        // b459: `isTemporaryUnlock` means "the resolved mode is currently
+        // unlocked because of a temp unlock override". It MUST NOT be true
+        // when `mode == .locked` / `.restricted` / `.lockedDown`. The old
+        // code set it true purely based on the existence of a temp unlock
+        // file, which is wrong when the Monitor is writing a corrected
+        // snapshot for a locked-window transition: the file may still be
+        // present but the caller is explicitly moving to a non-unlocked
+        // mode. Setting the flag true then caused downstream readers (like
+        // the old apply()'s isTemporaryUnlock early-return, now removed)
+        // to clear shields on a locked device. That's one of the random
+        // shield-drop paths the user reported.
         let currentTempUnlock: TemporaryUnlockState? = storage.readTemporaryUnlockState()
             ?? existing?.temporaryUnlockState
-        let isTempUnlock = currentTempUnlock != nil && currentTempUnlock!.expiresAt > Date()
+        let tempUnlockActive = currentTempUnlock != nil && currentTempUnlock!.expiresAt > Date()
+        let isTempUnlock = tempUnlockActive && mode == .unlocked
 
         let corrected = EffectivePolicy(
             resolvedMode: mode,
             controlAuthority: controlAuthority,
             isTemporaryUnlock: isTempUnlock,
-            temporaryUnlockExpiresAt: currentTempUnlock?.expiresAt,
+            temporaryUnlockExpiresAt: isTempUnlock ? currentTempUnlock?.expiresAt : nil,
             shieldedCategoriesData: basePolicy?.shieldedCategoriesData,
             allowedAppTokensData: freshAllowedTokensData,
             deviceRestrictions: basePolicy?.deviceRestrictions ?? storage.readDeviceRestrictions(),
@@ -1625,9 +1764,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             policyVersion: snapshot?.effectivePolicy.policyVersion ?? 0
         )
         try? storage.writeExtensionSharedState(state)
-        // Write shield state for tunnel's enforcement verifier
-        let auditDefaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        // Write shield state for tunnel's enforcement verifier.
+        // The companion timestamp lets the tunnel distinguish "fresh evidence from
+        // Monitor" from "stale flag during a transition" and suppress false
+        // "shields down" alerts while Monitor is still applying the new mode.
+        let auditDefaults = UserDefaults.appGroup
         auditDefaults?.set(mode != .unlocked, forKey: "shieldsActiveAtLastHeartbeat")
+        auditDefaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
 
         // Shield audit fingerprint — tracks that the Monitor applied shields and WHY.
         let auditSource: String
@@ -1653,7 +1796,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// If only heartbeat is stale but the flag was cleared, the app is alive but
     /// having CloudKit issues — do NOT treat as force-close.
     private func isAppForceClosed() -> Bool {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
 
         // Signal 0: Build mismatch — the app was updated but hasn't launched yet.
         // After an update, the ack token still matches the request token (from the
@@ -1718,7 +1861,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         if defaults?.bool(forKey: "forceCloseWebBlocked") == true {
             // But clear the latch if a temp unlock started AFTER the latch was set
             if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
@@ -1738,7 +1881,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Apply essential-only enforcement. Only sends a notification when `nagNotification`
     /// is true (unlocked window blocked). Silent when the device is already locked down.
     private func sendForceCloseEnforcement(nagNotification: Bool) {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         defaults?.set("appClosed", forKey: "lastShieldChangeReason")
 
         // Apply essential-only mode on all stores — no exemptions.
@@ -1777,8 +1920,29 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// After an app update the main app doesn't auto-launch, and DeviceActivity
     /// schedule registrations may be lost. Without this, the device can stay
     /// unlocked indefinitely until someone manually opens the app.
+    ///
+    /// b462: two substantive changes after finding Olivia/Daphne/Juliet
+    /// stuck in a 24-hour build-mismatch blackhole:
+    ///   1. GRACE PERIOD. A fresh install+launch from `devicectl` leaves
+    ///      a window where the Monitor extension is on the new binary but
+    ///      the main app hasn't relaunched yet. Previously this fired
+    ///      immediately and blackholed the device before the main app's
+    ///      `setupOnLaunch` had a chance to update
+    ///      `mainAppLastLaunchedBuild`. Now we only act on a mismatch
+    ///      that's been detected for at least 10 minutes — that's way
+    ///      more than any install→launch window, and it's short enough
+    ///      that a kid who actually never opens BB for 10 min after an
+    ///      update still gets the protection.
+    ///   2. SHORTER TTL. The `internetBlockedUntil` was 24 h. That's
+    ///      absurd — if the main app doesn't launch in 2 h after a build
+    ///      push, either something's badly wrong (parent should look) or
+    ///      the kid's asleep (fire again on next wake). Capping at 2 h
+    ///      means even if every other safety path fails, the kid gets
+    ///      internet back before the school day is over. Also now backed
+    ///      by the 5 s `.parentCommand` invariant in the tunnel which
+    ///      clears the in-memory reason if the flag is gone.
     private func checkAppLaunchNeeded() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let mainAppBuild = defaults?.integer(forKey: "mainAppLastLaunchedBuild") ?? 0
         let extensionBuild = AppConstants.appBuildNumber
 
@@ -1788,7 +1952,25 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             if defaults?.bool(forKey: "buildMismatchDNSBlock") == true {
                 defaults?.removeObject(forKey: "buildMismatchDNSBlock")
                 defaults?.removeObject(forKey: "internetBlockedUntil")
+                defaults?.removeObject(forKey: "monitorBuildMismatchFirstSeenAt")
             }
+            return
+        }
+
+        // b462 grace period: require the mismatch to have been visible
+        // for at least 10 minutes before we take any destructive action.
+        // Use the monitor's own first-seen timestamp so we can reset it
+        // when the mismatch clears.
+        let now = Date().timeIntervalSince1970
+        let firstSeen = defaults?.double(forKey: "monitorBuildMismatchFirstSeenAt") ?? 0
+        if firstSeen <= 0 {
+            defaults?.set(now, forKey: "monitorBuildMismatchFirstSeenAt")
+            logEvent(.policyReconciled, details: "Post-update mismatch first-seen (main=\(mainAppBuild) ext=\(extensionBuild)) — starting 10 min grace")
+            return
+        }
+        let mismatchAge = now - firstSeen
+        if mismatchAge < 600 {
+            // Still within grace. Don't blackhole yet.
             return
         }
 
@@ -1807,12 +1989,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Block DNS via the tunnel's legacy internetBlockedUntil flag.
         // This works even if the tunnel is still running OLD code — it already
-        // checks this flag every 30 seconds. Set expiry far in the future;
-        // it's cleared when the app launches and the mismatch resolves.
+        // checks this flag every 30 seconds. 2 h TTL (was 24 h) so even
+        // if every clearance path fails, the kid gets internet back within
+        // a school period instead of an entire day.
         if defaults?.bool(forKey: "buildMismatchDNSBlock") != true {
             defaults?.set(true, forKey: "buildMismatchDNSBlock")
-            // Block for 24 hours — cleared when app launches (guard clause above).
-            let blockUntil = Date().addingTimeInterval(86400).timeIntervalSince1970
+            let blockUntil = Date().addingTimeInterval(2 * 3600).timeIntervalSince1970
             defaults?.set(blockUntil, forKey: "internetBlockedUntil")
         }
 
@@ -1840,6 +2022,81 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Check if reconciliation AND schedule window activities are registered.
+    /// Re-register if missing. Called on every Monitor callback to self-heal
+    /// after app installs which kill all DeviceActivity registrations (R9).
+    private func ensureReconciliationRegistered() {
+        let center = DeviceActivityCenter()
+        let allActivities = center.activities
+
+        // 1. Reconciliation quarters (4 expected)
+        let reconciliationCount = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation.q") }.count
+        if reconciliationCount < 4 {
+            NSLog("[Monitor] Reconciliation incomplete (\(reconciliationCount)/4) — re-registering")
+            reregisterReconciliationSchedule()
+            reconcile()
+        }
+
+        // 2. Schedule window activities — re-register from stored profile if missing.
+        // Without these, schedule transitions (free window start/end) never fire.
+        let scheduleCount = allActivities.filter {
+            $0.rawValue.hasPrefix("bigbrother.scheduleprofile.") || $0.rawValue.hasPrefix("bigbrother.essentialwindow.")
+        }.count
+        if scheduleCount == 0, let profile = storage.readActiveScheduleProfile() {
+            NSLog("[Monitor] Schedule window activities MISSING — re-registering from \(profile.name)")
+            reregisterScheduleWindows(profile: profile, center: center)
+        }
+    }
+
+    /// Re-register schedule window DeviceActivity entries from a stored ScheduleProfile.
+    /// Mirrors ScheduleRegistrar.register() logic but callable from the Monitor extension.
+    private func reregisterScheduleWindows(profile: ScheduleProfile, center: DeviceActivityCenter) {
+        let unlockPrefix = "bigbrother.scheduleprofile."
+        let lockPrefix = "bigbrother.essentialwindow."
+
+        for window in profile.unlockedWindows {
+            registerScheduleWindow(window, prefix: unlockPrefix, center: center)
+        }
+        for window in profile.lockedWindows {
+            registerScheduleWindow(window, prefix: lockPrefix, center: center)
+        }
+
+        let count = center.activities.filter {
+            $0.rawValue.hasPrefix(unlockPrefix) || $0.rawValue.hasPrefix(lockPrefix)
+        }.count
+        NSLog("[Monitor] Re-registered \(count) schedule window activities")
+    }
+
+    private func registerScheduleWindow(_ window: ActiveWindow, prefix: String, center: DeviceActivityCenter) {
+        if window.startTime < window.endTime {
+            // Same-day window
+            let name = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)")
+            let schedule = DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
+                intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
+                repeats: true
+            )
+            try? center.startMonitoring(name, during: schedule)
+        } else {
+            // Cross-midnight — split into evening + morning
+            let eveningName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString).pm")
+            let eveningSchedule = DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
+                intervalEnd: DateComponents(hour: 23, minute: 59),
+                repeats: true
+            )
+            try? center.startMonitoring(eveningName, during: eveningSchedule)
+
+            let morningName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString).am")
+            let morningSchedule = DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: 0, minute: 0),
+                intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
+                repeats: true
+            )
+            try? center.startMonitoring(morningName, during: morningSchedule)
+        }
     }
 
     /// Re-register the 4 quarter-day reconciliation windows from the Monitor extension.

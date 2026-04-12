@@ -412,6 +412,8 @@ enum CKRecordConversion {
         record["hbMonitorBuild"] = hb.monitorBuildNumber.map { $0 as NSNumber }
         record["hbShieldBuild"] = hb.shieldBuildNumber.map { $0 as NSNumber }
         record["hbShieldActionBuild"] = hb.shieldActionBuildNumber.map { $0 as NSNumber }
+        record["hbFCDegraded"] = hb.fcAuthDegraded.map { NSNumber(value: $0) }
+        record["hbGhostShields"] = hb.ghostShieldsDetected.map { NSNumber(value: $0) }
         record["hbDiagnosticSnapshot"] = hb.diagnosticSnapshot
     }
 
@@ -505,6 +507,8 @@ enum CKRecordConversion {
             monitorBuildNumber: record["hbMonitorBuild"] as? Int,
             shieldBuildNumber: record["hbShieldBuild"] as? Int,
             shieldActionBuildNumber: record["hbShieldActionBuild"] as? Int,
+            fcAuthDegraded: (record["hbFCDegraded"] as? Int64).map { $0 != 0 },
+            ghostShieldsDetected: (record["hbGhostShields"] as? Int64).map { $0 != 0 },
             diagnosticSnapshot: record["hbDiagnosticSnapshot"] as? String
         )
     }

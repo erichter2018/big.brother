@@ -12,9 +12,28 @@ final class DNSProxy {
     private let tunnelIP: Data = Data([198, 18, 0, 1])
     private let storage: AppGroupStorage
 
-    // Pending queries: txnID → (sourceIP, sourcePort, timestamp, original query)
-    private var pending: [UInt16: (ip: Data, port: UInt16, at: Date, query: Data)] = [:]
+    // Pending queries keyed by a PROXY-owned upstream txn ID, not the
+    // client's original DNS txn ID. Clients can and do reuse txn IDs — two
+    // browsers might both pick 0x1234 at the same instant. Keying on just
+    // the client ID used to collide and drop one of the queries (or worse,
+    // deliver Safari's response to Chrome). b457: allocate a monotonic
+    // proxy ID, rewrite bytes [0..1] of the query before sending upstream,
+    // then on response we look up by the proxy ID and restore the original
+    // client txn ID before forwarding.
+    //
+    // `originalTxn` is the 16-bit ID the client originally used; we
+    // remember it so the response can be built with the value the client
+    // will recognize.
+    private struct PendingEntry {
+        let ip: Data
+        let port: UInt16
+        let at: Date
+        let query: Data
+        let originalTxn: UInt16
+    }
+    private var pending: [UInt16: PendingEntry] = [:]
     private let pendingLock = NSLock()
+    private var nextUpstreamTxn: UInt16 = UInt16.random(in: 0...UInt16.max)
 
     // Safe search cache (avoid disk I/O per query)
     private var safeSearchOn: Bool = false
@@ -31,6 +50,9 @@ final class DNSProxy {
     /// even when internet is blackholed for enforcement.
     var isBlackholeMode: Bool = false
     private var knownApps: Set<String> = []
+    /// b461: lock around all knownApps access (check + insert + persist +
+    /// pending-list append). See recordDomain comments for rationale.
+    private let knownAppsLock = NSLock()
 
     /// Called when a known app domain is seen. Parameters: (appName, rootDomain, timestamp)
     var onAppDomainSeen: ((String, String, Date) -> Void)?
@@ -44,15 +66,31 @@ final class DNSProxy {
         "cdn-apple.com", "apple-dns.net"
     ]
 
+    /// Match the domain against an exemption ONLY at DNS label boundaries.
+    /// The previous implementation used plain `hasSuffix`, which lets
+    /// `evilicloud.com` falsely match `icloud.com` — a trivial blackhole
+    /// bypass. Correct matching requires the exemption to be either the
+    /// whole domain or immediately preceded by a dot.
     private func isBlackholeExempt(_ domain: String) -> Bool {
         let lower = domain.lowercased()
-        return Self.blackholeExemptSuffixes.contains { lower.hasSuffix($0) }
+        for suffix in Self.blackholeExemptSuffixes {
+            if lower == suffix { return true }
+            if lower.hasSuffix("." + suffix) { return true }
+        }
+        return false
     }
 
-    // DNS-based per-app time tracking
+    // DNS-based per-app time tracking.
+    //
+    // `appWindows` and `appMinutes` are mutated on `bgQueue` (via
+    // `trackAppMinute`) and read/cleared from other threads (`flushToAppGroup`,
+    // `resetDaily`, `restoreAppUsageFromAppGroup`). Unsynchronized Dictionary
+    // access across threads in Swift is UB — the only reason this hadn't
+    // crashed loudly is dumb luck. Guard all access with `appUsageLock`.
     private var appWindows: [String: Date] = [:]     // app name -> current 60s window start
     private var appMinutes: [String: Int] = [:]       // app name -> accumulated active minutes today
     private var appUsageDateString: String = ""        // "yyyy-MM-dd" for daily reset
+    private let appUsageLock = NSLock()
     private var timeLimitsCache: [AppTimeLimit] = []   // cached time limits
     private var timeLimitsCacheExpiry: Date = .distantPast
 
@@ -76,25 +114,78 @@ final class DNSProxy {
         restoreFromAppGroup()
         restoreKnownApps()
         // Pre-load enforcement blocked domains so the first DNS query is already enforced.
+        // b457: take blocklistLock for parity with the refresh path — start()
+        // races against the 5s refresh if the tunnel restarts while a flush is
+        // in-flight from another subsystem.
+        blocklistLock.lock()
         enforcementBlockedDomains = storage.readEnforcementBlockedDomains()
         enforcementBlockedExpiry = Date().addingTimeInterval(5)
         timeLimitBlockedDomains = storage.readTimeLimitBlockedDomains()
         timeLimitBlockedExpiry = Date().addingTimeInterval(5)
+        blocklistLock.unlock()
         upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
         upstreamSession?.setReadHandler({ [weak self] datagrams, error in
             if let error {
                 NSLog("[DNSProxy] Upstream read error: \(error.localizedDescription)")
+                // b457: a read error usually means the underlying socket is
+                // bound to a dead interface (classic wifi→cell handoff).
+                // Drop the session immediately so the next query triggers a
+                // fresh one in the right network context.
+                self?.markUpstreamUnhealthy()
             }
             guard let datagrams else { return }
             for d in datagrams { self?.onUpstreamResponse(d) }
         }, maxDatagrams: 64)
-        readLoop()
-        NSLog("[DNSProxy] Started → \(upstreamDNS.hostname)")
+        let gen = startReadLoopInternal()
+        NSLog("[DNSProxy] Started → \(upstreamDNS.hostname) (readLoop gen=\(gen))")
+    }
+
+    /// Record that the upstream session hit an error and should be reconnected
+    /// on the very next query. Without this, transient errors caused by
+    /// interface changes were silently logged and recovery waited for the
+    /// 30-second health check.
+    private var upstreamNeedsReconnect: Bool = false
+    private let reconnectLock = NSLock()
+
+    private func markUpstreamUnhealthy() {
+        reconnectLock.lock()
+        upstreamNeedsReconnect = true
+        reconnectLock.unlock()
+    }
+
+    /// Check the reconnect flag and, if set, rebuild the upstream session
+    /// before forwarding the next query. Called from the onPacket forwarding
+    /// path so a single error triggers recovery immediately on the next
+    /// inbound DNS query — no 30-second wait for healthCheck.
+    private func reconnectIfFlagged() {
+        reconnectLock.lock()
+        let needs = upstreamNeedsReconnect
+        upstreamNeedsReconnect = false
+        reconnectLock.unlock()
+        if needs {
+            NSLog("[DNSProxy] upstreamNeedsReconnect flag set — rebinding session")
+            reconnectUpstream()
+        }
     }
 
     func stop() {
         upstreamSession?.cancel()
         upstreamSession = nil
+        // Invalidate the running read loop so its next completion drains
+        // out. We don't need to actively cancel `readPackets` — Apple
+        // doesn't expose that — but bumping the generation guarantees
+        // that whatever callback eventually fires will stop recursing.
+        readLoopLock.lock()
+        readLoopGeneration += 1
+        readLoopLock.unlock()
+    }
+
+    /// Start a fresh read loop chain, superseding any previous one.
+    /// Called after `reapplyNetworkSettings` completes so the new packet
+    /// flow has an active reader — but without leaving the old chain
+    /// running in parallel (the generation check in `readLoop` drains it).
+    func startReadLoop() {
+        startReadLoopInternal()
     }
 
     /// Periodic health check — call from the tunnel's liveness timer.
@@ -130,19 +221,22 @@ final class DNSProxy {
         upstreamSession?.setReadHandler({ [weak self] datagrams, error in
             if let error {
                 NSLog("[DNSProxy] Upstream read error after reconnect: \(error.localizedDescription)")
+                self?.markUpstreamUnhealthy()
             }
             guard let datagrams else { return }
             for d in datagrams { self?.onUpstreamResponse(d) }
         }, maxDatagrams: 64)
         // Drain orphaned queries with REFUSED so clients get an immediate error
-        // instead of waiting for a timeout that never comes.
+        // instead of waiting for a timeout that never comes. Use the original
+        // client txn ID so the browser can demux the refused back to the
+        // right in-flight request.
         pendingLock.lock()
         let orphaned = pending
         pending.removeAll()
         pendingLock.unlock()
         if !orphaned.isEmpty {
             for (_, entry) in orphaned {
-                let refused = buildRefusedResponse(query: entry.query)
+                let refused = buildRefusedResponseWithOriginalTxn(entry: entry)
                 writeResponse(refused, destIP: entry.ip, destPort: entry.port)
             }
             NSLog("[DNSProxy] Upstream reconnected → \(upstreamDNS.hostname) (\(orphaned.count) orphaned queries refused)")
@@ -153,11 +247,58 @@ final class DNSProxy {
 
     // MARK: - Packet Loop
 
-    private func readLoop() {
+    /// Generation counter. Incremented each time a fresh read-loop chain is
+    /// started (from `start()` or `startReadLoop()`). Each recursive
+    /// invocation captures its birth generation and bails out of the
+    /// recursion if a newer generation has been started since — so older
+    /// chains naturally drain out once their pending `readPackets`
+    /// completion fires.
+    ///
+    /// Why this matters: `packetFlow.readPackets { ... readLoop() }` is a
+    /// recursive self-scheduling chain. The old code had no ownership
+    /// guard. Every `reapplyNetworkSettings` completion called
+    /// `dnsProxy?.startReadLoop()` which unconditionally re-entered
+    /// `readLoop()`, creating a brand new concurrent chain. On the 5-second
+    /// fast path, a single `setTunnelNetworkSettings` timeout sets
+    /// `networkSettingsNeedRetry = true` and the retry fires reapply →
+    /// `startReadLoop()` → another chain — every 5 seconds, indefinitely.
+    /// After a few minutes, dozens of chains were all sharing
+    /// `packetFlow.readPackets`, which is undefined behavior in
+    /// NEPacketTunnelFlow and caused DNS delivery to wedge. The tunnel's
+    /// own CloudKit DNS lookups then failed with `CKErrorDomain 3`
+    /// (networkUnavailable) in an endless loop. Reboot fixed it; recovery
+    /// ladder couldn't because `cancelTunnelWithError` restart re-hit the
+    /// same bootstrap sequence that immediately spawned 2 chains.
+    private var readLoopGeneration: Int = 0
+    private let readLoopLock = NSLock()
+
+    /// Begin a fresh read loop, superseding any older chains. Returns the
+    /// new generation ID for debug logging.
+    @discardableResult
+    private func startReadLoopInternal() -> Int {
+        readLoopLock.lock()
+        readLoopGeneration += 1
+        let myGen = readLoopGeneration
+        readLoopLock.unlock()
+        readLoop(generation: myGen)
+        return myGen
+    }
+
+    private func readLoop(generation: Int) {
         provider?.packetFlow.readPackets { [weak self] packets, _ in
             guard let self else { return }
+            // Supersession check: if a newer read loop has been started
+            // while we were waiting on this completion, drop out so only
+            // the newest chain drives the packet flow.
+            self.readLoopLock.lock()
+            let currentGen = self.readLoopGeneration
+            self.readLoopLock.unlock()
+            if currentGen != generation {
+                NSLog("[DNSProxy] readLoop gen=\(generation) superseded by gen=\(currentGen) — draining")
+                return
+            }
             for p in packets { self.onPacket(p) }
-            self.readLoop()
+            self.readLoop(generation: generation)
         }
     }
 
@@ -168,12 +309,32 @@ final class DNSProxy {
         guard packet.count >= 40, packet[0] >> 4 == 4, packet[9] == 17 else { return }
         let ihl = Int(packet[0] & 0x0F) * 4
         guard ihl >= 20, packet.count >= ihl + 8 else { return }
+
+        // b457: honor the IP header totalLength and UDP length fields
+        // instead of trusting packet.count. A truncated packet could have
+        // a UDP length field larger than the remaining bytes, which would
+        // then be read as oversized DNS payload; conversely, a packet with
+        // trailing garbage would have extra bytes the DNS parser tried to
+        // interpret. Also reject fragments — we can't safely handle them.
+        let ipTotalLen = Int(packet[2]) << 8 | Int(packet[3])
+        let fragFlagsOffset = Int(packet[6]) << 8 | Int(packet[7])
+        let moreFragments = (fragFlagsOffset & 0x2000) != 0
+        let fragmentOffset = fragFlagsOffset & 0x1FFF
+        guard !moreFragments, fragmentOffset == 0 else { return }
+        guard ipTotalLen >= ihl + 8, ipTotalLen <= packet.count else { return }
+
         let udp = ihl
         guard UInt16(packet[udp+2]) << 8 | UInt16(packet[udp+3]) == 53 else { return }
 
+        // UDP length = UDP header (8) + payload, MUST fit inside what the
+        // IP header said. A crafted packet could claim udpLen > ipTotalLen
+        // and make us read past the packet end.
+        let udpLen = Int(packet[udp+4]) << 8 | Int(packet[udp+5])
+        guard udpLen >= 8, udp + udpLen <= ipTotalLen else { return }
+
         let srcIP = packet.subdata(in: 12..<16)
         let srcPort = UInt16(packet[udp]) << 8 | UInt16(packet[udp+1])
-        let dns = packet.subdata(in: (udp+8)..<packet.count)
+        let dns = packet.subdata(in: (udp+8)..<(udp+udpLen))
         guard dns.count >= 12 else { return }
         let txn = UInt16(dns[0]) << 8 | UInt16(dns[1])
         let domain = parseDomain(dns)
@@ -214,15 +375,40 @@ final class DNSProxy {
             return
         }
 
-        // 5. Forward upstream
+        // 5. Forward upstream.
+        //
+        // b457: allocate a proxy-owned upstream txn ID so colliding client
+        // txn IDs don't smash each other in the pending map. Build a copy
+        // of the query with bytes [0..1] rewritten to the proxy ID and send
+        // that upstream. The original client txn ID is stashed in the
+        // pending entry and restored when the response comes back.
         pendingLock.lock()
-        pending[txn] = (ip: srcIP, port: srcPort, at: Date(), query: dns)
-        // Evict queries older than 5 seconds (timed out) and cap at 300
         let now = Date()
+        // Find a free upstream ID — almost always succeeds on the first
+        // try because we start at a random offset and 65k slots are rare
+        // to exhaust with our 300-entry cap.
+        var upstreamTxn: UInt16 = nextUpstreamTxn
+        var attempts = 0
+        while pending[upstreamTxn] != nil && attempts < 65536 {
+            upstreamTxn &+= 1
+            attempts += 1
+        }
+        if attempts >= 65536 {
+            // Pending map is completely full (should be impossible with the
+            // 300 cap). Drop the query rather than corrupt state.
+            pendingLock.unlock()
+            NSLog("[DNSProxy] pending table full (65k) — dropping query")
+            return
+        }
+        nextUpstreamTxn = upstreamTxn &+ 1
+        pending[upstreamTxn] = PendingEntry(
+            ip: srcIP, port: srcPort, at: now, query: dns, originalTxn: txn
+        )
+        // Evict queries older than 5 seconds (timed out) and cap at 300
         if pending.count > 100 {
             let stale = pending.filter { now.timeIntervalSince($0.value.at) >= 5 }
             for (_, entry) in stale {
-                let refused = buildRefusedResponse(query: entry.query)
+                let refused = buildRefusedResponseWithOriginalTxn(entry: entry)
                 writeResponse(refused, destIP: entry.ip, destPort: entry.port)
             }
             pending = pending.filter { now.timeIntervalSince($0.value.at) < 5 }
@@ -231,13 +417,24 @@ final class DNSProxy {
             let sorted = pending.sorted { $0.value.at < $1.value.at }
             let keepFrom = sorted.count / 2
             let dropped = Array(sorted.prefix(keepFrom))
-            for (_, entry) in dropped {
-                let refused = buildRefusedResponse(query: entry.query)
-                writeResponse(refused, destIP: entry.ip, destPort: entry.port)
+            for kv in dropped {
+                let refused = buildRefusedResponseWithOriginalTxn(entry: kv.value)
+                writeResponse(refused, destIP: kv.value.ip, destPort: kv.value.port)
             }
             pending = Dictionary(uniqueKeysWithValues: sorted.suffix(from: keepFrom).map { ($0.key, $0.value) })
         }
         pendingLock.unlock()
+
+        // Build the upstream datagram with the proxy txn ID stamped in.
+        var upstreamDns = dns
+        upstreamDns[0] = UInt8(upstreamTxn >> 8)
+        upstreamDns[1] = UInt8(upstreamTxn & 0xFF)
+
+        // Eager reconnect: if a prior read/write raised an error, the flag was
+        // set and the very next query rebuilds the session before forwarding.
+        // This turns "30s healthCheck timer recovery" into "first-query-
+        // after-error recovery" — exactly what you want during a wifi flap.
+        reconnectIfFlagged()
 
         // Check session health before forwarding
         if let session = upstreamSession {
@@ -247,9 +444,12 @@ final class DNSProxy {
             }
         }
 
-        upstreamSession?.writeDatagram(dns) { error in
+        upstreamSession?.writeDatagram(upstreamDns) { [weak self] error in
             if let error {
                 NSLog("[DNSProxy] Upstream write failed: \(error.localizedDescription)")
+                // b457: write errors also indicate a dead session. Flag so
+                // the next query reconnects before forwarding.
+                self?.markUpstreamUnhealthy()
             }
         }
 
@@ -257,59 +457,109 @@ final class DNSProxy {
         if let domain { bgLog(domain) }
     }
 
+    /// Build a REFUSED response using the pending entry's ORIGINAL client
+    /// txn ID (not the proxy upstream ID). Used for stale-query eviction
+    /// so the client sees a refused with its own txn ID and doesn't wait
+    /// forever for a response that's never coming.
+    private func buildRefusedResponseWithOriginalTxn(entry: PendingEntry) -> Data {
+        var restored = entry.query
+        if restored.count >= 2 {
+            restored[0] = UInt8(entry.originalTxn >> 8)
+            restored[1] = UInt8(entry.originalTxn & 0xFF)
+        }
+        return buildRefusedResponse(query: restored)
+    }
+
     // MARK: - Upstream Response
 
     private func onUpstreamResponse(_ data: Data) {
         guard data.count >= 12 else { return }
-        let txn = UInt16(data[0]) << 8 | UInt16(data[1])
+        // The response comes back with the proxy-owned upstream txn ID we
+        // stamped on the outbound query. Look up the pending entry by that
+        // ID, then rewrite the response's txn bytes to the client's
+        // original ID before delivering.
+        let upstreamTxn = UInt16(data[0]) << 8 | UInt16(data[1])
 
         pendingLock.lock()
-        let p = pending.removeValue(forKey: txn)
+        let p = pending.removeValue(forKey: upstreamTxn)
         pendingLock.unlock()
 
         guard let p else { return }
-        writeResponse(data, destIP: p.ip, destPort: p.port)
+
+        var restored = data
+        restored[0] = UInt8(p.originalTxn >> 8)
+        restored[1] = UInt8(p.originalTxn & 0xFF)
+        writeResponse(restored, destIP: p.ip, destPort: p.port)
     }
 
     private func writeResponse(_ payload: Data, destIP: Data, destPort: UInt16) {
         let pkt = buildIPPacket(srcIP: tunnelIP, dstIP: destIP, srcPort: 53, dstPort: destPort, payload: payload)
+        // b457: buildIPPacket returns empty on size/length failures.
+        guard !pkt.isEmpty else { return }
         provider?.packetFlow.writePackets([pkt], withProtocols: [AF_INET as NSNumber])
     }
 
     // MARK: - Time Limit Domain Blocking
 
+    // b457: `blocklistLock` guards the in-proxy cached blocklists and their
+    // expiry timestamps. Previously these Sets were read from the packetFlow
+    // thread (`onPacket`) and mutated from bgQueue (`checkTimeLimitExhaustionLocked`)
+    // and the 5-second refresh path inside `isTimeLimitBlocked` itself —
+    // unsynchronized. Concurrent Swift Set access is UB: crashes or, worse,
+    // torn reads where a domain pops in and out of the blocked set for a
+    // single packet-flow tick.
     private var timeLimitBlockedDomains: Set<String> = []
     private var timeLimitBlockedExpiry: Date = .distantPast
+    private var enforcementBlockedDomains: Set<String> = []
+    private var enforcementBlockedExpiry: Date = .distantPast
+    private let blocklistLock = NSLock()
 
     /// Check if a domain should be blocked because its app's time limit is exhausted.
     private func isTimeLimitBlocked(_ domain: String) -> Bool {
-        // Refresh cache every 30 seconds
         let now = Date()
+        blocklistLock.lock()
         if now >= timeLimitBlockedExpiry {
             timeLimitBlockedDomains = storage.readTimeLimitBlockedDomains()
             timeLimitBlockedExpiry = now.addingTimeInterval(5)
         }
-        guard !timeLimitBlockedDomains.isEmpty else { return false }
+        if timeLimitBlockedDomains.isEmpty {
+            blocklistLock.unlock()
+            return false
+        }
         let root = DomainCategorizer.rootDomain(domain)
-        return timeLimitBlockedDomains.contains(root)
+        let hit = timeLimitBlockedDomains.contains(root)
+        blocklistLock.unlock()
+        return hit
+    }
+
+    /// Called from `checkTimeLimitExhaustionLocked` (bgQueue) to force-refresh
+    /// the blocklist after a new exhaustion entry. Thread-safe.
+    private func updateTimeLimitBlocklistLocked(_ domains: Set<String>, expiry: Date) {
+        blocklistLock.lock()
+        timeLimitBlockedDomains = domains
+        timeLimitBlockedExpiry = expiry
+        blocklistLock.unlock()
     }
 
     // MARK: - Enforcement Domain Blocking
-
-    private var enforcementBlockedDomains: Set<String> = []
-    private var enforcementBlockedExpiry: Date = .distantPast
 
     /// Check if a domain should be blocked because its app is shielded (not allowed).
     /// Blocks web versions of apps so kids can't bypass shield.applications via Safari.
     private func isEnforcementBlocked(_ domain: String) -> Bool {
         let now = Date()
+        blocklistLock.lock()
         if now >= enforcementBlockedExpiry {
             enforcementBlockedDomains = storage.readEnforcementBlockedDomains()
             enforcementBlockedExpiry = now.addingTimeInterval(5)
         }
-        guard !enforcementBlockedDomains.isEmpty else { return false }
+        if enforcementBlockedDomains.isEmpty {
+            blocklistLock.unlock()
+            return false
+        }
         let root = DomainCategorizer.rootDomain(domain)
-        return enforcementBlockedDomains.contains(root)
+        let hit = enforcementBlockedDomains.contains(root)
+        blocklistLock.unlock()
+        return hit
     }
 
     // MARK: - Safe Search
@@ -318,7 +568,7 @@ final class DNSProxy {
         let now = Date()
         if now >= safeSearchExpiry {
             let r = storage.readDeviceRestrictions()?.denyExplicitContent == true
-            let t = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.bool(forKey: "safeSearchEnabled") ?? false
+            let t = UserDefaults.appGroup?.bool(forKey: "safeSearchEnabled") ?? false
             safeSearchOn = r || t
             safeSearchExpiry = now.addingTimeInterval(5)
         }
@@ -365,16 +615,38 @@ final class DNSProxy {
         let octets = ip.split(separator: ".").compactMap { UInt8($0) }
         guard query.count >= 12, octets.count == 4 else { return query }
 
+        // b457: validate the question section before building the response.
+        // Previously, a malformed query could produce a response with
+        // QDCOUNT=1 / ANCOUNT=1 but no question section copied, leaving the
+        // answer's `0xC0 0x0C` name pointer pointing at garbage. Clients
+        // reject or hang on that. Parse the QNAME walk ourselves with
+        // bounds checks; if it doesn't form a valid terminated name plus
+        // 4 bytes of QTYPE/QCLASS, fall back to REFUSED.
+        var walk = 12
+        while walk < query.count {
+            let labelLen = Int(query[walk])
+            if labelLen == 0 { walk += 1; break }
+            if labelLen > 63 {
+                // Compression pointer or invalid length — we don't handle
+                // compression in safe-search rewriting, drop to REFUSED.
+                return buildRefusedResponse(query: query)
+            }
+            walk += 1 + labelLen
+            if walk > query.count { return buildRefusedResponse(query: query) }
+        }
+        // Require 4 more bytes for QTYPE + QCLASS.
+        let qnameEnd = walk
+        guard qnameEnd + 4 <= query.count else {
+            return buildRefusedResponse(query: query)
+        }
+        let questionEnd = qnameEnd + 4
+
         var r = Data()
         r.append(contentsOf: [query[0], query[1]])           // txn ID
         r.append(contentsOf: [0x81, 0x80])                    // flags
         r.append(contentsOf: [0,1, 0,1, 0,0, 0,0])           // counts
-
-        // Copy question
-        var off = 12
-        while off < query.count { let l = query[off]; if l == 0 { off += 1; break }; off += Int(l)+1 }
-        off += 4
-        if off <= query.count { r.append(query[12..<off]) }
+        // Copy the validated question section verbatim.
+        r.append(query[12..<questionEnd])
 
         // Answer
         r.append(contentsOf: [0xC0, 0x0C, 0,1, 0,1, 0,0,1,0x2C, 0,4])
@@ -385,6 +657,21 @@ final class DNSProxy {
     // MARK: - IP Packet Builder
 
     private func buildIPPacket(srcIP: Data, dstIP: Data, srcPort: UInt16, dstPort: UInt16, payload: Data) -> Data {
+        // b457: bounds checks. UInt16(28 + payload.count) traps on
+        // payload.count > 65507 — reachable if an upstream DNS server
+        // returns an oversized response (EDNS0 / DNSSEC with large chains,
+        // or adversarial payloads). Trap == tunnel process crash == kid
+        // loses internet until OS restarts the extension. Similarly, the
+        // srcIP/dstIP slices must be exactly 4 bytes each or the
+        // replaceSubrange calls below corrupt the header.
+        guard payload.count <= 65507 else {
+            NSLog("[DNSProxy] buildIPPacket: payload too large (\(payload.count)B) — dropping")
+            return Data()
+        }
+        guard srcIP.count == 4, dstIP.count == 4 else {
+            NSLog("[DNSProxy] buildIPPacket: bad IP length src=\(srcIP.count) dst=\(dstIP.count)")
+            return Data()
+        }
         let udpLen = UInt16(8 + payload.count)
         let totalLen = UInt16(28 + payload.count)
         var p = Data(count: Int(totalLen))
@@ -421,15 +708,35 @@ final class DNSProxy {
         if DomainCategorizer.isNoise(fullDomain) { return }
         guard !isDeviceLocked else { return }
 
-        // New app detection + per-app time tracking
+        // New app detection + per-app time tracking.
+        //
+        // b461: atomicize the (contains → insert → persist → append-to-pending)
+        // sequence under knownAppsLock. `recordDomain` already runs on the
+        // serial `bgQueue`, but `restoreKnownApps()` runs on the tunnel
+        // startup thread, and a future caller that isn't on bgQueue would
+        // race the check. Also, re-read the `newAppDetections` list with
+        // a fresh UserDefaults fetch right before writing — minimizes the
+        // lost-update window if the main-app heartbeat flush ran between
+        // our initial check and our write.
         let appName = DomainCategorizer.appName(for: root)
-        if let appName, !knownApps.contains(appName) {
-            knownApps.insert(appName)
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(Array(knownApps), forKey: "knownAppDomains")
-            var p = UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.stringArray(forKey: "newAppDetections") ?? []
-            p.append(appName)
-            UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.set(p, forKey: "newAppDetections")
-            NSLog("[DNSProxy] New app: \(appName)")
+        if let appName {
+            knownAppsLock.lock()
+            let isNew = !knownApps.contains(appName)
+            if isNew {
+                knownApps.insert(appName)
+                let defaults = UserDefaults.appGroup
+                defaults?.set(Array(knownApps), forKey: "knownAppDomains")
+                // Fresh-read newAppDetections right before the append to
+                // shrink the cross-process race against the main app's
+                // flushNewAppDetections (which reads then removes the key).
+                var p = defaults?.stringArray(forKey: "newAppDetections") ?? []
+                if !p.contains(appName) {
+                    p.append(appName)
+                    defaults?.set(p, forKey: "newAppDetections")
+                }
+                NSLog("[DNSProxy] New app: \(appName)")
+            }
+            knownAppsLock.unlock()
         }
         if let appName {
             trackAppMinute(appName)
@@ -463,10 +770,26 @@ final class DNSProxy {
 
     /// Track a 60-second activity window for an app. Called from recordDomain() on bgQueue.
     /// A "minute" requires sustained DNS activity: an open window must last 60s before counting.
+    ///
+    /// b457: holds `appUsageLock` across the whole body so concurrent reads
+    /// from `flushToAppGroup` / `resetDaily` don't race on `appWindows` /
+    /// `appMinutes`. Previously this was unsynchronized — only surviving
+    /// because the two callers rarely overlapped in practice.
+    ///
+    /// b457 also tightens the "phantom minute" bug: previously, if an app
+    /// emitted one DNS query, went silent for an hour, then emitted another,
+    /// the second query would find a stale `appWindows[appName]` entry
+    /// `>= 60s` old and credit the app with a "minute" of activity that
+    /// never happened. Fix: only count as an active minute if the gap is
+    /// in the plausible active-session window (60–75s). Beyond that, treat
+    /// it as a fresh session and reset the window without crediting time.
     private func trackAppMinute(_ appName: String) {
         let now = Date()
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
         let today = fmt.string(from: now)
+
+        appUsageLock.lock()
+        defer { appUsageLock.unlock() }
 
         // Day rollover: reset all tracking
         if today != appUsageDateString {
@@ -476,15 +799,19 @@ final class DNSProxy {
         }
 
         if let windowStart = appWindows[appName] {
-            // Open window exists — check if 60s has elapsed
-            if now.timeIntervalSince(windowStart) >= 60 {
-                // Close window: increment minute count
+            let gap = now.timeIntervalSince(windowStart)
+            if gap >= 60 && gap < 75 {
+                // Sustained activity: window rolled from at-least-60s to
+                // under-75s. Credit a minute, open a new window.
                 appMinutes[appName, default: 0] += 1
-                // Open a new window for continued activity
                 appWindows[appName] = now
-                checkTimeLimitExhaustion(appName)
+                checkTimeLimitExhaustionLocked(appName)
+            } else if gap >= 75 {
+                // Too long a gap — this isn't sustained activity, it's a
+                // new session. Reset the window without crediting.
+                appWindows[appName] = now
             }
-            // Otherwise window is still open, nothing to do (sustained activity continues)
+            // Otherwise (0 <= gap < 60): window still open, nothing to do.
         } else {
             // No open window — start one
             appWindows[appName] = now
@@ -493,7 +820,11 @@ final class DNSProxy {
 
     /// Check if an app has exceeded its time limit (with 10% buffer for DNS noise).
     /// If exhausted, write to the same pathway the Monitor uses (TimeLimitExhaustedApp).
-    private func checkTimeLimitExhaustion(_ appName: String) {
+    ///
+    /// **PRECONDITION:** caller must already hold `appUsageLock`. Reading
+    /// `appMinutes[appName]` without the lock would race against the
+    /// bgQueue writer in `trackAppMinute`.
+    private func checkTimeLimitExhaustionLocked(_ appName: String) {
         let now = Date()
 
         // Refresh time limits cache every 30 seconds
@@ -537,25 +868,37 @@ final class DNSProxy {
         }
         try? storage.writeTimeLimitBlockedDomains(blockedDomains)
 
-        // Force-refresh the in-memory blocked domains cache immediately
-        timeLimitBlockedDomains = blockedDomains
-        timeLimitBlockedExpiry = now.addingTimeInterval(5)
+        // Force-refresh the in-memory blocked domains cache immediately.
+        // b457: goes through the blocklist lock so we don't race the packetFlow
+        // reader in `isTimeLimitBlocked`.
+        updateTimeLimitBlocklistLocked(blockedDomains, expiry: now.addingTimeInterval(5))
 
         NSLog("[DNSProxy] DNS time limit exhausted: \(appName) (\(minutes)m >= \(limit.dailyLimitMinutes)m * 1.1)")
     }
 
     /// Persist current app usage to App Group. Called from flushToAppGroup().
+    ///
+    /// b457: only serializes the current count — does NOT credit new minutes.
+    /// Previously the flush path iterated open windows and credited a minute
+    /// for anything aged past 60s, which was wrong in two ways:
+    ///   1. A "minute" should require an actual incoming DNS query after 60s
+    ///      of window time (sustained activity). Crediting on a timer tick
+    ///      instead of on a query event over-counts idle apps that happened
+    ///      to have a stale window entry.
+    ///   2. The old flush also reset `appWindows[app] = now` on any aged
+    ///      entry, reopening the window indefinitely even when the app had
+    ///      gone silent. Next flush 60s later would credit another minute.
+    ///      Repeat for hours. Apps with ~zero real traffic could "exhaust"
+    ///      their daily limit from nothing but DNS-noise leftovers.
+    ///
+    /// `trackAppMinute` on the bgQueue writer is the ONLY place that credits
+    /// minutes — and only when a fresh query arrives. Flush just serializes
+    /// the current state.
     private func flushAppUsageToAppGroup() {
-        guard !appMinutes.isEmpty || !appWindows.isEmpty else { return }
+        appUsageLock.lock()
+        defer { appUsageLock.unlock() }
 
-        // Close any open windows older than 60s (count their minute)
-        let now = Date()
-        for (app, windowStart) in appWindows {
-            if now.timeIntervalSince(windowStart) >= 60 {
-                appMinutes[app, default: 0] += 1
-                appWindows[app] = now
-            }
-        }
+        guard !appMinutes.isEmpty else { return }
 
         let usage = DNSAppUsage(dateString: appUsageDateString, apps: appMinutes)
         if let data = try? JSONEncoder().encode(usage) {
@@ -564,6 +907,8 @@ final class DNSProxy {
     }
 
     /// Restore app usage from App Group on startup. Called from restoreFromAppGroup().
+    /// b457: also takes appUsageLock for consistency even though this runs at
+    /// start() before bgQueue has work queued.
     private func restoreAppUsageFromAppGroup() {
         guard let data = storage.readRawData(forKey: "dnsAppUsage"),
               let saved = try? JSONDecoder().decode(DNSAppUsage.self, from: data) else { return }
@@ -571,6 +916,8 @@ final class DNSProxy {
         let today = fmt.string(from: Date())
         guard saved.dateString == today else { return }
 
+        appUsageLock.lock()
+        defer { appUsageLock.unlock() }
         // Restore: take max of in-memory and persisted (tunnel may have restarted mid-day)
         appUsageDateString = today
         for (app, minutes) in saved.apps {
@@ -596,7 +943,7 @@ final class DNSProxy {
         let total = totalQueries
         statsLock.unlock()
         guard !domains.isEmpty else { return }
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         if let data = try? JSONEncoder().encode(domains) { defaults?.set(data, forKey: "dnsActivityDomains") }
         defaults?.set(total, forKey: "dnsActivityTotalQueries")
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
@@ -606,7 +953,7 @@ final class DNSProxy {
     }
 
     private func restoreFromAppGroup() {
-        let defaults = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let defaults = UserDefaults.appGroup
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
         guard defaults?.string(forKey: "dnsActivityDate") == fmt.string(from: Date()),
               let data = defaults?.data(forKey: "dnsActivityDomains"),
@@ -622,30 +969,37 @@ final class DNSProxy {
     }
 
     private func restoreKnownApps() {
-        knownApps = Set(UserDefaults(suiteName: AppConstants.appGroupIdentifier)?.stringArray(forKey: "knownAppDomains") ?? [])
+        knownAppsLock.lock()
+        knownApps = Set(UserDefaults.appGroup?.stringArray(forKey: "knownAppDomains") ?? [])
+        knownAppsLock.unlock()
     }
 
     func resetDaily() {
         statsLock.lock(); domainCounts.removeAll(); totalQueries = 0; statsLock.unlock()
-        let d = UserDefaults(suiteName: AppConstants.appGroupIdentifier)
+        let d = UserDefaults.appGroup
         d?.removeObject(forKey: "dnsActivityDomains"); d?.set(0, forKey: "dnsActivityTotalQueries")
-        // Reset per-app time tracking
+        // Reset per-app time tracking — b457: synchronized with the bgQueue
+        // writer. Without this the UB was a real crash waiting to happen on
+        // day rollover when a query arrived at the same instant.
+        appUsageLock.lock()
         appWindows.removeAll()
         appMinutes.removeAll()
         appUsageDateString = ""
+        appUsageLock.unlock()
         try? storage.writeRawData(nil, forKey: "dnsAppUsage")
     }
 
     func cleanupStalePendingQueries() {
         pendingLock.lock()
-        _ = pending.count
         let now = Date()
         let stale = pending.filter { now.timeIntervalSince($0.value.at) >= 5 }
         pending = pending.filter { now.timeIntervalSince($0.value.at) < 5 }
         pendingLock.unlock()
-        // Send REFUSED for stale queries so clients get immediate error
+        // Send REFUSED for stale queries so clients get immediate error.
+        // Use the original client txn ID so the client's DNS resolver can
+        // actually match the refused response to its in-flight request.
         for (_, entry) in stale {
-            let refused = buildRefusedResponse(query: entry.query)
+            let refused = buildRefusedResponseWithOriginalTxn(entry: entry)
             writeResponse(refused, destIP: entry.ip, destPort: entry.port)
         }
         if !stale.isEmpty {
