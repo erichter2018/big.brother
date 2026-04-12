@@ -83,6 +83,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Tunnel signals "enforcement dirty" when it handles grantExtraTime/blockAppForToday.
         // The tunnel can't write ManagedSettings — we must do it here on the next callback.
         checkEnforcementRefreshSignal()
+        rearmEnforcementHeartbeat()
 
         // Reconciliation quarter window started — verify enforcement matches snapshot.
         if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
@@ -278,6 +279,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name, activity: DeviceActivityName) {
         checkEnforcementRefreshSignal()
+        rearmEnforcementHeartbeat()
+
+        if event.rawValue == "enforcement.heartbeat" {
+            NSLog("[Monitor] Enforcement heartbeat fired — flag checked")
+            return
+        }
+
         // Handle per-app time limit events.
         if activity.rawValue.hasPrefix("bigbrother.timelimit.") {
             if event.rawValue.hasPrefix("timelimit.exhausted") {
@@ -1087,6 +1095,41 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             category: .enforcement,
             message: "Enforcement refresh from tunnel signal (age \(Int(age))s) → \(resolution.mode.rawValue)"
         ))
+    }
+
+    // MARK: - Rolling Enforcement Heartbeat
+
+    private func rearmEnforcementHeartbeat() {
+        let center = DeviceActivityCenter()
+        let activityName = DeviceActivityName(rawValue: "bigbrother.enforcementHeartbeat")
+
+        let defaults = UserDefaults.appGroup
+        let currentScreenMinutes = defaults?.integer(forKey: "screenTimeMinutes") ?? 0
+
+        let nextThresholdSeconds = (currentScreenMinutes * 60) + 30
+        let thresholdHours = nextThresholdSeconds / 3600
+        let thresholdMinutes = (nextThresholdSeconds % 3600) / 60
+        let thresholdSecs = nextThresholdSeconds % 60
+
+        let schedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: 0, minute: 0),
+            intervalEnd: DateComponents(hour: 23, minute: 59),
+            repeats: true
+        )
+        let event = DeviceActivityEvent(
+            applications: [],
+            categories: [],
+            webDomains: [],
+            threshold: DateComponents(hour: thresholdHours, minute: thresholdMinutes, second: thresholdSecs)
+        )
+        let eventName = DeviceActivityEvent.Name(rawValue: "enforcement.heartbeat")
+
+        center.stopMonitoring([activityName])
+        do {
+            try center.startMonitoring(activityName, during: schedule, events: [eventName: event])
+        } catch {
+            NSLog("[Monitor] Failed to rearm enforcement heartbeat: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Reconciliation

@@ -91,6 +91,12 @@ struct BigBrotherApp: App {
         // to inject mode-change commands without going through CloudKit.
         // Debug builds only — observer code is compiled out of release.
         TestCommandReceiver.install(appState: appState)
+        // Parent-side receiver: harness posts a Darwin notification to the
+        // parent phone, this calls AppState.sendCommand through the real
+        // CK pipeline. Only installs when running as parent role.
+        if appState.deviceRole == .parent {
+            ParentTestCommandReceiver.install(appState: appState)
+        }
         #endif
 
         // Record that the main app launched with this build number.

@@ -183,6 +183,30 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             forKey: StorageKeys.enrollmentState
         ) else { return }
 
+        // The tunnel processes CK commands but cannot apply ManagedSettings
+        // (no family-controls entitlement). It writes this flag so the main
+        // app can schedule a Monitor wake. The main app HAS the entitlement,
+        // so its DeviceActivity schedule registrations work (unlike the
+        // tunnel's). The Monitor then applies enforcement from its
+        // privileged context. We don't call enforcement.apply() directly
+        // because ManagedSettings writes silently fail from backgrounded apps.
+        let enforcementDefaults = UserDefaults.appGroup
+        let refreshEpoch = enforcementDefaults?.double(forKey: AppGroupKeys.needsEnforcementRefresh) ?? 0
+        if refreshEpoch > 0 {
+            NSLog("[BigBrother] needsEnforcementRefresh flag set (epoch=\(refreshEpoch)) — applying enforcement")
+            // Layer 1: Try direct apply (works if app was recently foreground,
+            // silently fails if XPC connection is stale from background).
+            if let policy = snapshotStore.loadCurrentSnapshot()?.effectivePolicy {
+                try? enforcement?.apply(policy)
+            }
+            // Layer 2: Schedule Monitor wake at 65s. The main app HAS the
+            // family-controls entitlement so the registration works even from
+            // background. 65s ensures the minute component is in the future
+            // (DeviceActivity has minute-level granularity). The Monitor
+            // applies enforcement from its privileged context — guaranteed.
+            scheduleEnforcementRefreshActivity(source: "tunnelFlag", delaySeconds: 65)
+        }
+
         let commands = try await cloudKit.fetchPendingCommands(
             deviceID: enrollment.deviceID,
             childProfileID: enrollment.childProfileID,
@@ -290,11 +314,22 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             + latestConfig.values.sorted { $0.issuedAt < $1.issuedAt }
 
         let skippedConfig = configCommands.count - latestConfig.count
+        // If the tunnel processed mode commands, the snapshot is correct but
+        // ManagedSettings shields were never applied (tunnel lacks the
+        // family-controls entitlement). Re-apply enforcement for the current
+        // resolved mode so shields match the snapshot the tunnel wrote.
+        let tunnelHandledModeCommands = commands.filter { cmd in
+            tunnelProcessed.contains(cmd.id.uuidString) && cmd.action.isModeCommand
+        }
+
         #if DEBUG
         if sorted.isEmpty && !commands.isEmpty {
             print("[BigBrother] All commands already processed (deduped)")
         } else {
             print("[BigBrother] \(effectiveModeCommands.count) mode + \(perAppCommands.count) per-app + \(latestConfig.count) config to process (\(skippedMode) mode + \(skippedConfig) config skipped)")
+        }
+        if !tunnelHandledModeCommands.isEmpty {
+            print("[BigBrother] \(tunnelHandledModeCommands.count) tunnel-processed mode commands — re-applying enforcement")
         }
         #endif
 
@@ -306,6 +341,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // processing (~30 reviewApp calls in ~5 minutes degraded the agent).
         beginEnforcementBatch()
         defer { endEnforcementBatch() }
+
+        if !tunnelHandledModeCommands.isEmpty {
+            reapplyCurrentEnforcement()
+        }
 
         // Poison-pill: if the same command UUID has been processed >3 times in
         // the recent history (e.g. tunnel/app dedup mismatch, CK status update

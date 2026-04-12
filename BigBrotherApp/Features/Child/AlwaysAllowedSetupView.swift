@@ -150,6 +150,37 @@ struct AlwaysAllowedSetupView: View {
                 try? appState.enforcement?.apply(policy)
             }
 
+            // Bug 3 fix: persist picker approvals to CloudKit via
+            // TimeLimitConfig records so they survive device uninstalls
+            // and enable cross-device auto-approve. Without this, the
+            // picker writes to local allowedAppTokens only and the
+            // approval dies with the device.
+            if let enrollment = try? appState.keychain.get(
+                ChildEnrollmentState.self,
+                forKey: StorageKeys.enrollmentState
+            ), let cloudKit = appState.cloudKit {
+                Task {
+                    for application in selection.applications {
+                        guard let token = application.token,
+                              let tokenData = try? JSONEncoder().encode(token) else { continue }
+                        let fp = TokenFingerprint.fingerprint(for: tokenData)
+                        let name = application.localizedDisplayName
+                            ?? application.bundleIdentifier?.split(separator: ".").last.map(String.init)
+                            ?? "App"
+                        let config = TimeLimitConfig(
+                            familyID: enrollment.familyID,
+                            childProfileID: enrollment.childProfileID,
+                            appFingerprint: fp,
+                            appName: name,
+                            dailyLimitMinutes: 0,
+                            isActive: true
+                        )
+                        try? await cloudKit.saveTimeLimitConfig(config)
+                    }
+                    NSLog("[AlwaysAllowed] Persisted \(selection.applications.count) picker approvals to CK")
+                }
+            }
+
             #if DEBUG
             print("[BigBrother] Saved \(tokens.count) always-allowed app tokens")
             #endif

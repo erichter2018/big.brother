@@ -524,7 +524,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var livenessTickCount: Int = 0
 
     private func startLivenessTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
         // Poll commands every 5 seconds for responsive command delivery.
         // Push notifications for non-mode commands are throttled by iOS, and
         // even mode commands can take 30-90s for the alert push to arrive.
@@ -532,12 +532,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // of the cadence cuts kid-perceived latency proportionally.
         // Heavier operations (schedule sync, blocklist persist, app liveness)
         // still run every 30 seconds (every 6th tick now).
-        timer.schedule(deadline: .now() + 5, repeating: 5)
+        // Fire immediately on startup, then every 5 seconds. The first poll
+        // is critical — a parent command may be waiting in CK from before the
+        // tunnel restarted. Without the immediate fire, the first poll is
+        // delayed 5 seconds, and if it QoS-stalls, the tunnel is blind for
+        // the entire startup window.
+        timer.schedule(deadline: .now(), repeating: 5)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.livenessTickCount += 1
 
-            // Fast path: poll for commands every 5 seconds (with overlap guard)
+            // Poll for commands every 5 seconds. Skip if previous poll is
+            // still running (CK operations have 15s request timeout via the
+            // QoS-enabled helpers, so a single poll should never exceed ~20s).
             if !self.isPollingCommands {
                 self.isPollingCommands = true
                 Task {
@@ -1407,25 +1414,29 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let signalTime = defaults?.double(forKey: AppGroupKeys.needsEnforcementRefresh),
               signalTime > 0 else { return }
 
-        // Only relay recent signals (within 30 seconds — after that, give up)
+        // Don't clear the flag here — let the main app or Monitor clear it
+        // when they actually re-apply enforcement. The tunnel can't apply
+        // ManagedSettings, so clearing the flag before a consumer reads it
+        // means enforcement never happens.
         let age = Date().timeIntervalSince1970 - signalTime
-        guard age < 30 else {
-            defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
-            return
-        }
 
-        // Check if Monitor already confirmed
+        // Check if Monitor or main app already confirmed
         let confirmedAt = defaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0
         if confirmedAt >= signalTime {
-            // Monitor handled it — clear the flag
             defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
             return
         }
 
-        // Monitor hasn't confirmed yet — schedule a near-future activity to wake it.
-        NSLog("[Tunnel] Relaying enforcement refresh (signal age: \(Int(age))s, no Monitor confirmation)")
-        scheduleEnforcementRefreshActivity(source: "relay")
-        defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
+        // Expire stale flags (2 hours) to prevent indefinite accumulation.
+        guard age < 7200 else {
+            defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
+            return
+        }
+
+        // Only attempt relay every 60s to avoid spamming dead-code schedules.
+        guard age < 60 else { return }
+
+        NSLog("[Tunnel] Relaying enforcement refresh (signal age: \(Int(age))s, no confirmation)")
     }
 
     /// Persistent enforcement verifier — runs every 30s on the liveness timer.
@@ -1691,9 +1702,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let endAt = fireAt.addingTimeInterval(16 * 60)
         let cal = Calendar.current
         let schedule = DeviceActivitySchedule(
-            intervalStart: cal.dateComponents([.hour, .minute, .second], from: fireAt),
-            intervalEnd: cal.dateComponents([.hour, .minute, .second], from: endAt),
-            repeats: false,
+            intervalStart: DateComponents(hour: cal.component(.hour, from: fireAt),
+                                          minute: cal.component(.minute, from: fireAt)),
+            intervalEnd: DateComponents(hour: cal.component(.hour, from: endAt),
+                                        minute: cal.component(.minute, from: endAt)),
+            repeats: true,
             warningTime: nil
         )
         let activityName = DeviceActivityName(
@@ -1716,6 +1729,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// our scheduled activity triggers). Belt-and-suspenders.
     private func signalMonitorToReconcile() {
         scheduleEnforcementRefreshActivity(source: "signalReconcile")
+        triggerBackgroundURLSessionWake()
+    }
+
+    private func triggerBackgroundURLSessionWake() {
+        let id = "bb.enforcement.wake.\(Int(Date().timeIntervalSince1970))"
+        let config = URLSessionConfiguration.background(withIdentifier: id)
+        config.sharedContainerIdentifier = AppConstants.appGroupIdentifier
+        config.sessionSendsLaunchEvents = true
+        config.isDiscretionary = false
+        let session = URLSession(configuration: config)
+        guard let url = URL(string: "https://www.apple.com/robots.txt") else { return }
+        let task = session.downloadTask(with: url)
+        task.resume()
+        NSLog("[Tunnel] Background URLSession wake triggered: \(id)")
     }
 
     /// Handle removeTimeLimit from tunnel: remove limit, remove from allowed, update DNS.
@@ -2543,32 +2570,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
         let db = container.publicCloudDatabase
 
-        // Query for pending commands targeting this device or child profile
-        // within the last 24 hours. Sort newest-first so a fresh command is
-        // never starved by older stuck-pending records hitting the result
-        // limit. The previous query had no sort and a 25-record limit, which
-        // meant a backlog of 25+ stale "pending" records (failed CK status
-        // updates) could hide every new mode command from the tunnel forever.
-        let cutoff = Date().addingTimeInterval(-86400) as NSDate
-        let predicate = NSPredicate(
-            format: "familyID == %@ AND status == %@ AND issuedAt >= %@",
-            enrollment.familyID.rawValue, "pending", cutoff
-        )
-        let query = CKQuery(recordType: "BBRemoteCommand", predicate: predicate)
-        query.sortDescriptors = [NSSortDescriptor(key: "issuedAt", ascending: false)]
-
-        // Track processed command IDs to prevent re-execution.
         let defaults = UserDefaults.appGroup
         var processedByTunnel = Set(defaults?.stringArray(forKey: AppGroupKeys.tunnelProcessedCommandIDs) ?? [])
+        var deferredHeartbeat = false
 
         do {
-            let (results, _) = try await db.records(matching: query, resultsLimit: 100)
-            for (_, result) in results {
-                guard let record = try? result.get() else { continue }
-                let actionJSON = record["actionJSON"] as? String ?? ""
-                let commandID = record.recordID.recordName
-                let targetType = record["targetType"] as? String ?? ""
-                let targetID = record["targetID"] as? String ?? ""
+            // Use URLSession + CloudKit REST API instead of CK framework.
+            // CK framework operations hang after ~3 min of main app being
+            // backgrounded (cloudd daemon throttles the operation queue).
+            // URLSession bypasses cloudd entirely — the tunnel is a high-priority
+            // NE process with persistent network access.
+            let results = try await Self.queryCommandsViaREST(
+                familyID: enrollment.familyID.rawValue
+            )
+            for record in results {
+                let actionJSON = record["actionJSON"] ?? ""
+                let commandID = record["recordName"] ?? ""
+                let targetType = record["targetType"] ?? ""
+                let targetID = record["targetID"] ?? ""
 
                 // Skip commands already processed by this tunnel instance
                 guard !processedByTunnel.contains(commandID) else { continue }
@@ -2587,86 +2606,244 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 guard isTargeted else { continue }
 
                 // Skip expired commands — use the same 24-hour window as the main app.
-                // Previously 30 minutes, which caused commands valid for the app to be
-                // silently dropped when the app was dead for hours.
-                if let issuedAt = record["issuedAt"] as? Date,
-                   Date().timeIntervalSince(issuedAt) > AppConstants.defaultCommandExpirySeconds {
+                let issuedAtMs = Double(record["issuedAt"] ?? "0") ?? 0
+                let issuedAt = Date(timeIntervalSince1970: issuedAtMs / 1000)
+                if Date().timeIntervalSince(issuedAt) > AppConstants.defaultCommandExpirySeconds {
                     processedByTunnel.insert(commandID)
-                    NSLog("[Tunnel] Skipping expired command \(commandID) (issued \(Int(Date().timeIntervalSince(issuedAt)))s ago)")
                     continue
                 }
 
-                processedByTunnel.insert(commandID)
-
-                // Handle simple commands from the tunnel.
-                // Parse the action type from JSON to match exactly (not substring).
                 let tunnelAction = Self.parseTunnelActionType(from: actionJSON)
                 if tunnelAction == "requestHeartbeat" {
-                    await sendHeartbeatFromTunnel(reason: "command")
-                    record["status"] = "applied"
-                    _ = try? await db.save(record)
+                    deferredHeartbeat = true
+                    processedByTunnel.insert(commandID)
+                    Self.markCommandAppliedAsync(db: db, recordName: commandID)
                     NSLog("[Tunnel] Processed requestHeartbeat command: \(commandID)")
                 } else if tunnelAction == "requestDiagnostics" {
-                    // Always handle from tunnel — the main app may be suspended
-                    // even when mainAppAlive is true. Both tunnel and app can
-                    // upload reports; the parent sees whichever arrives.
                     await collectAndUploadDiagnostics(enrollment: enrollment)
-                    record["status"] = "applied"
-                    _ = try? await db.save(record)
+                    processedByTunnel.insert(commandID)
+                    Self.markCommandAppliedAsync(db: db, recordName: commandID)
                     NSLog("[Tunnel] Processed requestDiagnostics command: \(commandID)")
                 } else if tunnelAction == "blockInternet" {
-                    // Legacy: internet blocking is now mode-driven.
-                    // Just reapply network settings — tunnel reads mode from App Group.
                     reapplyNetworkSettings()
-                    record["status"] = "applied"
-                    _ = try? await db.save(record)
+                    processedByTunnel.insert(commandID)
+                    Self.markCommandAppliedAsync(db: db, recordName: commandID)
                     NSLog("[Tunnel] Processed blockInternet (mode-driven): \(commandID)")
                 } else if let tunnelAction,
                           Self.isTunnelProcessableAction(tunnelAction) {
-                    // Always process mode commands from the tunnel — don't gate on mainAppAlive.
-                    // Push notifications may be broken (iCloud account change, MDM removal),
-                    // so the app can't be relied on to wake and process commands.
-                    // The tunnel polls every 30s and is the reliable fallback.
-                    // Dedup via processedCommandIDs prevents double application if both
-                    // the tunnel and main app process the same command.
+                    let ckRecord = CKRecord(
+                        recordType: "BBRemoteCommand",
+                        recordID: CKRecord.ID(recordName: commandID)
+                    )
+                    ckRecord["actionJSON"] = actionJSON
+                    ckRecord["issuedAt"] = issuedAt as NSDate
+                    ckRecord["status"] = "pending"
+                    ckRecord["targetType"] = targetType
+                    ckRecord["targetID"] = targetID
                     await handleModeCommandFromTunnel(
                         actionType: tunnelAction,
                         actionJSON: actionJSON,
-                        record: record,
+                        record: ckRecord,
                         enrollment: enrollment,
                         db: db
                     )
+                    processedByTunnel.insert(commandID)
                     NSLog("[Tunnel] Processed mode command \(tunnelAction): \(commandID) (appAlive=\(mainAppAlive))")
+                } else {
+                    processedByTunnel.insert(commandID)
                 }
-                // Other commands are left for the main app
             }
 
-            // Reset failure counter on successful poll
             commandPollFailureCount = 0
             recordCKOperationResult(success: true, reason: "poll")
         } catch {
             NSLog("[Tunnel] Command poll failed: \(error.localizedDescription)")
             commandPollFailureCount += 1
-            if commandPollFailureCount >= 6 { // 6 failures = 60 seconds of failed polls
+            if commandPollFailureCount >= 6 {
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .command,
                     message: "Command polling failed \(commandPollFailureCount)x: \(error.localizedDescription)"
                 ))
-                commandPollFailureCount = 0 // Reset logging counter
+                commandPollFailureCount = 0
             }
-            // Feed the streak tracker for recovery-ladder escalation.
             recordCKOperationResult(success: false, reason: "poll: \(error.localizedDescription)")
         }
 
-        // Persist processed IDs (cap at 200 to prevent unbounded growth)
         if processedByTunnel.count > 200 {
             processedByTunnel = Set(processedByTunnel.suffix(200))
         }
         defaults?.set(Array(processedByTunnel), forKey: AppGroupKeys.tunnelProcessedCommandIDs)
+
+        if deferredHeartbeat {
+            await sendHeartbeatFromTunnel(reason: "command")
+        }
     }
 
-    /// Parse the top-level action type from a command's JSON string.
-    /// Returns the exact action key (e.g. "requestHeartbeat") or nil if unparseable.
+
+    // MARK: - CloudKit Operations with QoS
+
+    // MARK: - CloudKit REST API (bypasses cloudd throttling)
+
+    private static let ckAPIToken = "1a091d3460a9c1b488dd4259ae2f5c7bd9200ef9dd311a42c1b447da992766b7"
+    private static let ckRESTBase = "https://api.apple-cloudkit.com/database/1/\(AppConstants.cloudKitContainerIdentifier)/development/public"
+
+    private static let restSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 20
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
+
+    private static func queryCommandsViaREST(familyID: String) async throws -> [[String: String]] {
+        let cutoffMs = Int((Date().timeIntervalSince1970 - 86400) * 1000)
+        let body: [String: Any] = [
+            "query": [
+                "recordType": "BBRemoteCommand",
+                "filterBy": [
+                    ["fieldName": "familyID", "comparator": "EQUALS",
+                     "fieldValue": ["value": familyID]],
+                    ["fieldName": "status", "comparator": "EQUALS",
+                     "fieldValue": ["value": "pending"]],
+                    ["fieldName": "issuedAt", "comparator": "GREATER_THAN",
+                     "fieldValue": ["value": cutoffMs, "type": "TIMESTAMP"]]
+                ],
+                "sortBy": [["fieldName": "issuedAt", "ascending": false]]
+            ],
+            "resultsLimit": 100
+        ]
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        var request = URLRequest(url: URL(string: "\(ckRESTBase)/records/query?ckAPIToken=\(ckAPIToken)")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonData
+
+        let (data, _) = try await restSession.data(for: request)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let records = json["records"] as? [[String: Any]] else {
+            return []
+        }
+
+        return records.compactMap { rec -> [String: String]? in
+            guard let fields = rec["fields"] as? [String: Any],
+                  let recordName = (rec["recordName"] as? String)
+                    ?? (rec["recordID"] as? [String: Any])?["recordName"] as? String
+            else { return nil }
+            var dict: [String: String] = ["recordName": recordName]
+            for (key, val) in fields {
+                if let field = val as? [String: Any], let v = field["value"] {
+                    dict[key] = "\(v)"
+                }
+            }
+            return dict
+        }
+    }
+
+    private static func markCommandAppliedAsync(db: CKDatabase, recordName: String) {
+        Task.detached {
+            do {
+                let record = try await db.record(for: CKRecord.ID(recordName: recordName))
+                record["status"] = "applied"
+                _ = try? await db.save(record)
+            } catch {
+                NSLog("[Tunnel] markApplied failed for \(recordName): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private static func performCKQuery(db: CKDatabase, query: CKQuery, resultsLimit: Int = 100) async throws -> [CKRecord] {
+        try await withCheckedThrowingContinuation { continuation in
+            let lock = NSLock()
+            var records: [CKRecord] = []
+            var resumed = false
+
+            let op = CKQueryOperation(query: query)
+            op.resultsLimit = resultsLimit
+            op.qualityOfService = .userInitiated
+            op.configuration.timeoutIntervalForRequest = 15
+            op.configuration.timeoutIntervalForResource = 25
+
+            op.recordMatchedBlock = { _, result in
+                if let r = try? result.get() {
+                    lock.lock()
+                    records.append(r)
+                    lock.unlock()
+                }
+            }
+            op.queryResultBlock = { result in
+                lock.lock()
+                guard !resumed else { lock.unlock(); return }
+                resumed = true
+                let snapshot = records
+                lock.unlock()
+                switch result {
+                case .success: continuation.resume(returning: snapshot)
+                case .failure(let e): continuation.resume(throwing: e)
+                }
+            }
+            db.add(op)
+        }
+    }
+
+    private static func performCKFetch(db: CKDatabase, recordID: CKRecord.ID) async throws -> CKRecord {
+        try await withCheckedThrowingContinuation { continuation in
+            let lock = NSLock()
+            var resumed = false
+
+            let op = CKFetchRecordsOperation(recordIDs: [recordID])
+            op.qualityOfService = .userInitiated
+            op.configuration.timeoutIntervalForRequest = 10
+            op.configuration.timeoutIntervalForResource = 15
+
+            op.perRecordResultBlock = { _, result in
+                lock.lock()
+                guard !resumed else { lock.unlock(); return }
+                resumed = true
+                lock.unlock()
+                switch result {
+                case .success(let r): continuation.resume(returning: r)
+                case .failure(let e): continuation.resume(throwing: e)
+                }
+            }
+            op.fetchRecordsResultBlock = { result in
+                lock.lock()
+                guard !resumed else { lock.unlock(); return }
+                resumed = true
+                lock.unlock()
+                let err = (try? result.get()) == nil
+                    ? CKError(.unknownItem)
+                    : CKError(.internalError)
+                continuation.resume(throwing: err)
+            }
+            db.add(op)
+        }
+    }
+
+    private static func performCKSave(db: CKDatabase, record: CKRecord) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let lock = NSLock()
+            var resumed = false
+
+            let op = CKModifyRecordsOperation(recordsToSave: [record])
+            op.qualityOfService = .userInitiated
+            op.savePolicy = .changedKeys
+            op.configuration.timeoutIntervalForRequest = 10
+            op.configuration.timeoutIntervalForResource = 15
+
+            op.modifyRecordsResultBlock = { result in
+                lock.lock()
+                guard !resumed else { lock.unlock(); return }
+                resumed = true
+                lock.unlock()
+                switch result {
+                case .success: continuation.resume(returning: true)
+                case .failure: continuation.resume(returning: false)
+                }
+            }
+            db.add(op)
+        }
+    }
+
     private static func parseTunnelActionType(from json: String) -> String? {
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -2879,7 +3056,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // 6. Mark command as applied in CloudKit
         record["status"] = "applied"
-        _ = try? await db.save(record)
+        _ = await Self.performCKSave(db: db, record: record)
 
         // 7. Mark in shared storage so main app's dedup catches it via readProcessedCommandIDs().
         // The recordName is "BBRemoteCommand_<UUID>" — strip the prefix before
@@ -2959,6 +3136,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             await sendHeartbeatFromTunnel(reason: "bgTestRequestHeartbeat", force: true)
             return
         }
+
+        // VPN recovery hooks — exercise the tunnel's network recovery paths
+        // on wifi-only devices that can't do real interface transitions.
+        if notif == .recoverReapply {
+            NSLog("[Tunnel] Recovery test: forcing full network settings reapply")
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .command,
+                message: "Recovery test: reapply (simulated interface transition)"
+            ))
+            reapplyNetworkSettings(force: true)
+            // Wait for the reapply to settle, then send a heartbeat so
+            // the harness can verify CK connectivity recovered.
+            try? await Task.sleep(for: .seconds(3))
+            await sendHeartbeatFromTunnel(reason: "bgTest.recoverReapply", force: true)
+            return
+        }
+        if notif == .recoverStaleTransport {
+            NSLog("[Tunnel] Recovery test: injecting stale transport state")
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .command,
+                message: "Recovery test: staleTransport (simulated DNS wedge)"
+            ))
+            networkSettingsNeedRetry = true
+            dnsProxy?.markUpstreamUnhealthy()
+            // Don't send an immediate heartbeat — the point is to let the
+            // 5-second fast-path liveness tick detect the stale state and
+            // self-heal. The harness polls until CK ops succeed (heartbeat
+            // timestamp advances). Timeout = 30s (6 ticks × 5s).
+            return
+        }
+
         guard let mode = notif.mode else { return }
         let isTempUnlock = notif.actionType == "temporaryUnlock"
         let tempDuration = notif.tempUnlockDurationSeconds
@@ -3290,9 +3498,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let recordID = CKRecord.ID(recordName: "BBHeartbeat_\(enrollment.deviceID.rawValue)")
         let record: CKRecord
 
-        // Fetch existing record to preserve change tag
+        // Fetch existing record to preserve change tag (QoS: userInitiated)
         do {
-            record = try await db.record(for: recordID)
+            record = try await Self.performCKFetch(db: db, recordID: recordID)
         } catch {
             record = CKRecord(recordType: "BBHeartbeat", recordID: recordID)
         }
@@ -3511,6 +3719,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             "applyStartedAt": applyStartedTS,
             "applyFinishedAt": applyFinishedTS,
             "tokenVerdicts": [],
+            "shieldRenders": (defaults?.array(forKey: "shieldRenderLog") as? [[String: Any]]) ?? [],
+            "monitorConfirmedAt": defaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0,
         ]
         if let diagData = try? JSONSerialization.data(withJSONObject: tunnelDiagJSON, options: []),
            let diagStr = String(data: diagData, encoding: .utf8) {
@@ -3530,8 +3740,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         do {
-            try await db.save(record)
-            heartbeatPermissionFailures = 0 // Reset on success
+            let saved = await Self.performCKSave(db: db, record: record)
+            if !saved { throw NSError(domain: "CKSave", code: -1) }
+            heartbeatPermissionFailures = 0
             recordCKOperationResult(success: true, reason: "heartbeat")
         } catch {
             // "WRITE operation not permitted" = record owned by a different iCloud account.

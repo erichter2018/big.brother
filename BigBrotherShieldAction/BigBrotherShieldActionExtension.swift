@@ -77,6 +77,12 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
     private func handleAction(action: ShieldAction, token: ApplicationToken?, completionHandler: @escaping (ShieldActionResponse) -> Void) {
         let storage = AppGroupStorage()
 
+        // Enforcement trampoline: every time the kid taps a shielded app,
+        // re-read the current mode and re-apply shields. This catches stale
+        // enforcement state when the tunnel processed a mode change but the
+        // Monitor hasn't woken to apply ManagedSettings yet.
+        refreshEnforcementIfNeeded(storage: storage)
+
         switch action {
         case .primaryButtonPressed:
             handlePrimaryButton(directToken: token, storage: storage, completionHandler: completionHandler)
@@ -445,6 +451,31 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         let result = notify_get_state(token, &state)
         notify_cancel(token)
         return result == NOTIFY_STATUS_OK ? state : nil
+    }
+
+    // MARK: - Enforcement Trampoline
+
+    private func refreshEnforcementIfNeeded(storage: AppGroupStorage) {
+        let defaults = UserDefaults.appGroup
+        let flagEpoch = defaults?.double(forKey: AppGroupKeys.needsEnforcementRefresh) ?? 0
+        guard flagEpoch > 0 else { return }
+
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let store = ManagedSettingsStore(named: .init(rawValue: AppConstants.managedSettingsStoreEnforcement))
+
+        if resolution.mode == .unlocked {
+            store.clearAllSettings()
+        } else {
+            store.shield.applicationCategories = .all()
+            if let tokenData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+               let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: tokenData),
+               !tokens.isEmpty, resolution.mode == .restricted {
+                store.shield.applicationCategories = .all(except: tokens)
+            }
+        }
+        defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
+        defaults?.set(Date().timeIntervalSince1970, forKey: "shieldActionEnforcedAt")
+        NSLog("[ShieldAction] Trampoline: applied \(resolution.mode.rawValue) enforcement")
     }
 
     // MARK: - Diagnostics

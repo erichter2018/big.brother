@@ -114,6 +114,44 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    // MARK: - Background URLSession Wake (tunnel enforcement bridge)
+
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard identifier.hasPrefix("bb.enforcement.wake") else {
+            completionHandler()
+            return
+        }
+        NSLog("[BigBrother] Background URLSession wake from tunnel — applying enforcement")
+
+        let defaults = UserDefaults.appGroup
+        let flagEpoch = defaults?.double(forKey: AppGroupKeys.needsEnforcementRefresh) ?? 0
+        if flagEpoch > 0 {
+            let store = ManagedSettingsStore(named: .init(rawValue: AppConstants.managedSettingsStoreEnforcement))
+            let storage = AppGroupStorage()
+            let resolution = ModeStackResolver.resolve(storage: storage)
+
+            if resolution.mode == .unlocked {
+                store.clearAllSettings()
+            } else {
+                if let tokenData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+                   let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: tokenData),
+                   !tokens.isEmpty, resolution.mode == .restricted {
+                    store.shield.applicationCategories = .all(except: tokens)
+                } else {
+                    store.shield.applicationCategories = .all()
+                }
+            }
+            defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
+            defaults?.set(Date().timeIntervalSince1970, forKey: "bgURLSessionEnforcedAt")
+            NSLog("[BigBrother] Background URLSession enforcement applied: \(resolution.mode.rawValue)")
+        }
+        completionHandler()
+    }
+
     // MARK: - Guided Setup Detection
 
     /// Synchronously detect "needs guided setup" and set the suppression flag

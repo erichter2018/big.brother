@@ -108,12 +108,26 @@ Modes:
               via 'devicectl process launch' before every step).
               Fast path — measures apply/heartbeat latency when the
               kid has the app open.
-  background  tunnel receives Darwin notifications (main app NOT woken).
-              Exercises the production pain path: parent flips a mode
-              while the kid's main app is suspended. Monitor has to
-              wake via DeviceActivity to actually apply shields.
-  both        runs foreground once then background once, producing two
-              labelled summaries for comparison.
+  suspended   main app alive but NOT foregrounded. Sends the foreground
+              Darwin notification without launching the app. Tests the
+              realistic scenario where the kid closed BB but iOS hasn't
+              killed the process yet. If the app is still running in bg,
+              it processes the command and applies enforcement.
+  background  tunnel receives Darwin notifications (main app KILLED).
+              Worst-case scenario: kid force-quit BB. Tunnel processes
+              commands but cannot apply ManagedSettings shields. Monitor
+              must wake via DeviceActivity to apply enforcement.
+  production  REAL CloudKit path. Posts a Darwin notification to the
+              PARENT phone (must be on b469+) which fires
+              AppState.sendCommand → CK record → silent push → child.
+              Exercises the full parent→CK→child pipeline including
+              command signing. Requires parent phone alive + deployed.
+  recovery    VPN recovery stress. Injects stale transport state into
+              the tunnel, waits for self-heal, then runs a mode
+              transition to verify enforcement still works. Tests the
+              recovery code paths on wifi-only devices.
+  both        runs foreground, suspended, then background, producing
+              three labelled summaries for comparison.
 
 Examples:
   $(basename "$0")                                   # olivia, foreground, 25 iterations
@@ -168,8 +182,8 @@ case "$SCENARIO_MODE" in
 esac
 
 case "$APP_MODE" in
-    foreground|background|both) ;;
-    *) echo "Invalid --mode: $APP_MODE (expected foreground|background|both)"; exit 1 ;;
+    foreground|suspended|background|both|production|recovery) ;;
+    *) echo "Invalid --mode: $APP_MODE (expected foreground|suspended|background|both|production|recovery)"; exit 1 ;;
 esac
 
 if [ -n "$SEED" ]; then
@@ -211,7 +225,7 @@ notif_name_for_action() {
     local action="$1"
     local channel="${2:-foreground}"
     local infix=""
-    [ "$channel" = "background" ] && infix="bg."
+    [ "$channel" = "background" ] || [ "$channel" = "recovery" ] && infix="bg."
     case "$action" in
         locked)           echo "fr.bigbrother.test.${infix}setMode.locked" ;;
         restricted)       echo "fr.bigbrother.test.${infix}setMode.restricted" ;;
@@ -223,10 +237,78 @@ notif_name_for_action() {
     esac
 }
 
+# Parent device Xcode ID — used by production channel to post Darwin
+# notifications to the parent phone. Looked up from the "me" registry entry.
+PARENT_XCODE_ID=""
+for ((i=0; i<DEVICE_COUNT; i++)); do
+    if [ "${ALL_IS_PARENT[$i]}" = "1" ]; then
+        PARENT_XCODE_ID="${ALL_XCODE_IDS[$i]}"
+        break
+    fi
+done
+
 post_command() {
     local xcode_id="$1"
     local action_label="$2"
     local channel="${3:-foreground}"
+    local target_ck_id="${4:-}"
+
+    if [ "$channel" = "production" ]; then
+        # Production channel: post to the PARENT phone, which fires
+        # AppState.sendCommand through the real CK pipeline. The parent
+        # app is foregrounded first so its Darwin observer is alive.
+        if [ -z "$PARENT_XCODE_ID" ]; then
+            echo "No parent device in registry — cannot use production mode" >&2
+            return 1
+        fi
+        if [ -z "$target_ck_id" ]; then
+            echo "production mode requires target_ck_id" >&2
+            return 1
+        fi
+        xcrun devicectl device process launch --device "$PARENT_XCODE_ID" fr.bigbrother.app >/dev/null 2>&1 || true
+        # Settle delay: cold-launching the parent app takes 3-5s to
+        # initialize AppState + register ParentTestCommandReceiver's
+        # Darwin observers. 2s was too short (~2/7 failures).
+        sleep 5
+        # Fixed notification names — the target device ID is pre-written
+        # to the App Group via write_production_target (called once per
+        # device before the iteration loop starts).
+        local prod_notif="fr.bigbrother.parenttest.${action_label}"
+        if [ "$action_label" = "tempUnlock" ]; then
+            prod_notif="fr.bigbrother.parenttest.tempUnlock300"
+        fi
+        if ! xcrun devicectl device notification post \
+                --device "$PARENT_XCODE_ID" \
+                --name "$prod_notif" >/dev/null 2>&1; then
+            echo "devicectl notification post to parent failed for $action_label on $PARENT_XCODE_ID" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if [ "$channel" = "recovery" ]; then
+        # Recovery channel: inject stale transport into the tunnel, then
+        # follow up with a mode command via the bg path.
+        xcrun devicectl device notification post \
+            --device "$xcode_id" \
+            --name "fr.bigbrother.test.bg.recover.staleTransport" >/dev/null 2>&1 || true
+        # Let the fast-path self-heal for a few ticks before sending the
+        # mode command via the bg channel.
+        sleep 8
+        local notif_name
+        notif_name=$(notif_name_for_action "$action_label" "background") || {
+            echo "Unknown action label: $action_label" >&2
+            return 1
+        }
+        if ! xcrun devicectl device notification post \
+                --device "$xcode_id" \
+                --name "$notif_name" >/dev/null 2>&1; then
+            echo "devicectl notification post failed for $action_label (recovery) on $xcode_id" >&2
+            return 1
+        fi
+        return 0
+    fi
+
     local notif_name
     notif_name=$(notif_name_for_action "$action_label" "$channel") || {
         echo "Unknown action label: $action_label" >&2
@@ -234,17 +316,30 @@ post_command() {
     }
 
     if [ "$channel" = "foreground" ]; then
-        # Foreground the child app first. Darwin notifications are NOT
-        # delivered to suspended processes, and iOS suspends the main app
-        # within seconds of losing foreground. `devicectl process launch`
-        # brings a running app to foreground (or launches it if it's been
-        # killed) — takes ~0.2s after the first call (tunnel setup) and
-        # is a no-op for freshness otherwise.
         xcrun devicectl device process launch --device "$xcode_id" fr.bigbrother.app >/dev/null 2>&1 || true
     fi
-    # For background channel: do NOT launch the main app. The tunnel (a
-    # NetworkExtension that's always running) receives the notification
-    # directly and dispatches through its own command pipeline.
+
+    if [ "$channel" = "suspended" ]; then
+        # Suspended channel: send command to TUNNEL only. Do NOT touch the
+        # main app — it stays backgrounded/suspended the entire time.
+        # Enforcement must happen via:
+        #   Layer 1: CK push wakes main app → reads flag → schedules Monitor
+        #   Layer 2: Monitor's scheduled wake (65s)
+        #   Layer 3: Usage milestone wakes Monitor → checks flag
+        # In the harness (no real CK push), only layers 2+3 are exercised.
+        local bg_notif
+        bg_notif=$(notif_name_for_action "$action_label" "background") || {
+            echo "Unknown action label: $action_label" >&2
+            return 1
+        }
+        if ! xcrun devicectl device notification post \
+                --device "$xcode_id" \
+                --name "$bg_notif" >/dev/null 2>&1; then
+            echo "devicectl notification post (tunnel) failed for $action_label on $xcode_id" >&2
+            return 1
+        fi
+        return 0
+    fi
 
     if ! xcrun devicectl device notification post \
             --device "$xcode_id" \
@@ -346,12 +441,36 @@ verify_snapshot() {
     fi
 
     local shields_up
-    shields_up=$(echo "$diag" | jq -r '.shieldsUp // false')
+    shields_up=$(echo "$diag" | jq -r 'if .shieldsUp then "true" else "false" end')
     local shields_expected_true="true"
     [ "$expected" = "unlocked" ] && shields_expected_true="false"
     if [ "$shields_up" != "$shields_expected_true" ]; then
         echo "shieldsUp=$shields_up (expected $shields_expected_true)"
         return 1
+    fi
+
+    # categoryShieldActive — direct ManagedSettingsStore compliance check.
+    local cat_shield
+    cat_shield=$(echo "$diag" | jq -r 'if .categoryShieldActive then "true" else "false" end')
+    local cat_expected="true"
+    [ "$expected" = "unlocked" ] && cat_expected="false"
+    if [ "$cat_shield" != "$cat_expected" ]; then
+        echo "categoryShieldActive=$cat_shield (expected $cat_expected for $expected)"
+        return 1
+    fi
+
+    # shieldAudit freshness — verify the audit fingerprint was written AFTER t_sent.
+    if [ -n "$3" ]; then
+        local audit_epoch
+        audit_epoch=$(echo "$diag" | jq -r '.shieldAudit // ""' | awk -F'|' '{print $NF}')
+        if [ -n "$audit_epoch" ] && [ "$audit_epoch" != "" ]; then
+            local audit_fresh
+            audit_fresh=$(python3 -c "print(1 if float('${audit_epoch}') >= float('${3}') - 1.0 else 0)" 2>/dev/null || echo "0")
+            if [ "$audit_fresh" = "0" ]; then
+                echo "shieldAudit stale (epoch=$audit_epoch < t_sent=$3)"
+                return 1
+            fi
+        fi
     fi
 
     # Token verdicts — verify the expectedBlocked distribution matches the mode.
@@ -374,9 +493,6 @@ verify_snapshot() {
                 fi
                 ;;
             restricted)
-                # Mixed is fine; we require only that at least one is allowed
-                # when there's an always-allowed set. Pass-through if all blocked
-                # (it might just mean the user has no always-allowed entries).
                 ;;
         esac
     fi
@@ -415,7 +531,7 @@ TOTAL_FAIL=0
 # device×iteration matrix once per channel so the summary can
 # compare foreground vs background latency cleanly.
 if [ "$APP_MODE" = "both" ]; then
-    CHANNELS=("foreground" "background")
+    CHANNELS=("foreground" "suspended" "background")
 else
     CHANNELS=("$APP_MODE")
 fi
@@ -428,19 +544,27 @@ fi
 # a fail — no reason to keep the script sitting on a dead step.
 POLL_TIMEOUT_FG=10
 POLL_TIMEOUT_BG=30
+POLL_TIMEOUT_SUSPENDED=90
+POLL_TIMEOUT_PROD=90
+POLL_TIMEOUT_RECOV=45
 
 for channel in "${CHANNELS[@]}"; do
-    if [ "$channel" = "background" ]; then
-        POLL_TIMEOUT_SEC=$POLL_TIMEOUT_BG
-    else
-        POLL_TIMEOUT_SEC=$POLL_TIMEOUT_FG
-    fi
+    case "$channel" in
+        foreground)  POLL_TIMEOUT_SEC=$POLL_TIMEOUT_FG ;;
+        background)  POLL_TIMEOUT_SEC=$POLL_TIMEOUT_BG ;;
+        suspended)   POLL_TIMEOUT_SEC=$POLL_TIMEOUT_SUSPENDED ;;
+        production)  POLL_TIMEOUT_SEC=$POLL_TIMEOUT_PROD ;;
+        recovery)    POLL_TIMEOUT_SEC=$POLL_TIMEOUT_RECOV ;;
+        *)           POLL_TIMEOUT_SEC=$POLL_TIMEOUT_BG ;;
+    esac
     echo "════ Channel: $channel (timeout ${POLL_TIMEOUT_SEC}s) ════"
-    if [ "$channel" = "background" ]; then
-        echo "  (tunnel-dispatched · main app NOT woken · measures production 'parent flips mode while kid's app is suspended' path)"
-    else
-        echo "  (main-app-dispatched · app foregrounded via devicectl · measures apply latency when the kid has the app open)"
-    fi
+    case "$channel" in
+        background)  echo "  (tunnel-dispatched · main app KILLED · worst case: tunnel only, no enforcement)" ;;
+        suspended)   echo "  (tunnel processes → flag → main app wake → Monitor applies shields · 90s timeout for scheduled Monitor wake)" ;;
+        production)  echo "  (REAL CK path · parent phone → CloudKit → silent push → child. Full production pipeline.)" ;;
+        recovery)    echo "  (VPN recovery stress · inject stale transport → self-heal → mode change via bg path)" ;;
+        *)           echo "  (main-app-dispatched · app foregrounded via devicectl · measures apply latency when the kid has the app open)" ;;
+    esac
 
     for target_name in "${TARGETS[@]}"; do
         target_idx=$(find_device_index "$target_name")
@@ -458,7 +582,7 @@ for channel in "${CHANNELS[@]}"; do
         # merely backgrounded it can still fire its 30s heartbeat and 60s
         # enforcement-fix timers, racing the tunnel and corrupting our
         # measurements. Terminating is the clean reset.
-        if [ "$channel" = "background" ]; then
+        if [ "$channel" = "background" ] || [ "$channel" = "recovery" ]; then
             main_pid=$(xcrun devicectl device info processes --device "$target_xcode_id" 2>/dev/null \
                 | awk '/\/BigBrother\.app\/BigBrother[[:space:]]*$/ {print $1; exit}')
             if [ -n "$main_pid" ]; then
@@ -470,6 +594,34 @@ for channel in "${CHANNELS[@]}"; do
             else
                 echo "  [terminate] main app not running (already clean)"
             fi
+        fi
+
+        # Suspended + production channels: ensure BB is running then
+        # background it by opening Settings. The app stays alive but
+        # NOT foreground — this is the realistic "kid closed BB" scenario.
+        if [ "$channel" = "suspended" ] || [ "$channel" = "production" ]; then
+            xcrun devicectl device process launch --device "$target_xcode_id" fr.bigbrother.app >/dev/null 2>&1 || true
+            echo "  [bg-setup] app launched, waiting 3s for setup..."
+            sleep 3
+            xcrun devicectl device process launch --device "$target_xcode_id" com.apple.Preferences >/dev/null 2>&1 || true
+            echo "  [bg-setup] Settings opened — waiting 30s for iOS to suspend BB..."
+            sleep 30
+            echo "  [bg-setup] settle complete — BB should be suspended"
+        fi
+
+        # Production channel: write the target device CK_ID to the parent's
+        # App Group so ParentTestCommandReceiver knows where to send commands.
+        if [ "$channel" = "production" ] && [ -n "$PARENT_XCODE_ID" ]; then
+            printf '{"targetDeviceID":"%s"}\n' "$target_ck_id" > /tmp/bb_test_target.json
+            xcrun devicectl device copy to \
+                --device "$PARENT_XCODE_ID" \
+                --source /tmp/bb_test_target.json \
+                --destination "bb_test_target.json" \
+                --domain-type appGroupDataContainer \
+                --domain-identifier "group.fr.bigbrother.shared" \
+                >/dev/null 2>&1 || {
+                    echo "  WARNING: failed to write target file to parent App Group"
+                }
         fi
 
         echo "### Device: $target_name ($target_ck_id) · $channel ###"
@@ -509,7 +661,7 @@ for channel in "${CHANNELS[@]}"; do
 
                 t_sent=$(python3 -c "import time; print(time.time())")
 
-                if ! post_command "$target_xcode_id" "$action_label" "$channel"; then
+                if ! post_command "$target_xcode_id" "$action_label" "$channel" "$target_ck_id"; then
                     printf "  [%02d.%d] %-12s POST-FAILED\n" "$iter" "$sub" "$label"
                     TOTAL_FAIL=$((TOTAL_FAIL+1))
                     continue
@@ -558,6 +710,52 @@ for channel in "${CHANNELS[@]}"; do
                     sleep "$POLL_INTERVAL_SEC"
                 done
 
+                # Production channel: pv+mode match means the command arrived,
+                # but shields may not be applied yet (Monitor needs ~20s via
+                # DeviceActivity to wake and write ManagedSettings). Keep
+                # polling until monitorConfirmedAt in the diagnostic JSON
+                # advances past t_sent — that proves Monitor actually ran
+                # applyShieldingToAllStores. Without this, the harness
+                # reports "OK" while the kid's screen still shows the old
+                # mode for another 20 seconds.
+                if [ -n "$t_applied" ] && [ "$channel" = "production" ]; then
+                    enforce_ok=""
+                    enforce_poll_start=$(python3 -c "import time; print(time.time())")
+                    while :; do
+                        mnow=$(python3 -c "import time; print(time.time())")
+                        melapsed=$(python3 -c "print($mnow - $enforce_poll_start)")
+                        mabove=$(python3 -c "print(1 if $melapsed >= 30 else 0)")
+                        [ "$mabove" = "1" ] && break
+                        mhb=$(fetch_heartbeat "$target_ck_id")
+                        mdiag=$(hb_diag_snapshot "$mhb")
+                        if [ -n "$mdiag" ] && [ "$mdiag" != "null" ]; then
+                            # Check EITHER monitorConfirmedAt (bg path) OR
+                            # applyFinishedAt (fg/main-app path). In production
+                            # mode the main app usually processes the command
+                            # directly and calls enforcement.apply() without
+                            # waking Monitor. Either timestamp advancing past
+                            # t_sent proves shields were actually written.
+                            mconfirmed=$(echo "$mdiag" | jq -r '.monitorConfirmedAt // 0')
+                            mapplied=$(echo "$mdiag" | jq -r '.applyFinishedAt // 0')
+                            mcheck=$(python3 -c "print(1 if max($mconfirmed, $mapplied) > $t_sent else 0)")
+                            if [ "$mcheck" = "1" ]; then
+                                t_applied=$mnow
+                                hb_json="$mhb"
+                                enforce_ok="1"
+                                break
+                            fi
+                        fi
+                        sleep "$POLL_INTERVAL_SEC"
+                    done
+                    if [ -z "$enforce_ok" ]; then
+                        printf "  [%02d.%d] %-12s ENFORCE_TIMEOUT (command landed but shields not confirmed within 30s)\n" "$iter" "$sub" "$label"
+                        append_artifact "{\"device\":\"$target_name\",\"channel\":\"$channel\",\"iter\":$iter,\"sub\":$sub,\"label\":\"$label\",\"result\":\"enforce_timeout\"}"
+                        TOTAL_FAIL=$((TOTAL_FAIL+1))
+                        baseline_version="$last_seen_version"
+                        continue
+                    fi
+                fi
+
                 # Timeout fallback: use the most recent advance we saw so
                 # the harness can still report what the device ended up in.
                 if [ -z "$t_applied" ] && [ "$last_seen_version" -gt "$baseline_version" ] 2>/dev/null; then
@@ -584,7 +782,7 @@ for channel in "${CHANNELS[@]}"; do
                 apply_finished=$(echo "$diag_json" | jq -r '.applyFinishedAt // empty')
 
                 fail_reason=""
-                if ! fail_reason=$(verify_snapshot "$diag_json" "$expected_mode" 2>&1); then
+                if ! fail_reason=$(verify_snapshot "$diag_json" "$expected_mode" "$t_sent" 2>&1); then
                     result="FAIL"
                     TOTAL_FAIL=$((TOTAL_FAIL+1))
                 else
@@ -611,8 +809,11 @@ except: print('n/a')")
 
                 mark="OK"
                 [ "$result" = "PASS" ] || mark="FAIL"
-                printf "  [%02d.%d] %-12s %s confirm=%sms apply=%sms%s\n" \
+                cat_active=$(echo "$diag_json" | jq -r 'if .categoryShieldActive then "true" else "false" end')
+                shield_audit_short=$(echo "$diag_json" | jq -r '.shieldAudit // "none"' | cut -d'|' -f1-3)
+                printf "  [%02d.%d] %-12s %s confirm=%sms apply=%sms cat=%s audit=%s%s\n" \
                     "$iter" "$sub" "$label" "$mark" "$confirm_ms" "$apply_ms" \
+                    "$cat_active" "$shield_audit_short" \
                     "${fail_reason:+ · $fail_reason}"
 
                 append_artifact "$(python3 -c "

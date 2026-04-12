@@ -38,6 +38,12 @@ enum TunnelTestCommandReceiver {
         case tempUnlock5m       = "fr.bigbrother.test.bg.tempUnlock.300"
         case requestHeartbeat   = "fr.bigbrother.test.bg.requestHeartbeat"
 
+        // VPN recovery testing — wifi-only devices can't do a real
+        // interface transition, so these hooks exercise the same code
+        // paths deterministically from the harness.
+        case recoverReapply        = "fr.bigbrother.test.bg.recover.reapply"
+        case recoverStaleTransport = "fr.bigbrother.test.bg.recover.staleTransport"
+
         /// The LockMode this notification maps to, or nil for non-mode commands.
         var mode: LockMode? {
             switch self {
@@ -46,7 +52,8 @@ enum TunnelTestCommandReceiver {
             case .setModeUnlocked:   return .unlocked
             case .setModeLockedDown: return .lockedDown
             case .tempUnlock5m:      return .unlocked
-            case .requestHeartbeat:  return nil
+            case .requestHeartbeat, .recoverReapply, .recoverStaleTransport:
+                return nil
             }
         }
 
@@ -55,8 +62,10 @@ enum TunnelTestCommandReceiver {
             switch self {
             case .setModeLocked, .setModeRestricted, .setModeUnlocked, .setModeLockedDown:
                 return "setMode"
-            case .tempUnlock5m:      return "temporaryUnlock"
-            case .requestHeartbeat:  return "requestHeartbeat"
+            case .tempUnlock5m:          return "temporaryUnlock"
+            case .requestHeartbeat:      return "requestHeartbeat"
+            case .recoverReapply:        return "recoverReapply"
+            case .recoverStaleTransport: return "recoverStaleTransport"
             }
         }
 

@@ -14,6 +14,7 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
         UserDefaults.appGroup?
             .set(AppConstants.appBuildNumber, forKey: "shieldBuildNumber")
         cacheAppIdentity(application: application)
+        logShieldRender(application: application, viaCategory: false)
         detectGhostShield(application: application, viaCategory: false)
         if let config = forceCloseShieldConfig { return config }
         if let config = timeLimitShieldConfig(application: application) { return config }
@@ -23,11 +24,48 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
 
     override func configuration(shielding application: Application, in category: ActivityCategory) -> ShieldConfiguration {
         cacheAppIdentity(application: application)
+        logShieldRender(application: application, viaCategory: true)
         detectGhostShield(application: application, viaCategory: true)
         if let config = forceCloseShieldConfig { return config }
         if let config = timeLimitShieldConfig(application: application) { return config }
         if let config = pendingReviewShieldConfig(application: application) { return config }
         return defaultShieldConfig(application: application)
+    }
+
+    /// Ground-truth render log: record that iOS actually asked us to render
+    /// a shield for this application. The harness reads this from the
+    /// heartbeat's `hbDiagnosticSnapshot.shieldRenders` field to verify
+    /// that a token the store says is "blocked" actually triggered a
+    /// shield UI render. Without this, the harness can only verify the
+    /// store's state, not what the user actually sees.
+    ///
+    /// Ring buffer capped at 50 entries; each entry is a small JSON dict.
+    /// Written to App Group UserDefaults so the tunnel can pick it up on
+    /// the next heartbeat. ShieldConfiguration has no network access, so
+    /// this is the only way the data gets out of the extension.
+    private func logShieldRender(application: Application, viaCategory: Bool) {
+        #if DEBUG
+        let defaults = UserDefaults.appGroup
+        let now = Date().timeIntervalSince1970
+        let fp: String
+        if let token = application.token,
+           let data = try? JSONEncoder().encode(token) {
+            fp = TokenFingerprint.fingerprint(for: data)
+        } else {
+            fp = "unknown"
+        }
+        let name = application.localizedDisplayName ?? "?"
+        let entry: [String: Any] = [
+            "fp": fp,
+            "name": name,
+            "cat": viaCategory,
+            "at": now
+        ]
+        var log = (defaults?.array(forKey: "shieldRenderLog") as? [[String: Any]]) ?? []
+        log.append(entry)
+        if log.count > 50 { log = Array(log.suffix(50)) }
+        defaults?.set(log, forKey: "shieldRenderLog")
+        #endif
     }
 
     /// b431: Detect when the OS renders a shield for an app that, according to

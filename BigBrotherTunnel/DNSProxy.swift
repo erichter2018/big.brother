@@ -147,7 +147,7 @@ final class DNSProxy {
     private var upstreamNeedsReconnect: Bool = false
     private let reconnectLock = NSLock()
 
-    private func markUpstreamUnhealthy() {
+    func markUpstreamUnhealthy() {
         reconnectLock.lock()
         upstreamNeedsReconnect = true
         reconnectLock.unlock()

@@ -41,6 +41,7 @@
 		2A7333B38AD4A92D3676A910 /* ActivityFeedViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B95B2F5C9CFDAFB5A63907B0 /* ActivityFeedViewModel.swift */; };
 		2C07273E33EED3CF492EC083 /* LocalParentUnlockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B2932282E5C1291793D282 /* LocalParentUnlockViewModel.swift */; };
 		2C2DC3DFB2D37A7069EE7A84 /* DNSProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D41227A54F0B86A1736CFC5 /* DNSProxy.swift */; };
+		2F5598AE6A7EB8E626433A89 /* ParentTestCommandReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1969CF6680008C6077CD1DAE /* ParentTestCommandReceiver.swift */; };
 		2FAFBBB2E116F22FE3F34104 /* ScheduleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7425110E1AD24BCA7B6F62EE /* ScheduleManager.swift */; };
 		3052250EB127B85C0D3C219F /* HeartbeatProfileListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBE922CC1D119DC068B1B419 /* HeartbeatProfileListView.swift */; };
 		30858EE4CAFAC79BC85802B0 /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B33EA033B68C98649EBD6B4A /* DeviceActivity.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
@@ -289,6 +290,7 @@
 		1422E5C82CC6D132879C5627 /* EnrollmentCompleteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentCompleteView.swift; sourceTree = "<group>"; };
 		16BEA7394895657CCEB25157 /* ModeActionButtons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModeActionButtons.swift; sourceTree = "<group>"; };
 		18652D93CEE63E93A2ED1C86 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		1969CF6680008C6077CD1DAE /* ParentTestCommandReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentTestCommandReceiver.swift; sourceTree = "<group>"; };
 		1A2ACF78BD6A37BB1AA7C14F /* CommandProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandProcessor.swift; sourceTree = "<group>"; };
 		1B5DC2165FE4CA5A8229AB9A /* InsightsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsView.swift; sourceTree = "<group>"; };
 		1BB7CF9073113D2C6EAD80E0 /* ParentAppNameMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentAppNameMapping.swift; sourceTree = "<group>"; };
@@ -604,6 +606,7 @@
 				2A6038FA70DCFA9E944B73C2 /* ModeChangeNotifier.swift */,
 				3D4B9424E819FFE29BB14E89 /* NetworkMonitor.swift */,
 				1BB7CF9073113D2C6EAD80E0 /* ParentAppNameMapping.swift */,
+				1969CF6680008C6077CD1DAE /* ParentTestCommandReceiver.swift */,
 				2D9B6BC354EE0B06DF178287 /* RouteProcessingService.swift */,
 				D6805362753E5A5ACC38AE02 /* SafetyEventNotificationService.swift */,
 				3CEA41AEE818CDD3D848EC8A /* ScheduleRegistrar.swift */,
@@ -1516,6 +1519,7 @@
 				3F8D30E56A7E2BC60E838882 /* ParentPINEntryView.swift in Sources */,
 				0E782CC55EC6F990858C74A1 /* ParentPINSetupView.swift in Sources */,
 				8C464F8C12C8C9C525632EF1 /* ParentSetupView.swift in Sources */,
+				2F5598AE6A7EB8E626433A89 /* ParentTestCommandReceiver.swift in Sources */,
 				DD8B0636042E88362F4F0EB4 /* PaywallView.swift in Sources */,
 				94B2930159ECD884F1FF0D7A /* PendingAppReviewSection.swift in Sources */,
 				065CA226A2425B7E763B3F93 /* PermissionFixerView.swift in Sources */,

@@ -1442,41 +1442,113 @@ final class ChildDetailViewModel: CommandSendable {
             // dedupe is by app NAME below (approvedAppNames), since fingerprint changes
             // when the token rotates.
 
-            let all = try await cloudKit.fetchPendingAppReviews(childProfileID: child.id)
+            let allFromCK = try await cloudKit.fetchPendingAppReviews(childProfileID: child.id)
 
-            // Auto-re-approve apps that are already configured — refreshes stale tokens
-            // without requiring parent action. The child gets immediate relief.
-            // Match by app NAME (not fingerprint) because token rotation changes the fingerprint.
+            // ── Bug 4 fix: filter out reviews from dead devices ──
+            // Reviews from uninstalled devices persist in CK forever.
+            // Only keep reviews from devices that are currently enrolled
+            // for this child. Delete orphans in the background.
             //
-            // CRITICAL: Throttle commands AND dedupe across calls. Sending many
-            // commands in rapid succession corrupts the child's ManagedSettings daemon.
-            let approvedAppNames = Set(timeLimitConfigs.filter(\.isActive).map { $0.appName.lowercased() })
-            let candidates = all.filter {
-                $0.nameResolved && approvedAppNames.contains($0.appName.lowercased())
+            // SAFETY: if the device list is empty (hasn't loaded yet
+            // after a fresh app launch), skip the purge entirely.
+            // Without this guard, a race between dashboard refresh and
+            // loadPendingAppReviews causes ALL reviews to be classified
+            // as orphans and deleted on every kill+relaunch.
+            // ── Bug 4 fix: purge reviews from dead devices ──
+            // A device is "dead" if it has no heartbeat in 48+ hours.
+            // Checking device registration alone isn't enough — uninstalled
+            // devices stay registered in CK but stop sending heartbeats.
+            let now = Date()
+            let heartbeatCutoff = now.addingTimeInterval(-48 * 3600)
+            let aliveDeviceIDs: Set<DeviceID> = {
+                var ids = Set<DeviceID>()
+                for device in devices {
+                    if let lastHB = device.lastHeartbeat, lastHB > heartbeatCutoff {
+                        ids.insert(device.id)
+                    } else if device.lastHeartbeat == nil {
+                        // No heartbeat data yet — don't purge, could be freshly enrolled
+                        ids.insert(device.id)
+                    }
+                }
+                return ids
+            }()
+            let all: [PendingAppReview]
+            if aliveDeviceIDs.isEmpty {
+                NSLog("[ChildDetail] No alive devices — skipping zombie purge")
+                all = allFromCK
+            } else {
+                all = allFromCK.filter { aliveDeviceIDs.contains($0.deviceID) }
+                let orphans = allFromCK.filter { !aliveDeviceIDs.contains($0.deviceID) }
+                for orphan in orphans {
+                    try? await cloudKit.deletePendingAppReview(orphan.id)
+                }
+                if !orphans.isEmpty {
+                    NSLog("[ChildDetail] Purged \(orphans.count) zombie reviews from dead devices")
+                }
             }
+
+            // ── Bug 1 fix: filter out explicitly blocked apps ──
+            // When a parent blocks an app via reviewApp(.keepBlocked),
+            // we now create a TimeLimitConfig with isActive=false.
+            // Filter out reviews whose name matches a blocked config
+            // so they don't reappear every time the kid taps the shield.
+            let blockedAppNames = Set(
+                timeLimitConfigs
+                    .filter { !$0.isActive }
+                    .map { $0.appName.lowercased() }
+            )
+            let notBlocked = all.filter { review in
+                !review.nameResolved || !blockedAppNames.contains(review.appName.lowercased())
+            }
+            // Silently delete CK records for blocked apps so they stop
+            // accumulating. The kid can still request — the parent just
+            // won't see it until they unblock the app from the config.
+            let blockedReviews = all.filter { review in
+                review.nameResolved && blockedAppNames.contains(review.appName.lowercased())
+            }
+            for review in blockedReviews {
+                try? await cloudKit.deletePendingAppReview(review.id)
+            }
+
+            // ── Bug 2 fix: auto-approve only if the app is confirmed
+            //    on the REQUESTING device's heartbeat ──
+            // Previously auto-approve checked ALL devices' heartbeats,
+            // which silently ate reviews from new devices (the app was
+            // "approved" on device A so device B's request got auto-
+            // approved and hidden from the parent). The parent never
+            // saw the request, and if the command failed, the kid was
+            // stuck. Now: only auto-approve if the REQUESTING device's
+            // own heartbeat already lists the app in allowedAppNames.
+            // Cross-device approvals show as new reviews for the parent.
+            // Auto-approve: TimeLimitConfig is the single source of truth.
+            // If the app has an active config (from any prior approval on
+            // any device), auto-approve it, send the command, and delete
+            // the CK review. If the command doesn't land, the kid
+            // re-requests and it auto-approves again. No heartbeat
+            // checking, no cross-device scoping — TimeLimitConfigs are
+            // child-scoped and persist across devices.
+            let approvedConfigNames = Set(
+                timeLimitConfigs.filter(\.isActive).map { $0.appName.lowercased() }
+            )
+            let candidates = notBlocked.filter { review in
+                review.nameResolved && approvedConfigNames.contains(review.appName.lowercased())
+            }
+
             // Session-level dedupe — never re-send for the same review ID twice.
-            // b436 (audit fix): ALSO dedupe by app name at session level. Without
-            // this, a concurrent second call to loadPendingAppReviews (e.g., from
-            // the 30s auto-refresh firing while we're suspended on await
-            // performCommand) could queue duplicate allow commands for the SAME
-            // app via different review IDs. The first call marked review A's ID
-            // but hadn't yet marked app "Safari" in a cross-call set, so the
-            // second call sees review B (different ID, same app) as unprocessed.
             let unsent = candidates.filter {
                 !Self.autoApprovedSession.contains($0.id) &&
                 !Self.autoApprovedSessionAppNames.contains($0.appName.lowercased())
             }
-            // Per-app dedupe — only send ONE command per app name (not one per review)
-            var seenAppNames = Set<String>()
+            // Per-DEVICE per-app dedup — each device gets ONE command per
+            // app name. The old global dedup kept one review across ALL
+            // devices, so a dead phone's review could win and the live
+            // iPad's review would be deduped out — iPad never got the
+            // command.
+            var seenPerDevice = Set<String>()
             let toSend = unsent.filter { review in
-                let key = review.appName.lowercased()
-                return seenAppNames.insert(key).inserted
+                let key = "\(review.deviceID.rawValue)|\(review.appName.lowercased())"
+                return seenPerDevice.insert(key).inserted
             }
-            // b436 (audit fix): Mark ALL to-send review IDs AND app names in the
-            // cross-call session sets BEFORE the first await so a reentrant call
-            // sees them as already-processed. Previously we only marked inside
-            // the loop, leaving a suspension window where a concurrent call
-            // could pick up the same reviews.
             for review in toSend {
                 Self.autoApprovedSession.insert(review.id)
                 Self.autoApprovedSessionAppNames.insert(review.appName.lowercased())
@@ -1485,39 +1557,58 @@ final class ChildDetailViewModel: CommandSendable {
                 Self.autoApprovedSession.insert(review.id)
                 Self.autoApprovedSessionAppNames.insert(review.appName.lowercased())
             }
-            // Group by deviceID and send ONE batched .reviewApps per device.
-            // Sending 18 separate reviewApp commands creates 18 CK records and
-            // 18 alert pushes; iOS heavily throttles bursts of pushes, so the
-            // child's app may not wake until minutes later (the timeline showed
-            // a ~4 minute delay between parent SENT and child APPLIED). Batching
-            // collapses to 1 record + 1 push + 1 wake event.
+
+            // Send commands grouped by device.
             let toSendByDevice = Dictionary(grouping: toSend, by: { $0.deviceID })
             for (deviceID, reviews) in toSendByDevice {
-                let decisions = reviews.map {
-                    AppReviewDecision(
-                        fingerprint: $0.appFingerprint,
-                        disposition: .allowAlways,
-                        minutes: nil
+                let decisions = reviews.map { review -> AppReviewDecision in
+                    let matchingConfig = timeLimitConfigs.first {
+                        $0.isActive && $0.appName.lowercased() == review.appName.lowercased()
+                    }
+                    let disposition: AppDisposition
+                    let minutes: Int?
+                    if let config = matchingConfig, config.dailyLimitMinutes > 0 {
+                        disposition = .timeLimit
+                        minutes = config.dailyLimitMinutes
+                    } else {
+                        disposition = .allowAlways
+                        minutes = nil
+                    }
+                    return AppReviewDecision(
+                        fingerprint: review.appFingerprint,
+                        disposition: disposition,
+                        minutes: minutes
                     )
                 }
                 await performCommand(
                     .reviewApps(decisions: decisions),
                     target: .device(deviceID)
                 )
-                for review in reviews {
-                    try? await cloudKit.deletePendingAppReview(review.id)
-                }
                 NSLog("[ChildDetail] Auto-re-approved \(reviews.count) apps for device \(deviceID.rawValue.prefix(8)) in one batch")
             }
-            // Delete the duplicate (same-app-name) reviews we marked earlier but
-            // didn't send a command for. Session marking was already done before
-            // the loop above (b436 audit fix).
-            for review in unsent where !toSend.contains(where: { $0.id == review.id }) {
+            // Delete ALL candidate reviews from CK — both the ones we
+            // sent commands for AND duplicates. This covers:
+            //   - toSend reviews (command sent, can be re-requested if
+            //     delivery fails)
+            //   - session-deduped duplicates (same app, extra CK records)
+            //   - cross-device duplicates (dead phone + live iPad both
+            //     had a review — dead phone's was processed, iPad's is
+            //     a duplicate by name)
+            for review in candidates {
                 try? await cloudKit.deletePendingAppReview(review.id)
             }
 
-            let remaining = all.filter { review in
-                !review.nameResolved || !approvedAppNames.contains(review.appName.lowercased())
+            // Remaining = reviews NOT auto-approved and NOT blocked.
+            // These show in the parent UI for manual review.
+            // Filter by review ID, NOT by name. The old name-based filter
+            // had a cross-device collision: if device A's "Pinterest" was
+            // auto-approved, the name went into the exclusion set and
+            // device B's "Pinterest" (which was NOT a candidate) got
+            // silently dropped too. Using IDs means only the specific
+            // reviews that matched auto-approve are excluded.
+            let candidateIDs = Set(candidates.map { $0.id })
+            let remaining = notBlocked.filter { review in
+                !candidateIDs.contains(review.id)
             }
 
             // Deduplicate by fingerprint — keep the one with latest updatedAt
@@ -1607,47 +1698,57 @@ final class ChildDetailViewModel: CommandSendable {
             target: .device(review.deviceID)
         )
 
-        // Create or reactivate CloudKit config — source of truth for app status.
-        if disposition != .keepBlocked {
-            let dailyMinutes = disposition == .allowAlways ? 0 : (minutes ?? 60)
+        // Create or update CloudKit config — source of truth for app status.
+        // For .keepBlocked: create an INACTIVE config so loadPendingAppReviews
+        // knows to suppress future requests for this app (Bug 1 fix).
+        // For .allowAlways/.timeLimit: create an ACTIVE config as before.
+        let dailyMinutes: Int
+        let configIsActive: Bool
+        switch disposition {
+        case .allowAlways:
+            dailyMinutes = 0
+            configIsActive = true
+        case .timeLimit:
+            dailyMinutes = minutes ?? 60
+            configIsActive = true
+        case .keepBlocked:
+            dailyMinutes = 0
+            configIsActive = false
+        }
 
-            // Look up App Store category (best-effort, non-blocking on failure)
-            let category = await AppStoreLookup.lookupCategory(appName: review.appName)
+        let category = await AppStoreLookup.lookupCategory(appName: review.appName)
 
-            if let existingIdx = timeLimitConfigs.firstIndex(where: { $0.appFingerprint == review.appFingerprint }) {
-                // Reactivate existing config
-                var updated = timeLimitConfigs[existingIdx]
-                updated.dailyLimitMinutes = dailyMinutes
-                updated.isActive = true
-                updated.appName = review.appName
-                if let category { updated.appCategory = category }
-                updated.updatedAt = Date()
-                do {
-                    try await cloudKit.saveTimeLimitConfig(updated)
-                } catch {
-                    showError("Failed to save app config: \(error.localizedDescription)")
-                    return
-                }
-                timeLimitConfigs[existingIdx] = updated
-            } else {
-                // Create new config
-                let config = TimeLimitConfig(
-                    familyID: review.familyID,
-                    childProfileID: review.childProfileID,
-                    appFingerprint: review.appFingerprint,
-                    appName: review.appName,
-                    dailyLimitMinutes: dailyMinutes,
-                    isActive: true,
-                    appCategory: category
-                )
-                do {
-                    try await cloudKit.saveTimeLimitConfig(config)
-                } catch {
-                    showError("Failed to save app config: \(error.localizedDescription)")
-                    return
-                }
-                timeLimitConfigs.append(config)
+        if let existingIdx = timeLimitConfigs.firstIndex(where: { $0.appFingerprint == review.appFingerprint }) {
+            var updated = timeLimitConfigs[existingIdx]
+            updated.dailyLimitMinutes = dailyMinutes
+            updated.isActive = configIsActive
+            updated.appName = review.appName
+            if let category { updated.appCategory = category }
+            updated.updatedAt = Date()
+            do {
+                try await cloudKit.saveTimeLimitConfig(updated)
+            } catch {
+                showError("Failed to save app config: \(error.localizedDescription)")
+                return
             }
+            timeLimitConfigs[existingIdx] = updated
+        } else {
+            let config = TimeLimitConfig(
+                familyID: review.familyID,
+                childProfileID: review.childProfileID,
+                appFingerprint: review.appFingerprint,
+                appName: review.appName,
+                dailyLimitMinutes: dailyMinutes,
+                isActive: configIsActive,
+                appCategory: category
+            )
+            do {
+                try await cloudKit.saveTimeLimitConfig(config)
+            } catch {
+                showError("Failed to save app config: \(error.localizedDescription)")
+                return
+            }
+            timeLimitConfigs.append(config)
         }
 
         // Delete the pending review from CloudKit

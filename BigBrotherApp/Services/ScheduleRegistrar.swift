@@ -197,12 +197,14 @@ enum ScheduleRegistrar {
         )
 
         // Build milestone events at tiered granularity:
-        //   0–2h:  every 5 minutes  (24 events)
+        //   0–5m:  every 1 minute   (4 events)  — fast enforcement detection
+        //   5–2h:  every 5 minutes  (24 events)
         //   2–6h:  every 15 minutes (16 events)
         //   6–12h: every 30 minutes (12 events)
-        // Total: 52 events — well within DeviceActivity limits.
+        // Total: 56 events — well within DeviceActivity limits.
         // Empty applications/categories = tracks ALL device activity.
         var milestoneMinutes: [Int] = []
+        for m in 1...4 { milestoneMinutes.append(m) }                                      // 1-min steps for first 4 min
         for m in stride(from: 5, through: 120, by: 5) { milestoneMinutes.append(m) }      // 5-min steps up to 2h
         for m in stride(from: 135, through: 360, by: 15) { milestoneMinutes.append(m) }    // 15-min steps 2h–6h
         for m in stride(from: 390, through: 720, by: 30) { milestoneMinutes.append(m) }    // 30-min steps 6h–12h
