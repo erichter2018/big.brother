@@ -137,10 +137,10 @@ struct ChildHomeView: View {
                 .padding()
             }
         }
-        .overlay(alignment: .bottomLeading) {
+        .overlay(alignment: .topLeading) {
             sosButton
                 .padding(.leading, 16)
-                .padding(.bottom, 16)
+                .padding(.top, 16)
         }
         .overlay(alignment: .bottomTrailing) {
             if !launchGracePeriod && viewModel.hasPermissionIssues {

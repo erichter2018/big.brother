@@ -979,7 +979,38 @@ struct LocationMapView: View {
             VStack(spacing: 0) {
                 if viewMode == .latest {
                     VStack(spacing: 8) {
-                        if let address = currentAddress, let age = locationAge {
+                        if let live = liveManager, live.isLive {
+                            HStack(spacing: 6) {
+                                Image(systemName: "antenna.radiowaves.left.and.right")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                                    .symbolEffect(.pulse)
+                                Text("Live Tracking")
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.green)
+                                if let speed = live.speedMPH, speed > 0 {
+                                    Text("\(speed) mph")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    liveManager?.stop()
+                                    liveManager = nil
+                                } label: {
+                                    Text("Stop")
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                            if let address = currentAddress {
+                                Text(address)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        } else if let address = currentAddress, let age = locationAge {
                             HStack {
                                 Image(systemName: "location.fill").foregroundStyle(.blue)
                                 Text(address).font(.subheadline)
@@ -990,21 +1021,6 @@ struct LocationMapView: View {
                             Text("No location data yet")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                        }
-
-                        if let live = liveManager, live.isLive, let speed = live.speedMPH {
-                            HStack(spacing: 6) {
-                                Circle().fill(.green).frame(width: 8, height: 8)
-                                Text("Live").font(.caption).fontWeight(.semibold).foregroundStyle(.green)
-                                Text("\(speed) mph").font(.caption).foregroundStyle(.secondary)
-                                Spacer()
-                                Button {
-                                    liveManager?.stop()
-                                    liveManager = nil
-                                } label: {
-                                    Text("Stop").font(.caption2).foregroundStyle(.red)
-                                }
-                            }
                         }
 
                         HStack(spacing: 8) {
