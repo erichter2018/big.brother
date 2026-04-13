@@ -616,9 +616,11 @@ final class AppState {
             ensureVPNInstalled(vpn)
 
             cmdProcessor.onLocationModeChanged = { [weak locService] mode in
+                guard UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") != true else { return }
                 locService?.setMode(mode)
             }
             cmdProcessor.onRequestLocation = { [weak locService] in
+                guard UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") != true else { return }
                 Task { let _ = await locService?.requestCurrentLocation() }
             }
             cmdProcessor.onSyncNamedPlaces = { [weak self, weak locService] in
@@ -661,17 +663,12 @@ final class AppState {
                 }
             }
             cmdProcessor.onRequestPermissions = { [weak self, weak locService] in
+                guard UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") != true else { return }
                 Task { @MainActor in
-                    // Re-request FamilyControls authorization
                     try? await self?.enforcement?.requestAuthorization()
-
-                    // Ensure location service is at least onDemand so it's ready
                     if locService?.mode == .off {
                         locService?.setMode(.onDemand)
                     }
-
-                    // Always open Settings — the parent is holding the device and
-                    // needs to verify/set location to "Always". No guessing.
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         await UIApplication.shared.open(url)
                     }

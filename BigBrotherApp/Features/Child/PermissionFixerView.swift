@@ -40,7 +40,7 @@ struct PermissionFixerView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") {
-                        clearOnboardingFlag()
+                        completeOnboarding()
                         dismiss()
                     }
                     .disabled(isGrantingFamilyControls)
@@ -177,7 +177,7 @@ struct PermissionFixerView: View {
                 .padding(.horizontal, 32)
             Spacer()
             Button("Done") {
-                clearOnboardingFlag()
+                completeOnboarding()
                 dismiss()
             }
                 .buttonStyle(.borderedProminent)
@@ -187,22 +187,15 @@ struct PermissionFixerView: View {
         }
     }
 
-    private func clearOnboardingFlag() {
-        // Lift the auto-prompt suppression — fixer is done, normal flows can resume.
+    private func completeOnboarding() {
         let defaults = UserDefaults.appGroup
         defaults?.removeObject(forKey: "showPermissionFixerOnNextLaunch")
-        // Mark fixer as completed so AppDelegate won't re-arm the flag on cold launches
-        // when the FC daemon momentarily returns .notDetermined.
-        defaults?.set(true, forKey: "permissionFixerCompletedOnce")
 
-        // b439: Trigger an enforcement apply now that permissions are granted.
-        // During the fixer, handleAuthorizationChange and performForegroundSync
-        // skip enforcement work to avoid freezing the UI. Now that we're done,
-        // dispatch a one-time apply to a DETACHED background task so the fixer
-        // sheet dismiss doesn't freeze the UI. AppState is @MainActor, so a
-        // plain Task { } would run on the main thread and block for the
-        // duration of enforcement.apply() — which can be 6+ seconds when the
-        // deep daemon rescue fires on a freshly-authorized FC state.
+        let allGranted = permissionsToFix.isEmpty
+        if allGranted {
+            defaults?.set(true, forKey: "permissionFixerCompletedOnce")
+        }
+
         let enforcement = appState.enforcement
         let storage = appState.storage
         Task.detached {
@@ -210,6 +203,9 @@ struct PermissionFixerView: View {
                 try? enforcement?.apply(snapshot.effectivePolicy)
             }
         }
+
+        // Restart location/motion now that suppression flag is cleared
+        appState.locationService?.setMode(appState.locationService?.mode ?? .continuous)
     }
 
     // MARK: - Permission Checking

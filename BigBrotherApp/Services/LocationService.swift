@@ -198,29 +198,22 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     }
 
     private func requestAlwaysAuthIfNeeded() {
+        if UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+            return
+        }
         let status = locationManager.authorizationStatus
-        // Suppress auto-prompts during the guided onboarding window — the
-        // PermissionFixerView walks the user through location auth in sequence.
-        let defaults = UserDefaults.appGroup
-        let suppressUntilFixerDone = defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true
         switch status {
-        case .notDetermined:
-            if suppressUntilFixerDone { return }
-            // On iOS, requestAlwaysAuthorization() shows the full 3-option dialog
-            // (Allow Once / While Using / Always) if called before requestWhenInUseAuthorization().
+        case .notDetermined, .authorizedWhenInUse:
             locationManager.requestAlwaysAuthorization()
-        case .authorizedWhenInUse:
-            // Already has "When In Use" — request upgrade to Always.
-            // iOS shows a follow-up prompt: "Change to Always Allow?"
-            locationManager.requestAlwaysAuthorization()
-        case .authorizedAlways:
-            break // Already good
         default:
-            break // Denied/restricted — can't re-prompt, user must go to Settings
+            break
         }
     }
 
     private func startContinuousTracking() {
+        if UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+            return
+        }
         let status = locationManager.authorizationStatus
         if status == .authorizedAlways || status == .authorizedWhenInUse {
             locationManager.startMonitoringSignificantLocationChanges()
@@ -252,12 +245,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             #endif
             return
         }
-        // Suppress the motion permission prompt during guided onboarding —
-        // PermissionFixerView walks the user through this. startActivityUpdates
-        // triggers the system dialog as a side effect when status is .notDetermined.
-        let suppressDefaults = UserDefaults.appGroup
-        if suppressDefaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true,
-           CMMotionActivityManager.authorizationStatus() == .notDetermined {
+        if UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
             return
         }
         motionMonitoringActive = true

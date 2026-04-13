@@ -233,14 +233,10 @@ struct ChildHomeView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
                 launchGracePeriod = false
             }
-            // First-launch flow: show the WelcomeView intro screen BEFORE
-            // PermissionFixerView so the kid (or parent) understands what's
-            // about to be asked for. WelcomeView's "Get started" button
-            // dismisses itself and triggers the fixer. The fresh-install
-            // flag is cleared here so we don't re-show on normal relaunches.
-            let defaults = UserDefaults.appGroup
-            if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
-                defaults?.removeObject(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
+            // First-launch flow: show WelcomeView → PermissionFixerView.
+            // Flag stays set until PermissionFixerView explicitly clears it
+            // on completion — services check it to suppress auto-prompts.
+            if UserDefaults.appGroup?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     showWelcome = true
                 }
