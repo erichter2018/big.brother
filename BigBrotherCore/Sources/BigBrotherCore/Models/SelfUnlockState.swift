@@ -57,7 +57,8 @@ public struct SelfUnlockState: Codable, Sendable, Equatable {
     /// Uses local time so the budget resets at local midnight.
     /// Time zone manipulation is blocked by requireAutomaticDateAndTime.
     public static func todayDateString() -> String {
-        let comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        let cal = Calendar(identifier: .gregorian)
+        let comps = cal.dateComponents([.year, .month, .day], from: Date())
         return String(format: "%04d-%02d-%02d", comps.year ?? 0, comps.month ?? 0, comps.day ?? 0)
     }
 }

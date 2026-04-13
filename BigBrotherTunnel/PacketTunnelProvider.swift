@@ -647,10 +647,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let defaults = UserDefaults.appGroup
             defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.appDiedNeedLocationAt)
 
-            // If screen is currently unlocked, start tracking from now
-            let currentlyLocked = UserDefaults.appGroup?
-                .bool(forKey: AppGroupKeys.isDeviceLocked) ?? true
-            if !currentlyLocked {
+            // If screen is currently unlocked AND lock state is fresh, start tracking.
+            let appDeathDefaults = UserDefaults.appGroup
+            let rawLocked = appDeathDefaults?.bool(forKey: AppGroupKeys.isDeviceLocked) ?? true
+            let lockedAt = appDeathDefaults?.double(forKey: "isDeviceLockedAt") ?? 0
+            let lockFresh = lockedAt > 0 && (Date().timeIntervalSince1970 - lockedAt) < 120
+            if lockFresh && !rawLocked {
                 lastUnlockAt = Date()
             }
 
@@ -4334,10 +4336,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Safe to call from any context — checks that screen is actually unlocked.
     private func flushScreenTimeSession() {
         guard let unlockTime = lastUnlockAt else { return }
-        // Double-check screen state to prevent double-counting if lock handler
-        // already cleared lastUnlockAt on a different dispatch.
-        let screenLocked = UserDefaults.appGroup?
-            .bool(forKey: AppGroupKeys.isDeviceLocked) ?? true
+        let flushDefaults = UserDefaults.appGroup
+        let rawLocked = flushDefaults?.bool(forKey: AppGroupKeys.isDeviceLocked) ?? true
+        let lockedAt = flushDefaults?.double(forKey: "isDeviceLockedAt") ?? 0
+        let stale = lockedAt == 0 || (Date().timeIntervalSince1970 - lockedAt) > 120
+        let screenLocked = stale ? true : rawLocked
         guard !screenLocked else {
             // Screen is locked — lock handler already counted this session.
             lastUnlockAt = nil

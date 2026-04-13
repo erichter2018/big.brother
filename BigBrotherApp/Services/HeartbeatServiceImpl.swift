@@ -89,8 +89,10 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             guard let self else { return }
 
             // Write liveness timestamp for the VPN tunnel to read.
-            UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+            let liveDefaults = UserDefaults.appGroup
+            liveDefaults?.set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+            // Refresh lock state timestamp so tunnel knows the value is fresh.
+            liveDefaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
 
             // Ping the VPN tunnel (IPC liveness signal).
             self.vpnManager?.sendPing()
