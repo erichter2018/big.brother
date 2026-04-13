@@ -815,6 +815,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    private func postOpenAppNag(_ body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Open Big Brother"
+        content.body = body
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: "bb-open-app", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
+    }
+
     private func sendPermissionRevokedAlert() async {
         guard let enrollment = try? keychain.get(ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState) else { return }
         let entry = EventLogEntry(
@@ -944,16 +953,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let now = Date()
         if now.timeIntervalSince(lastStaleUnlockNotificationAt) > 300 {
             lastStaleUnlockNotificationAt = now
-            let content = UNMutableNotificationContent()
-            content.title = "Big Brother"
-            content.body = "Open Big Brother to update your device settings."
-            content.sound = .default
-            let request = UNNotificationRequest(
-                identifier: "expired-temp-unlock",
-                content: content,
-                trigger: nil
-            )
-            UNUserNotificationCenter.current().add(request)
+            postOpenAppNag("Open Big Brother to update your device settings.")
         }
     }
 
@@ -972,7 +972,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 NSLog("[Tunnel] Build mismatch cleared — device is unlocked, no point blocking DNS")
                 buildMismatchFirstDetectedAt = nil
                 setBlockReason(.buildMismatch, active: false)
-                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["build-mismatch"])
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["bb-open-app"])
             }
             return
         }
@@ -985,16 +985,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 buildMismatchFirstDetectedAt = Date()
                 NSLog("[Tunnel] Build mismatch: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — 2-min grace before blocking")
 
-                let content = UNMutableNotificationContent()
-                content.title = "Big Brother Update"
-                content.body = "Open Big Brother to restore internet access."
-                content.sound = .default
-                let request = UNNotificationRequest(
-                    identifier: "build-mismatch",
-                    content: content,
-                    trigger: nil
-                )
-                UNUserNotificationCenter.current().add(request)
+                postOpenAppNag("Open Big Brother to restore internet access.")
             }
 
             // After 2-minute grace, block internet — but only if app is actually dead.
@@ -1020,7 +1011,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             buildMismatchFirstDetectedAt = nil
             setBlockReason(.buildMismatch, active: false)
             Task { await sendHeartbeatFromTunnel(reason: "buildMismatchCleared") }
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["build-mismatch"])
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["bb-open-app"])
         }
     }
 
@@ -1514,16 +1505,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 setBlockReason(.scheduledLockedDown, active: true)
                 Task { await sendHeartbeatFromTunnel(reason: "scheduleEnforcementActivated") }
                 // Notify the kid — tapping opens BB which restores full enforcement + DNS.
-                let notif = UNMutableNotificationContent()
-                notif.title = "Internet Paused"
-                notif.body = "Open Big Brother to restore internet access."
-                notif.sound = .default
-                let req = UNNotificationRequest(
-                    identifier: "schedule-enforcement",
-                    content: notif,
-                    trigger: nil
-                )
-                UNUserNotificationCenter.current().add(req)
+                postOpenAppNag("Open Big Brother to restore internet access.")
             } else {
                 NSLog("[Tunnel] Schedule enforcement DNS cleared — \(resolution.mode == .unlocked ? "mode unlocked" : "app alive")")
                 setBlockReason(.scheduledLockedDown, active: false)
@@ -1541,12 +1523,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let lastNag = nagDefaults?.double(forKey: lastNagKey) ?? 0
             if Date().timeIntervalSince1970 - lastNag > 3600 { // Max once per hour
                 nagDefaults?.set(Date().timeIntervalSince1970, forKey: lastNagKey)
-                let content = UNMutableNotificationContent()
-                content.title = "Open Big Brother"
-                content.body = "Tap to restore location tracking and full protection."
-                content.sound = .default
-                let req = UNNotificationRequest(identifier: "tunnel-location-nag", content: content, trigger: nil)
-                UNUserNotificationCenter.current().add(req)
+                postOpenAppNag("Tap to restore location tracking and full protection.")
                 NSLog("[Tunnel] Posted location nag notification — app dead for \(Int(appDeadFor))s")
             }
         }
