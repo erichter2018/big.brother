@@ -388,7 +388,7 @@ final class DNSProxy {
             }
         }
 
-        if isBlackholeMode, let domain, !isBlackholeExempt(domain), !domainIsCloudKit {
+        if isBlackholeMode, currentMode != .unlocked, let domain, !isBlackholeExempt(domain), !domainIsCloudKit {
             let resp = buildRefusedResponse(query: dns)
             writeResponse(resp, destIP: srcIP, destPort: srcPort)
             bgLog(domain)
