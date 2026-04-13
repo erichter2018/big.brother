@@ -522,7 +522,12 @@ final class DNSProxy {
         let now = Date()
         blocklistLock.lock()
         if now >= timeLimitBlockedExpiry {
-            timeLimitBlockedDomains = storage.readTimeLimitBlockedDomains()
+            let resolution = ModeStackResolver.resolve(storage: storage)
+            if resolution.mode == .unlocked {
+                timeLimitBlockedDomains = []
+            } else {
+                timeLimitBlockedDomains = storage.readTimeLimitBlockedDomains()
+            }
             timeLimitBlockedExpiry = now.addingTimeInterval(5)
         }
         if timeLimitBlockedDomains.isEmpty {
@@ -552,7 +557,12 @@ final class DNSProxy {
         let now = Date()
         blocklistLock.lock()
         if now >= enforcementBlockedExpiry {
-            enforcementBlockedDomains = storage.readEnforcementBlockedDomains()
+            let resolution = ModeStackResolver.resolve(storage: storage)
+            if resolution.mode == .unlocked {
+                enforcementBlockedDomains = []
+            } else {
+                enforcementBlockedDomains = storage.readEnforcementBlockedDomains()
+            }
             enforcementBlockedExpiry = now.addingTimeInterval(5)
         }
         if enforcementBlockedDomains.isEmpty {
@@ -864,17 +874,18 @@ final class DNSProxy {
         exhausted.append(entry)
         try? storage.writeTimeLimitExhaustedApps(exhausted)
 
-        // Update DNS blocklist: compute blocked domains for ALL exhausted apps
-        var blockedDomains = Set<String>()
-        for app in exhausted where app.dateString == today {
-            blockedDomains.formUnion(DomainCategorizer.domainsForApp(app.appName))
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        if resolution.mode == .unlocked {
+            try? storage.writeTimeLimitBlockedDomains([])
+            updateTimeLimitBlocklistLocked([], expiry: now.addingTimeInterval(5))
+        } else {
+            var blockedDomains = Set<String>()
+            for app in exhausted where app.dateString == today {
+                blockedDomains.formUnion(DomainCategorizer.domainsForApp(app.appName))
+            }
+            try? storage.writeTimeLimitBlockedDomains(blockedDomains)
+            updateTimeLimitBlocklistLocked(blockedDomains, expiry: now.addingTimeInterval(5))
         }
-        try? storage.writeTimeLimitBlockedDomains(blockedDomains)
-
-        // Force-refresh the in-memory blocked domains cache immediately.
-        // b457: goes through the blocklist lock so we don't race the packetFlow
-        // reader in `isTimeLimitBlocked`.
-        updateTimeLimitBlocklistLocked(blockedDomains, expiry: now.addingTimeInterval(5))
 
         NSLog("[DNSProxy] DNS time limit exhausted: \(appName) (\(minutes)m >= \(limit.dailyLimitMinutes)m * 1.1)")
     }
