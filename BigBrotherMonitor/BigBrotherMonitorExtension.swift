@@ -923,11 +923,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: policy?.resolvedMode ?? .restricted, policy: policy)
 
-        // Notify kid
-        sendModeNotification(
-            title: "\(limit.appName) — Time's Up",
-            body: "Daily limit of \(limit.dailyLimitMinutes) minutes reached."
+        let tlContent = UNMutableNotificationContent()
+        tlContent.title = "\(limit.appName) — Time's Up"
+        tlContent.body = "Daily limit of \(limit.dailyLimitMinutes) minutes reached."
+        tlContent.sound = .default
+        let tlReq = UNNotificationRequest(
+            identifier: "timelimit-\(limit.fingerprint)",
+            content: tlContent, trigger: nil
         )
+        UNUserNotificationCenter.current().add(tlReq)
 
         // Log event
         logEvent(.timeLimitExhausted, details: "\(limit.appName): \(limit.dailyLimitMinutes) min limit reached")
@@ -1688,25 +1692,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     }
 
     private func sendModeNotification(title: String, body: String) {
-        // Dedup: skip if this is the same notification title we last sent.
-        // Titles encode the mode ("Free Time Started", "Locked Mode", etc.)
-        // so same title = same mode = duplicate.
-        if lastNotifiedMode == title { return }
-        lastNotifiedMode = title
-
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        content.categoryIdentifier = "SCHEDULE_CHANGE"
-
-        // Fixed identifier — replaces previous notification instead of stacking.
-        let request = UNNotificationRequest(
-            identifier: "monitor-mode-change",
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request)
+        // b518: Monitor no longer sends mode-change notifications.
+        // The main app's ModeChangeNotifier handles all user-facing mode
+        // notifications with persisted dedup. Monitor firing its own
+        // caused guaranteed duplicates (different identifier).
+        // Exception: time-limit "Time's Up" notifications still use
+        // sendTimeLimitNotification() below.
     }
 
     /// Request an immediate heartbeat from the main app by writing a flag to App Group.

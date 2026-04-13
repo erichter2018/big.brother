@@ -2,17 +2,21 @@ import Foundation
 import UserNotifications
 import BigBrotherCore
 
-/// Sends local notifications on the child device when the enforcement mode changes.
-/// Deduplicates: only fires when the mode actually changes from the last notification.
 enum ModeChangeNotifier {
 
-    /// Last mode we notified about — prevents duplicate notifications when
-    /// enforcement refreshes or reconciliation re-applies the same mode.
-    private static var lastNotifiedMode: LockMode?
+    private static let dedupKey = "lastNotifiedMode"
 
-    /// Request notification permissions (called once during child setup).
+    private static var lastNotifiedMode: LockMode? {
+        get {
+            guard let raw = UserDefaults.appGroup?.string(forKey: dedupKey) else { return nil }
+            return LockMode(rawValue: raw)
+        }
+        set {
+            UserDefaults.appGroup?.set(newValue?.rawValue, forKey: dedupKey)
+        }
+    }
+
     static func requestPermission() {
-        // Suppress during onboarding — PermissionFixerView walks through notifications.
         let defaults = UserDefaults.appGroup
         if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true { return }
         UNUserNotificationCenter.current().requestAuthorization(
@@ -20,55 +24,32 @@ enum ModeChangeNotifier {
         ) { _, _ in }
     }
 
-    /// Notify the child that the device mode has changed.
-    /// Deduplicates: skips if mode matches the last notification sent.
     static func notify(newMode: LockMode, reason: String? = nil) {
-        // Skip if we already notified about this mode.
         guard newMode != lastNotifiedMode else { return }
         lastNotifiedMode = newMode
 
         let content = UNMutableNotificationContent()
-
         switch newMode {
         case .unlocked:
             content.title = "Device Unlocked"
             content.body = reason ?? "All apps are now accessible."
-            content.sound = .default
         case .restricted:
-            content.title = "Device Restricted"
+            content.title = "Restricted"
             content.body = reason ?? "Only allowed apps are available."
-            content.sound = .default
         case .locked:
-            content.title = "Device Locked"
-            content.body = reason ?? "Only essential apps (Phone, Messages) are available."
-            content.sound = .default
+            content.title = "Locked"
+            content.body = reason ?? "Only essential apps are available."
         case .lockedDown:
-            content.title = "Device Locked Down"
-            content.body = reason ?? "Only essential apps, no internet."
-            content.sound = .default
+            content.title = "Locked Down"
+            content.body = reason ?? "Essential apps only, no internet."
         }
-
+        content.sound = .default
         content.categoryIdentifier = "MODE_CHANGE"
-
-        // Fixed identifier — replaces the previous mode notification instead of stacking.
-        let request = UNNotificationRequest(
-            identifier: "mode-change",
-            content: content,
-            trigger: nil // Deliver immediately.
-        )
-
-        UNUserNotificationCenter.current().add(request) { error in
-            #if DEBUG
-            if let error {
-                print("[BigBrother] Mode notification failed: \(error.localizedDescription)")
-            }
-            #endif
-        }
+        post("mode-change", content: content)
     }
 
-    /// Format seconds as a human-readable duration, rounding up to the nearest minute.
     static func formatDuration(_ seconds: Int) -> String {
-        let totalMinutes = (seconds + 59) / 60  // round up
+        let totalMinutes = (seconds + 59) / 60
         let hours = totalMinutes / 60
         let mins = totalMinutes % 60
         if hours > 0 && mins > 0 {
@@ -80,107 +61,78 @@ enum ModeChangeNotifier {
         }
     }
 
-    /// Notify about a temporary unlock or extension.
     static func notifyTemporaryUnlock(durationSeconds: Int, isExtension: Bool = false) {
+        lastNotifiedMode = .unlocked
         let content = UNMutableNotificationContent()
-        let durationStr = formatDuration(durationSeconds)
+        let dur = formatDuration(durationSeconds)
         if isExtension {
             content.title = "Unlock Extended"
-            content.body = "Time extended — \(durationStr) total remaining."
+            content.body = "\(dur) total remaining."
         } else {
-            content.title = "Temporary Unlock"
-            content.body = "Device unlocked for \(durationStr)."
+            content.title = "Unlocked for \(dur)"
+            content.body = "All apps are accessible."
         }
         content.sound = .default
         content.categoryIdentifier = "MODE_CHANGE"
-
-        let request = UNNotificationRequest(
-            identifier: "mode-change-temp-unlock",
-            content: content,
-            trigger: nil
-        )
-
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["mode-change"])
+        post("mode-change", content: content)
     }
 
-    /// Notify that a temporary unlock has expired.
     static func notifyTemporaryUnlockExpired(restoredMode: LockMode) {
+        lastNotifiedMode = restoredMode
         let content = UNMutableNotificationContent()
-        content.title = "Temporary Unlock Expired"
-        content.body = "Device returned to \(restoredMode.displayName) mode."
+        content.title = "Unlock Expired"
+        content.body = "Back to \(restoredMode.displayName) mode."
         content.sound = .default
         content.categoryIdentifier = "MODE_CHANGE"
-
-        let request = UNNotificationRequest(
-            identifier: "mode-change-temp-expired",
-            content: content,
-            trigger: nil
-        )
-
-        UNUserNotificationCenter.current().add(request)
+        post("mode-change", content: content)
     }
 
-    /// Notify that a penalty-offset unlock has started (device locked during penalty).
     static func notifyPenaltyStarted(penaltySeconds: Int, unlockSeconds: Int) {
         let content = UNMutableNotificationContent()
         let penaltyStr = formatDuration(penaltySeconds)
         let unlockStr = formatDuration(unlockSeconds)
         content.title = "Penalty Time"
-        content.body = "Device locked for \(penaltyStr), then unlocked for \(unlockStr)."
+        content.body = "Locked for \(penaltyStr), then unlocked for \(unlockStr)."
         content.sound = .default
         content.categoryIdentifier = "MODE_CHANGE"
-
-        let request = UNNotificationRequest(
-            identifier: "mode-change-penalty-start",
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request)
+        post("mode-change", content: content)
     }
 
-    /// Notify the child about a parent message.
     static func notifyParentMessage(text: String, from sender: String) {
         let content = UNMutableNotificationContent()
         content.title = "Message from \(sender)"
         content.body = text
         content.sound = .default
         content.categoryIdentifier = "PARENT_MESSAGE"
-        let request = UNNotificationRequest(
-            identifier: "parent-msg-\(UUID().uuidString)",
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request)
+        post("parent-msg-\(UUID().uuidString)", content: content)
     }
 
-    /// Notify about a schedule-triggered mode change.
-    /// Deduplicates via lastNotifiedMode — same guard as notify().
     static func notifyScheduleChange(newMode: LockMode, windowName: String? = nil) {
         guard newMode != lastNotifiedMode else { return }
         lastNotifiedMode = newMode
 
         let content = UNMutableNotificationContent()
-
         switch newMode {
         case .unlocked:
             content.title = "Free Time Started"
-            content.body = windowName.map { "\($0): All apps are now accessible." }
-                ?? "Scheduled free time — all apps accessible."
+            content.body = windowName.map { "\($0): All apps accessible." }
+                ?? "All apps accessible."
         case .restricted, .locked, .lockedDown:
             content.title = "Free Time Ended"
-            content.body = "Device locked — \(newMode.displayName) mode active."
+            content.body = "\(newMode.displayName) mode active."
         }
-
         content.sound = .default
         content.categoryIdentifier = "SCHEDULE_CHANGE"
+        post("mode-change", content: content)
+    }
 
-        // Fixed identifier — replaces previous schedule notification.
-        let request = UNNotificationRequest(
-            identifier: "schedule-change",
-            content: content,
-            trigger: nil
-        )
-
-        UNUserNotificationCenter.current().add(request)
+    private static func post(_ identifier: String, content: UNMutableNotificationContent) {
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            #if DEBUG
+            if let error { print("[Notif] \(identifier) failed: \(error.localizedDescription)") }
+            #endif
+        }
     }
 }
