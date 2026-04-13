@@ -934,6 +934,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         defaultStore.shield.webDomains = nil
         defaultStore.webContent.blockedByFilter = nil
 
+        try? storage.writeEnforcementBlockedDomains([])
+        try? storage.writeTimeLimitBlockedDomains([])
+
         // b432: Defensive clear of the recovery probe store. The probe path
         // (apply() recovery branch) writes .all() to enforcement.recovery
         // briefly to test if a fresh store name accepts writes. It immediately
