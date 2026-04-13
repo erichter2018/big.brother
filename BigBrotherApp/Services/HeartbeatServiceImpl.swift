@@ -97,14 +97,8 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             // Ping the VPN tunnel (IPC liveness signal).
             self.vpnManager?.sendPing()
 
-            // Restart tunnel if disconnected or hung (stale but supposedly connected).
             if let vpn = self.vpnManager {
-                let tunnelAge = Date().timeIntervalSince1970
-                    - (UserDefaults.appGroup?
-                        .double(forKey: "tunnelLastActiveAt") ?? 0)
-                if !vpn.isConnected || (tunnelAge > 300 && vpn.isConnected) {
-                    Task { try? await vpn.installAndStart() }
-                }
+                Task { await vpn.restartIfNeeded() }
             }
 
             // Extension heartbeat request.

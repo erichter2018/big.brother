@@ -1191,21 +1191,8 @@ final class AppState {
                     enf.forceDaemonRescue()
                 }
 
-                // Ensure VPN tunnel is installed and connected.
                 if let vpn = await self?.vpnManager {
-                    if !(await vpn.isConfigured()) {
-                        try? await vpn.installAndStart()
-                        try? storageRef.appendDiagnosticEntry(DiagnosticEntry(
-                            category: .enforcement,
-                            message: "VPN was missing — reinstalled during foreground sync"
-                        ))
-                    } else if !vpn.isConnected {
-                        try? await vpn.installAndStart()
-                        try? storageRef.appendDiagnosticEntry(DiagnosticEntry(
-                            category: .enforcement,
-                            message: "VPN was disconnected — restarted during foreground sync"
-                        ))
-                    }
+                    await vpn.restartIfNeeded()
                 }
 
                 // Heartbeat so parent sees state immediately.
