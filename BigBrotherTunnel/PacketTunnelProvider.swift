@@ -3933,6 +3933,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// interface-based identity we can compare.
     private var pathMonitor: NWPathMonitor?
     private var lastPathInterfaceSignature: String = ""
+    private var pathMonitorQueue: DispatchQueue?
+    private var pathDebounceWork: DispatchWorkItem?
 
     private func startNetworkPathMonitoring() {
         // b466 (three-way audit): reset the seed flag so the very next
@@ -3949,11 +3951,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // the root causes of the post-reboot "tunnel wedges after a few
         // minutes" failure on Olivia's iPad.
         pathMonitorInitialCallbackPending = true
+        let queue = DispatchQueue(label: "fr.bigbrother.tunnel.pathMonitor")
+        pathMonitorQueue = queue
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             self?.handlePathUpdate(path)
         }
-        monitor.start(queue: DispatchQueue(label: "fr.bigbrother.tunnel.pathMonitor"))
+        monitor.start(queue: queue)
         pathMonitor = monitor
     }
 
@@ -4017,32 +4021,33 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         NSLog("[Tunnel] Network path changed — was '\(previous)', now '\(signature)' (status: \(path.status))")
 
-        // b457: ANY real interface-signature change while satisfied gets a full
-        // reapplyNetworkSettings(force: true). The old code took a "cheap"
-        // reconnectUpstream path for WiFi→cell (both satisfied), but Apple's
-        // NEPacketTunnelFlow has a documented behavior where it stays wedged on
-        // the dead interface until setTunnelNetworkSettings is re-invoked.
-        // Empirical repro: flipping wifi off on a child device with cellular
-        // available caused total internet loss until the 30s CK recovery ladder
-        // finally forced a reapply. Three-way gemini/codex/manual review all
-        // agreed: the only reliable recovery here is a full re-plumb. This
-        // branch now subsumes the returningOnline case too.
-        //
-        // unsatisfied → .unsatisfied stays a no-op — nothing to do until we
-        // come back online, and forcing a reapply on a dead path just wastes
-        // a 5-second setTunnelNetworkSettings timeout.
+        // b513: Debounce rapid network transitions. Toggling wifi off produces
+        // multiple intermediate states (wifi+cell → cell → wifi+cell → ...) within
+        // milliseconds. Without debouncing, each one fires a full
+        // setTunnelNetworkSettings call. While reapplyNetworkSettings coalesces
+        // concurrent calls, the rapid destroy/recreate of the DNS upstream session
+        // breaks cloudd's DNS path and wedges CloudKit as "temporarilyUnavailable"
+        // for minutes. Wait 2 seconds after the LAST path change before reapplying.
+        pathDebounceWork?.cancel()
+
         if nowSatisfied {
-            let returningOnline = !wasSatisfied
-            let reason = returningOnline
-                ? "offline → online"
-                : "interface signature changed (\(previous) → \(signature))"
-            NSLog("[Tunnel] \(reason) — forcing full network settings reapply")
-            try? storage.appendDiagnosticEntry(DiagnosticEntry(
-                category: .command,
-                message: "Network path transition — re-plumbing tunnel",
-                details: reason
-            ))
-            reapplyNetworkSettings(force: true)
+            let capturedSignature = signature
+            let capturedPrevious = previous
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                let reason = "interface settled (\(capturedPrevious) → \(capturedSignature))"
+                NSLog("[Tunnel] Network settled — forcing full network settings reapply")
+                try? self.storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "Network path transition — re-plumbing tunnel",
+                    details: reason
+                ))
+                self.reapplyNetworkSettings(force: true)
+            }
+            pathDebounceWork = work
+            (pathMonitorQueue ?? DispatchQueue.global()).asyncAfter(
+                deadline: .now() + 2.0, execute: work
+            )
         }
 
         // Signal main app that the device likely moved (cell tower / WiFi change).

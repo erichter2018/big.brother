@@ -34,6 +34,11 @@ struct LocationMapView: View {
     /// When set, the scrubber is scoped to this trip's breadcrumb range.
     @State private var selectedTrip: Trip?
 
+    enum ViewMode { case latest, tripHistory }
+    @State private var viewMode: ViewMode = .latest
+    @State private var isLoadingTrips = false
+    @State private var liveManager: LiveLocationManager?
+
     // Speed limit lookup for scrubbed position
     private var speedLimitService: SpeedLimitService { .shared }
     @State private var scrubbedSpeedLimit: Int?
@@ -118,36 +123,36 @@ struct LocationMapView: View {
 
     // MARK: - Computed: Current Live Location
 
+    private var bestHeartbeatWithLocation: DeviceHeartbeat? {
+        let deviceIDs = Set(devices.map(\.id))
+        return heartbeats
+            .filter { deviceIDs.contains($0.deviceID) && $0.latitude != nil && $0.longitude != nil }
+            .max { ($0.locationTimestamp ?? .distantPast) < ($1.locationTimestamp ?? .distantPast) }
+    }
+
     private var currentLocation: CLLocationCoordinate2D? {
-        for device in devices {
-            if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
-               let lat = hb.latitude, let lon = hb.longitude {
-                return CLLocationCoordinate2D(latitude: lat, longitude: lon)
-            }
-        }
-        return nil
+        guard let hb = bestHeartbeatWithLocation,
+              let lat = hb.latitude, let lon = hb.longitude else { return nil }
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
     }
 
     private var currentAddress: String? {
-        for device in devices {
-            if let hb = heartbeats.first(where: { $0.deviceID == device.id }) {
-                return hb.locationAddress
-            }
-        }
-        return nil
+        bestHeartbeatWithLocation?.locationAddress
     }
 
     private var locationAge: String? {
-        for device in devices {
-            if let hb = heartbeats.first(where: { $0.deviceID == device.id }),
-               let ts = hb.locationTimestamp {
-                let seconds = Date().timeIntervalSince(ts)
-                if seconds < 60 { return "just now" }
-                if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
-                return "\(Int(seconds / 3600))h ago"
-            }
+        guard let ts = bestHeartbeatWithLocation?.locationTimestamp else { return nil }
+        let seconds = Date().timeIntervalSince(ts)
+        if seconds < 60 { return "just now" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+        return "\(Int(seconds / 3600))h ago"
+    }
+
+    private var primaryDeviceID: DeviceID? {
+        if let phone = devices.first(where: { $0.modelIdentifier.lowercased().contains("iphone") }) {
+            return phone.id
         }
-        return nil
+        return devices.first?.id
     }
 
     // MARK: - Scrubber Range
@@ -941,12 +946,11 @@ struct LocationMapView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Map — always visible, pinned at top
             mapView
                 .frame(minHeight: 300)
                 .frame(maxHeight: .infinity)
                 .overlay(alignment: .topTrailing) {
-                    if isScrubbing {
+                    if viewMode == .tripHistory && isScrubbing {
                         Button {
                             followDot.toggle()
                             if followDot, let coord = scrubbedCoord {
@@ -970,58 +974,94 @@ struct LocationMapView: View {
                     }
                 }
 
-            // Controls + trip list — fixed height, scrolls independently
             VStack(spacing: 0) {
-                // Scrubber + info panel
-                VStack(spacing: 6) {
-                    // Time scrubber
-                    if breadcrumbs.count >= 2 {
-                        timeScrubber
-                    }
-
-                    // Info line
-                    if isScrubbing, scrubbedCoord != nil {
-                        scrubberInfoLine
-                    } else if let address = currentAddress, let age = locationAge {
-                        HStack {
-                            Image(systemName: "location.fill").foregroundStyle(.blue)
-                            Text(address).font(.subheadline)
-                            Spacer()
-                            Text(age).font(.caption).foregroundStyle(.secondary)
+                if viewMode == .latest {
+                    VStack(spacing: 8) {
+                        if let address = currentAddress, let age = locationAge {
+                            HStack {
+                                Image(systemName: "location.fill").foregroundStyle(.blue)
+                                Text(address).font(.subheadline)
+                                Spacer()
+                                Text(age).font(.caption).foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Text("No location data yet")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                         }
-                    } else {
-                        Text("No location data yet")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
 
-                    if routeProgress != nil || speedLimitPrefetchProgress != nil {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                            VStack(alignment: .leading, spacing: 1) {
-                                if let rp = routeProgress {
-                                    Text(rp).font(.caption2).foregroundStyle(.secondary)
-                                }
-                                if let sp = speedLimitPrefetchProgress {
-                                    Text(sp).font(.caption2).foregroundStyle(.secondary)
+                        if let live = liveManager, live.isLive, let speed = live.speedMPH {
+                            HStack(spacing: 6) {
+                                Circle().fill(.green).frame(width: 8, height: 8)
+                                Text("Live").font(.caption).fontWeight(.semibold).foregroundStyle(.green)
+                                Text("\(speed) mph").font(.caption).foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                        }
+
+                        Button {
+                            withAnimation { viewMode = .tripHistory }
+                        } label: {
+                            Label("View Trips", systemImage: "map")
+                                .font(.subheadline)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 10)
+                } else {
+                    VStack(spacing: 6) {
+                        Button {
+                            returnToLatest()
+                        } label: {
+                            Label("Back to Current", systemImage: "location")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                        }
+
+                        if breadcrumbs.count >= 2 {
+                            timeScrubber
+                        }
+
+                        if isScrubbing, scrubbedCoord != nil {
+                            scrubberInfoLine
+                        }
+
+                        if routeProgress != nil || speedLimitPrefetchProgress != nil {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    if let rp = routeProgress {
+                                        Text(rp).font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                    if let sp = speedLimitPrefetchProgress {
+                                        Text(sp).font(.caption2).foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
                     }
+                    .padding(.horizontal)
+                    .padding(.vertical, 10)
 
-                    // (Locate button is now on the map overlay)
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 10)
-
-                // Trip list — scrolls independently
-                if !trips.isEmpty {
                     Divider()
-                    ScrollView {
-                        tripListSection
+
+                    if isLoadingTrips {
+                        ProgressView("Loading trips...")
+                            .padding()
+                    } else if trips.isEmpty {
+                        Text("No trips found")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding()
+                    } else {
+                        ScrollView {
+                            tripListSection
+                        }
+                        .frame(maxHeight: 300)
                     }
-                    .frame(maxHeight: 300)
                 }
             }
         }
@@ -1033,20 +1073,25 @@ struct LocationMapView: View {
             if autoLocate {
                 Task { await locateAndCenter() }
             }
+            isLoadingTrips = true
             await loadBreadcrumbs()
             trips = detectTrips()
+            isLoadingTrips = false
             await correlateDriveReportEvents()
             await resolveTripPOIs()
-            // Auto-focus on a specific trip if requested
             if let target = focusTripAt, let match = trips.min(by: {
                 abs($0.endTime.timeIntervalSince(target)) < abs($1.endTime.timeIntervalSince(target))
             }), abs(match.endTime.timeIntervalSince(target)) < 600 {
+                viewMode = .tripHistory
                 jumpToTrip(match)
             }
-            // Routes and speed limits load in parallel
-            async let routes: () = resolveRoutes()
-            async let speedLimits: () = prefetchSpeedLimitsForTrips()
-            _ = await (routes, speedLimits)
+            if let hb = bestHeartbeatWithLocation,
+               let speed = hb.currentSpeed, speed > 2.0,
+               let devID = primaryDeviceID {
+                let manager = LiveLocationManager(deviceID: devID)
+                liveManager = manager
+                manager.start()
+            }
         }
         .onChange(of: heartbeats.first?.latitude) { _, _ in
             if !isScrubbing, let coord = currentLocation {
@@ -1054,6 +1099,7 @@ struct LocationMapView: View {
             }
         }
         .onDisappear {
+            liveManager?.stop()
             Task { await speedLimitService.persistToDisk() }
         }
     }
@@ -1063,30 +1109,6 @@ struct LocationMapView: View {
     @ViewBuilder
     private var tripListSection: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // "All Data" row to return to full timeline
-            Button {
-                returnToAllData()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 12))
-                        .foregroundStyle(selectedTrip == nil ? .blue : .secondary)
-                    Text("All Data")
-                        .font(.subheadline.weight(selectedTrip == nil ? .semibold : .regular))
-                        .foregroundStyle(selectedTrip == nil ? .blue : .primary)
-                    Spacer()
-                    Text("\(trips.count) trips")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(selectedTrip == nil ? Color.blue.opacity(0.08) : Color.clear)
-            }
-            .buttonStyle(.plain)
-
-            Divider()
-
             LazyVStack(spacing: 0) {
                 ForEach(trips.reversed()) { trip in
                     tripRow(trip)
@@ -1255,11 +1277,17 @@ struct LocationMapView: View {
     private func jumpToTrip(_ trip: Trip) {
         guard breadcrumbs.count >= 2 else { return }
 
-        // Scope the scrubber to this trip's range and start at the beginning.
         withAnimation {
             selectedTrip = trip
             scrubberValue = 0.0
             isScrubbing = true
+        }
+
+        if routeSegments.isEmpty {
+            Task {
+                await resolveRoutes()
+                await prefetchSpeedLimitsForTrips()
+            }
         }
 
         // Zoom to fit the trip
@@ -1282,8 +1310,9 @@ struct LocationMapView: View {
         }
     }
 
-    private func returnToAllData() {
+    private func returnToLatest() {
         withAnimation {
+            viewMode = .latest
             selectedTrip = nil
             scrubberValue = 1.0
             isScrubbing = false
@@ -1305,9 +1334,13 @@ struct LocationMapView: View {
             HStack {
                 if selectedTrip != nil {
                     Button {
-                        returnToAllData()
+                        withAnimation {
+                            selectedTrip = nil
+                            scrubberValue = 1.0
+                            isScrubbing = false
+                        }
                     } label: {
-                        Label("All Data", systemImage: "arrow.uturn.backward")
+                        Label("All Trips", systemImage: "arrow.uturn.backward")
                             .font(.caption2)
                             .foregroundStyle(.blue)
                     }
@@ -1319,8 +1352,7 @@ struct LocationMapView: View {
                     .foregroundStyle(isScrubbing ? .blue : .secondary)
                 Spacer()
                 if selectedTrip != nil {
-                    // Spacer for symmetry
-                    Text("All Data").font(.caption2).hidden()
+                    Text("All Trips").font(.caption2).hidden()
                 }
             }
 
@@ -1472,64 +1504,86 @@ struct LocationMapView: View {
     @ViewBuilder
     private var mapView: some View {
         Map(position: $position) {
-            // Visible route segments (context-dependent)
-            let visible = visibleSegmentIndices
-            ForEach(visible, id: \.self) { i in
-                if i < routeSegments.count {
-                    MapPolyline(routeSegments[i])
-                        .stroke(.blue, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+            if viewMode == .tripHistory {
+                let visible = visibleSegmentIndices
+                ForEach(visible, id: \.self) { i in
+                    if i < routeSegments.count {
+                        MapPolyline(routeSegments[i])
+                            .stroke(.blue, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                    }
                 }
-            }
 
-            // Fallback dashed lines while routes are loading
-            if routeSegments.isEmpty && breadcrumbs.count >= 2 {
-                let fbRange = scrubRange
-                let fbEnd = isScrubbing
-                    ? fbRange.start + Int(scrubberValue * Double(fbRange.end - fbRange.start))
-                    : fbRange.end
-                let safeStart = min(fbRange.start, breadcrumbs.count - 1)
-                let safeEnd = min(max(fbEnd, safeStart), breadcrumbs.count - 1)
-                let slice = breadcrumbs[safeStart...safeEnd]
-                MapPolyline(coordinates: slice.map {
-                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
-                })
-                .stroke(.blue.opacity(0.4), style: StrokeStyle(lineWidth: 3, dash: [8, 4]))
-            }
-
-            // Breadcrumb dots (subtle, only within visible range)
-            let dotRange = scrubRange
-            let dotStart = min(dotRange.start, max(breadcrumbs.count - 1, 0))
-            let dotEnd = min(dotRange.end, max(breadcrumbs.count - 1, 0))
-            let visibleCrumbs = breadcrumbs.isEmpty ? [] : Array(breadcrumbs[dotStart...dotEnd])
-            ForEach(visibleCrumbs) { crumb in
-                Annotation("", coordinate: CLLocationCoordinate2D(latitude: crumb.latitude, longitude: crumb.longitude)) {
-                    Circle()
-                        .fill(.blue.opacity(0.2))
-                        .frame(width: 5, height: 5)
+                if selectedTrip != nil && routeSegments.isEmpty && breadcrumbs.count >= 2 {
+                    let fbRange = scrubRange
+                    let fbEnd = isScrubbing
+                        ? fbRange.start + Int(scrubberValue * Double(fbRange.end - fbRange.start))
+                        : fbRange.end
+                    let safeStart = min(fbRange.start, breadcrumbs.count - 1)
+                    let safeEnd = min(max(fbEnd, safeStart), breadcrumbs.count - 1)
+                    let slice = breadcrumbs[safeStart...safeEnd]
+                    MapPolyline(coordinates: slice.map {
+                        CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                    })
+                    .stroke(.blue.opacity(0.4), style: StrokeStyle(lineWidth: 3, dash: [8, 4]))
                 }
-            }
 
-            // Scrubbed time dot — orange for real breadcrumbs, yellow for interpolated
-            if isScrubbing, let coord = scrubbedCoord {
-                let dotColor: Color = isInterpolated ? .yellow : .orange
-                Annotation("", coordinate: coord) {
-                    ZStack {
-                        Circle()
-                            .fill(dotColor.opacity(0.3))
-                            .frame(width: 28, height: 28)
-                        Circle()
-                            .fill(dotColor)
-                            .frame(width: 14, height: 14)
-                        Circle()
-                            .fill(.white)
-                            .frame(width: 6, height: 6)
+                if selectedTrip != nil {
+                    let dotRange = scrubRange
+                    let dotStart = min(dotRange.start, max(breadcrumbs.count - 1, 0))
+                    let dotEnd = min(dotRange.end, max(breadcrumbs.count - 1, 0))
+                    let visibleCrumbs = breadcrumbs.isEmpty ? [] : Array(breadcrumbs[dotStart...dotEnd])
+                    ForEach(visibleCrumbs) { crumb in
+                        Annotation("", coordinate: CLLocationCoordinate2D(latitude: crumb.latitude, longitude: crumb.longitude)) {
+                            Circle()
+                                .fill(.blue.opacity(0.2))
+                                .frame(width: 5, height: 5)
+                        }
+                    }
+                }
+
+                if isScrubbing, let coord = scrubbedCoord {
+                    let dotColor: Color = isInterpolated ? .yellow : .orange
+                    Annotation("", coordinate: coord) {
+                        ZStack {
+                            Circle()
+                                .fill(dotColor.opacity(0.3))
+                                .frame(width: 28, height: 28)
+                            Circle()
+                                .fill(dotColor)
+                                .frame(width: 14, height: 14)
+                            Circle()
+                                .fill(.white)
+                                .frame(width: 6, height: 6)
+                        }
                     }
                 }
             }
 
-            // Current location pin (always visible)
+            if let live = liveManager, live.isLive {
+                if live.trail.count >= 2 {
+                    MapPolyline(coordinates: live.trail)
+                        .stroke(.green, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                }
+                if let coord = live.smoothCoordinate {
+                    Annotation("", coordinate: coord) {
+                        ZStack {
+                            Circle()
+                                .fill(.green.opacity(0.2))
+                                .frame(width: 32, height: 32)
+                            Circle()
+                                .fill(.green)
+                                .frame(width: 14, height: 14)
+                            Circle()
+                                .fill(.white)
+                                .frame(width: 6, height: 6)
+                        }
+                    }
+                }
+            }
+
             if let coord = currentLocation {
-                Annotation(isScrubbing ? "" : (currentAddress ?? "Current"), coordinate: coord) {
+                let showLabel = viewMode == .latest && !(liveManager?.isLive ?? false)
+                Annotation(showLabel ? (currentAddress ?? "Current") : "", coordinate: coord) {
                     ZStack {
                         Circle()
                             .fill(.blue)
@@ -1608,11 +1662,16 @@ struct LocationMapView: View {
     // Shared breadcrumb cache — persists across view appearances.
     // Key: sorted device IDs joined. Value: (breadcrumbs, fetchedAt).
     private static var breadcrumbCache: [String: ([DeviceLocation], Date)] = [:]
-    private static let breadcrumbCacheTTL: TimeInterval = 300 // 5 minutes
+    private static let breadcrumbCacheTTL: TimeInterval = 3600 // 1 hour
 
     private func loadBreadcrumbs() async {
         guard let cloudKit else { return }
-        let deviceIDs = devices.map(\.id)
+        let deviceIDs: [DeviceID]
+        if let primary = primaryDeviceID {
+            deviceIDs = [primary]
+        } else {
+            deviceIDs = devices.map(\.id)
+        }
         let cacheKey = deviceIDs.map(\.rawValue).sorted().joined(separator: ",")
 
         // Return cached if fresh
@@ -1735,40 +1794,4 @@ struct LocationMapView: View {
         routeProgress = nil
     }
 
-    // MARK: - Route Cache
-
-    /// Cache key from rounded coordinates (4 decimal places ~ 11m precision).
-    private static func routeCacheKey(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) -> String {
-        let r = { (v: Double) in String(format: "%.4f", v) }
-        return "\(r(from.latitude)),\(r(from.longitude))-\(r(to.latitude)),\(r(to.longitude))"
-    }
-
-    private static var cacheDir: URL {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return caches.appendingPathComponent("route-cache", isDirectory: true)
-    }
-
-    private static func cacheRoute(_ polyline: MKPolyline, key: String) {
-        let dir = cacheDir
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let count = polyline.pointCount
-        var coords = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: count)
-        polyline.getCoordinates(&coords, range: NSRange(location: 0, length: count))
-        let encoded = coords.map { "\($0.latitude),\($0.longitude)" }.joined(separator: ";")
-        let file = dir.appendingPathComponent(key.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? key)
-        try? encoded.write(to: file, atomically: true, encoding: .utf8)
-    }
-
-    private static func loadCachedRoute(key: String) -> MKPolyline? {
-        let file = cacheDir.appendingPathComponent(key.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? key)
-        guard let data = try? String(contentsOf: file, encoding: .utf8) else { return nil }
-        let coords = data.split(separator: ";").compactMap { part -> CLLocationCoordinate2D? in
-            let comps = part.split(separator: ",")
-            guard comps.count == 2, let lat = Double(comps[0]), let lon = Double(comps[1]) else { return nil }
-            return CLLocationCoordinate2D(latitude: lat, longitude: lon)
-        }
-        guard coords.count >= 2 else { return nil }
-        return MKPolyline(coordinates: coords, count: coords.count)
-    }
 }

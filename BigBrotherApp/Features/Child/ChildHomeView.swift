@@ -29,8 +29,6 @@ struct ChildHomeView: View {
     @State private var showPINUnlock = false
     @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
     @State private var showSOSConfirmation = false
-    @State private var showPauseConfirmation = false
-    @State private var restrictionsPaused = false
     @State private var showAppVerification = false
     @State private var showPermissionFixer = false
     @State private var showWelcome = false
@@ -140,12 +138,9 @@ struct ChildHomeView: View {
             }
         }
         .overlay(alignment: .bottomLeading) {
-            HStack(spacing: 8) {
-                sosButton
-                pauseRestrictionsButton
-            }
-            .padding(.leading, 16)
-            .padding(.bottom, 16)
+            sosButton
+                .padding(.leading, 16)
+                .padding(.bottom, 16)
         }
         .overlay(alignment: .bottomTrailing) {
             if !launchGracePeriod && viewModel.hasPermissionIssues {
@@ -317,58 +312,6 @@ struct ChildHomeView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will immediately alert your parents with your current location.")
-        }
-    }
-
-    private var pauseRestrictionsButton: some View {
-        Button {
-            showPauseConfirmation = true
-        } label: {
-            Image(systemName: restrictionsPaused ? "play.fill" : "pause.fill")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
-                .background(restrictionsPaused ? Color.green.opacity(0.8) : Color.orange.opacity(0.8))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .alert(restrictionsPaused ? "Resume Restrictions?" : "Pause Restrictions?", isPresented: $showPauseConfirmation) {
-            Button(restrictionsPaused ? "Resume" : "Pause", role: restrictionsPaused ? nil : .destructive) {
-                Task { await togglePauseRestrictions() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(restrictionsPaused
-                 ? "This will re-enable all restrictions."
-                 : "This will temporarily disable all restrictions. Your parents will be notified.")
-        }
-    }
-
-    private func togglePauseRestrictions() async {
-        if restrictionsPaused {
-            // Resume: re-apply enforcement from current snapshot
-            restrictionsPaused = false
-            if let snapshot = viewModel.appState.snapshotStore?.loadCurrentSnapshot() {
-                try? viewModel.appState.enforcement?.apply(snapshot.effectivePolicy)
-            }
-            viewModel.appState.eventLogger?.log(.commandApplied, details: "Restrictions resumed by child")
-
-            // Tell tunnel to re-enable DNS enforcement
-            let defaults = UserDefaults.appGroup
-            defaults?.removeObject(forKey: "restrictionsPausedByChild")
-        } else {
-            // Pause: clear all shields + DNS blocking
-            restrictionsPaused = true
-            try? viewModel.appState.enforcement?.clearAllRestrictions()
-
-            // Tell tunnel to stop DNS blocking
-            let defaults = UserDefaults.appGroup
-            defaults?.set(Date().timeIntervalSince1970, forKey: "restrictionsPausedByChild")
-
-            // Notify parent via event log
-            viewModel.appState.eventLogger?.log(.authorizationLost, details: "RESTRICTIONS PAUSED BY CHILD — testing/emergency mode")
-
-            // Force immediate heartbeat so parent sees it
-            try? await viewModel.appState.heartbeatService?.sendNow(force: true)
         }
     }
 

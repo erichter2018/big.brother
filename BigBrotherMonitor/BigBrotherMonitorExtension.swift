@@ -246,22 +246,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // Legacy / other schedule — resolve schedule mode and apply.
-        if let profile = storage.readActiveScheduleProfile() {
-            let mode = profile.resolvedMode(at: Date())
-            if mode == .unlocked {
-                clearAllShieldStores()
-            } else {
-                let policy = storage.readPolicySnapshot()?.effectivePolicy
-                applyShieldingToAllStores(mode: mode, policy: policy)
-            }
-            updateSharedState(mode: mode)
+        // Legacy / other schedule — use ModeStackResolver for ground truth.
+        // b513: was using profile.resolvedMode(at:) which reads raw schedule mode,
+        // ignoring parent commands and temp unlocks. This caused locked shields
+        // to be applied while a temp unlock was active.
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let policy = storage.readPolicySnapshot()?.effectivePolicy
+        if resolution.mode == .unlocked {
+            clearAllShieldStores()
         } else {
-            // No profile — clear the enforcement store and default to restricted.
-            enforcementStore.clearAllSettings()
-            updateSharedState(mode: .restricted)
+            applyShieldingToAllStores(mode: resolution.mode, policy: policy)
         }
-        logEvent(.scheduleEnded, details: "Schedule ended: \(activity.rawValue)")
+        updateSharedState(mode: resolution.mode)
+        logEvent(.scheduleEnded, details: "Schedule ended: \(activity.rawValue) → \(resolution.mode.rawValue)")
     }
 
     override func intervalWillEndWarning(for activity: DeviceActivityName) {
@@ -1613,11 +1610,11 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     // MARK: - Single-Store Shielding (legacy fallback)
 
     private func applyShielding(mode: LockMode, policy: EffectivePolicy?) {
-        // Prefer the multi-store path when possible — the legacy single-store path
-        // doesn't handle essential mode correctly. Resolve schedule profile mode first.
-        if let profile = storage.readActiveScheduleProfile() {
-            let resolvedMode = profile.resolvedMode(at: Date())
-            applyShieldingToAllStores(mode: resolvedMode, policy: policy)
+        // b513: was overriding the caller's mode with profile.resolvedMode(at:),
+        // which reads raw schedule mode and ignores parent commands/temp unlocks.
+        // Now respects the mode passed in (should come from ModeStackResolver).
+        if storage.readActiveScheduleProfile() != nil {
+            applyShieldingToAllStores(mode: mode, policy: policy)
             return
         }
 

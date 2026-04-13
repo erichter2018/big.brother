@@ -146,6 +146,7 @@ final class AppState {
     /// Used by the dashboard to show the correct mode before heartbeat confirms.
     /// Cleared when a heartbeat confirms the mode.
     var expectedModes: [ChildProfileID: (mode: LockMode, sentAt: Date)] = [:]
+    var childrenOnSchedule: Set<ChildProfileID> = []
 
     /// Recent commands sent by the parent, for diagnostic interleaving.
     /// Ring buffer of last 20 per child. Shown in diagnostic copy text

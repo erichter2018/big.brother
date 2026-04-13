@@ -553,7 +553,9 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     var isScheduleDriven: Bool {
-        if appState.expectedModes[child.id] != nil { return false }
+        if appState.expectedModes[child.id] != nil {
+            return appState.childrenOnSchedule.contains(child.id)
+        }
         return scheduleProfile != nil
     }
 
@@ -564,6 +566,7 @@ final class ChildDetailViewModel: CommandSendable {
     // MARK: - Actions (target all devices for this child)
 
     func setMode(_ mode: LockMode) async {
+        appState.childrenOnSchedule.remove(child.id)
         appState.expectedModes[child.id] = (mode, Date())
         await performCommand(.setMode(mode), target: .child(child.id))
     }
@@ -571,7 +574,7 @@ final class ChildDetailViewModel: CommandSendable {
     func lockWithDuration(_ duration: LockDuration) async {
         switch duration {
         case .returnToSchedule:
-            // Set optimistic mode to what the schedule resolves to right now.
+            appState.childrenOnSchedule.insert(child.id)
             if let profile = scheduleProfile {
                 let scheduleMode = profile.resolvedMode(at: Date())
                 appState.expectedModes[child.id] = (scheduleMode, Date())
@@ -581,15 +584,18 @@ final class ChildDetailViewModel: CommandSendable {
             await performCommand(.returnToSchedule, target: .child(child.id))
 
         case .indefinite:
+            appState.childrenOnSchedule.remove(child.id)
             appState.expectedModes[child.id] = (.restricted, Date())
             await performCommand(.setMode(.restricted), target: .child(child.id))
 
         case .untilMidnight:
+            appState.childrenOnSchedule.remove(child.id)
             let midnight = Calendar.current.startOfDay(for: Date()).addingTimeInterval(86400)
             appState.expectedModes[child.id] = (.restricted, Date())
             await performCommand(.lockUntil(date: midnight), target: .child(child.id))
 
         case .hours(let h):
+            appState.childrenOnSchedule.remove(child.id)
             let target = Date().addingTimeInterval(Double(h) * 3600)
             appState.expectedModes[child.id] = (.restricted, Date())
             await performCommand(.lockUntil(date: target), target: .child(child.id))
@@ -598,8 +604,8 @@ final class ChildDetailViewModel: CommandSendable {
 
     /// Lock down: essentialOnly shielding + internet block via VPN DNS blackhole.
     func lockDown(seconds: Int? = nil) async {
+        appState.childrenOnSchedule.remove(child.id)
         appState.expectedModes[child.id] = (.lockedDown, Date())
-        let _ = seconds ?? 86400
         isSendingCommand = true
         do {
             try await appState.sendCommand(target: .child(child.id), action: .setMode(.lockedDown))
@@ -612,7 +618,15 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     func temporaryUnlock(seconds: Int = 24 * 3600) async {
+        appState.childrenOnSchedule.remove(child.id)
         appState.expectedModes[child.id] = (.unlocked, Date())
+        let expiry = Date().addingTimeInterval(Double(seconds))
+        var dict = (try? JSONDecoder().decode([String: Date].self,
+            from: UserDefaults.standard.data(forKey: "unlockExpiries") ?? Data())) ?? [:]
+        dict[child.id.rawValue] = expiry
+        if let encoded = try? JSONEncoder().encode(dict) {
+            UserDefaults.standard.set(encoded, forKey: "unlockExpiries")
+        }
         await performCommand(.temporaryUnlock(durationSeconds: seconds), target: .child(child.id))
     }
 

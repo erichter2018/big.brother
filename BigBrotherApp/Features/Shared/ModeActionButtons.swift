@@ -40,7 +40,7 @@ struct ModeActionButtons: View {
             return formatDuration(secs)
         }
 
-        if isScheduleDriven, let next = scheduleNextTransition {
+        if isScheduleDriven, mode != .unlocked, let next = scheduleNextTransition {
             let secs = Int(next.timeIntervalSinceNow)
             if secs > 0 && secs < 86400 {
                 return "until " + formatTime(next)

@@ -45,6 +45,8 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     /// callers should dispatch rescue to a background queue (forceDaemonRescue
     /// already does this via Task.detached).
     private static let applyLock = NSLock()
+    private static var lastApplyMode: LockMode?
+    private static var lastApplyTime: Date?
 
     /// FRESH store instance created on every access — never cached.
     /// ManagedSettingsStore communicates with the system daemon via XPC.
@@ -176,6 +178,16 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     func apply(_ policy: EffectivePolicy) throws {
         Self.applyLock.lock()
         defer { Self.applyLock.unlock() }
+
+        let now = Date()
+        if let lastMode = Self.lastApplyMode,
+           let lastTime = Self.lastApplyTime,
+           lastMode == policy.resolvedMode,
+           now.timeIntervalSince(lastTime) < 2.0 {
+            NSLog("[Enforcement] apply() coalesced — \(policy.resolvedMode.rawValue) applied \(String(format: "%.1f", now.timeIntervalSince(lastTime)))s ago")
+            return
+        }
+
         NSLog("[Enforcement] apply() START — mode=\(policy.resolvedMode.rawValue) isTemp=\(policy.isTemporaryUnlock)")
 
         // Timing: record the exact instants around the ManagedSettings write
@@ -228,6 +240,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             NSLog("[Enforcement] applying shields for \(policy.resolvedMode.rawValue)")
             applyShield(allowExemptions: policy.resolvedMode == .restricted, policyRestrictions: policy.deviceRestrictions)
         }
+
+        Self.lastApplyMode = policy.resolvedMode
+        Self.lastApplyTime = Date()
 
         // Verify the write actually stuck
         let diagResult = shieldDiagnostic()
