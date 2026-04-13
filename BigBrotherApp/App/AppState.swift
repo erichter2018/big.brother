@@ -2469,17 +2469,18 @@ final class AppState {
     private func verifyAndFixEnforcement() {
         guard deviceRole == .child, let enforcement else { return }
 
-        // Skip enforcement fix if a command was just processed (within 10s).
-        // The command processor's result is authoritative — the enforcement fix can
-        // race against it and "correct" enforcement backwards (especially temp unlocks
-        // where ModeStackResolver may see stale state from a different process).
-        // 10s is enough to prevent races while allowing rapid command correction.
-        // Post-write verification (1s retry) handles immediate write failures.
+        // Skip if a command was just processed (within 10s).
         let cmdDefaults = UserDefaults.appGroup
         let lastCommandAt = cmdDefaults?.double(forKey: "fr.bigbrother.lastCommandProcessedAt") ?? 0
-        if Date().timeIntervalSince1970 - lastCommandAt < 10 {
-            return
-        }
+        if Date().timeIntervalSince1970 - lastCommandAt < 10 { return }
+
+        // Skip if enforcement was recently applied — XPC reads from
+        // ManagedSettingsStore are stale for several seconds after a write.
+        // Without this, every 10s tick reads "shields down" (stale XPC),
+        // triggers a false mismatch, and re-applies. The apply() dedup
+        // catches this too, but skipping the XPC read is cheaper.
+        if let lastApply = EnforcementServiceImpl.lastApplyTime,
+           Date().timeIntervalSince(lastApply) < 15 { return }
 
         // DIRECT temp unlock file check FIRST, before ModeStackResolver.
         // ModeStackResolver sometimes fails to see the file (reason unknown — possibly

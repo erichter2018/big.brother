@@ -46,7 +46,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     /// already does this via Task.detached).
     private static let applyLock = NSLock()
     private static var lastApplyMode: LockMode?
-    private static var lastApplyTime: Date?
+    static private(set) var lastApplyTime: Date?
 
     /// FRESH store instance created on every access — never cached.
     /// ManagedSettingsStore communicates with the system daemon via XPC.
