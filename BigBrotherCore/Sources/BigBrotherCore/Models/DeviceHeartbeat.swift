@@ -121,6 +121,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// Number of screen unlocks today.
     public let screenUnlockCount: Int?
 
+    /// Whether the child device has trusted command-signing public keys in Keychain.
+    public let hasSigningKeys: Bool?
+
     /// Whether jailbreak indicators were detected on the device.
     public let jailbreakDetected: Bool?
     /// Which jailbreak check triggered (e.g. "suspicious_paths", "dyld_injection:/path/to/lib").
@@ -238,6 +241,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         timeZoneOffsetSeconds: Int? = nil,
         screenTimeMinutes: Int? = nil,
         screenUnlockCount: Int? = nil,
+        hasSigningKeys: Bool? = nil,
         jailbreakDetected: Bool? = nil,
         jailbreakReason: String? = nil,
         isDriving: Bool? = nil,
@@ -311,6 +315,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.timeZoneOffsetSeconds = timeZoneOffsetSeconds
         self.screenTimeMinutes = screenTimeMinutes
         self.screenUnlockCount = screenUnlockCount
+        self.hasSigningKeys = hasSigningKeys
         self.jailbreakDetected = jailbreakDetected
         self.jailbreakReason = jailbreakReason
         self.isDriving = isDriving
@@ -368,6 +373,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case timeZoneOffsetSeconds
         case screenTimeMinutes
         case screenUnlockCount
+        case hasSigningKeys
         case jailbreakDetected
         case jailbreakReason
         case isDriving, currentSpeed, heartbeatSource, buildType, tunnelConnected
@@ -430,6 +436,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         timeZoneOffsetSeconds = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetSeconds)
         screenTimeMinutes = try container.decodeIfPresent(Int.self, forKey: .screenTimeMinutes)
         screenUnlockCount = try container.decodeIfPresent(Int.self, forKey: .screenUnlockCount)
+        hasSigningKeys = try container.decodeIfPresent(Bool.self, forKey: .hasSigningKeys)
         jailbreakDetected = try container.decodeIfPresent(Bool.self, forKey: .jailbreakDetected)
         jailbreakReason = try container.decodeIfPresent(String.self, forKey: .jailbreakReason)
         isDriving = try container.decodeIfPresent(Bool.self, forKey: .isDriving)

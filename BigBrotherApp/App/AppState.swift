@@ -65,11 +65,33 @@ final class AppState {
         for hb in heartbeats {
             let key = hb.deviceID.rawValue
             var history = heartbeatHistory[key] ?? []
-            // Skip if this exact timestamp is already recorded
             if history.first?.timestamp == hb.timestamp { continue }
             history.insert(hb, at: 0)
             if history.count > 3 { history = Array(history.prefix(3)) }
             heartbeatHistory[key] = history
+        }
+        if deviceRole == .parent { autoDistributeSigningKeysIfNeeded(heartbeats) }
+    }
+
+    @ObservationIgnored private var signingKeyPushSent: Set<DeviceID> = []
+
+    private func autoDistributeSigningKeysIfNeeded(_ heartbeats: [DeviceHeartbeat]) {
+        guard let keychain = try? KeychainManager(),
+              let pubKeyData = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey),
+              pubKeyData.count >= 32 else { return }
+        let pubKeyBase64 = pubKeyData.base64EncodedString()
+
+        for hb in heartbeats {
+            guard hb.hasSigningKeys == false,
+                  !signingKeyPushSent.contains(hb.deviceID) else { continue }
+            signingKeyPushSent.insert(hb.deviceID)
+            Task {
+                try? await sendCommand(
+                    target: .device(hb.deviceID),
+                    action: .addTrustedSigningKey(publicKeyBase64: pubKeyBase64)
+                )
+                NSLog("[Parent] Auto-pushed signing key to \(hb.deviceID.rawValue)")
+            }
         }
     }
 

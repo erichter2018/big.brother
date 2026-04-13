@@ -412,6 +412,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
             screenUnlockCount: UserDefaults.appGroup?.integer(forKey: "screenUnlockCount"),
+            hasSigningKeys: Self.hasSigningKeys(keychain: keychain),
             jailbreakDetected: JailbreakDetector.isJailbroken(),
             jailbreakReason: JailbreakDetector.detectedReason(),
             isDriving: locationService?.drivingMonitor?.isDriving == true ? true : nil,
@@ -1027,6 +1028,12 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         _notifAuthLock.lock()
         defer { _notifAuthLock.unlock() }
         return _notifAuthBacking
+    }
+
+    private static func hasSigningKeys(keychain: any KeychainProtocol) -> Bool {
+        guard let data = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey) else { return false }
+        if let keys = try? JSONDecoder().decode([String].self, from: data) { return !keys.isEmpty }
+        return data.count >= 32
     }
 
     private static func currentScreenTimeMinutes(from storage: any SharedStorageProtocol) -> Int? {

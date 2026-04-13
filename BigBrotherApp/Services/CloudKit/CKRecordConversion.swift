@@ -383,6 +383,7 @@ enum CKRecordConversion {
         record[CKFieldName.hbTimeZoneOffset] = hb.timeZoneOffsetSeconds.map { NSNumber(value: $0) }
         record[CKFieldName.hbScreenTimeMinutes] = hb.screenTimeMinutes.map { $0 as NSNumber }
         record[CKFieldName.hbScreenUnlockCount] = hb.screenUnlockCount.map { $0 as NSNumber }
+        record["hbHasSigningKeys"] = hb.hasSigningKeys.map { NSNumber(value: $0) }
         record[CKFieldName.hbJailbreakDetected] = hb.jailbreakDetected.map { NSNumber(value: $0) }
         record[CKFieldName.hbJailbreakReason] = hb.jailbreakReason
         record[CKFieldName.hbIsDriving] = hb.isDriving.map { NSNumber(value: $0) }
@@ -483,6 +484,7 @@ enum CKRecordConversion {
             timeZoneOffsetSeconds: (record[CKFieldName.hbTimeZoneOffset] as? Int64).map { Int($0) },
             screenTimeMinutes: (record[CKFieldName.hbScreenTimeMinutes] as? Int64).map { Int($0) },
             screenUnlockCount: (record[CKFieldName.hbScreenUnlockCount] as? Int64).map { Int($0) },
+            hasSigningKeys: (record["hbHasSigningKeys"] as? Int64).map { $0 != 0 },
             jailbreakDetected: (record[CKFieldName.hbJailbreakDetected] as? Int64).map { $0 != 0 },
             jailbreakReason: record[CKFieldName.hbJailbreakReason] as? String,
             isDriving: (record[CKFieldName.hbIsDriving] as? Int64).map { $0 != 0 },
