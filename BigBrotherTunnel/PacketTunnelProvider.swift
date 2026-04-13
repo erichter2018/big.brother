@@ -489,9 +489,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var lastDNSDateCheck: String?
 
     private func checkDNSDayRollover() {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let today = dateFormatter.string(from: Date())
+        let today = screenTimeTodayString()
 
         let dayChanged = lastDNSDateCheck != nil && lastDNSDateCheck != today
         if dayChanged {
@@ -589,6 +587,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // dead app got up to 30s of unrestricted internet before the
             // counter even started advancing.
             self.pollScreenLockState()
+            self.checkFlushRequest()
 
             // Slow path: heavier operations every 30 seconds (every 6th tick at 5s cadence)
             if self.livenessTickCount % 6 == 0 {
@@ -3826,9 +3825,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func saveDailyScreenTimeSnapshot(db: CKDatabase, enrollment: ChildEnrollmentState, minutes: Int, unlocks: Int, date: String?, slotSeconds: [String: Int]) async {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
-        let dateStr = date ?? fmt.string(from: Date())
+        let dateStr = date ?? screenTimeTodayString()
 
         let recordID = CKRecord.ID(recordName: "BBScreenTime_\(enrollment.deviceID.rawValue)_\(dateStr)")
         let stRecord: CKRecord
@@ -4204,15 +4201,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let screenTimeUnlockCountKey = "screenUnlockCount"
 
     private func startScreenLockMonitoring() {
-        // Screen lock state is now read from App Group (written by main app's
-        // DeviceLockMonitor using public UIApplication.protectedData notifications).
-        // The tunnel polls this on each liveness tick instead of using the
-        // private com.apple.springboard.lockstate Darwin notification.
         let defaults = UserDefaults.appGroup
-        let locked = defaults?.bool(forKey: AppGroupKeys.isDeviceLocked) ?? true
+        let rawLocked = defaults?.bool(forKey: AppGroupKeys.isDeviceLocked) ?? true
+        let lockedAt = defaults?.double(forKey: "isDeviceLockedAt") ?? 0
+        let stale = lockedAt == 0 || (Date().timeIntervalSince1970 - lockedAt) > 120
+        let locked = stale ? true : rawLocked
         dnsProxy?.isDeviceLocked = locked
         if !locked { lastUnlockAt = Date() }
-        NSLog("[Tunnel] Screen lock monitoring started (initial: \(locked ? "locked" : "unlocked"), from App Group)")
+        NSLog("[Tunnel] Screen lock monitoring started (initial: \(locked ? "locked" : "unlocked"), stale: \(stale))")
     }
 
     private func stopScreenLockMonitoring() {
@@ -4220,9 +4216,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Poll screen lock state from App Group (written by main app's DeviceLockMonitor).
+    /// Treats stale or missing lock state as locked (conservative — avoids phantom screen time).
     private func pollScreenLockState() {
         let defaults = UserDefaults.appGroup
-        let locked = defaults?.bool(forKey: AppGroupKeys.isDeviceLocked) ?? true
+        let rawLocked = defaults?.bool(forKey: AppGroupKeys.isDeviceLocked) ?? true
+        let lockedAt = defaults?.double(forKey: "isDeviceLockedAt") ?? 0
+        let stale = lockedAt == 0 || (Date().timeIntervalSince1970 - lockedAt) > 120
+        let locked = stale ? true : rawLocked
         let wasLocked = dnsProxy?.isDeviceLocked ?? true
         if locked != wasLocked {
             handleScreenLockTransition(locked: locked)
@@ -4271,7 +4271,26 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let screenTimeSlotKey = "screenTimeSlots"
 
     private func addScreenTimeFromTunnel(seconds: Int, date: String, defaults: UserDefaults?) {
-        // Reset if day changed
+        // Split session at midnight if it spans two days.
+        let sessionStart = Date().addingTimeInterval(TimeInterval(-seconds))
+        let startDate = screenTimeTodayString(for: sessionStart)
+        if startDate != date && seconds > 0 {
+            let cal = Calendar.current
+            let midnight = cal.startOfDay(for: Date())
+            let beforeMidnight = max(1, Int(midnight.timeIntervalSince(sessionStart)))
+            let afterMidnight = seconds - beforeMidnight
+            if beforeMidnight > 0 {
+                addScreenTimeToDate(seconds: beforeMidnight, date: startDate, defaults: defaults)
+            }
+            if afterMidnight > 0 {
+                addScreenTimeToDate(seconds: afterMidnight, date: date, defaults: defaults)
+            }
+            return
+        }
+        addScreenTimeToDate(seconds: seconds, date: date, defaults: defaults)
+    }
+
+    private func addScreenTimeToDate(seconds: Int, date: String, defaults: UserDefaults?) {
         if defaults?.string(forKey: screenTimeDateKey) != date {
             defaults?.set(date, forKey: screenTimeDateKey)
             defaults?.set(0, forKey: screenTimeSecondsKey)
@@ -4331,8 +4350,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         lastUnlockAt = Date()
     }
 
-    private func screenTimeTodayString() -> String {
-        let comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+    private func checkFlushRequest() {
+        let defaults = UserDefaults.appGroup
+        guard let requestedAt = defaults?.double(forKey: "tunnelFlushRequestedAt"),
+              requestedAt > 0,
+              Date().timeIntervalSince1970 - requestedAt < 10 else { return }
+        defaults?.removeObject(forKey: "tunnelFlushRequestedAt")
+        flushScreenTimeSession()
+    }
+
+    private func screenTimeTodayString(for date: Date = Date()) -> String {
+        let cal = Calendar(identifier: .gregorian)
+        let comps = cal.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", comps.year ?? 0, comps.month ?? 0, comps.day ?? 0)
     }
 }

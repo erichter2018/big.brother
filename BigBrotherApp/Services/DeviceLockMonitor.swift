@@ -32,6 +32,7 @@ final class DeviceLockMonitor {
             self?.isDeviceLocked = true
             self?.onLockStateChanged?(true)
             defaults?.set(true, forKey: "isDeviceLocked")
+            defaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
         }
 
         let didBecome = NotificationCenter.default.addObserver(
@@ -41,12 +42,14 @@ final class DeviceLockMonitor {
             self?.isDeviceLocked = false
             self?.onLockStateChanged?(false)
             defaults?.set(false, forKey: "isDeviceLocked")
+            defaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
         }
 
         observers = [willResign, didBecome]
 
-        // Set initial state from current protected data availability.
         isDeviceLocked = !UIApplication.shared.isProtectedDataAvailable
+        defaults?.set(isDeviceLocked, forKey: "isDeviceLocked")
+        defaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
     }
 
     /// No-op — screen time is now tracked exclusively by the VPN tunnel.

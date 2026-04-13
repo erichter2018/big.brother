@@ -311,24 +311,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let minuteString = String(event.rawValue.dropFirst("usage.".count))
         guard let minutes = Int(minuteString) else { return }
 
-        // Write the highest milestone reached to App Group so the heartbeat can relay it.
+        // b518: Monitor no longer writes screenTimeMinutes — tunnel is sole owner.
+        // Store milestone separately for diagnostics only.
         let defaults = UserDefaults.appGroup
         let today = Self.todayDateString()
-        let dateKey = "screenTimeDate"
-        let minutesKey = "screenTimeMinutes"
-
-        let existingDate = defaults?.string(forKey: dateKey)
-        let existingMinutes = defaults?.integer(forKey: minutesKey) ?? 0
-
-        // Only update if today's date matches and the new milestone is higher.
+        let existingDate = defaults?.string(forKey: "monitorMilestoneDate")
+        let existingMinutes = defaults?.integer(forKey: "monitorMilestoneMinutes") ?? 0
         if existingDate == today {
             if minutes > existingMinutes {
-                defaults?.set(minutes, forKey: minutesKey)
+                defaults?.set(minutes, forKey: "monitorMilestoneMinutes")
             }
         } else {
-            // New day — reset.
-            defaults?.set(today, forKey: dateKey)
-            defaults?.set(minutes, forKey: minutesKey)
+            defaults?.set(today, forKey: "monitorMilestoneDate")
+            defaults?.set(minutes, forKey: "monitorMilestoneMinutes")
         }
 
         // Record Monitor activity timestamp.

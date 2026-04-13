@@ -1028,18 +1028,13 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     }
 
     private static func currentScreenTimeMinutes(from storage: any SharedStorageProtocol) -> Int? {
-        // Flush any in-progress unlock session so the count is current.
-        DeviceLockMonitor.shared.flushCurrentSession()
-
+        // Signal tunnel to flush any in-progress session before we read.
         let defaults = UserDefaults.appGroup ?? .standard
-        let dateKey = "screenTimeDate"
-        let minutesKey = "screenTimeMinutes"
+        defaults.set(Date().timeIntervalSince1970, forKey: "tunnelFlushRequestedAt")
 
-        // Only return if the stored date matches today
         let today = SelfUnlockState.todayDateString()
-        guard defaults.string(forKey: dateKey) == today else { return nil }
-        let minutes = defaults.integer(forKey: minutesKey)
-        return minutes > 0 ? minutes : nil
+        guard defaults.string(forKey: "screenTimeDate") == today else { return nil }
+        return defaults.integer(forKey: "screenTimeMinutes")
     }
 
     /// Detect build type: debug, testflight, or appstore.
