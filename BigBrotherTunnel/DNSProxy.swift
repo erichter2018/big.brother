@@ -49,6 +49,29 @@ final class DNSProxy {
     /// (CloudKit, APNS, iCloud). This ensures the device stays reachable for commands
     /// even when internet is blackholed for enforcement.
     var isBlackholeMode: Bool = false
+
+    private var resolvedModeCache: LockMode = .restricted
+    private var resolvedModeCacheExpiry: Date = .distantPast
+
+    private func refreshModeCache() {
+        let now = Date()
+        guard now >= resolvedModeCacheExpiry else { return }
+        resolvedModeCache = ModeStackResolver.resolve(storage: storage).mode
+        resolvedModeCacheExpiry = now.addingTimeInterval(3)
+    }
+
+    private static let ckDomainSuffixes = [
+        "apple-cloudkit.com", "icloud-content.com", "icloud.com",
+        "apple.com", "mzstatic.com", "push.apple.com"
+    ]
+
+    private func isCloudKitDomain(_ domain: String) -> Bool {
+        let lower = domain.lowercased()
+        for suffix in Self.ckDomainSuffixes {
+            if lower == suffix || lower.hasSuffix("." + suffix) { return true }
+        }
+        return false
+    }
     private var knownApps: Set<String> = []
     /// b461: lock around all knownApps access (check + insert + persist +
     /// pending-list append). See recordDomain comments for rationale.
@@ -342,28 +365,30 @@ final class DNSProxy {
         let txn = UInt16(dns[0]) << 8 | UInt16(dns[1])
         let domain = parseDomain(dns)
 
-        // Priority order: enforcement blocks win over everything, then time limits,
-        // then blackhole, then safe search. A shielded app's domain should be REFUSED
-        // even if safe search would redirect it.
+        refreshModeCache()
+        // GATE: unlocked mode = forward everything, zero blocking.
+        // Checked here (the single DNS decision point) so stale blocklist
+        // files can never cause blocking in unlocked mode.
+        let currentMode = resolvedModeCache
+        let domainIsCloudKit = domain.map { isCloudKitDomain($0) } ?? false
 
-        // 1. Enforcement domain blocking: block web versions of shielded apps.
-        if let domain, isEnforcementBlocked(domain) {
-            let resp = buildRefusedResponse(query: dns)
-            writeResponse(resp, destIP: srcIP, destPort: srcPort)
-            bgLog(domain)
-            return
+        if currentMode != .unlocked {
+            if let domain, !domainIsCloudKit, isEnforcementBlocked(domain) {
+                let resp = buildRefusedResponse(query: dns)
+                writeResponse(resp, destIP: srcIP, destPort: srcPort)
+                bgLog(domain)
+                return
+            }
+
+            if let domain, !domainIsCloudKit, isTimeLimitBlocked(domain) {
+                let resp = buildRefusedResponse(query: dns)
+                writeResponse(resp, destIP: srcIP, destPort: srcPort)
+                bgLog(domain)
+                return
+            }
         }
 
-        // 2. Time-limit domain blocking: REFUSED for exhausted app domains.
-        if let domain, isTimeLimitBlocked(domain) {
-            let resp = buildRefusedResponse(query: dns)
-            writeResponse(resp, destIP: srcIP, destPort: srcPort)
-            bgLog(domain)
-            return
-        }
-
-        // 3. DNS blackhole mode: REFUSE everything except Apple infrastructure.
-        if isBlackholeMode, let domain, !isBlackholeExempt(domain) {
+        if isBlackholeMode, let domain, !isBlackholeExempt(domain), !domainIsCloudKit {
             let resp = buildRefusedResponse(query: dns)
             writeResponse(resp, destIP: srcIP, destPort: srcPort)
             bgLog(domain)
