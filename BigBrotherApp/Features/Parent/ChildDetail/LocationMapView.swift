@@ -38,6 +38,7 @@ struct LocationMapView: View {
     @State private var viewMode: ViewMode = .latest
     @State private var isLoadingTrips = false
     @State private var liveManager: LiveLocationManager?
+    @State private var selectedDeviceID: DeviceID?
 
     // Speed limit lookup for scrubbed position
     private var speedLimitService: SpeedLimitService { .shared }
@@ -149,6 +150,7 @@ struct LocationMapView: View {
     }
 
     private var primaryDeviceID: DeviceID? {
+        if let selected = selectedDeviceID { return selected }
         if let phone = devices.first(where: { $0.modelIdentifier.lowercased().contains("iphone") }) {
             return phone.id
         }
@@ -996,17 +998,41 @@ struct LocationMapView: View {
                                 Text("Live").font(.caption).fontWeight(.semibold).foregroundStyle(.green)
                                 Text("\(speed) mph").font(.caption).foregroundStyle(.secondary)
                                 Spacer()
+                                Button {
+                                    liveManager?.stop()
+                                    liveManager = nil
+                                } label: {
+                                    Text("Stop").font(.caption2).foregroundStyle(.red)
+                                }
                             }
                         }
 
-                        Button {
-                            withAnimation { viewMode = .tripHistory }
-                        } label: {
-                            Label("View Trips", systemImage: "map")
-                                .font(.subheadline)
-                                .frame(maxWidth: .infinity)
+                        HStack(spacing: 8) {
+                            Button {
+                                withAnimation { viewMode = .tripHistory }
+                            } label: {
+                                Label("View Trips", systemImage: "map")
+                                    .font(.subheadline)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+
+                            if liveManager == nil || liveManager?.isLive == false {
+                                Button {
+                                    startLiveTracking()
+                                } label: {
+                                    Label("Track Now", systemImage: "antenna.radiowaves.left.and.right")
+                                        .font(.subheadline)
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.green)
+                            }
                         }
-                        .buttonStyle(.bordered)
+
+                        if devices.count > 1 {
+                            devicePicker
+                        }
                     }
                     .padding(.horizontal)
                     .padding(.vertical, 10)
@@ -1096,6 +1122,13 @@ struct LocationMapView: View {
         .onChange(of: heartbeats.first?.latitude) { _, _ in
             if !isScrubbing, let coord = currentLocation {
                 withAnimation { position = .camera(MapCamera(centerCoordinate: coord, distance: 2000)) }
+            }
+        }
+        .onChange(of: liveManager?.latestLocation?.timestamp) { _, _ in
+            if viewMode == .latest, let coord = liveManager?.smoothCoordinate {
+                withAnimation(.linear(duration: 2.5)) {
+                    position = .camera(MapCamera(centerCoordinate: coord, distance: 2000))
+                }
             }
         }
         .onDisappear {
@@ -1307,6 +1340,43 @@ struct LocationMapView: View {
         withAnimation {
             position = .region(MKCoordinateRegion(center: center, span: span))
             followDot = false
+        }
+    }
+
+    private func startLiveTracking() {
+        guard let devID = primaryDeviceID else { return }
+        let manager = LiveLocationManager(deviceID: devID)
+        liveManager = manager
+        manager.start()
+    }
+
+    @ViewBuilder
+    private var devicePicker: some View {
+        HStack(spacing: 12) {
+            ForEach(devices, id: \.id) { device in
+                let isSelected = primaryDeviceID == device.id
+                let isPhone = device.modelIdentifier.lowercased().contains("iphone")
+                Button {
+                    selectedDeviceID = device.id
+                    liveManager?.stop()
+                    liveManager = nil
+                    Task { await loadBreadcrumbs() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: isPhone ? "iphone" : "ipad")
+                            .font(.caption2)
+                        Text(device.displayName.replacingOccurrences(of: "'s ", with: " "))
+                            .font(.caption2)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(isSelected ? Color.blue.opacity(0.15) : Color.clear)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(isSelected ? Color.blue : Color.secondary.opacity(0.3), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
