@@ -1932,11 +1932,8 @@ final class AppState {
                     childProfileID: profile.id,
                     timeLimitConfigs: configs
                 )
-                // Track which children have pending requests for the blue dot.
-                let hasRequests = events.contains { event in
-                    event.eventType == .unlockRequested && deviceIDs.contains(event.deviceID)
-                }
-                if hasRequests { pendingChildIDs.insert(profile.id) }
+                let reviews = (try? await cloudKit.fetchPendingAppReviews(childProfileID: profile.id)) ?? []
+                if !reviews.isEmpty { pendingChildIDs.insert(profile.id) }
             }
             await MainActor.run { childrenWithPendingRequests = pendingChildIDs }
         }
