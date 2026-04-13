@@ -362,10 +362,6 @@ public enum AppGroupKeys {
 
     // MARK: - Tunnel internals
 
-    /// Cached serialized blocklist the tunnel reuses across tunnel restarts
-    /// so the DNS proxy starts with useful data before the first refresh.
-    public static let tunnelLastKnownBlocklist = "tunnel_last_known_blocklist"
-
     /// Queue of token data (base64) that the main app wants the Monitor /
     /// tunnel to treat as "removed" on the next reconcile. Written by the
     /// command processor, read by enforcement reapply.

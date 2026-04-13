@@ -155,18 +155,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // app launch after a deploy. The 30-second tick will activate it after the grace.
         dnsProxy?.isBlackholeMode = shouldBlackhole
 
-        // Seed enforcement blocked domains from last-known fallback if the
-        // main list is empty AND the device should be restricted/locked.
-        // Skip for unlocked — the empty list is intentional.
-        let mainBlocklist = storage.readEnforcementBlockedDomains()
-        let modeOnStart = ModeStackResolver.resolve(storage: storage).mode
-        if mainBlocklist.isEmpty && modeOnStart != .unlocked,
-           let lastKnownData = storage.readRawData(forKey: AppGroupKeys.tunnelLastKnownBlocklist),
-           let lastKnownDomains = try? JSONDecoder().decode(Set<String>.self, from: lastKnownData),
-           !lastKnownDomains.isEmpty {
-            try? storage.writeEnforcementBlockedDomains(lastKnownDomains)
-            NSLog("[Tunnel] Seeded enforcement blocklist from last-known fallback (\(lastKnownDomains.count) domains)")
-        }
+        // b526: Resurrection cache (tunnelLastKnownBlocklist) deleted.
+        // The tunnel is a passive consumer of enforcementBlockedDomains.
+        // If the list is empty, that's intentional (unlocked or fresh start).
+        // The app/Monitor will populate it within seconds of a mode change.
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error {
@@ -213,10 +205,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         flushScreenTimeSession()
         stopScreenLockMonitoring()
         stopNetworkPathMonitoring()
-
-        // Persist current blocklist so next tunnel start has a fallback
-        // if the main app hasn't written one yet.
-        persistCurrentBlocklist()
 
         writeTunnelStatus("stopped:\(reason.rawValue)")
         completionHandler()
@@ -602,7 +590,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.checkPendingShieldConfirmation()
                 self.checkNetworkPathAndReconnect()
                 self.checkDNSDayRollover()
-                self.persistCurrentBlocklist()
                 self.relayEnforcementRefreshIfNeeded()
                 self.verifyEnforcementState()
                 // pollScreenLockState moved to fast path above — see b457 note.
@@ -1764,9 +1751,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Recalculate time-limit DNS blocked domains from exhausted apps.
     private func updateTimeLimitBlockedDomains() {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        let today = f.string(from: Date())
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        if resolution.mode == .unlocked {
+            try? storage.writeTimeLimitBlockedDomains([])
+            return
+        }
+        let today = screenTimeTodayString()
         let exhausted = storage.readTimeLimitExhaustedApps().filter { $0.dateString == today }
         var blockedDomains = Set<String>()
         for app in exhausted {
@@ -3879,15 +3869,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - DNS Blocklist Persistence
 
-    /// Save the current enforcement blocklist to a last-known key so a future
-    /// tunnel start can fall back to it if the main app hasn't written one yet.
-    private func persistCurrentBlocklist() {
-        let current = storage.readEnforcementBlockedDomains()
-        guard !current.isEmpty else { return }
-        if let data = try? JSONEncoder().encode(current) {
-            try? storage.writeRawData(data, forKey: AppGroupKeys.tunnelLastKnownBlocklist)
-        }
-    }
 
     // MARK: - Status
 

@@ -936,7 +936,6 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
         try? storage.writeEnforcementBlockedDomains([])
         try? storage.writeTimeLimitBlockedDomains([])
-        try? storage.writeRawData(Data("[]".utf8), forKey: AppGroupKeys.tunnelLastKnownBlocklist)
 
         // b432: Defensive clear of the recovery probe store. The probe path
         // (apply() recovery branch) writes .all() to enforcement.recovery
