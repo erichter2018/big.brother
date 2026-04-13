@@ -179,6 +179,7 @@ final class AppState {
     /// Cleared when a heartbeat confirms the mode.
     var expectedModes: [ChildProfileID: (mode: LockMode, sentAt: Date)] = [:]
     var childrenManuallyOverridden: Set<ChildProfileID> = []
+    var pendingReviewNeedsRefresh: Bool = false
 
     /// Recent commands sent by the parent, for diagnostic interleaving.
     /// Ring buffer of last 20 per child. Shown in diagnostic copy text

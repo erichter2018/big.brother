@@ -1475,6 +1475,14 @@ final class ChildDetailViewModel: CommandSendable {
             pendingReviewDiagnostic = "No CloudKit service"
             return
         }
+        if appState.pendingReviewNeedsRefresh {
+            appState.pendingReviewNeedsRefresh = false
+            for _ in 0..<3 {
+                try? await Task.sleep(for: .seconds(2))
+                let reviews = (try? await cloudKit.fetchPendingAppReviews(childProfileID: child.id)) ?? []
+                if !reviews.isEmpty { break }
+            }
+        }
         do {
             // Show reviews even for already-approved apps — a review for an approved app
             // means the token rotated (stale) and needs refreshing. Previously these were
