@@ -100,16 +100,15 @@ struct ChildSummaryCard: View {
             }
         }
 
-        // latestHeartbeatAge + source
-        var heartbeatAge: TimeInterval? = nil
-        var heartbeatIsTunnel = false
+        var deviceHeartbeats: [(isPhone: Bool, age: TimeInterval)] = []
         for device in devices {
             if let hb = heartbeats.first(where: { $0.deviceID == device.id }) {
-                heartbeatAge = Date().timeIntervalSince(hb.timestamp)
-                heartbeatIsTunnel = hb.heartbeatSource == "vpnTunnel"
-                break
+                let isPhone = device.modelIdentifier.lowercased().contains("iphone")
+                deviceHeartbeats.append((isPhone: isPhone, age: Date().timeIntervalSince(hb.timestamp)))
             }
         }
+        deviceHeartbeats.sort { $0.age < $1.age }
+        let heartbeatAge = deviceHeartbeats.first?.age
 
         // jailbreak info (used in tertiaryLine)
         let jailbreakReasons = devices.compactMap { dev in heartbeats.first(where: { $0.deviceID == dev.id })?.jailbreakReason }
@@ -160,7 +159,7 @@ struct ChildSummaryCard: View {
             isFCAuthDegraded: fcAuthDegraded,
             isAppForceClosed: appForceClosed,
             latestHeartbeatAge: heartbeatAge,
-            isTunnelHeartbeat: heartbeatIsTunnel,
+            deviceHeartbeats: deviceHeartbeats,
             jailbreakReasons: jailbreakReasons,
             hasJailbreak: hasJailbreak,
             isInternetBlocked: internetBlocked,
@@ -188,7 +187,7 @@ struct ChildSummaryCard: View {
         let isFCAuthDegraded: Bool
         let isAppForceClosed: Bool
         let latestHeartbeatAge: TimeInterval?
-        let isTunnelHeartbeat: Bool
+        let deviceHeartbeats: [(isPhone: Bool, age: TimeInterval)]
         let jailbreakReasons: [String]
         let hasJailbreak: Bool
         let isInternetBlocked: Bool
@@ -680,23 +679,25 @@ struct ChildSummaryCard: View {
     @ViewBuilder
     private func heartbeatLine(cached: PrecomputedValues) -> some View {
         if let lastSeen = cached.latestHeartbeatAge {
-            let sourceIcon = cached.isTunnelHeartbeat ? "shield.checkered" : "heart.fill"
-            if lastSeen < 30 {
-                infoRow(icon: sourceIcon, color: .red) {
-                    Text("online")
-                        .foregroundStyle(.secondary)
-                    lockIcon
-                }
-            } else if cached.isAppForceClosed {
+            if cached.isAppForceClosed {
                 infoRow(icon: "exclamationmark.triangle.fill", color: Self.mutedOrange) {
                     Text("app not running")
                         .foregroundStyle(Self.mutedOrange)
                     lockIcon
                 }
             } else {
-                infoRow(icon: sourceIcon, color: .red) {
-                    Text(formatAge(lastSeen))
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    ForEach(Array(cached.deviceHeartbeats.enumerated()), id: \.offset) { _, dh in
+                        HStack(spacing: 2) {
+                            Image(systemName: dh.isPhone ? "iphone" : "ipad")
+                                .font(.caption2)
+                                .foregroundStyle(dh.age < 600 ? .green : .secondary)
+                            Text(dh.age < 30 ? "now" : formatAge(dh.age))
+                                .font(.caption2)
+                                .foregroundStyle(dh.age < 600 ? Color.secondary : Color.orange)
+                        }
+                    }
+                    Spacer()
                     lockIcon
                 }
             }
