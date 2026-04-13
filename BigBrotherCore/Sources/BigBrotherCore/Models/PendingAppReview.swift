@@ -12,16 +12,28 @@ public struct PendingAppReview: Codable, Sendable, Identifiable, Equatable {
     public let familyID: FamilyID
     public let childProfileID: ChildProfileID
     public let deviceID: DeviceID
-    /// FNV-1a fingerprint of the device-local ApplicationToken.
     public let appFingerprint: String
-    /// Display name — starts as picker name or "Temporary Name N", updated when resolved.
     public var appName: String
-    /// Bundle identifier if available.
     public var bundleID: String?
-    /// Whether the real app name has been captured via ShieldConfiguration.
     public var nameResolved: Bool
     public let createdAt: Date
     public var updatedAt: Date
+
+    /// Lifecycle status for the local write-ahead log.
+    /// - pending: created locally, not yet uploaded to CK
+    /// - synced: uploaded to CK, awaiting parent decision
+    /// - resolved: parent decided (allow/block/limit), command sent or will be sent
+    public var syncStatus: SyncStatus
+
+    public enum SyncStatus: String, Codable, Sendable, Equatable {
+        case pending
+        case synced
+        case resolved
+    }
+
+    /// Raw ApplicationToken data (base64). Stored so the parent's command
+    /// can reference the exact token without relying on fingerprint matching.
+    public var tokenDataBase64: String?
 
     public init(
         id: UUID = UUID(),
@@ -33,7 +45,9 @@ public struct PendingAppReview: Codable, Sendable, Identifiable, Equatable {
         bundleID: String? = nil,
         nameResolved: Bool = false,
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        syncStatus: SyncStatus = .pending,
+        tokenDataBase64: String? = nil
     ) {
         self.id = id
         self.familyID = familyID
@@ -45,6 +59,8 @@ public struct PendingAppReview: Codable, Sendable, Identifiable, Equatable {
         self.nameResolved = nameResolved
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.syncStatus = syncStatus
+        self.tokenDataBase64 = tokenDataBase64
     }
 }
 

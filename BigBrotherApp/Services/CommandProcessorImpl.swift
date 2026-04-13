@@ -90,6 +90,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     var onScheduleSyncNeeded: (() -> Void)?
     var onRequestTimeLimitSetup: (() -> Void)?
     var onRequestChildAppPick: (() -> Void)?
+    /// Called when a startLiveTracking command is received.
+    var onStartLiveTracking: ((Int) -> Void)?
+    /// Called when a stopLiveTracking command is received.
+    var onStopLiveTracking: (() -> Void)?
 
     init(
         cloudKit: any CloudKitServiceProtocol,
@@ -1028,6 +1032,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .blockAppForToday(let fingerprint):
                 return handleBlockAppForToday(fingerprint: fingerprint)
+
+            // Live tracking handled automatically by LocationService when moving
+                return .applied
             }
 
         } catch {
@@ -2278,9 +2285,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Match by fingerprint — the parent acted on this exact fingerprint.
         if let data = storage.readRawData(forKey: "pending_review_local.json"),
            var pending = try? JSONDecoder().decode([PendingAppReview].self, from: data) {
-            let before = pending.count
-            pending.removeAll { $0.appFingerprint == fingerprint }
-            if pending.count != before, let encoded = try? JSONEncoder().encode(pending) {
+            var changed = false
+            for i in pending.indices where pending[i].appFingerprint == fingerprint {
+                pending[i].syncStatus = .resolved
+                changed = true
+            }
+            if changed, let encoded = try? JSONEncoder().encode(pending) {
                 try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
         }

@@ -77,12 +77,6 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
     private func handleAction(action: ShieldAction, token: ApplicationToken?, completionHandler: @escaping (ShieldActionResponse) -> Void) {
         let storage = AppGroupStorage()
 
-        // Enforcement trampoline: every time the kid taps a shielded app,
-        // re-read the current mode and re-apply shields. This catches stale
-        // enforcement state when the tunnel processed a mode change but the
-        // Monitor hasn't woken to apply ManagedSettings yet.
-        refreshEnforcementIfNeeded(storage: storage)
-
         switch action {
         case .primaryButtonPressed:
             handlePrimaryButton(directToken: token, storage: storage, completionHandler: completionHandler)

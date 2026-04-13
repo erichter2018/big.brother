@@ -70,10 +70,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     //
     // Thresholds are in number of consecutive CK failures (poll + heartbeat
     // combined). The liveness timer runs every 10s so ~6 failures ≈ 1 minute.
-    private var ckConsecutiveFailures: Int = 0
-    private var ckFailureStreakStartedAt: Date?
-    private var lastCKRecoveryAction: Date?
-    private var ckRecoveryLevel: Int = 0  // 0 = no recovery fired yet in this streak
+    private var consecutiveHealthFailures: Int = 0
+    private var healthStreakStartedAt: Date?
+    private var lastHealthRecoveryAction: Date?
+    private var healthRecoveryLevel: Int = 0  // 0 = no recovery fired yet in this streak
 
     /// Timer for periodic DNS activity sync.
     private var dnsActivitySyncTimer: DispatchSourceTimer?
@@ -578,7 +578,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 NSLog("[Tunnel] (fast-path) retrying failed network settings application")
                 self.reapplyNetworkSettings()
             }
-            self.dnsProxy?.healthCheck()
+            if self.dnsProxy?.healthCheck() == false {
+                // healthCheck returns false if it had to reconnect (wedged upstream)
+                self.recordNetworkHealthResult(success: false, reason: "dns_wedge")
+            }
             // b457: screen-lock polling on the fast path. The emergency
             // blackhole counter uses `isDeviceLocked` to decide whether to
             // count toward the 5-tick activation threshold. With lock state
@@ -1838,15 +1841,23 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
               needsSync > 0 else { return }
 
         guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
-              let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
+              var reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
               !reviews.isEmpty else { return }
+
+        // Only upload entries that haven't been resolved by the parent.
+        // Resolved entries stay in the local file for child UI but are
+        // NEVER re-uploaded — this breaks the zombie re-upload loop.
+        let toUpload = reviews.filter { $0.syncStatus != .resolved }
+        guard !toUpload.isEmpty else {
+            defaults?.removeObject(forKey: AppGroupKeys.pendingReviewNeedsSync)
+            return
+        }
 
         let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
         let db = container.publicCloudDatabase
 
-        // Build records for all reviews
         var records: [CKRecord] = []
-        for review in reviews {
+        for review in toUpload {
             let recordID = CKRecord.ID(recordName: "BBPendingAppReview_\(review.id.uuidString)")
             let record = CKRecord(recordType: "BBPendingAppReview", recordID: recordID)
             record["familyID"] = review.familyID.rawValue
@@ -1855,30 +1866,35 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             record["appFingerprint"] = review.appFingerprint
             record["appName"] = review.appName
             record["appBundleID"] = review.bundleID
+            record["tokenDataBase64"] = review.tokenDataBase64
             record["nameResolved"] = (review.nameResolved ? 1 : 0) as NSNumber
             record["createdAt"] = review.createdAt as NSDate
             record["updatedAt"] = review.updatedAt as NSDate
             records.append(record)
         }
 
-        // Use CKModifyRecordsOperation with .changedKeys so updates work
-        // (db.save() would fail with serverRecordChanged on second sync).
         let op = CKModifyRecordsOperation(recordsToSave: records)
         op.savePolicy = .changedKeys
         op.isAtomic = false
         op.qualityOfService = .userInitiated
 
-        var synced = 0
+        var syncedIDs = Set<UUID>()
         do {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                var resumed = false
+                op.perRecordSaveBlock = { recordID, result in
+                    if case .success = result {
+                        let uuidStr = recordID.recordName.replacingOccurrences(of: "BBPendingAppReview_", with: "")
+                        if let uuid = UUID(uuidString: uuidStr) { syncedIDs.insert(uuid) }
+                    }
+                }
                 op.modifyRecordsResultBlock = { result in
+                    guard !resumed else { return }
+                    resumed = true
                     switch result {
                     case .success: cont.resume()
                     case .failure(let error): cont.resume(throwing: error)
                     }
-                }
-                op.perRecordSaveBlock = { _, result in
-                    if case .success = result { synced += 1 }
                 }
                 db.add(op)
             }
@@ -1886,16 +1902,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             NSLog("[Tunnel] Failed to sync pending reviews: \(error.localizedDescription)")
         }
 
-        if synced > 0 {
-            // Clear ONLY the needs-sync flag — DO NOT wipe the local file.
-            // The kid UI reads pending_review_local.json to show "Pending
-            // Parent Approval" cards; wiping after upload made them disappear
-            // immediately even though the parent hadn't acted yet. Individual
-            // entries are removed by handleReviewApp on the main app side
-            // when the parent's decision lands. Re-uploads of unchanged
-            // records are no-ops via .changedKeys savePolicy.
+        if !syncedIDs.isEmpty {
+            for i in reviews.indices where syncedIDs.contains(reviews[i].id) {
+                if reviews[i].syncStatus == .pending {
+                    reviews[i].syncStatus = .synced
+                }
+            }
+            if let encoded = try? JSONEncoder().encode(reviews) {
+                try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
+            }
             defaults?.removeObject(forKey: AppGroupKeys.pendingReviewNeedsSync)
-            NSLog("[Tunnel] Synced \(synced)/\(reviews.count) pending reviews to CloudKit (local file kept)")
+            NSLog("[Tunnel] Synced \(syncedIDs.count)/\(toUpload.count) pending reviews (skipped \(reviews.count - toUpload.count) resolved)")
         }
     }
 
@@ -2655,7 +2672,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             commandPollFailureCount = 0
-            recordCKOperationResult(success: true, reason: "poll")
+            recordNetworkHealthResult(success: true, reason: "poll")
         } catch {
             NSLog("[Tunnel] Command poll failed: \(error.localizedDescription)")
             commandPollFailureCount += 1
@@ -2666,7 +2683,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 ))
                 commandPollFailureCount = 0
             }
-            recordCKOperationResult(success: false, reason: "poll: \(error.localizedDescription)")
+            recordNetworkHealthResult(success: false, reason: "poll: \(error.localizedDescription)")
         }
 
         if processedByTunnel.count > 200 {
@@ -3743,7 +3760,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let saved = await Self.performCKSave(db: db, record: record)
             if !saved { throw NSError(domain: "CKSave", code: -1) }
             heartbeatPermissionFailures = 0
-            recordCKOperationResult(success: true, reason: "heartbeat")
+            // Don't feed heartbeat results into the recovery ladder.
+            // Heartbeat CK saves hang after ~3 min of background (cloudd
+            // throttling) but that doesn't mean the tunnel is broken —
+            // command polling uses URLSession REST and works fine.
         } catch {
             // "WRITE operation not permitted" = record owned by a different iCloud account.
             // Delete the stale record and create a fresh one we own.
@@ -3791,7 +3811,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     // Clear the poison flag — delete+recreate healed.
                     UserDefaults.appGroup?
                         .removeObject(forKey: AppGroupKeys.tunnelHeartbeatRecordPoisoned)
-                    recordCKOperationResult(success: true, reason: "heartbeat-recreate")
+                    // Heartbeat recreate success — don't feed recovery ladder
                 } catch {
                     // Exponential backoff: 1min, 2min, 4min, max 5min.
                     // Heartbeats are critical — never go silent for more than 5 minutes.
@@ -3804,10 +3824,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
             } else {
                 NSLog("[Tunnel] Heartbeat failed: \(error.localizedDescription)")
-                // Feed non-permission failures into the DNS recovery ladder so
-                // a sustained "CKErrorDomain error 3" streak eventually triggers
-                // DNS proxy reconnect / recreate / reapplyNetworkSettings.
-                recordCKOperationResult(success: false, reason: "heartbeat: \(error.localizedDescription)")
+                // b468: DO NOT feed heartbeat failures into the network recovery ladder.
+                // Framework-based CloudKit saves (db.save) are throttled by cloudd after
+                // ~3 minutes of the main app being backgrounded, even when the tunnel
+                // itself has perfect internet access. Command polling (which uses
+                // URLSession REST) is the source of truth for tunnel health.
                 return
             }
         }
@@ -4041,156 +4062,123 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// Register a CK operation result. Called from pollAndProcessCommands and
-    /// sendHeartbeatFromTunnel on every attempt. Triggers the recovery ladder
-    /// when consecutive failures cross escalating thresholds.
-    private func recordCKOperationResult(success: Bool, reason: String) {
+    /// Register a network operation result (e.g. command poll or DNS health check).
+    /// Triggers the recovery ladder when consecutive failures cross escalating thresholds.
+    private func recordNetworkHealthResult(success: Bool, reason: String) {
         if success {
-            if ckConsecutiveFailures > 0 {
-                let streak = ckConsecutiveFailures
-                NSLog("[Tunnel] CK recovered after \(streak) consecutive failures")
+            if consecutiveHealthFailures > 0 {
+                let streak = consecutiveHealthFailures
+                NSLog("[Tunnel] Network health recovered after \(streak) consecutive failures")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .command,
-                    message: "CK recovered after \(streak) consecutive failures (recovery level reached: \(ckRecoveryLevel))"
+                    message: "Network health recovered after \(streak) consecutive failures (recovery level reached: \(healthRecoveryLevel))"
                 ))
             }
-            ckConsecutiveFailures = 0
-            ckFailureStreakStartedAt = nil
-            ckRecoveryLevel = 0
+            consecutiveHealthFailures = 0
+            healthStreakStartedAt = nil
+            healthRecoveryLevel = 0
             return
         }
 
-        ckConsecutiveFailures += 1
-        if ckFailureStreakStartedAt == nil {
-            ckFailureStreakStartedAt = Date()
+        consecutiveHealthFailures += 1
+        if healthStreakStartedAt == nil {
+            healthStreakStartedAt = Date()
         }
-        escalateCKRecoveryIfNeeded(reason: reason)
+        escalateNetworkRecoveryIfNeeded(reason: reason)
     }
 
     /// Escalating recovery ladder. Each level is more invasive but all are
     /// invisible to the user — no Settings toggling required. The levels
-    /// fire once per streak (tracked via ckRecoveryLevel), in order:
+    /// fire once per streak (tracked via healthRecoveryLevel), in order:
     ///
     ///   L1 (6 failures, ~1 min):  DNS proxy reconnectUpstream()
     ///   L2 (18 failures, ~3 min): recreate DNS proxy entirely
     ///   L3 (36 failures, ~6 min): reapplyNetworkSettings(force: true) — full re-plumb
     ///   L4 (60 failures, ~10 min): cancelTunnelWithError() → OS restarts us
     ///
-    /// **Compressed in b431.** The previous L4 at 120 failures (~20 min) was
-    /// far too slow:
-    ///   - iOS 17+ kills tunnels stuck in `reasserting` state after just 5 min
-    ///     (Apple Developer Forums thread 744949)
-    ///   - The most common failure (NWUDPSession bound to dead interface) is
-    ///     unrecoverable in-process; the only fix is restarting the tunnel
-    ///   - Kids were offline for 20+ min during morning network transitions
-    ///
-    /// L3 lets `reapplyNetworkSettings` set `self.reasserting = true` (counter-
-    /// tracked, so it stays set until ALL in-flight reapply ops complete).
-    /// L4 sets it explicitly because cancelTunnelWithError doesn't go through
-    /// reapplyNetworkSettings — without it, iOS would auto-disconnect after 5 min.
-    private func escalateCKRecoveryIfNeeded(reason: String) {
-        // Throttle: never fire two recovery actions within 60 seconds — some
-        // of these are expensive and need time to settle before we judge them.
-        if let last = lastCKRecoveryAction,
+    /// Thresholds are based on the 5-second liveness timer ticks.
+    /// 60 consecutive failures = 5 minutes of total connectivity loss via REST polling.
+    private func escalateNetworkRecoveryIfNeeded(reason: String) {
+        // Throttle: never fire two recovery actions within 60 seconds
+        if let last = lastHealthRecoveryAction,
            Date().timeIntervalSince(last) < 60 {
             return
         }
 
-        let count = ckConsecutiveFailures
+        let count = consecutiveHealthFailures
 
-        // b431: Fast path — if we've recently received a main app ping (APNs is
-        // still working) but CK calls keep failing, that's the "DNS bound to
-        // dead interface" pattern with high confidence. Skip L1/L2 and go
-        // straight to L3 reapply. The 36-failure threshold for normal L3 is too
-        // slow when we already know what's wrong.
+        // FAST L3: if APNs still works (recent ping from app) but network
+        // operations fail, that's likely a wedged interface/NWUDPSession.
         let now = Date()
         let recentlyHeardFromApp: Bool = {
             guard let lastPing = lastPingFromApp else { return false }
             return now.timeIntervalSince(lastPing) < 120
         }()
-        if ckRecoveryLevel < 3 && count >= 12 && recentlyHeardFromApp {
-            ckRecoveryLevel = 3
-            lastCKRecoveryAction = now
-            NSLog("[Tunnel] CK recovery FAST L3: reapplyNetworkSettings (count=\(count), recent app ping = APNs works = DNS wedged)")
+        if healthRecoveryLevel < 3 && count >= 12 && recentlyHeardFromApp {
+            healthRecoveryLevel = 3
+            lastHealthRecoveryAction = now
+            NSLog("[Tunnel] Network recovery FAST L3: reapplyNetworkSettings (count=\(count), reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
-                message: "CK recovery FAST L3: reapplyNetworkSettings (DNS bound to dead interface)",
-                details: "Failures=\(count), reason=\(reason). APNs working (recent ping), CK failing — classic stale NWUDPSession."
+                message: "Network recovery FAST L3: reapplyNetworkSettings (DNS bound to dead interface)",
+                details: "Failures=\(count), reason=\(reason). APNs working (recent ping), REST/DNS failing — classic stale NWUDPSession."
             ))
-            // reapplyNetworkSettings handles `reasserting = true` via the
-            // counter (cleared when all in-flight calls complete).
             reapplyNetworkSettings(force: true)
             return
         }
 
-        if ckRecoveryLevel < 1 && count >= 6 {
-            ckRecoveryLevel = 1
-            lastCKRecoveryAction = Date()
-            NSLog("[Tunnel] CK recovery L1: reconnectUpstream (\(count) consecutive failures)")
+        if healthRecoveryLevel < 1 && count >= 6 {
+            healthRecoveryLevel = 1
+            lastHealthRecoveryAction = Date()
+            NSLog("[Tunnel] Network recovery L1: reconnectUpstream (\(count) failures, reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
-                message: "CK recovery L1: reconnectUpstream",
+                message: "Network recovery L1: reconnectUpstream",
                 details: "Failures=\(count), reason=\(reason)"
             ))
             dnsProxy?.reconnectUpstream()
             return
         }
 
-        if ckRecoveryLevel < 2 && count >= 18 {
-            ckRecoveryLevel = 2
-            lastCKRecoveryAction = Date()
-            NSLog("[Tunnel] CK recovery L2: recreate DNS proxy (\(count) consecutive failures)")
+        if healthRecoveryLevel < 2 && count >= 18 {
+            healthRecoveryLevel = 2
+            lastHealthRecoveryAction = Date()
+            NSLog("[Tunnel] Network recovery L2: recreate DNS proxy (\(count) failures, reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
-                message: "CK recovery L2: recreate DNS proxy",
+                message: "Network recovery L2: recreate DNS proxy",
                 details: "Failures=\(count), reason=\(reason)"
             ))
             recreateDNSProxy()
             return
         }
 
-        if ckRecoveryLevel < 3 && count >= 36 {
-            ckRecoveryLevel = 3
-            lastCKRecoveryAction = Date()
-            NSLog("[Tunnel] CK recovery L3: reapplyNetworkSettings (\(count) consecutive failures)")
+        if healthRecoveryLevel < 3 && count >= 36 {
+            healthRecoveryLevel = 3
+            lastHealthRecoveryAction = Date()
+            NSLog("[Tunnel] Network recovery L3: reapplyNetworkSettings (\(count) failures, reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
-                message: "CK recovery L3: reapplyNetworkSettings",
+                message: "Network recovery L3: reapplyNetworkSettings",
                 details: "Failures=\(count), reason=\(reason)"
             ))
-            // reapplyNetworkSettings handles `reasserting = true` via the
-            // counter (cleared when all in-flight calls complete).
+            reasserting = true
             reapplyNetworkSettings(force: true)
             return
         }
 
-        if ckRecoveryLevel < 4 && count >= 60 {
-            ckRecoveryLevel = 4
-            lastCKRecoveryAction = Date()
-            NSLog("[Tunnel] CK recovery L4: cancelTunnelWithError (\(count) consecutive failures) — OS will restart us")
+        if healthRecoveryLevel < 4 && count >= 60 {
+            healthRecoveryLevel = 4
+            lastHealthRecoveryAction = Date()
+            NSLog("[Tunnel] Network recovery L4: RESTARTING TUNNEL (\(count) failures, reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
-                message: "CK recovery L4: cancelling tunnel, OS will restart",
-                details: "Failures=\(count), reason=\(reason)"
+                message: "L4 Recovery: Restarting tunnel after \(count) consecutive health failures",
+                details: "Last failure reason: \(reason)"
             ))
-            // b466 (three-way audit fix): do NOT set `reasserting = true`
-            // before `cancelTunnelWithError`. Setting reasserting tells the
-            // OS "we're in a transient recovery state, don't tear us down"
-            // — which is the exact opposite of what we want at L4. We
-            // WANT the OS to treat this as a fatal process failure and
-            // relaunch the extension from scratch. The old ordering may
-            // have been silently inhibiting the relaunch, which would
-            // explain why L4 never cleared the wedge (reboot was the
-            // only thing that worked). Clear reasserting first so iOS
-            // treats the cancel as a real failure.
-            self.reasserting = false
-            let err = NSError(
-                domain: "fr.bigbrother.tunnel",
-                code: -1001,
-                userInfo: [NSLocalizedDescriptionKey: "CK unreachable for >10min — recycling"]
-            )
-            cancelTunnelWithError(err)
-            return
+            // Clear reasserting first so iOS treats the cancel as a real failure and relaunches us.
+            reasserting = false
+            cancelTunnelWithError(NSError(domain: "fr.bigbrother.recovery", code: 4, userInfo: [NSLocalizedDescriptionKey: "L4 Network Recovery: \(reason)"]))
         }
     }
 

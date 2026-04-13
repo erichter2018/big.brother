@@ -1358,6 +1358,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         enforcementStore.shield.applicationCategories = nil
         enforcementStore.shield.webDomainCategories = nil
         enforcementStore.shield.webDomains = nil
+        enforcementStore.webContent.blockedByFilter = nil
 
         let defaultStore = ManagedSettingsStore()
         defaultStore.shield.applications = nil
@@ -1439,6 +1440,12 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             let allowExemptions = effectiveMode == .restricted
             var allowedTokens = allowExemptions ? collectAllowedTokens() : []
             let pickerTokens = loadPickerTokens()
+            let alwaysAllowedForShielding: Set<ApplicationToken> = allowExemptions ? [] : {
+                guard let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+                      let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data)
+                else { return [] }
+                return tokens
+            }()
 
             // Remove time-exhausted apps from the allowed set and collect their tokens
             // for shield.applications (enables "Request More Time" on the shield).
@@ -1496,12 +1503,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 ))
                 if shouldBlockWeb {
                     enforcementStore.shield.webDomainCategories = .all()
+                    enforcementStore.webContent.blockedByFilter = .all()
                 } else {
                     enforcementStore.shield.webDomainCategories = nil
+                    enforcementStore.webContent.blockedByFilter = nil
                 }
             } else {
                 var apps: Set<ApplicationToken>? = allowExemptions ? nil : (pickerTokens.isEmpty ? nil : pickerTokens)
-                // Add exhausted tokens to shield.applications
+                if !alwaysAllowedForShielding.isEmpty {
+                    apps = (apps ?? Set()).union(alwaysAllowedForShielding)
+                }
                 if !exhaustedTokens.isEmpty {
                     apps = (apps ?? Set()).union(exhaustedTokens)
                 }
@@ -1526,8 +1537,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 ))
                 if shouldBlockWeb {
                     enforcementStore.shield.webDomainCategories = .all()
+                    enforcementStore.webContent.blockedByFilter = .all()
                 } else {
                     enforcementStore.shield.webDomainCategories = nil
+                    enforcementStore.webContent.blockedByFilter = nil
                 }
             }
 

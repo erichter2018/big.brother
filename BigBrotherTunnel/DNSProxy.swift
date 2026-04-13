@@ -190,17 +190,18 @@ final class DNSProxy {
 
     /// Periodic health check — call from the tunnel's liveness timer.
     /// Detects stale upstream sessions and reconnects.
-    func healthCheck() {
+    @discardableResult
+    func healthCheck() -> Bool {
         guard let session = upstreamSession else {
             NSLog("[DNSProxy] Health: no upstream session — reconnecting")
             reconnectUpstream()
-            return
+            return false
         }
         // Session stuck in non-ready state
         if session.state == .cancelled || session.state == .failed {
             NSLog("[DNSProxy] Health: upstream session \(session.state.rawValue) — reconnecting")
             reconnectUpstream()
-            return
+            return false
         }
         // Check for query blackhole: many pending queries = responses not arriving
         pendingLock.lock()
@@ -210,7 +211,9 @@ final class DNSProxy {
         if count > 20, let oldest, Date().timeIntervalSince(oldest) > 3 {
             NSLog("[DNSProxy] Health: \(count) pending queries (oldest \(Int(Date().timeIntervalSince(oldest)))s) — upstream may be dead, reconnecting")
             reconnectUpstream()
+            return false
         }
+        return true
     }
 
     /// Recreate the upstream UDP session after a network change (WiFi↔cellular).

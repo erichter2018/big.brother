@@ -220,6 +220,11 @@ struct ParentDashboardView: View {
     @ViewBuilder
     private func childCard(_ child: ChildProfile) -> some View {
         let devs = viewModel.devices(for: child)
+        // Read expectedModes directly so @Observable tracks the dependency.
+        // dominantMode(for:) is a function call — SwiftUI doesn't observe
+        // property reads inside function calls, only direct property access
+        // during body evaluation.
+        let _ = viewModel.appState.expectedModes[child.id]
         let dominant = viewModel.dominantMode(for: child)
 
         ChildSummaryCard(

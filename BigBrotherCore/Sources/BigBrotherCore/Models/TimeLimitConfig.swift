@@ -18,6 +18,9 @@ public struct TimeLimitConfig: Codable, Sendable, Identifiable, Equatable {
     public var isActive: Bool
     /// App Store category from iTunes Search API (e.g. "Games", "Social Networking").
     public var appCategory: String?
+    /// Bundle identifier — stable across token rotations and device reinstalls.
+    /// The canonical identity for auto-approve matching.
+    public var bundleID: String?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -31,6 +34,7 @@ public struct TimeLimitConfig: Codable, Sendable, Identifiable, Equatable {
         dailyLimitMinutes: Int,
         isActive: Bool = true,
         appCategory: String? = nil,
+        bundleID: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -43,6 +47,7 @@ public struct TimeLimitConfig: Codable, Sendable, Identifiable, Equatable {
         self.dailyLimitMinutes = dailyLimitMinutes
         self.isActive = isActive
         self.appCategory = appCategory
+        self.bundleID = bundleID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

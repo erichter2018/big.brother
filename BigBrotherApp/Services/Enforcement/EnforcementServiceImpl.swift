@@ -654,6 +654,16 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
         var allowedTokens = allowExemptions ? collectAllowedTokens() : Set<ApplicationToken>()
         let pickerTokens = loadPickerTokens()
+        // For locked/lockedDown: load always-allowed tokens so we can
+        // explicitly add them to shield.applications. System apps like Safari
+        // are exempt from .all() category catch-all, but per-app shields
+        // via shield.applications DO block them.
+        let alwaysAllowedForShielding: Set<ApplicationToken> = allowExemptions ? [] : {
+            guard let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+                  let tokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data)
+            else { return [] }
+            return tokens
+        }()
         NSLog("[Enforcement] applyShield: allowExemptions=\(allowExemptions) picker=\(pickerTokens.count) allowed=\(allowedTokens.count)")
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
@@ -721,6 +731,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         } else {
             // No picker selection or essentialOnly — block everything.
             var explicitApps: Set<ApplicationToken>? = allowExemptions ? nil : pickerTokens.isEmpty ? nil : pickerTokens
+            // Add always-allowed tokens to shield.applications in locked mode
+            // so system apps (Safari, etc.) get per-app shielded. The .all()
+            // category catch-all exempts system apps, but explicit per-app
+            // shields block them.
+            if !alwaysAllowedForShielding.isEmpty {
+                explicitApps = (explicitApps ?? Set()).union(alwaysAllowedForShielding)
+            }
             // Add exhausted tokens
             if !exhaustedTokens.isEmpty {
                 explicitApps = (explicitApps ?? Set()).union(exhaustedTokens)
@@ -817,14 +834,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         let restrictions = policyRestrictions ?? storage.readDeviceRestrictions() ?? DeviceRestrictions()
         guard restrictions.denyWebWhenRestricted || forceBlock else {
             enforcementStore.shield.webDomainCategories = nil
+            enforcementStore.webContent.blockedByFilter = nil
             ManagedSettingsStore().shield.webDomainCategories = nil
-            #if DEBUG
-            print("[BigBrother] Web blocking: disabled (denyWebWhenRestricted=false, forceBlock=false) — cleared stores")
-            #endif
             return
         }
 
         enforcementStore.shield.webDomainCategories = .all()
+        enforcementStore.webContent.blockedByFilter = .all()
     }
 
     /// Load app tokens from the saved FamilyActivitySelection.
@@ -894,13 +910,14 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         enforcementStore.shield.applicationCategories = nil
         enforcementStore.shield.webDomainCategories = nil
         enforcementStore.shield.webDomains = nil
+        enforcementStore.webContent.blockedByFilter = nil
 
-        // Also clear the default (unnamed) store in case anything leaked there.
         let defaultStore = ManagedSettingsStore()
         defaultStore.shield.applications = nil
         defaultStore.shield.applicationCategories = nil
         defaultStore.shield.webDomainCategories = nil
         defaultStore.shield.webDomains = nil
+        defaultStore.webContent.blockedByFilter = nil
 
         // b432: Defensive clear of the recovery probe store. The probe path
         // (apply() recovery branch) writes .all() to enforcement.recovery

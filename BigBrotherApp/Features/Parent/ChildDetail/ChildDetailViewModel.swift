@@ -540,6 +540,27 @@ final class ChildDetailViewModel: CommandSendable {
         return secs > 0 ? secs : nil
     }
 
+    var activeMode: LockMode? {
+        if let (mode, _) = appState.expectedModes[child.id] {
+            return mode
+        }
+        return heartbeats.first?.currentMode
+    }
+
+    var isTemporaryUnlock: Bool {
+        guard activeMode == .unlocked else { return false }
+        return remainingUnlockSeconds != nil
+    }
+
+    var isScheduleDriven: Bool {
+        if appState.expectedModes[child.id] != nil { return false }
+        return scheduleProfile != nil
+    }
+
+    var scheduleNextTransition: Date? {
+        scheduleProfile?.nextTransitionTime(from: Date())
+    }
+
     // MARK: - Actions (target all devices for this child)
 
     func setMode(_ mode: LockMode) async {
@@ -1429,6 +1450,11 @@ final class ChildDetailViewModel: CommandSendable {
     /// Apps selected by the child awaiting parent review.
     var pendingAppReviews: [PendingAppReview] = []
     var pendingReviewDiagnostic = ""
+    private(set) var blockedAppNames: Set<String> = []
+
+    func isPreviouslyBlocked(_ review: PendingAppReview) -> Bool {
+        review.nameResolved && blockedAppNames.contains(review.appName.lowercased())
+    }
 
     func loadPendingAppReviews() async {
         guard let cloudKit = appState.cloudKit else {
@@ -1487,25 +1513,20 @@ final class ChildDetailViewModel: CommandSendable {
                 }
             }
 
-            // ── Bug 1 fix: filter out explicitly blocked apps ──
-            // When a parent blocks an app via reviewApp(.keepBlocked),
-            // we now create a TimeLimitConfig with isActive=false.
-            // Filter out reviews whose name matches a blocked config
-            // so they don't reappear every time the kid taps the shield.
-            let blockedAppNames = Set(
-                timeLimitConfigs
-                    .filter { !$0.isActive }
-                    .map { $0.appName.lowercased() }
-            )
-            let notBlocked = all.filter { review in
-                !review.nameResolved || !blockedAppNames.contains(review.appName.lowercased())
+            let blockedConfigs = timeLimitConfigs.filter { !$0.isActive }
+            blockedAppNames = Set(blockedConfigs.map { $0.appName.lowercased() })
+            let blockedFingerprints = Set(blockedConfigs.map { $0.appFingerprint })
+            let blockedBundleIDs = Set(blockedConfigs.compactMap { $0.bundleID?.lowercased() })
+
+            func isBlocked(_ review: PendingAppReview) -> Bool {
+                if let bid = review.bundleID?.lowercased(), blockedBundleIDs.contains(bid) { return true }
+                if blockedFingerprints.contains(review.appFingerprint) { return true }
+                if review.nameResolved && blockedAppNames.contains(review.appName.lowercased()) { return true }
+                return false
             }
-            // Silently delete CK records for blocked apps so they stop
-            // accumulating. The kid can still request — the parent just
-            // won't see it until they unblock the app from the config.
-            let blockedReviews = all.filter { review in
-                review.nameResolved && blockedAppNames.contains(review.appName.lowercased())
-            }
+
+            let notBlocked = all.filter { !isBlocked($0) }
+            let blockedReviews = all.filter { isBlocked($0) }
             for review in blockedReviews {
                 try? await cloudKit.deletePendingAppReview(review.id)
             }
@@ -1527,11 +1548,18 @@ final class ChildDetailViewModel: CommandSendable {
             // re-requests and it auto-approves again. No heartbeat
             // checking, no cross-device scoping — TimeLimitConfigs are
             // child-scoped and persist across devices.
-            let approvedConfigNames = Set(
-                timeLimitConfigs.filter(\.isActive).map { $0.appName.lowercased() }
-            )
+            // Auto-approve cascade: bundleID → name → fingerprint.
+            // bundleID survives token rotation and renames.
+            let activeConfigs = timeLimitConfigs.filter(\.isActive)
+            let approvedBundleIDs = Set(activeConfigs.compactMap { $0.bundleID?.lowercased() })
+            let approvedConfigNames = Set(activeConfigs.map { $0.appName.lowercased() })
+            let approvedConfigFingerprints = Set(activeConfigs.map { $0.appFingerprint })
             let candidates = notBlocked.filter { review in
-                review.nameResolved && approvedConfigNames.contains(review.appName.lowercased())
+                guard review.nameResolved else { return false }
+                if let bid = review.bundleID?.lowercased(), approvedBundleIDs.contains(bid) { return true }
+                if approvedConfigNames.contains(review.appName.lowercased()) { return true }
+                if approvedConfigFingerprints.contains(review.appFingerprint) { return true }
+                return false
             }
 
             // Session-level dedupe — never re-send for the same review ID twice.
@@ -1562,8 +1590,11 @@ final class ChildDetailViewModel: CommandSendable {
             let toSendByDevice = Dictionary(grouping: toSend, by: { $0.deviceID })
             for (deviceID, reviews) in toSendByDevice {
                 let decisions = reviews.map { review -> AppReviewDecision in
-                    let matchingConfig = timeLimitConfigs.first {
-                        $0.isActive && $0.appName.lowercased() == review.appName.lowercased()
+                    let matchingConfig = activeConfigs.first { cfg in
+                        if let bid = review.bundleID?.lowercased(), let cbid = cfg.bundleID?.lowercased(), bid == cbid { return true }
+                        if cfg.appName.lowercased() == review.appName.lowercased() { return true }
+                        if cfg.appFingerprint == review.appFingerprint { return true }
+                        return false
                     }
                     let disposition: AppDisposition
                     let minutes: Int?
@@ -1718,11 +1749,15 @@ final class ChildDetailViewModel: CommandSendable {
 
         let category = await AppStoreLookup.lookupCategory(appName: review.appName)
 
-        if let existingIdx = timeLimitConfigs.firstIndex(where: { $0.appFingerprint == review.appFingerprint }) {
+        if let existingIdx = timeLimitConfigs.firstIndex(where: {
+            $0.appFingerprint == review.appFingerprint ||
+            ($0.bundleID != nil && $0.bundleID == review.bundleID)
+        }) {
             var updated = timeLimitConfigs[existingIdx]
             updated.dailyLimitMinutes = dailyMinutes
             updated.isActive = configIsActive
             updated.appName = review.appName
+            if let bid = review.bundleID { updated.bundleID = bid }
             if let category { updated.appCategory = category }
             updated.updatedAt = Date()
             do {
@@ -1740,7 +1775,8 @@ final class ChildDetailViewModel: CommandSendable {
                 appName: review.appName,
                 dailyLimitMinutes: dailyMinutes,
                 isActive: configIsActive,
-                appCategory: category
+                appCategory: category,
+                bundleID: review.bundleID
             )
             do {
                 try await cloudKit.saveTimeLimitConfig(config)

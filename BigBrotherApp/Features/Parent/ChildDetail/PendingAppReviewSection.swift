@@ -69,6 +69,11 @@ struct PendingAppReviewSection: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
+                if viewModel.isPreviouslyBlocked(review) {
+                    Text("previously blocked")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
                 Spacer()
             }
 

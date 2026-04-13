@@ -1,4 +1,5 @@
 import Foundation
+import CloudKit
 import CoreLocation
 import CoreMotion
 import UIKit
@@ -28,6 +29,10 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     /// Cached last known location for heartbeat inclusion.
     private(set) var lastLocation: CLLocation?
     private(set) var lastAddress: String?
+
+    /// Live location: written to CK every 3s when moving for parent's real-time map.
+    private var lastLiveLocationWriteAt: Date?
+    private static let liveLocationInterval: TimeInterval = 3
 
     /// Continuation for on-demand location requests.
     private var pendingContinuation: CheckedContinuation<CLLocation?, Never>?
@@ -520,6 +525,41 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             logDiag("Breadcrumb saved (interval=\(Int(breadcrumbInterval))s)")
             Task { await saveBreadcrumb(from: location) }
         }
+
+        // Live location: write to CK every 3s when moving for parent's real-time map.
+        if isMoving,
+           lastLiveLocationWriteAt == nil || now.timeIntervalSince(lastLiveLocationWriteAt!) >= Self.liveLocationInterval {
+            lastLiveLocationWriteAt = now
+            Task { await writeLiveLocation(location) }
+        }
+    }
+
+    private func writeLiveLocation(_ location: CLLocation) async {
+        guard let enrollment = try? keychain.get(
+            ChildEnrollmentState.self,
+            forKey: StorageKeys.enrollmentState
+        ) else { return }
+
+        let recordName = "BBLiveLocation_\(enrollment.deviceID.rawValue)"
+        let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
+        let db = container.publicCloudDatabase
+        let recordID = CKRecord.ID(recordName: recordName)
+
+        let record: CKRecord
+        do {
+            record = try await db.record(for: recordID)
+        } catch {
+            record = CKRecord(recordType: "BBLiveLocation", recordID: recordID)
+            record["familyID"] = enrollment.familyID.rawValue
+            record["deviceID"] = enrollment.deviceID.rawValue
+        }
+        record["latitude"] = location.coordinate.latitude as NSNumber
+        record["longitude"] = location.coordinate.longitude as NSNumber
+        record["speed"] = location.speed as NSNumber
+        record["course"] = location.course as NSNumber
+        record["accuracy"] = location.horizontalAccuracy as NSNumber
+        record["timestamp"] = Date() as NSDate
+        _ = try? await db.save(record)
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

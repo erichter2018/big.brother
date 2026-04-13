@@ -926,6 +926,7 @@ enum CKRecordConversion {
         record[CKFieldName.dailyLimitMinutes] = config.dailyLimitMinutes as NSNumber
         record[CKFieldName.timeLimitIsActive] = (config.isActive ? 1 : 0) as NSNumber
         record["appCategory"] = config.appCategory
+        record["appBundleID"] = config.bundleID
         record[CKFieldName.createdAt] = config.createdAt as NSDate
         record[CKFieldName.updatedAt] = config.updatedAt as NSDate
         return record
@@ -945,6 +946,7 @@ enum CKRecordConversion {
 
         let isActive = (record[CKFieldName.timeLimitIsActive] as? Int64 ?? 1) != 0
         let appCategory = record["appCategory"] as? String
+        let bundleID = record["appBundleID"] as? String
 
         return TimeLimitConfig(
             id: UUID(uuidString: record.recordID.recordName.replacingOccurrences(of: "BBTimeLimitConfig_", with: "")) ?? UUID(),
@@ -956,6 +958,7 @@ enum CKRecordConversion {
             dailyLimitMinutes: minutes,
             isActive: isActive,
             appCategory: appCategory,
+            bundleID: bundleID,
             createdAt: createdAt,
             updatedAt: updatedAt
         )
@@ -1053,4 +1056,5 @@ enum CKRecordConversion {
             notifyDeparture: (record["placeNotifyDeparture"] as? Int64 ?? 1) != 0
         )
     }
+
 }

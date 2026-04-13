@@ -52,6 +52,7 @@
 		374C12848223C3B8A45CFF0B /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF9656E40CEB33E61E39D9E3 /* AuthService.swift */; };
 		37ADED53FF15FE544BB9B6FE /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18652D93CEE63E93A2ED1C86 /* AppState.swift */; };
 		38388348B398E7D581370D12 /* BigBrotherTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6053AC6882632276193BFB7D /* BigBrotherTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		39F9BF1B90A12B64B76E7B27 /* LiveLocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEF61FB3773D4C7EDF68DA11 /* LiveLocationManager.swift */; };
 		3A3B45A1C1F77B0DA870D7F0 /* ScheduleListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32E0AEC9003140FEC925C6B0 /* ScheduleListView.swift */; };
 		3D6198980D8B24C094A75D58 /* BigBrotherCore in Frameworks */ = {isa = PBXBuildFile; productRef = 99310E40518DAA20A6EB3AF3 /* BigBrotherCore */; };
 		3E8076C3F90192D3F1A7A07D /* BigBrotherCore in Frameworks */ = {isa = PBXBuildFile; productRef = 68B44ADF85D5BD9BF210324E /* BigBrotherCore */; };
@@ -448,6 +449,7 @@
 		ED0B79790676DE3996AF9691 /* ParentJoinView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentJoinView.swift; sourceTree = "<group>"; };
 		ED646A413500C5008EF33AF7 /* TunnelTestCommandReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelTestCommandReceiver.swift; sourceTree = "<group>"; };
 		EDA5283613E22E91A0CDF040 /* EventTypeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventTypeFormatting.swift; sourceTree = "<group>"; };
+		EEF61FB3773D4C7EDF68DA11 /* LiveLocationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveLocationManager.swift; sourceTree = "<group>"; };
 		EF81945A93EAFCF8EE68AB47 /* EnrollmentCodeEntryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentCodeEntryView.swift; sourceTree = "<group>"; };
 		EF9656E40CEB33E61E39D9E3 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		EFA791F07A50D5886BD8D11B /* TimerIntegrationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimerIntegrationService.swift; sourceTree = "<group>"; };
@@ -956,6 +958,7 @@
 				6D6F28C469F306643A072853 /* ChildDetailSectionOrder.swift */,
 				D0FC85C498B643706950C782 /* ChildDetailView.swift */,
 				C07395C4A7FA6A27B2702AD0 /* ChildDetailViewModel.swift */,
+				EEF61FB3773D4C7EDF68DA11 /* LiveLocationManager.swift */,
 				C439A682AED725B73ACC0B0C /* LocationMapView.swift */,
 				A66C4E57EACD24F29FF12DF5 /* MiniMapCard.swift */,
 				5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */,
@@ -1493,6 +1496,7 @@
 				D63FA80AC2135A444637CD7E /* InsightsModels.swift in Sources */,
 				BDF57CCF089834D095F39F7D /* InsightsView.swift in Sources */,
 				1BAE60F19C6DC8BA80494E88 /* InsightsViewModel.swift in Sources */,
+				39F9BF1B90A12B64B76E7B27 /* LiveLocationManager.swift in Sources */,
 				644ABEABCBD6CE8D958B9F13 /* LoadingStateView.swift in Sources */,
 				2C07273E33EED3CF492EC083 /* LocalParentUnlockViewModel.swift in Sources */,
 				FB2ED62CFB885FBB6B7365E4 /* LocalUnlockView.swift in Sources */,

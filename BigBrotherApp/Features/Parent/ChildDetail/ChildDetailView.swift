@@ -36,7 +36,11 @@ struct ChildDetailView: View {
                     onLockWithDuration: { duration in Task { await viewModel.lockWithDuration(duration) } },
                     onLockDown: { seconds in Task { await viewModel.lockDown(seconds: seconds) } },
                     disabled: viewModel.isSendingCommand,
-                    remainingSeconds: viewModel.remainingUnlockSeconds
+                    remainingSeconds: viewModel.remainingUnlockSeconds,
+                    activeMode: viewModel.activeMode,
+                    isTemporaryUnlock: viewModel.isTemporaryUnlock,
+                    isScheduleDriven: viewModel.isScheduleDriven,
+                    scheduleNextTransition: viewModel.scheduleNextTransition
                 )
 
                 // CloudKit error banner

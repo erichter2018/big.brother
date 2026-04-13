@@ -8,60 +8,100 @@ import BigBrotherCore
 /// Lock: tap = lock, long-press shows lock down options.
 struct ModeActionButtons: View {
     let onSetMode: (LockMode) -> Void
-    let onTemporaryUnlock: (Int) -> Void  // duration in seconds
+    let onTemporaryUnlock: (Int) -> Void
     var onLockWithDuration: ((LockDuration) -> Void)? = nil
     var onLockDown: ((Int?) -> Void)? = nil
     var disabled: Bool = false
     var remainingSeconds: Int? = nil
 
+    var activeMode: LockMode? = nil
+    var isTemporaryUnlock: Bool = false
+    var isScheduleDriven: Bool = false
+    var scheduleNextTransition: Date? = nil
+
     var body: some View {
         HStack(spacing: 8) {
-            // Unlock: tap = +15 min, long-press = duration menu
-            Menu {
-                if let remaining = remainingSeconds, remaining > 0 {
-                    Button { onTemporaryUnlock(remaining + 15 * 60) } label: {
-                        Label("+15 minutes", systemImage: "plus.circle")
-                    }
-                    Divider()
-                }
-                Button { onTemporaryUnlock(15 * 60) } label: {
-                    Label("15 minutes", systemImage: "clock")
-                }
-                Button { onTemporaryUnlock(1 * 3600) } label: {
-                    Label("1 hour", systemImage: "clock")
-                }
-                Button { onTemporaryUnlock(2 * 3600) } label: {
-                    Label("2 hours", systemImage: "clock")
-                }
-                Divider()
-                Button { onTemporaryUnlock(Self.secondsUntilMidnight) } label: {
-                    Label("Until midnight", systemImage: "moon.fill")
-                }
-                Button { onTemporaryUnlock(24 * 3600) } label: {
-                    Label("24 hours", systemImage: "clock.badge.checkmark")
-                }
-                Divider()
-                Button { onSetMode(.unlocked) } label: {
-                    Label("Indefinite (until I restrict)", systemImage: "lock.open.fill")
-                }
-            } label: {
-                VStack(spacing: 2) {
-                    Image(systemName: "lock.open").font(.subheadline)
-                    Text("Unlock").font(.caption2).fontWeight(.medium)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .foregroundStyle(.green)
-                .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .green)
-            } primaryAction: {
-                if let remaining = remainingSeconds, remaining > 0 {
-                    onTemporaryUnlock(remaining + 15 * 60)
-                } else {
-                    onTemporaryUnlock(15 * 60)
-                }
-            }
+            unlockButton
+            restrictButton
+            lockButton
+        }
+        .disabled(disabled)
+        .opacity(disabled ? 0.6 : 1)
+    }
 
-            // Restrict: tap = indefinite, long-press = duration + schedule
+    private var isUnlockActive: Bool { activeMode == .unlocked }
+    private var isRestrictActive: Bool { activeMode == .restricted }
+    private var isLockActive: Bool { activeMode == .locked || activeMode == .lockedDown }
+
+    private func statusText(for mode: LockMode) -> String? {
+        guard activeMode == mode || (mode == .locked && activeMode == .lockedDown) else { return nil }
+
+        if isTemporaryUnlock, mode == .unlocked, let secs = remainingSeconds, secs > 0 {
+            return formatDuration(secs)
+        }
+
+        if isScheduleDriven, let next = scheduleNextTransition {
+            let secs = Int(next.timeIntervalSinceNow)
+            if secs > 0 && secs < 86400 {
+                return "until " + formatTime(next)
+            }
+        }
+
+        switch mode {
+        case .unlocked: return "Unlocked"
+        case .restricted: return "Restricted"
+        case .locked: return "Locked"
+        case .lockedDown: return "Locked"
+        }
+    }
+
+    // MARK: - Unlock Button
+
+    private var unlockButton: some View {
+        Menu {
+            if let remaining = remainingSeconds, remaining > 0 {
+                Button { onTemporaryUnlock(remaining + 15 * 60) } label: {
+                    Label("+15 minutes", systemImage: "plus.circle")
+                }
+                Divider()
+            }
+            Button { onTemporaryUnlock(15 * 60) } label: {
+                Label("15 minutes", systemImage: "clock")
+            }
+            Button { onTemporaryUnlock(1 * 3600) } label: {
+                Label("1 hour", systemImage: "clock")
+            }
+            Button { onTemporaryUnlock(2 * 3600) } label: {
+                Label("2 hours", systemImage: "clock")
+            }
+            Divider()
+            Button { onTemporaryUnlock(Self.secondsUntilMidnight) } label: {
+                Label("Until midnight", systemImage: "moon.fill")
+            }
+            Button { onTemporaryUnlock(24 * 3600) } label: {
+                Label("24 hours", systemImage: "clock.badge.checkmark")
+            }
+            Divider()
+            Button { onSetMode(.unlocked) } label: {
+                Label("Indefinite (until I restrict)", systemImage: "lock.open.fill")
+            }
+        } label: {
+            modeButtonLabel("Unlock", icon: "lock.open", color: .green,
+                            isActive: isUnlockActive,
+                            status: statusText(for: .unlocked))
+        } primaryAction: {
+            if let remaining = remainingSeconds, remaining > 0 {
+                onTemporaryUnlock(remaining + 15 * 60)
+            } else {
+                onTemporaryUnlock(15 * 60)
+            }
+        }
+    }
+
+    // MARK: - Restrict Button
+
+    private var restrictButton: some View {
+        Group {
             if let onLockWithDuration {
                 Menu {
                     Button { onLockWithDuration(.untilMidnight) } label: {
@@ -85,22 +125,26 @@ struct ModeActionButtons: View {
                         Label("Return to Schedule", systemImage: "calendar.badge.clock")
                     }
                 } label: {
-                    VStack(spacing: 2) {
-                        Image(systemName: "lock.fill").font(.subheadline)
-                        Text("Restrict").font(.caption2).fontWeight(.medium)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .foregroundStyle(.blue)
-                    .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .blue)
+                    modeButtonLabel("Restrict", icon: "lock.fill", color: .blue,
+                                    isActive: isRestrictActive,
+                                    status: statusText(for: .restricted))
                 } primaryAction: {
                     onLockWithDuration(.indefinite)
                 }
             } else {
-                modeButton("Restrict", icon: "lock.fill", color: .blue, mode: .restricted)
+                Button { onSetMode(.restricted) } label: {
+                    modeButtonLabel("Restrict", icon: "lock.fill", color: .blue,
+                                    isActive: isRestrictActive,
+                                    status: statusText(for: .restricted))
+                }
             }
+        }
+    }
 
-            // Lock: tap = lock, long-press = lock down options
+    // MARK: - Lock Button
+
+    private var lockButton: some View {
+        Group {
             if let onLockDown {
                 Menu {
                     Button { onSetMode(.locked) } label: {
@@ -125,37 +169,61 @@ struct ModeActionButtons: View {
                         Label("Lock Down...", systemImage: "wifi.slash")
                     }
                 } label: {
-                    VStack(spacing: 2) {
-                        Image(systemName: "shield").font(.subheadline)
-                        Text("Lock").font(.caption2).fontWeight(.medium)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .foregroundStyle(.purple)
-                    .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: .purple)
+                    modeButtonLabel("Lock", icon: "shield", color: .purple,
+                                    isActive: isLockActive,
+                                    status: statusText(for: .locked))
                 } primaryAction: {
                     onSetMode(.locked)
                 }
             } else {
-                modeButton("Lock", icon: "shield", color: .purple, mode: .locked)
+                Button { onSetMode(.locked) } label: {
+                    modeButtonLabel("Lock", icon: "shield", color: .purple,
+                                    isActive: isLockActive,
+                                    status: statusText(for: .locked))
+                }
             }
         }
-        .disabled(disabled)
-        .opacity(disabled ? 0.6 : 1)
     }
 
+    // MARK: - Button Label
+
     @ViewBuilder
-    private func modeButton(_ title: String, icon: String, color: Color, mode: LockMode) -> some View {
-        Button { onSetMode(mode) } label: {
-            VStack(spacing: 2) {
-                Image(systemName: icon).font(.subheadline)
-                Text(title).font(.caption2).fontWeight(.medium)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-            .foregroundStyle(color)
-            .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: color)
+    private func modeButtonLabel(_ title: String, icon: String, color: Color,
+                                  isActive: Bool, status: String?) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: icon)
+                .font(.subheadline)
+            Text(status ?? title)
+                .font(.caption2)
+                .fontWeight(.medium)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .foregroundStyle(color)
+        .if_iOS26GlassEffect(fallbackMaterial: .ultraThinMaterial, borderColor: color)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(color, lineWidth: isActive ? 2 : 0)
+                .shadow(color: isActive ? color.opacity(0.6) : .clear, radius: 6)
+        )
+    }
+
+    // MARK: - Formatting
+
+    private func formatDuration(_ totalSeconds: Int) -> String {
+        let h = totalSeconds / 3600
+        let m = (totalSeconds % 3600) / 60
+        if h > 0 && m > 0 { return "\(h)h \(m)m" }
+        if h > 0 { return "\(h)h" }
+        return "\(m)m"
+    }
+
+    private func formatTime(_ date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "h:mm a"
+        return fmt.string(from: date)
     }
 
     static var secondsUntilMidnight: Int { Date.secondsUntilMidnight }
