@@ -183,8 +183,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         if let lastMode = Self.lastApplyMode,
            let lastTime = Self.lastApplyTime,
            lastMode == policy.resolvedMode,
-           now.timeIntervalSince(lastTime) < 2.0 {
-            NSLog("[Enforcement] apply() coalesced — \(policy.resolvedMode.rawValue) applied \(String(format: "%.1f", now.timeIntervalSince(lastTime)))s ago")
+           now.timeIntervalSince(lastTime) < 10.0 {
             return
         }
 

@@ -4007,22 +4007,32 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         pathDebounceWork?.cancel()
 
         if nowSatisfied {
+            // Immediately reconnect upstream DNS — cheap, no downtime.
+            // This alone fixes most wifi↔cellular transitions.
+            self.dnsProxy?.reconnectUpstream()
+            NSLog("[Tunnel] Network changed — reconnected upstream DNS (instant)")
+
+            // Schedule a health check after the network settles.
+            // Only do the expensive full re-plumb if DNS is actually broken.
             let capturedSignature = signature
-            let capturedPrevious = previous
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let reason = "interface settled (\(capturedPrevious) → \(capturedSignature))"
-                NSLog("[Tunnel] Network settled — forcing full network settings reapply")
-                try? self.storage.appendDiagnosticEntry(DiagnosticEntry(
-                    category: .command,
-                    message: "Network path transition — re-plumbing tunnel",
-                    details: reason
-                ))
-                self.reapplyNetworkSettings(force: true)
+                let healthy = self.dnsProxy?.healthCheck() ?? false
+                if !healthy {
+                    NSLog("[Tunnel] DNS health failed after network change — full re-plumb")
+                    try? self.storage.appendDiagnosticEntry(DiagnosticEntry(
+                        category: .command,
+                        message: "Network path transition — re-plumbing tunnel",
+                        details: "DNS unhealthy after interface change to \(capturedSignature)"
+                    ))
+                    self.reapplyNetworkSettings(force: true)
+                } else {
+                    NSLog("[Tunnel] DNS healthy after network change — skipping re-plumb")
+                }
             }
             pathDebounceWork = work
             (pathMonitorQueue ?? DispatchQueue.global()).asyncAfter(
-                deadline: .now() + 2.0, execute: work
+                deadline: .now() + 3.0, execute: work
             )
         }
 
