@@ -171,7 +171,7 @@ struct ChildHomeView: View {
         .fullScreenCover(isPresented: $showWelcome) {
             WelcomeView {
                 showWelcome = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                     showPermissionFixer = true
                 }
             }
