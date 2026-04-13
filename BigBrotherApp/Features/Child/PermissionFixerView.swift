@@ -295,15 +295,16 @@ struct PermissionFixerView: View {
             }
 
         case .motion:
-            // CoreMotion only prompts once. If denied, must go to Settings.
-            if CMMotionActivityManager.authorizationStatus() == .notDetermined {
-                // Trigger the one-time prompt by starting a query
+            let motionStatus = CMMotionActivityManager.authorizationStatus()
+            if motionStatus == .notDetermined {
                 let manager = CMMotionActivityManager()
                 manager.startActivityUpdates(to: .main) { _ in }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                     manager.stopActivityUpdates()
                     refreshPermissions()
                 }
+            } else if motionStatus == .authorized {
+                refreshPermissions()
             } else {
                 openSettings()
             }
