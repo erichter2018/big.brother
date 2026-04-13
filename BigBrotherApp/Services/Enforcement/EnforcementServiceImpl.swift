@@ -175,12 +175,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
     // MARK: - EnforcementServiceProtocol
 
-    func apply(_ policy: EffectivePolicy) throws {
+    func apply(_ policy: EffectivePolicy, force: Bool = false) throws {
         Self.applyLock.lock()
         defer { Self.applyLock.unlock() }
 
         let now = Date()
-        if let lastMode = Self.lastApplyMode,
+        if !force,
+           let lastMode = Self.lastApplyMode,
            let lastTime = Self.lastApplyTime,
            lastMode == policy.resolvedMode,
            now.timeIntervalSince(lastTime) < 10.0 {

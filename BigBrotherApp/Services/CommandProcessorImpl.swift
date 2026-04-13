@@ -2496,7 +2496,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             )
         }
         do {
-            try enforcement?.apply(policy)
+            try enforcement?.apply(policy, force: true)
             return true
         } catch {
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
