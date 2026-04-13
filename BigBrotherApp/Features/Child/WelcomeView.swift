@@ -1,20 +1,10 @@
 import SwiftUI
 
-/// First-launch intro screen for a freshly-enrolled child device.
-///
-/// Shown before `PermissionFixerView` so the kid (or the parent holding
-/// the device) understands what Big Brother is, what it's about to ask
-/// for, and why — before any system permission prompts fire. Dismissed
-/// via "Get started," which hands off to the permission fixer.
-///
-/// Intentionally lightweight: no AppState dependency, no side effects.
-/// The caller owns the presentation state and decides what to do on
-/// dismiss.
 struct WelcomeView: View {
 
     let onContinue: () -> Void
 
-    private struct Bullet: Identifiable {
+    private struct Step: Identifiable {
         let id = UUID()
         let icon: String
         let color: Color
@@ -22,30 +12,30 @@ struct WelcomeView: View {
         let detail: String
     }
 
-    private let bullets: [Bullet] = [
-        Bullet(
+    private let steps: [Step] = [
+        Step(
             icon: "shield.checkered",
             color: .blue,
-            title: "Screen Time rules",
-            detail: "Your parent sets which apps are allowed and when they unlock. Big Brother enforces those rules on this device."
+            title: "Screen Time",
+            detail: "You'll be asked to allow Screen Time access. This is required for app controls to work."
         ),
-        Bullet(
+        Step(
             icon: "location.fill",
             color: .green,
             title: "Location",
-            detail: "Your parent can see where you are, including saved places like home and school."
+            detail: "Choose \"Always Allow\" so location works even when the app is closed."
         ),
-        Bullet(
-            icon: "car.fill",
-            color: .orange,
-            title: "Driving safety",
-            detail: "If you're moving in a car, Big Brother blocks phone use until you stop."
-        ),
-        Bullet(
+        Step(
             icon: "bell.badge.fill",
             color: .red,
             title: "Notifications",
-            detail: "Get alerts about schedule changes, unlock approvals, and messages from your parent."
+            detail: "Allow notifications so your child sees schedule changes and unlock approvals."
+        ),
+        Step(
+            icon: "network",
+            color: .purple,
+            title: "VPN",
+            detail: "A local VPN will be installed. It doesn't send data anywhere — it's used for DNS filtering on this device."
         ),
     ]
 
@@ -56,12 +46,12 @@ struct WelcomeView: View {
                     VStack(spacing: 24) {
                         header
                         VStack(spacing: 20) {
-                            ForEach(bullets) { bullet in
-                                bulletRow(bullet)
+                            ForEach(steps) { step in
+                                stepRow(step)
                             }
                         }
                         .padding(.horizontal, 24)
-                        Text("The next few screens will ask you to grant each permission. You can tap \"Skip\" on any of them and enable it later.")
+                        Text("Each step takes one tap. You can fix any skipped permissions later from the child's home screen.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -74,7 +64,7 @@ struct WelcomeView: View {
 
                 VStack(spacing: 8) {
                     Button(action: onContinue) {
-                        Text("Get started")
+                        Text("Start Setup")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
@@ -93,12 +83,12 @@ struct WelcomeView: View {
 
     private var header: some View {
         VStack(spacing: 12) {
-            Image(systemName: "shield.checkered")
-                .font(.system(size: 72))
+            Image(systemName: "gearshape.2.fill")
+                .font(.system(size: 64))
                 .foregroundStyle(.blue)
-            Text("Welcome to Big Brother")
+            Text("Device Setup")
                 .font(.title.bold())
-            Text("Here's what this app does on your device.")
+            Text("A few permissions are needed for Big Brother to protect this device. Here's what you'll be asked for:")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -106,16 +96,16 @@ struct WelcomeView: View {
         .padding(.horizontal, 24)
     }
 
-    private func bulletRow(_ bullet: Bullet) -> some View {
+    private func stepRow(_ step: Step) -> some View {
         HStack(alignment: .top, spacing: 16) {
-            Image(systemName: bullet.icon)
+            Image(systemName: step.icon)
                 .font(.title2)
-                .foregroundStyle(bullet.color)
+                .foregroundStyle(step.color)
                 .frame(width: 36, height: 36)
             VStack(alignment: .leading, spacing: 4) {
-                Text(bullet.title)
+                Text(step.title)
                     .font(.headline)
-                Text(bullet.detail)
+                Text(step.detail)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
