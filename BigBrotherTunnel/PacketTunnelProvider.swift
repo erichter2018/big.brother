@@ -156,9 +156,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         dnsProxy?.isBlackholeMode = shouldBlackhole
 
         // Seed enforcement blocked domains from last-known fallback if the
-        // main list is empty (main app may not have written one yet after reboot).
+        // main list is empty AND the device should be restricted/locked.
+        // Skip for unlocked — the empty list is intentional.
         let mainBlocklist = storage.readEnforcementBlockedDomains()
-        if mainBlocklist.isEmpty,
+        let modeOnStart = ModeStackResolver.resolve(storage: storage).mode
+        if mainBlocklist.isEmpty && modeOnStart != .unlocked,
            let lastKnownData = storage.readRawData(forKey: AppGroupKeys.tunnelLastKnownBlocklist),
            let lastKnownDomains = try? JSONDecoder().decode(Set<String>.self, from: lastKnownData),
            !lastKnownDomains.isEmpty {
