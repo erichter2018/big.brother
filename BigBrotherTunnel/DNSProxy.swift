@@ -856,13 +856,12 @@ final class DNSProxy {
         }
     }
 
-    /// Check if an app has exceeded its time limit (with 10% buffer for DNS noise).
-    /// If exhausted, write to the same pathway the Monitor uses (TimeLimitExhaustedApp).
-    ///
-    /// **PRECONDITION:** caller must already hold `appUsageLock`. Reading
-    /// `appMinutes[appName]` without the lock would race against the
-    /// bgQueue writer in `trackAppMinute`.
+    /// DNS-based time limit check — diagnostic only. DeviceActivity milestones
+    /// (Monitor extension) are the sole authority for exhausting time-limited apps.
+    /// DNS tracking overcounts because background ad SDKs generate queries when
+    /// the app isn't actively in use.
     private func checkTimeLimitExhaustionLocked(_ appName: String) {
+        return
         let now = Date()
 
         // Refresh time limits cache every 30 seconds

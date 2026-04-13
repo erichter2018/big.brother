@@ -218,7 +218,6 @@ final class DeviceMonitor {
                         body: "\(name)'s \(device.displayName) hasn't reported in \(Int(age / 60)) minutes.",
                         throttleHours: 4
                     )
-                    // Auto-ping to wake the app (throttled to once per 15 min per device)
                     let pingKey = "ping-\(key)"
                     if lastNotificationTimes[pingKey] == nil ||
                        Date().timeIntervalSince(lastNotificationTimes[pingKey]!) > 900 {
@@ -229,6 +228,20 @@ final class DeviceMonitor {
                                 action: .requestHeartbeat
                             )
                         }
+                    }
+                }
+
+                if age > 7200 && isDaytime {
+                    let battery = hb.batteryLevel ?? 0
+                    let wasCharging = hb.isCharging ?? false
+                    if battery > 0.2 || wasCharging {
+                        let name = childName(for: device)
+                        sendThrottledNotification(
+                            id: "maybe-deleted-\(key)",
+                            title: "\(name) — App May Be Removed",
+                            body: "\(name)'s \(device.displayName) had \(Int(battery * 100))% battery but hasn't reported in \(Int(age / 3600)) hours. The app may have been deleted.",
+                            throttleHours: 12
+                        )
                     }
                 }
             }
