@@ -75,10 +75,20 @@ final class AppState {
 
     @ObservationIgnored private var signingKeyPushSent: Set<DeviceID> = []
 
+    private func ensureSigningKeyExists() {
+        guard (try? keychain.getData(forKey: StorageKeys.commandSigningPrivateKey)) == nil else { return }
+        let (privateKey, publicKey) = CommandSigner.generateKeyPair()
+        try? keychain.setData(privateKey, forKey: StorageKeys.commandSigningPrivateKey)
+        try? keychain.setData(publicKey, forKey: StorageKeys.commandSigningPublicKey)
+        NSLog("[Parent] Generated missing signing keypair")
+    }
+
     private func autoDistributeSigningKeysIfNeeded(_ heartbeats: [DeviceHeartbeat]) {
-        guard let keychain = try? KeychainManager(),
-              let pubKeyData = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey),
-              pubKeyData.count >= 32 else { return }
+        guard let pubKeyData = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey),
+              pubKeyData.count >= 32 else {
+            NSLog("[Parent] No signing public key in Keychain — cannot distribute")
+            return
+        }
         let pubKeyBase64 = pubKeyData.base64EncodedString()
 
         for hb in heartbeats {
@@ -477,6 +487,10 @@ final class AppState {
     /// Create and wire all services. Called after init because some services
     /// depend on knowing the device role and enrollment state.
     func configureServices() {
+        if deviceRole == .parent {
+            ensureSigningKeyExists()
+        }
+
         let ck = CloudKitServiceImpl()
         self.cloudKit = ck
 
