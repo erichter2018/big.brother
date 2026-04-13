@@ -1221,6 +1221,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Olivia hit.) We now cross-check against `mainAppLastLaunchedBuild`
     /// and `mainAppLastActiveAt` before trusting any seeded blackhole.
     private func seedBlockReasonsOnStart() {
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        if resolution.mode == .unlocked {
+            NSLog("[Tunnel] Seed: mode is unlocked — no block reasons seeded")
+            return
+        }
+
         let defaults = UserDefaults.appGroup
         let now = Date().timeIntervalSince1970
 
@@ -2061,6 +2067,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func applyInternetBlock(durationSeconds: Int) {
         let defaults = UserDefaults.appGroup
         if durationSeconds > 0 {
+            let resolution = ModeStackResolver.resolve(storage: storage)
+            if resolution.mode == .unlocked {
+                NSLog("[Tunnel] Internet block request ignored — mode is unlocked")
+                return
+            }
             let unblockAt = Date().addingTimeInterval(Double(durationSeconds))
             defaults?.set(unblockAt.timeIntervalSince1970, forKey: AppGroupKeys.internetBlockedUntil)
             NSLog("[Tunnel] Internet blocked for \(durationSeconds)s (until \(unblockAt))")

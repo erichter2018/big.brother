@@ -961,6 +961,11 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Update the DNS blocklist with domains of all currently-exhausted apps.
     /// The VPN tunnel reads this and blocks DNS queries for these domains.
     private func updateTimeLimitBlockedDomains() {
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        if resolution.mode == .unlocked {
+            try? storage.writeTimeLimitBlockedDomains([])
+            return
+        }
         let today = Self.todayDateString()
         let exhausted = storage.readTimeLimitExhaustedApps().filter { $0.dateString == today }
         var blockedDomains = Set<String>()
