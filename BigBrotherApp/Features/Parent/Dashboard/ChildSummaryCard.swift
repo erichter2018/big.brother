@@ -731,18 +731,16 @@ struct ChildSummaryCard: View {
     private var locationLine: some View {
         if let loc = locationInfo {
             infoRow(icon: "location.fill", color: Self.mutedBlue) {
-                // Address expands across multiple lines when tapped; the
-                // " · age" + movement icon stays as a single trailing unit
-                // on the first baseline so the car icon doesn't jump to a
-                // new row when the address wraps.
+                // Address + " · age" is ONE Text so the timestamp wraps with
+                // the address instead of sticking to the first line while
+                // the rest of the address overflows below it. Movement icon
+                // stays on the first baseline via HStack alignment so it
+                // doesn't jump to a new row when the address wraps.
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text(loc.address)
+                    Text("\(loc.address) \u{00B7} \(formatAge(loc.age))")
                         .foregroundStyle(.secondary)
                         .lineLimit(locationExpanded ? nil : 1)
                         .truncationMode(.middle)
-                    Text("\u{00B7} \(formatAge(loc.age))")
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
                     if let movement = movementIndicator {
                         Image(systemName: movement.icon)
                             .font(.system(size: 9))
