@@ -213,6 +213,49 @@ final class AppState {
     /// Children with pending unlock/time requests (updated by unlock request polling).
     var childrenWithPendingRequests: Set<ChildProfileID> = []
 
+    /// Pending app reviews keyed by child, shared across views.
+    /// Single source of truth: push handlers upsert directly, ChildDetailViewModel
+    /// reads via a computed property so new requests appear the instant a silent
+    /// push lands — no refresh required.
+    var pendingReviewsByChild: [ChildProfileID: [PendingAppReview]] = [:]
+
+    /// Flash highlight a specific review after deep-link. ChildDetailView uses this
+    /// to scroll-to and briefly pulse the card.
+    var highlightedReviewID: UUID?
+
+    /// Upsert a pending review into the shared store. Dedupes by `id`. Replaces
+    /// an existing entry if present (e.g., the parent renames the app or the
+    /// record is re-sent with updated fields).
+    func upsertPendingReview(_ review: PendingAppReview) {
+        var current = pendingReviewsByChild[review.childProfileID] ?? []
+        if let idx = current.firstIndex(where: { $0.id == review.id }) {
+            current[idx] = review
+        } else {
+            current.append(review)
+        }
+        pendingReviewsByChild[review.childProfileID] = current
+    }
+
+    /// Remove a pending review from the shared store.
+    func removePendingReviews(childID: ChildProfileID, matching predicate: (PendingAppReview) -> Bool) {
+        guard var current = pendingReviewsByChild[childID] else { return }
+        current.removeAll(where: predicate)
+        if current.isEmpty {
+            pendingReviewsByChild.removeValue(forKey: childID)
+        } else {
+            pendingReviewsByChild[childID] = current
+        }
+    }
+
+    /// Replace the full pending list for a child (used after loadPendingAppReviews).
+    func setPendingReviews(_ reviews: [PendingAppReview], for childID: ChildProfileID) {
+        if reviews.isEmpty {
+            pendingReviewsByChild.removeValue(forKey: childID)
+        } else {
+            pendingReviewsByChild[childID] = reviews
+        }
+    }
+
     /// Temporary confirmation message shown on the child home screen (auto-dismisses).
     var childConfirmationMessage: String?
 
@@ -1593,42 +1636,30 @@ final class AppState {
         // Profiles are the critical query — let this one throw.
         let fetchedProfiles = try await cloudKit.fetchChildProfiles(familyID: familyID)
 
-        // Fetch all secondary data into locals first to avoid flashing
-        // stale defaults while awaiting subsequent queries.
-        var fetchedDevices: [ChildDevice]?
-        var fetchedHeartbeats: [DeviceHeartbeat]?
-        var fetchedHBProfiles: [HeartbeatProfile]?
-        var fetchedScheduleProfiles: [ScheduleProfile]?
+        // Fetch all secondary data in PARALLEL. Previously sequential (4 round-trips
+        // in series) which dominated the 30-60s refresh. Each task swallows its own
+        // error locally so one slow/failing fetch doesn't cascade.
+        async let devicesTask: [ChildDevice]? = {
+            do { return try await cloudKit.fetchDevices(familyID: familyID) }
+            catch { NSLog("[BigBrother] fetchDevices failed: \(error.localizedDescription)"); return nil }
+        }()
+        async let heartbeatsTask: [DeviceHeartbeat]? = {
+            do { return try await cloudKit.fetchLatestHeartbeats(familyID: familyID) }
+            catch { NSLog("[BigBrother] fetchLatestHeartbeats failed: \(error.localizedDescription)"); return nil }
+        }()
+        async let hbProfilesTask: [HeartbeatProfile]? = {
+            do { return try await cloudKit.fetchHeartbeatProfiles(familyID: familyID) }
+            catch { NSLog("[BigBrother] fetchHeartbeatProfiles failed: \(error.localizedDescription)"); return nil }
+        }()
+        async let scheduleProfilesTask: [ScheduleProfile]? = {
+            do { return try await cloudKit.fetchScheduleProfiles(familyID: familyID) }
+            catch { NSLog("[BigBrother] fetchScheduleProfiles failed: \(error.localizedDescription)"); return nil }
+        }()
 
-        do {
-            fetchedDevices = try await cloudKit.fetchDevices(familyID: familyID)
-        } catch {
-            #if DEBUG
-            print("[BigBrother] Failed to fetch devices: \(error.localizedDescription)")
-            #endif
-        }
-
-        do {
-            fetchedHeartbeats = try await cloudKit.fetchLatestHeartbeats(familyID: familyID)
-        } catch {
-            NSLog("[BigBrother] Failed to fetch heartbeats: \(error.localizedDescription)")
-        }
-
-        do {
-            fetchedHBProfiles = try await cloudKit.fetchHeartbeatProfiles(familyID: familyID)
-        } catch {
-            #if DEBUG
-            print("[BigBrother] Failed to fetch heartbeat profiles: \(error.localizedDescription)")
-            #endif
-        }
-
-        do {
-            fetchedScheduleProfiles = try await cloudKit.fetchScheduleProfiles(familyID: familyID)
-        } catch {
-            #if DEBUG
-            print("[BigBrother] Failed to fetch schedule profiles: \(error.localizedDescription)")
-            #endif
-        }
+        let fetchedDevices = await devicesTask
+        let fetchedHeartbeats = await heartbeatsTask
+        let fetchedHBProfiles = await hbProfilesTask
+        let fetchedScheduleProfiles = await scheduleProfilesTask
 
         // Merge heartbeat data into device records BEFORE publishing to UI.
         // Only assign to @Observable properties when content actually changed
@@ -1917,26 +1948,112 @@ final class AppState {
     private func checkForUnlockRequestNotifications(familyID: FamilyID) {
         guard let cloudKit else { return }
 
-        Task {
-            let since = Date().addingTimeInterval(-1800) // last 30 minutes
-            let events = (try? await cloudKit.fetchEventLogs(familyID: familyID, since: since)) ?? []
+        // Snapshot the @MainActor state we need, then run all CloudKit work
+        // on a detached Task so this doesn't fight the main thread with the
+        // user's pull-to-refresh or dashboard rendering.
+        let profiles = childProfiles
+        let devices = childDevices
 
-            var pendingChildIDs = Set<ChildProfileID>()
-            for profile in childProfiles {
-                let deviceIDs = Set(childDevices.filter { $0.childProfileID == profile.id }.map(\.id))
-                let configs = childDetailViewModel(forID: profile.id).timeLimitConfigs
-                UnlockRequestNotificationService.checkAndNotify(
-                    events: events,
-                    childDeviceIDs: deviceIDs,
-                    childName: profile.name,
-                    childProfileID: profile.id,
-                    timeLimitConfigs: configs
-                )
-                let reviews = (try? await cloudKit.fetchPendingAppReviews(childProfileID: profile.id)) ?? []
-                if !reviews.isEmpty { pendingChildIDs.insert(profile.id) }
+        Task.detached { [cloudKit] in
+            let since = Date().addingTimeInterval(-1800)
+            let events = (try? await cloudKit.fetchEventLogs(familyID: familyID, since: since)) ?? []
+            let heartbeatCutoff = Date().addingTimeInterval(-48 * 3600)
+
+            // Fan out the per-child CK reads in parallel so 6 kids take ~1 round-trip,
+            // not 6×. Each task returns that child's ID only if it has live reviews.
+            let pendingChildIDs = await withTaskGroup(of: ChildProfileID?.self) { group in
+                for profile in profiles {
+                    let childDevicesForProfile = devices.filter { $0.childProfileID == profile.id }
+                    let deviceIDs = Set(childDevicesForProfile.map(\.id))
+                    group.addTask {
+                        await Self.evaluatePendingReviewsForChild(
+                            cloudKit: cloudKit,
+                            profile: profile,
+                            events: events,
+                            childDevicesForProfile: childDevicesForProfile,
+                            deviceIDs: deviceIDs,
+                            heartbeatCutoff: heartbeatCutoff
+                        )
+                    }
+                }
+                var collected = Set<ChildProfileID>()
+                for await result in group {
+                    if let id = result { collected.insert(id) }
+                }
+                return collected
             }
-            await MainActor.run { childrenWithPendingRequests = pendingChildIDs }
+
+            await MainActor.run { [weak self] in
+                self?.childrenWithPendingRequests = pendingChildIDs
+            }
         }
+    }
+
+    private static func evaluatePendingReviewsForChild(
+        cloudKit: CloudKitServiceProtocol,
+        profile: ChildProfile,
+        events: [EventLogEntry],
+        childDevicesForProfile: [ChildDevice],
+        deviceIDs: Set<DeviceID>,
+        heartbeatCutoff: Date
+    ) async -> ChildProfileID? {
+        async let configsTask: [TimeLimitConfig] = (try? await cloudKit.fetchTimeLimitConfigs(childProfileID: profile.id)) ?? []
+        async let reviewsTask: [PendingAppReview] = (try? await cloudKit.fetchPendingAppReviews(childProfileID: profile.id)) ?? []
+        let configs = await configsTask
+        let allReviews = await reviewsTask
+
+        UnlockRequestNotificationService.checkAndNotify(
+            events: events,
+            childDeviceIDs: deviceIDs,
+            childName: profile.name,
+            childProfileID: profile.id,
+            timeLimitConfigs: configs
+        )
+
+        let aliveDeviceIDs: Set<DeviceID> = {
+            var ids = Set<DeviceID>()
+            for device in childDevicesForProfile {
+                if let lastHB = device.lastHeartbeat, lastHB > heartbeatCutoff {
+                    ids.insert(device.id)
+                } else if device.lastHeartbeat == nil {
+                    ids.insert(device.id)
+                }
+            }
+            return ids
+        }()
+        let blockedConfigs = configs.filter { !$0.isActive }
+        let blockedNames = Set(blockedConfigs.map { $0.appName.lowercased() })
+        let blockedFingerprints = Set(blockedConfigs.map { $0.appFingerprint })
+        let blockedBundleIDs = Set(blockedConfigs.compactMap { $0.bundleID?.lowercased() })
+        let activeConfigs = configs.filter(\.isActive)
+        let activeNames = Set(activeConfigs.map { $0.appName.lowercased() })
+        let activeFingerprints = Set(activeConfigs.map { $0.appFingerprint })
+        let activeBundleIDs = Set(activeConfigs.compactMap { $0.bundleID?.lowercased() })
+
+        let liveReviews = allReviews.filter { review in
+            if !aliveDeviceIDs.isEmpty && !aliveDeviceIDs.contains(review.deviceID) { return false }
+            if let bid = review.bundleID?.lowercased(), blockedBundleIDs.contains(bid) { return false }
+            if blockedFingerprints.contains(review.appFingerprint) { return false }
+            if review.nameResolved && blockedNames.contains(review.appName.lowercased()) { return false }
+            if let bid = review.bundleID?.lowercased(), activeBundleIDs.contains(bid) { return false }
+            if activeFingerprints.contains(review.appFingerprint) { return false }
+            if review.nameResolved && activeNames.contains(review.appName.lowercased()) { return false }
+            return true
+        }
+
+        // Fire-and-forget deletes; don't block the set computation.
+        let stale = allReviews.filter { r in !liveReviews.contains(where: { $0.id == r.id }) }
+        if !stale.isEmpty {
+            Task.detached { [cloudKit] in
+                await withTaskGroup(of: Void.self) { group in
+                    for r in stale {
+                        group.addTask { try? await cloudKit.deletePendingAppReview(r.id) }
+                    }
+                }
+            }
+        }
+
+        return liveReviews.isEmpty ? nil : profile.id
     }
 
     /// Fetch pending app reviews for all children and post local notifications
@@ -1945,14 +2062,51 @@ final class AppState {
     /// AppReviewNotificationService via UserDefaults-tracked IDs + fingerprints.
     private func checkForPendingAppReviewNotifications() async {
         guard let cloudKit else { return }
-        for profile in childProfiles {
-            let reviews = (try? await cloudKit.fetchPendingAppReviews(childProfileID: profile.id)) ?? []
-            guard !reviews.isEmpty else { continue }
-            AppReviewNotificationService.checkAndNotify(
-                reviews: reviews,
-                childName: profile.name,
-                childProfileID: profile.id
-            )
+        // Fetch each child's pending reviews in parallel. Parent-side filtering
+        // is just zombie-device purge — kid-side auto-cleanup drops duplicates
+        // for already-approved apps before they reach CK.
+        let profiles = childProfiles
+        let devicesByChild = Dictionary(grouping: childDevices, by: \.childProfileID)
+        let heartbeatCutoff = Date().addingTimeInterval(-48 * 3600)
+
+        await withTaskGroup(of: (ChildProfile, [PendingAppReview], [PendingAppReview])?.self) { group in
+            for profile in profiles {
+                let kidDevices = devicesByChild[profile.id] ?? []
+                group.addTask { [cloudKit] in
+                    let all = (try? await cloudKit.fetchPendingAppReviews(childProfileID: profile.id)) ?? []
+                    guard !all.isEmpty else { return nil }
+                    let alive: Set<DeviceID> = {
+                        var ids = Set<DeviceID>()
+                        for d in kidDevices {
+                            if let hb = d.lastHeartbeat, hb > heartbeatCutoff { ids.insert(d.id) }
+                            else if d.lastHeartbeat == nil { ids.insert(d.id) }
+                        }
+                        return ids
+                    }()
+                    let live = alive.isEmpty ? all : all.filter { alive.contains($0.deviceID) }
+                    let orphans = alive.isEmpty ? [] : all.filter { !alive.contains($0.deviceID) }
+                    return (profile, live, orphans)
+                }
+            }
+            for await result in group {
+                guard let (profile, live, orphans) = result else { continue }
+                AppReviewNotificationService.checkAndNotify(
+                    reviews: live,
+                    childName: profile.name,
+                    childProfileID: profile.id
+                )
+                setPendingReviews(live, for: profile.id)
+                if !orphans.isEmpty {
+                    let ck = cloudKit
+                    Task.detached { [ck] in
+                        await withTaskGroup(of: Void.self) { g in
+                            for r in orphans {
+                                g.addTask { try? await ck.deletePendingAppReview(r.id) }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

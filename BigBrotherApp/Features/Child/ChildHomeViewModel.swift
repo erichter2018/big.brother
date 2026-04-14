@@ -3,6 +3,8 @@ import Observation
 import CoreLocation
 import CoreMotion
 import UIKit
+import FamilyControls
+import ManagedSettings
 import BigBrotherCore
 
 @Observable @MainActor
@@ -33,13 +35,114 @@ final class ChildHomeViewModel {
     /// Pending app reviews submitted by this child, refreshed periodically.
     var pendingReviews: [PendingAppReview] = []
 
+    /// Snapshot of ACTIVE TimeLimitConfig keys (name, bundleID, fingerprint) pulled from
+    /// CloudKit. Used to auto-clean the local pending file when a kid requests an app
+    /// that the parent already approved on a sibling device — without this, the request
+    /// sits in "Pending Parent Approval" forever because the fingerprint doesn't match
+    /// between devices even though the parent already said yes by name.
+    private var activeAppNames: Set<String> = []
+    private var activeAppBundleIDs: Set<String> = []
+    private var activeAppFingerprints: Set<String> = []
+    private var lastActiveConfigRefresh: Date = .distantPast
+
     func refreshPendingReviews() {
         guard let data = appState.storage.readRawData(forKey: "pending_review_local.json"),
               let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data) else {
             pendingReviews = []
             return
         }
-        pendingReviews = reviews.sorted { $0.createdAt > $1.createdAt }
+
+        let (live, resolved) = Self.partitionReviews(
+            reviews,
+            activeNames: activeAppNames,
+            activeBundleIDs: activeAppBundleIDs,
+            activeFingerprints: activeAppFingerprints
+        )
+
+        if !resolved.isEmpty {
+            // Persist the filtered list back so the kid UI and future reads stay clean.
+            if let encoded = try? JSONEncoder().encode(live) {
+                try? appState.storage.writeRawData(encoded, forKey: "pending_review_local.json")
+            }
+            // Allow the tokens locally + wipe the CK records (parent already decided).
+            allowTokensLocally(for: resolved)
+            Task { await deleteResolvedReviews(resolved) }
+        }
+
+        pendingReviews = live.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// Add tokens from auto-resolved reviews to the local allowed list so the shield
+    /// drops immediately — otherwise the kid sees the request disappear but the app
+    /// still gets shielded until the next parent command arrives.
+    private func allowTokensLocally(for resolved: [PendingAppReview]) {
+        let storage = appState.storage
+        var allowed = Set<ApplicationToken>()
+        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let existing = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data) {
+            allowed = existing
+        }
+        var added = false
+        for review in resolved {
+            guard let b64 = review.tokenDataBase64,
+                  let tokenData = Data(base64Encoded: b64),
+                  let token = try? JSONDecoder().decode(ApplicationToken.self, from: tokenData) else { continue }
+            if allowed.insert(token).inserted { added = true }
+        }
+        guard added else { return }
+        if let encoded = try? JSONEncoder().encode(allowed) {
+            try? storage.writeRawData(encoded, forKey: StorageKeys.allowedAppTokens)
+        }
+        // Kick enforcement so ManagedSettings drops the shield for the newly allowed apps.
+        if let snapshot = storage.readPolicySnapshot() {
+            try? appState.enforcement?.apply(snapshot.effectivePolicy)
+        }
+    }
+
+    private static func partitionReviews(
+        _ reviews: [PendingAppReview],
+        activeNames: Set<String>,
+        activeBundleIDs: Set<String>,
+        activeFingerprints: Set<String>
+    ) -> (live: [PendingAppReview], resolved: [PendingAppReview]) {
+        var live: [PendingAppReview] = []
+        var resolved: [PendingAppReview] = []
+        for review in reviews {
+            let matchesActive: Bool = {
+                if let bid = review.bundleID?.lowercased(), activeBundleIDs.contains(bid) { return true }
+                if activeFingerprints.contains(review.appFingerprint) { return true }
+                if review.nameResolved, activeNames.contains(review.appName.lowercased()) { return true }
+                return false
+            }()
+            if matchesActive { resolved.append(review) } else { live.append(review) }
+        }
+        return (live, resolved)
+    }
+
+    /// Fetch active TimeLimitConfigs from CloudKit, refresh the name/bundleID/fingerprint
+    /// caches, then re-run the local filter so the UI clears matched entries immediately.
+    func refreshActiveAppConfigs() async {
+        guard let cloudKit = appState.cloudKit,
+              let enrollment = try? KeychainManager().get(
+                  ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
+              ) else { return }
+        guard let configs = try? await cloudKit.fetchTimeLimitConfigs(
+            childProfileID: enrollment.childProfileID
+        ) else { return }
+
+        let active = configs.filter(\.isActive)
+        activeAppNames = Set(active.map { $0.appName.lowercased() })
+        activeAppBundleIDs = Set(active.compactMap { $0.bundleID?.lowercased() })
+        activeAppFingerprints = Set(active.map { $0.appFingerprint })
+        lastActiveConfigRefresh = Date()
+        refreshPendingReviews()
+    }
+
+    private func deleteResolvedReviews(_ resolved: [PendingAppReview]) async {
+        guard let cloudKit = appState.cloudKit else { return }
+        for review in resolved {
+            try? await cloudKit.deletePendingAppReview(review.id)
+        }
     }
 
     // MARK: - Parent Messages
@@ -698,6 +801,7 @@ final class ChildHomeViewModel {
         refreshScheduleDriving()
         refreshMessages()
         refreshPendingReviews()
+        Task { await refreshActiveAppConfigs() }
         // Initialize phase without triggering transition actions.
         let startNow = Date()
         if let info = timedUnlockInfo {
@@ -721,6 +825,11 @@ final class ChildHomeViewModel {
                     self.refreshPendingReviews()
                     self.scheduleCheckCounter = 0
                     self.appState.enforceScheduleTransition()
+                    // Pull the latest parent decisions every 60s so pending reviews
+                    // for apps the parent already approved on another device vanish.
+                    if Date().timeIntervalSince(self.lastActiveConfigRefresh) > 60 {
+                        Task { await self.refreshActiveAppConfigs() }
+                    }
                 }
                 if !self.isPINConfigured {
                     self.refreshPINConfigured()

@@ -662,9 +662,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
-        if let childProfileID = AppReviewNotificationService.handleTap(response) {
-            appState?.pendingChildNavigation = childProfileID
+        if let tap = AppReviewNotificationService.handleTap(response) {
+            appState?.pendingChildNavigation = tap.childProfileID
             appState?.pendingReviewNeedsRefresh = true
+            appState?.highlightedReviewID = tap.reviewID
             Task { try? await appState?.refreshDashboard() }
             completionHandler()
             return

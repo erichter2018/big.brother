@@ -524,7 +524,7 @@ struct ChildDetailView: View {
         let isExpanded = expandedDevices.contains(device.id)
 
         VStack(alignment: .leading, spacing: 0) {
-            // Collapsed header — always visible
+            // Two-line collapsed header — always visible
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     if isExpanded {
@@ -534,62 +534,15 @@ struct ChildDetailView: View {
                     }
                 }
             } label: {
-                HStack(spacing: 8) {
-                    // Online indicator
-                    Circle()
-                        .fill(deviceOnlineColor(heartbeat: hb))
-                        .frame(width: 8, height: 8)
-
-                    DeviceIcon(modelIdentifier: device.modelIdentifier, size: .caption)
-                    Text(DeviceIcon.displayName(for: device.modelIdentifier))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .contextMenu {
-                            Button {
-                                let text = viewModel.formattedHeartbeatHistory(for: device)
-                                UIPasteboard.general.string = text
-                            } label: {
-                                Label("Copy Heartbeat History", systemImage: "doc.on.clipboard")
-                            }
-                        }
-                    if hb?.buildType == "testflight" {
-                        Text("TF")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.purple)
-                    }
-
-                    Spacer()
-
-                    if let mode = dominantMode ?? device.confirmedMode {
-                        // Grey clock if heartbeat doesn't confirm the expected mode
-                        if let hbMode = hb?.currentMode, hbMode != mode {
-                            Image(systemName: "clock")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.gray)
-                        }
-                        ModeBadge(mode: mode)
-                    }
-
-                    if let battery = hb?.batteryLevel {
-                        HStack(spacing: 2) {
-                            Image(systemName: hb?.isCharging == true ? "battery.100.bolt" : "battery.50")
-                                .font(.system(size: 10))
-                            Text("\(Int(battery * 100))%")
-                                .font(.caption2)
-                        }
-                        .foregroundStyle(battery < 0.2 ? .red : .secondary)
-                    }
-
-                    Image(systemName: "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                VStack(alignment: .leading, spacing: 4) {
+                    deviceHeaderRow1(device: device, hb: hb, isExpanded: isExpanded)
+                    deviceHeaderRow2(device: device, hb: hb)
                 }
             }
             .buttonStyle(.plain)
             .padding(10)
 
-            // Expanded details
+            // Expanded details (diagnostic-level only)
             if isExpanded {
                 Divider().padding(.horizontal, 10)
                 deviceExpandedContent(device, hb: hb)
@@ -600,56 +553,179 @@ struct ChildDetailView: View {
     }
 
     @ViewBuilder
+    private func deviceHeaderRow1(device: ChildDevice, hb: DeviceHeartbeat?, isExpanded: Bool) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(deviceOnlineColor(heartbeat: hb))
+                .frame(width: 8, height: 8)
+
+            DeviceIcon(modelIdentifier: device.modelIdentifier, size: .caption)
+            Text(DeviceIcon.displayName(for: device.modelIdentifier))
+                .font(.caption)
+                .fontWeight(.medium)
+                .contextMenu {
+                    Button {
+                        let text = viewModel.formattedHeartbeatHistory(for: device)
+                        UIPasteboard.general.string = text
+                    } label: {
+                        Label("Copy Heartbeat History", systemImage: "doc.on.clipboard")
+                    }
+                }
+            if hb?.buildType == "testflight" {
+                Text("TF")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.purple)
+            }
+
+            // Screen on/off + heartbeat age fill the blank space next to the device name
+            if let locked = hb?.isDeviceLocked {
+                Image(systemName: locked ? "lock.fill" : "lock.open.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(locked ? .secondary : .yellow)
+            }
+            if let ts = hb?.timestamp {
+                HStack(spacing: 2) {
+                    Image(systemName: "heart.fill").font(.system(size: 7))
+                    Text(Self.compactHeartbeatAge(ts))
+                }
+                .font(.caption2)
+                .foregroundStyle(.pink.opacity(0.7))
+            }
+
+            Spacer()
+
+            if let mode = dominantMode ?? device.confirmedMode {
+                if let hbMode = hb?.currentMode, hbMode != mode {
+                    Image(systemName: "clock")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.gray)
+                }
+                ModeBadge(mode: mode)
+            }
+
+            if let battery = hb?.batteryLevel {
+                HStack(spacing: 2) {
+                    Image(systemName: hb?.isCharging == true ? "battery.100.bolt" : "battery.50")
+                        .font(.system(size: 10))
+                    Text("\(Int(battery * 100))%")
+                        .font(.caption2)
+                }
+                .foregroundStyle(battery < 0.2 ? .red : .secondary)
+            }
+
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+        }
+    }
+
+    @ViewBuilder
+    private func deviceHeaderRow2(device: ChildDevice, hb: DeviceHeartbeat?) -> some View {
+        HStack(spacing: 6) {
+            Text("iOS \(device.osVersion)")
+
+            if let disk = hb?.availableDiskSpace {
+                Text("·").foregroundStyle(.tertiary)
+                HStack(spacing: 2) {
+                    Image(systemName: "internaldrive")
+                    Text(Self.formatDisk(available: disk, total: hb?.totalDiskSpace))
+                }
+                .foregroundStyle(disk < 1_000_000_000 ? .red : .secondary)
+            }
+
+            if let hb, let minutes = hb.screenTimeMinutes,
+               hb.timestamp >= Calendar.current.startOfDay(for: Date()),
+               hb.heartbeatSource != "vpnTunnel" {
+                Text("·").foregroundStyle(.tertiary)
+                let h = minutes / 60, m = minutes % 60
+                HStack(spacing: 2) {
+                    Image(systemName: "hourglass")
+                    Text(h > 0 ? "\(h)h \(m)m" : "\(m)m")
+                }
+            }
+
+            if let count = hb?.allowedAppCount ?? hb?.allowedAppNames?.count, count > 0 {
+                Text("·").foregroundStyle(.tertiary)
+                Text("\(count) allowed")
+            }
+
+            Spacer(minLength: 4)
+
+            // Status cluster (compact icons)
+            if let hb { shieldsCompactIcon(hb) }
+            buildBadge(childBuild: hb?.appBuildNumber, heartbeat: hb)
+            if let authType = hb?.familyControlsAuthType, authType != "child" {
+                Image(systemName: "exclamationmark.shield")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            }
+            if hb?.vpnDetected == true {
+                Image(systemName: "network.badge.shield.half.filled")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            }
+            if let hb, hasPermissionIssue(hb) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+
+    @ViewBuilder
+    private func shieldsCompactIcon(_ hb: DeviceHeartbeat) -> some View {
+        let shieldsOK = hb.shieldsActive ?? true
+        let inTempUnlock = (hb.temporaryUnlockExpiresAt != nil && hb.temporaryUnlockExpiresAt! > Date())
+            || dominantMode == .unlocked
+        let shouldBeLocked = dominantMode != nil && dominantMode != .unlocked && !inTempUnlock
+        let mismatch = shouldBeLocked && !shieldsOK
+
+        Image(systemName: mismatch ? "shield.slash.fill" : shieldsOK ? "shield.checkered" : "shield.slash")
+            .font(.system(size: 10))
+            .foregroundStyle(mismatch ? .red : shieldsOK ? .green : .secondary)
+    }
+
+    private static func compactHeartbeatAge(_ ts: Date) -> String {
+        let age = max(0, Date().timeIntervalSince(ts))
+        if age < 60 { return "\(Int(age))s ago" }
+        if age < 3600 { return "\(Int(age / 60))m ago" }
+        if age < 86400 { return "\(Int(age / 3600))h ago" }
+        return "\(Int(age / 86400))d ago"
+    }
+
+    @ViewBuilder
     private func deviceExpandedContent(_ device: ChildDevice, hb: DeviceHeartbeat?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Stats row
-            HStack(spacing: 8) {
-                Text("iOS \(device.osVersion)")
-                if let disk = hb?.availableDiskSpace {
-                    HStack(spacing: 2) {
-                        Image(systemName: "internaldrive")
-                        Text(Self.formatDisk(available: disk, total: hb?.totalDiskSpace))
-                    }
-                    .foregroundStyle(disk < 1_000_000_000 ? .red : .secondary)
-                }
-                Spacer()
-                if let count = hb?.allowedAppCount ?? hb?.allowedAppNames?.count, count > 0 {
-                    Text("\(count) apps allowed")
-                }
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-
-            // Screen time + heartbeat
-            HStack(spacing: 8) {
-                if let hb, let minutes = hb.screenTimeMinutes,
-                   hb.timestamp >= Calendar.current.startOfDay(for: Date()),
-                   hb.heartbeatSource != "vpnTunnel" {
-                    let h = minutes / 60, m = minutes % 60
-                    HStack(spacing: 2) {
-                        Image(systemName: "hourglass")
-                        Text(h > 0 ? "\(h)h \(m)m" : "\(m)m")
-                    }
-                    .foregroundStyle(.secondary)
-                }
-                if let ts = hb?.timestamp {
-                    HStack(spacing: 2) {
-                        Image(systemName: "heart.fill").font(.system(size: 7))
-                        Text(ts, style: .relative) + Text(" ago")
-                    }
-                    .foregroundStyle(.pink.opacity(0.6))
-                }
-                buildBadge(childBuild: hb?.appBuildNumber, heartbeat: hb)
-                authTypeBadge(heartbeat: hb)
-            }
-            .font(.caption2)
-
-            // Shield diagnostics
             if let hb {
                 shieldDiagnosticRow(hb)
+                    .font(.caption2)
             }
 
-            // Permissions
+            if let hb, let authType = hb.familyControlsAuthType, authType != "child" {
+                authTypeBadge(heartbeat: hb)
+            }
+
+            if hb?.vpnDetected == true {
+                HStack(spacing: 6) {
+                    Image(systemName: "network.badge.shield.half.filled")
+                        .foregroundStyle(.orange)
+                    Text("VPN active")
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button {
+                        UserDefaults.standard.set(true, forKey: "vpnAcknowledged.\(device.id.rawValue)")
+                    } label: {
+                        Text("Dismiss")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption2)
+            }
+
             DisclosureGroup {
                 PermissionsStatusView(
                     device: device,
@@ -1502,12 +1578,6 @@ struct ChildDetailView: View {
                     }
                 }
 
-                if let locked = hb.isDeviceLocked {
-                    Image(systemName: locked ? "lock.fill" : "lock.open.fill")
-                        .foregroundColor(locked ? .secondary : .yellow)
-                    Text(locked ? "Screen off" : "Screen on")
-                        .foregroundColor(locked ? .secondary : .yellow)
-                }
             }
         }
         .font(.caption2.monospacedDigit())

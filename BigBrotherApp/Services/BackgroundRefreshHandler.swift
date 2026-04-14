@@ -66,10 +66,20 @@ enum BackgroundRefreshHandler {
 
         let isParent = await MainActor.run { appState.parentState != nil }
         if isParent {
+            // Fast path — pending-app-review subscription. The parent cares most
+            // about new kid requests showing up instantly. Short-circuit the full
+            // dashboard refresh and only fetch the reviews for the affected child,
+            // then upsert directly into AppState. UI updates immediately via the
+            // @Observable store; no pull-to-refresh needed.
+            if let queryNotif = notification as? CKQueryNotification,
+               let subID = queryNotif.subscriptionID,
+               subID.hasPrefix("app-reviews-") {
+                return await handlePendingReviewPush(queryNotif, appState: appState)
+            }
+
             #if DEBUG
             print("[BigBrother] CloudKit push received (parent) — refreshing dashboard...")
             #endif
-            // Short delay for CloudKit index consistency.
             try? await Task.sleep(for: .seconds(0.5))
             do {
                 try await appState.refreshDashboard()
@@ -119,6 +129,111 @@ enum BackgroundRefreshHandler {
                 return .failed
             }
         }
+    }
+
+    /// Handle a silent push fired by the pending-app-review CKQuerySubscription.
+    /// Fetches that child's reviews (single CK query), upserts into AppState, and
+    /// posts the parent notification. Much faster than a full dashboard refresh,
+    /// and since AppState is observable the child-detail UI updates instantly.
+    private static func handlePendingReviewPush(
+        _ queryNotif: CKQueryNotification,
+        appState: AppState
+    ) async -> UIBackgroundFetchResult {
+        guard let recordID = queryNotif.recordID,
+              let cloudKit = await MainActor.run(body: { appState.cloudKit })
+        else { return .noData }
+
+        // Fast path: payload carries the record via desiredKeys (v2 subscription).
+        // Upsert immediately — ZERO CK round-trips on the critical path. UI updates
+        // the instant the push is dispatched.
+        if let inline = pendingReviewFromNotification(queryNotif) {
+            let childID = inline.childProfileID
+            await MainActor.run {
+                appState.upsertPendingReview(inline)
+                appState.childrenWithPendingRequests.insert(childID)
+            }
+            let name = await MainActor.run {
+                appState.childProfiles.first(where: { $0.id == childID })?.name ?? "Child"
+            }
+            AppReviewNotificationService.checkAndNotify(
+                reviews: [inline],
+                childName: name,
+                childProfileID: childID
+            )
+            NSLog("[BigBrother] Push review INLINE upsert: child=\(childID.rawValue.prefix(8)) app=\(inline.appName)")
+            // Reconcile the full list in the background so dedup/auto-approve
+            // filters catch up without making the UI wait.
+            Task.detached { [cloudKit] in
+                if let full = try? await cloudKit.fetchPendingAppReviews(childProfileID: childID) {
+                    await MainActor.run { appState.setPendingReviews(full, for: childID) }
+                }
+            }
+            return .newData
+        }
+
+        // Fallback: payload didn't carry the fields (v1 subscription, old device,
+        // or CK truncated). Do a single-record fetch and upsert.
+        try? await Task.sleep(for: .milliseconds(500))
+        guard let review = try? await cloudKit.fetchPendingAppReview(recordID: recordID) else {
+            NSLog("[BigBrother] Push review fetch failed for \(recordID.recordName)")
+            return .failed
+        }
+        let childID = review.childProfileID
+        let allForChild = (try? await cloudKit.fetchPendingAppReviews(childProfileID: childID)) ?? [review]
+        await MainActor.run {
+            appState.setPendingReviews(allForChild, for: childID)
+            appState.childrenWithPendingRequests.insert(childID)
+        }
+        let name = await MainActor.run {
+            appState.childProfiles.first(where: { $0.id == childID })?.name ?? "Child"
+        }
+        AppReviewNotificationService.checkAndNotify(
+            reviews: allForChild,
+            childName: name,
+            childProfileID: childID
+        )
+        NSLog("[BigBrother] Push review FETCH upsert: child=\(childID.rawValue.prefix(8)) count=\(allForChild.count)")
+        return .newData
+    }
+
+    /// Reconstitute a PendingAppReview from CKQueryNotification.recordFields when
+    /// the subscription included desiredKeys. Returns nil if fields missing.
+    private static func pendingReviewFromNotification(
+        _ queryNotif: CKQueryNotification
+    ) -> PendingAppReview? {
+        guard let fields = queryNotif.recordFields,
+              let familyID = fields[CKFieldName.familyID] as? String,
+              let childProfileID = fields[CKFieldName.profileID] as? String,
+              let deviceID = fields[CKFieldName.deviceID] as? String,
+              let fingerprint = fields[CKFieldName.appFingerprint] as? String,
+              let appName = fields[CKFieldName.appName] as? String,
+              let createdAt = fields[CKFieldName.createdAt] as? Date,
+              let updatedAt = fields[CKFieldName.updatedAt] as? Date,
+              let recordID = queryNotif.recordID
+        else { return nil }
+
+        let nameResolved: Bool = {
+            if let n = fields[CKFieldName.nameResolved] as? Int64 { return n != 0 }
+            if let n = fields[CKFieldName.nameResolved] as? Int { return n != 0 }
+            if let n = fields[CKFieldName.nameResolved] as? Bool { return n }
+            return false
+        }()
+
+        let uuidString = recordID.recordName.replacingOccurrences(
+            of: "BBPendingAppReview_", with: ""
+        )
+        return PendingAppReview(
+            id: UUID(uuidString: uuidString) ?? UUID(),
+            familyID: FamilyID(rawValue: familyID),
+            childProfileID: ChildProfileID(rawValue: childProfileID),
+            deviceID: DeviceID(rawValue: deviceID),
+            appFingerprint: fingerprint,
+            appName: appName,
+            bundleID: fields["appBundleID"] as? String,
+            nameResolved: nameResolved,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
     }
 
     /// Register for remote notifications.

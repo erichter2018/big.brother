@@ -100,14 +100,22 @@ struct ChildSummaryCard: View {
             }
         }
 
-        var deviceHeartbeats: [(isPhone: Bool, age: TimeInterval)] = []
+        var deviceHeartbeats: [(isPhone: Bool, age: TimeInterval, isLocked: Bool?)] = []
         for device in devices {
             if let hb = heartbeats.first(where: { $0.deviceID == device.id }) {
                 let isPhone = device.modelIdentifier.lowercased().contains("iphone")
-                deviceHeartbeats.append((isPhone: isPhone, age: Date().timeIntervalSince(hb.timestamp)))
+                deviceHeartbeats.append((
+                    isPhone: isPhone,
+                    age: Date().timeIntervalSince(hb.timestamp),
+                    isLocked: hb.isDeviceLocked
+                ))
             }
         }
-        deviceHeartbeats.sort { $0.age < $1.age }
+        // Phones always first, then iPads; within each group, freshest heartbeat first.
+        deviceHeartbeats.sort { a, b in
+            if a.isPhone != b.isPhone { return a.isPhone }
+            return a.age < b.age
+        }
         let heartbeatAge = deviceHeartbeats.first?.age
 
         // jailbreak info (used in tertiaryLine)
@@ -187,7 +195,7 @@ struct ChildSummaryCard: View {
         let isFCAuthDegraded: Bool
         let isAppForceClosed: Bool
         let latestHeartbeatAge: TimeInterval?
-        let deviceHeartbeats: [(isPhone: Bool, age: TimeInterval)]
+        let deviceHeartbeats: [(isPhone: Bool, age: TimeInterval, isLocked: Bool?)]
         let jailbreakReasons: [String]
         let hasJailbreak: Bool
         let isInternetBlocked: Bool
@@ -689,6 +697,11 @@ struct ChildSummaryCard: View {
                 HStack(spacing: 6) {
                     ForEach(Array(cached.deviceHeartbeats.enumerated()), id: \.offset) { _, dh in
                         HStack(spacing: 2) {
+                            if let locked = dh.isLocked {
+                                Image(systemName: locked ? "lock.fill" : "lock.open.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(locked ? .secondary : .yellow)
+                            }
                             Image(systemName: dh.isPhone ? "iphone" : "ipad")
                                 .font(.caption2)
                                 .foregroundStyle(dh.age < 600 ? .green : .secondary)
@@ -698,7 +711,6 @@ struct ChildSummaryCard: View {
                         }
                     }
                     Spacer()
-                    lockIcon
                 }
             }
         }

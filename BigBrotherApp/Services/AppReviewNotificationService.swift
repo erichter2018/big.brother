@@ -90,13 +90,16 @@ enum AppReviewNotificationService {
         }
     }
 
-    /// Handle a tap on an app review notification. Returns the child profile ID to navigate to.
-    static func handleTap(_ response: UNNotificationResponse) -> ChildProfileID? {
+    /// Handle a tap on an app review notification.
+    /// Returns the child profile ID to navigate to, plus the specific review ID
+    /// so the detail view can auto-scroll to and highlight that card.
+    static func handleTap(_ response: UNNotificationResponse) -> (childProfileID: ChildProfileID, reviewID: UUID?)? {
         let userInfo = response.notification.request.content.userInfo
         guard userInfo["type"] as? String == "appReview",
               let rawID = userInfo["childProfileID"] as? String else {
             return nil
         }
-        return ChildProfileID(rawValue: rawID)
+        let reviewID = (userInfo["reviewID"] as? String).flatMap(UUID.init(uuidString:))
+        return (ChildProfileID(rawValue: rawID), reviewID)
     }
 }

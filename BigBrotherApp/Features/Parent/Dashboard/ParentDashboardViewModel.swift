@@ -274,7 +274,13 @@ final class ParentDashboardViewModel: CommandSendable {
     // MARK: - Loading
 
     func loadDashboard() async {
-        loadingState = .loading
+        // Only show the skeleton on the FIRST load. On subsequent refreshes
+        // (pull-to-refresh, returning from child detail) keep the existing
+        // cards visible while the new data fetches — wiping them to shimmer
+        // is what was producing "blank panes after refresh".
+        if case .loaded = loadingState {} else if case .empty = loadingState {} else {
+            loadingState = .loading
+        }
         do {
             try await appState.refreshDashboard()
             if appState.childProfiles.isEmpty {

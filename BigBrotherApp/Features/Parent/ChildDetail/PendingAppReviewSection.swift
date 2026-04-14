@@ -15,11 +15,46 @@ struct PendingAppReviewSection: View {
         viewModel.pendingAppReviews.filter { !$0.nameResolved }.count
     }
 
+    @ViewBuilder
+    private func highlightBackground(for id: UUID) -> some View {
+        if viewModel.appState.highlightedReviewID == id {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.yellow.opacity(0.25))
+                .transition(.opacity)
+        }
+    }
+
     var body: some View {
         if !viewModel.pendingAppReviews.isEmpty {
             Section {
-                ForEach(viewModel.pendingAppReviews) { review in
-                    reviewRow(review)
+                ScrollViewReader { proxy in
+                    ForEach(viewModel.pendingAppReviews) { review in
+                        reviewRow(review)
+                            .id(review.id)
+                            .background(
+                                highlightBackground(for: review.id)
+                            )
+                    }
+                    .onChange(of: viewModel.appState.highlightedReviewID) { _, newID in
+                        guard let id = newID else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo(id, anchor: .center)
+                        }
+                        // Auto-clear the highlight after a short flash.
+                        Task {
+                            try? await Task.sleep(for: .seconds(2))
+                            await MainActor.run {
+                                if viewModel.appState.highlightedReviewID == id {
+                                    viewModel.appState.highlightedReviewID = nil
+                                }
+                            }
+                        }
+                    }
+                    .onAppear {
+                        if let id = viewModel.appState.highlightedReviewID {
+                            withAnimation { proxy.scrollTo(id, anchor: .center) }
+                        }
+                    }
                 }
             } header: {
                 HStack {

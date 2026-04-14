@@ -574,6 +574,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         try await delete(recordID)
     }
 
+    /// Fetch a single pending review by its CKRecord.ID. Used by the silent push
+    /// handler to identify which child a newly-created review belongs to.
+    func fetchPendingAppReview(recordID: CKRecord.ID) async throws -> PendingAppReview? {
+        let record = try await database.record(for: recordID)
+        return CKRecordConversion.pendingAppReview(from: record)
+    }
+
     // MARK: - Enforcement Log
 
     func fetchEnforcementLogs(familyID: FamilyID, since: Date) async throws -> [CKRecord] {
@@ -759,21 +766,42 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 format: "%K == %@",
                 CKFieldName.familyID, familyID.rawValue
             )
+            // Bump to v2 so the new subscription with desiredKeys replaces the v1
+            // without-keys subscription — otherwise parents running older builds
+            // already have a v1 on file and wouldn't get the richer payloads.
             let reviewSub = CKQuerySubscription(
                 recordType: CKRecordType.pendingAppReview,
                 predicate: reviewPredicate,
-                subscriptionID: "app-reviews-v1-\(familyID.rawValue)",
+                subscriptionID: "app-reviews-v2-\(familyID.rawValue)",
                 options: [.firesOnRecordCreation]
             )
             let reviewNotifInfo = CKSubscription.NotificationInfo()
             reviewNotifInfo.shouldSendContentAvailable = true
+            // Request the full record payload in the push so we can build a
+            // PendingAppReview directly in the background handler — no CK fetch
+            // required for the review to appear in the parent UI.
+            // Stay well under the ~4KB push payload ceiling: only primitive fields.
+            reviewNotifInfo.desiredKeys = [
+                CKFieldName.familyID,
+                CKFieldName.profileID,
+                CKFieldName.deviceID,
+                CKFieldName.appFingerprint,
+                CKFieldName.appName,
+                CKFieldName.nameResolved,
+                CKFieldName.createdAt,
+                CKFieldName.updatedAt,
+                "appBundleID"
+            ]
             reviewSub.notificationInfo = reviewNotifInfo
             subscriptionsToSave.append(reviewSub)
         }
 
+        // Clean up superseded subscription IDs so the parent app doesn't
+        // receive two pushes per kid request (old + new).
+        let oldReviewSubID = "app-reviews-v1-\(familyID.rawValue)"
         let op = CKModifySubscriptionsOperation(
             subscriptionsToSave: subscriptionsToSave,
-            subscriptionIDsToDelete: nil
+            subscriptionIDsToDelete: [oldReviewSubID]
         )
         op.qualityOfService = .utility
 
