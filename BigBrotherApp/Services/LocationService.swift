@@ -116,12 +116,49 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     /// motion coprocessor with near-zero battery impact.
     private let motionManager = CMMotionActivityManager()
 
+    /// Task driving CoreMotion activity iteration. Bridges the legacy
+    /// closure-based `startActivityUpdates(to:withHandler:)` API into a
+    /// structured-concurrency Task whose lifetime owns the subscription.
+    /// Cancelling the task tears down the underlying motion subscription
+    /// via `stopActivityUpdates()`.
+    private var motionTask: Task<Void, Never>?
+
+    /// Serializes geofence-mutating work (add/remove conditions). Concurrent
+    /// `registerNamedPlaces()` calls — possible from rapid back-to-back
+    /// `syncNamedPlaces` commands — used to spawn racing Tasks that all
+    /// touched the same CLMonitor. Each new mutation now awaits the prior
+    /// one to prevent interleaved add/remove sequences.
+    private var lastGeofenceMutationTask: Task<Void, Never>?
+
     /// Whether CoreMotion is actively monitoring (exposed for diagnostics).
     private(set) var motionMonitoringActive = false
 
     /// iOS 17+ background activity session — keeps location alive even after force-quit.
     /// The system will relaunch the app for location updates when this session exists.
     private var backgroundSession: CLBackgroundActivitySession?
+
+    /// iOS 17+ region monitor. Replaces the deprecated
+    /// `CLLocationManager.startMonitoring(for: CLCircularRegion)` +
+    /// `locationManager(_:didEnterRegion:)` / `didExitRegion` delegate
+    /// pattern. Conditions (home + named places) are added via
+    /// `addGeofence(...)` and events arrive on `monitor.events()` AsyncSequence
+    /// driven by `geofenceEventTask`.
+    private var clMonitor: CLMonitor?
+
+    /// Task iterating `clMonitor.events()` — yields region transition
+    /// events (satisfied/unsatisfied) and routes them to the existing
+    /// arrival/departure handlers. Cancelling the task stops event
+    /// delivery; removing/re-adding conditions is done via the
+    /// `clMonitor` directly without restarting iteration.
+    private var geofenceEventTask: Task<Void, Never>?
+
+    /// In-process cache of identifiers we've added in THIS run. Used
+    /// only as a quick local lookup; the authoritative source is
+    /// `await monitor.identifiers` (CLMonitor persists conditions across
+    /// launches, so a fresh process starts with this empty cache while
+    /// real conditions still exist on disk). All cleanup paths query
+    /// `monitor.identifiers` to find the truly persisted set.
+    private var monitoredGeofenceIdentifiers: Set<String> = []
 
     init(
         cloudKit: any CloudKitServiceProtocol,
@@ -184,9 +221,13 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             locationManager.stopUpdatingLocation()
             locationManager.stopMonitoringVisits()
             stopMotionMonitoring()
-            for region in locationManager.monitoredRegions {
-                locationManager.stopMonitoring(for: region)
-            }
+            stopGeofenceMonitoring()
+            // Round-2 audit caught: CLBackgroundActivitySession was created in
+            // startContinuousTracking() but never invalidated when mode goes
+            // to .off. iOS would keep relaunching us for location even though
+            // we no longer want tracking. Invalidate explicitly.
+            backgroundSession?.invalidate()
+            backgroundSession = nil
         case .onDemand:
             locationManager.stopMonitoringSignificantLocationChanges()
             // Request Always so on-demand works even from background.
@@ -236,6 +277,16 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
 
     /// Start monitoring device motion via the motion coprocessor.
     /// Near-zero battery impact. Detects driving/walking/stationary within seconds.
+    ///
+    /// Architecture: `CMMotionActivityManager` only ships a closure-based
+    /// API (`startActivityUpdates(to:withHandler:)`); there is no native
+    /// AsyncSequence in iOS 17. We bridge it through `AsyncStream` so the
+    /// iteration runs inside a Task whose cancellation owns the
+    /// subscription lifecycle. Cancelling `motionTask` calls
+    /// `stopActivityUpdates()` via the stream's `onTermination` handler.
+    /// Removes the previous `beginBackgroundTask("motionDetected")` bridge —
+    /// the Task itself keeps the closure-driven work alive long enough to
+    /// hand off to high-frequency tracking.
     private func startMotionMonitoring() {
         guard CMMotionActivityManager.isActivityAvailable(), !motionMonitoringActive else {
             #if DEBUG
@@ -251,70 +302,121 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         motionMonitoringActive = true
         logDiag("CoreMotion activity monitoring started")
 
-        motionManager.startActivityUpdates(to: .main) { [weak self] activity in
-            guard let self, let activity else { return }
+        let manager = motionManager
+        let activityStream = AsyncStream<CMMotionActivity> { continuation in
+            manager.startActivityUpdates(to: .main) { activity in
+                if let activity {
+                    continuation.yield(activity)
+                }
+            }
+            continuation.onTermination = { _ in
+                manager.stopActivityUpdates()
+            }
+        }
 
-            let wasMoving = self.isMoving
-            let now = Date()
+        motionTask = Task { @MainActor [weak self] in
+            for await activity in activityStream {
+                guard let self else { return }
+                if Task.isCancelled { return }
+                self.handleMotionActivity(activity)
+            }
+            // Stream drained naturally (rare — usually only on manual cancel,
+            // but defensive). Reset the active flag so a later
+            // `startMotionMonitoring()` call isn't blocked by the guard.
+            await MainActor.run { [weak self] in
+                self?.motionMonitoringActive = false
+            }
+        }
+    }
 
-            // Log activity type for diagnostics (throttled — only on transitions)
-            let activityDesc = Self.describeActivity(activity)
+    /// Process one CoreMotion activity sample. Extracted from the inline
+    /// closure so the AsyncStream iteration in `startMotionMonitoring`
+    /// stays readable.
+    @MainActor
+    private func handleMotionActivity(_ activity: CMMotionActivity) {
+        let wasMoving = self.isMoving
+        let now = Date()
+        let activityDesc = Self.describeActivity(activity)
 
-            if activity.automotive || activity.cycling || activity.running || activity.walking {
-                self.isMoving = true
-                self.lastMovementAt = now
+        if activity.automotive || activity.cycling || activity.running || activity.walking {
+            self.isMoving = true
+            self.lastMovementAt = now
 
-                if activity.automotive {
-                    self.locationManager.activityType = .automotiveNavigation
+            if activity.automotive {
+                self.locationManager.activityType = .automotiveNavigation
+            } else {
+                self.locationManager.activityType = .fitness
+            }
+
+            if !wasMoving && self.mode == .continuous {
+                // Three reviewers (Claude/Gemini/Codex) flagged that removing
+                // the bgTask bridge here is risky: between the motion-detected
+                // event and `startUpdatingLocation` actually delivering its
+                // first GPS fix, iOS can suspend the app. The 10-second
+                // background assertion bridges that gap — Apple's documented
+                // pattern for "I just got a wake event and need to set up
+                // continuous location tracking before the system suspends me."
+                let bgTask = UIApplication.shared.beginBackgroundTask(withName: "motionDetected") { }
+                self.activateHighFrequencyTracking()
+                self.lastBreadcrumbSaveAt = nil
+                self.onRequestImmediateHeartbeat?()
+                self.logDiag("Movement started: \(activityDesc) → high-frequency tracking ON")
+                // Schedule end-of-task on a Task. Use `Task.detached` +
+                // CancellationHandler so cleanup runs even if we're cancelled
+                // mid-sleep — otherwise a cancelled Task leaks the bg
+                // assertion (round-2 audit caught this).
+                Task.detached {
+                    await withTaskCancellationHandler {
+                        try? await Task.sleep(for: .seconds(10))
+                        await MainActor.run {
+                            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
+                        }
+                    } onCancel: {
+                        Task { @MainActor in
+                            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
+                        }
+                    }
+                }
+            }
+
+            // Notify driving monitor of automotive start — require high confidence
+            // AND recent GPS speed >10mph to avoid false positives from vibrations,
+            // being near traffic, or riding in a stopped car.
+            if activity.automotive && activity.confidence == .high && self.drivingMonitor?.isDriving != true {
+                let recentSpeed = self.locationManager.location?.speed ?? -1
+                if recentSpeed > 4.5 { // ~10 mph — actually moving
+                    self.drivingMonitor?.onDrivingStarted()
+                    self.logDiag("Driving started (CoreMotion automotive high + GPS \(String(format: "%.0f", recentSpeed * 2.237))mph)")
                 } else {
-                    self.locationManager.activityType = .fitness
+                    self.logDiag("Driving suppressed (CoreMotion automotive high but GPS speed \(String(format: "%.0f", recentSpeed * 2.237))mph < 10mph)")
                 }
-
-                if !wasMoving && self.mode == .continuous {
-                    // Background task to bridge the gap until startUpdatingLocation keeps us alive
-                    let bgTask = UIApplication.shared.beginBackgroundTask(withName: "motionDetected") { }
-                    self.activateHighFrequencyTracking()
-                    self.lastBreadcrumbSaveAt = nil
-                    self.onRequestImmediateHeartbeat?()
-                    self.logDiag("Movement started: \(activityDesc) → high-frequency tracking ON")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-                        if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
-                    }
-                }
-
-                // Notify driving monitor of automotive start — require high confidence
-                // AND recent GPS speed >10mph to avoid false positives from vibrations,
-                // being near traffic, or riding in a stopped car.
-                if activity.automotive && activity.confidence == .high && self.drivingMonitor?.isDriving != true {
-                    let recentSpeed = self.locationManager.location?.speed ?? -1
-                    if recentSpeed > 4.5 { // ~10 mph — actually moving
-                        self.drivingMonitor?.onDrivingStarted()
-                        self.logDiag("Driving started (CoreMotion automotive high + GPS \(String(format: "%.0f", recentSpeed * 2.237))mph)")
-                    } else {
-                        self.logDiag("Driving suppressed (CoreMotion automotive high but GPS speed \(String(format: "%.0f", recentSpeed * 2.237))mph < 10mph)")
-                    }
-                }
-            } else if activity.stationary, self.isMoving,
-                      let lastMove = self.lastMovementAt,
-                      now.timeIntervalSince(lastMove) > Self.activeTrackingCooldown {
-                // Notify driving monitor of trip end
-                if self.drivingMonitor?.isDriving == true {
-                    self.drivingMonitor?.onDrivingEnded()
-                    self.consecutiveHighSpeedSamples = 0
-                    self.logDiag("Driving ended (stationary for \(Int(Self.activeTrackingCooldown))s)")
-                }
-                self.logDiag("Movement stopped: stationary → high-frequency tracking OFF")
-                self.isMoving = false
-                self.locationManager.activityType = .other
-                if self.mode == .continuous {
-                    self.deactivateHighFrequencyTracking()
-                }
+            }
+        } else if activity.stationary, self.isMoving,
+                  let lastMove = self.lastMovementAt,
+                  now.timeIntervalSince(lastMove) > Self.activeTrackingCooldown {
+            // Notify driving monitor of trip end
+            if self.drivingMonitor?.isDriving == true {
+                self.drivingMonitor?.onDrivingEnded()
+                self.consecutiveHighSpeedSamples = 0
+                self.logDiag("Driving ended (stationary for \(Int(Self.activeTrackingCooldown))s)")
+            }
+            self.logDiag("Movement stopped: stationary → high-frequency tracking OFF")
+            self.isMoving = false
+            self.locationManager.activityType = .other
+            if self.mode == .continuous {
+                self.deactivateHighFrequencyTracking()
             }
         }
     }
 
     private func stopMotionMonitoring() {
         guard motionMonitoringActive else { return }
+        motionTask?.cancel() // triggers onTermination → stopActivityUpdates
+        motionTask = nil
+        // Belt-and-suspenders: explicit stopActivityUpdates() in case the
+        // AsyncStream was never iterated (e.g., stop called before the
+        // Task was scheduled). Apple's CMMotionActivityManager is documented
+        // as idempotent for stopActivityUpdates.
         motionManager.stopActivityUpdates()
         motionMonitoringActive = false
     }
@@ -367,10 +469,135 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         #endif
     }
 
-    // MARK: - Home Geofence
+    // MARK: - Geofencing (CLMonitor)
+    //
+    // iOS 17+: `CLCircularRegion` + `CLLocationManager.startMonitoring(for:)`
+    // were deprecated in favor of `CLMonitor`. CLMonitor is async, condition-
+    // based, and survives app suspension/relaunch. Events flow through
+    // `monitor.events()` AsyncSequence instead of the
+    // `locationManager(_:didEnterRegion:)` / `didExitRegion` delegate.
+    // We keep one shared CLMonitor instance for the app's lifetime; conditions
+    // are added/removed as home + named places change.
 
     private static let homeRegionIdentifier = "bigbrother.home"
     private static let homeRadiusMeters: CLLocationDistance = 75
+    /// Alphanumeric-only per CoreLocation's documented `CLMonitor` name
+    /// contract. The previous value used dots (`fr.bigbrother.geofence`)
+    /// which is undefined behavior — codex audit caught this.
+    /// Conditions persist on disk under this name across app launches.
+    private static let geofenceMonitorName = "frbigbrothergeofence"
+
+    /// Lazily initialize the CLMonitor and start its event-iteration Task.
+    /// Idempotent — if the monitor already exists, just returns it.
+    private func ensureGeofenceMonitor() async -> CLMonitor? {
+        if let existing = clMonitor { return existing }
+        let monitor = await CLMonitor(Self.geofenceMonitorName)
+        clMonitor = monitor
+        // Drive the events() AsyncSequence on a Task. Cancelling
+        // geofenceEventTask stops event delivery; the monitor itself
+        // keeps the underlying conditions registered, so iOS can still
+        // wake the app on a transition (events queue up and deliver
+        // when iteration resumes after relaunch).
+        geofenceEventTask?.cancel()
+        geofenceEventTask = Task { [weak self] in
+            do {
+                let stream = await monitor.events
+                for try await event in stream {
+                    guard let self else { return }
+                    if Task.isCancelled { return }
+                    await self.handleGeofenceEvent(event)
+                }
+            } catch {
+                self?.logDiag("CLMonitor events stream ended: \(error.localizedDescription)", throttleKey: "clmonitor.streamEnd")
+            }
+        }
+        return monitor
+    }
+
+    /// Add a geographic geofence to the shared CLMonitor. Replaces
+    /// `CLCircularRegion` + `locationManager.startMonitoring(for:)`.
+    private func addGeofence(identifier: String, center: CLLocationCoordinate2D, radius: CLLocationDistance) async {
+        guard let monitor = await ensureGeofenceMonitor() else { return }
+        let bounded = min(radius, locationManager.maximumRegionMonitoringDistance)
+        let condition = CLMonitor.CircularGeographicCondition(
+            center: center,
+            radius: bounded
+        )
+        await monitor.add(condition, identifier: identifier, assuming: .unknown)
+        monitoredGeofenceIdentifiers.insert(identifier)
+    }
+
+    /// Remove a single geofence from the shared CLMonitor.
+    private func removeGeofence(identifier: String) async {
+        guard let monitor = clMonitor else { return }
+        await monitor.remove(identifier)
+        monitoredGeofenceIdentifiers.remove(identifier)
+    }
+
+    /// Tear down all geofence monitoring. Called when mode goes to .off.
+    ///
+    /// Two important details the audits caught:
+    /// 1. Wait for any in-flight `chainGeofenceMutation` work to finish
+    ///    BEFORE removing conditions, otherwise a register-then-stop race
+    ///    could leave the system with re-added geofences after shutdown.
+    /// 2. CLMonitor persists conditions across launches. The in-process
+    ///    `monitoredGeofenceIdentifiers` set starts empty on a fresh
+    ///    process, so we must enumerate the monitor's persisted set
+    ///    (`await monitor.identifiers`) rather than only acting on what
+    ///    we registered this run. Otherwise stale conditions from a prior
+    ///    process linger forever.
+    private func stopGeofenceMonitoring() {
+        geofenceEventTask?.cancel()
+        geofenceEventTask = nil
+        monitoredGeofenceIdentifiers.removeAll()
+        let monitorToCleanup = clMonitor
+        clMonitor = nil
+
+        // Append the cleanup to the SAME serialization chain that all
+        // register paths use (chainGeofenceMutation). Round-2 audit caught
+        // that nilling `lastGeofenceMutationTask` before awaiting it broke
+        // the chain invariant — a new chainGeofenceMutation call between
+        // the nil and the await would see nil and run unserialized,
+        // racing the stop. Instead, push the cleanup onto the chain so
+        // any concurrent register call naturally awaits it via the
+        // chain's own previous-task await.
+        guard let monitor = monitorToCleanup else { return }
+        chainGeofenceMutation { [weak self] in
+            _ = self // keep weak self alive through closure type
+            let persisted = await monitor.identifiers
+            for id in persisted {
+                await monitor.remove(id)
+            }
+        }
+    }
+
+    /// Process one CLMonitor event (region transition). Replaces the
+    /// `locationManager(_:didEnterRegion:)` and `didExitRegion` delegate
+    /// methods. CLMonitor reports `state` as `.satisfied` (inside the
+    /// region) or `.unsatisfied` (outside). Ignore `.unknown` — that's
+    /// just iOS computing initial state and doesn't reflect a real
+    /// transition the user made.
+    @MainActor
+    private func handleGeofenceEvent(_ event: CLMonitor.Event) async {
+        let id = event.identifier
+        switch event.state {
+        case .satisfied:
+            handleGeofenceEntered(identifier: id)
+        case .unsatisfied:
+            handleGeofenceExited(identifier: id)
+        case .unknown:
+            // Initial state computation — iOS hasn't decided yet.
+            // Don't act; wait for satisfied/unsatisfied to follow.
+            break
+        case .unmonitored:
+            // iOS 17.2+: condition is no longer being monitored (e.g.,
+            // we removed it but a queued event hadn't drained yet).
+            // Treat as no-op.
+            break
+        @unknown default:
+            break
+        }
+    }
 
     /// Registers a geofence around the home location if coordinates are stored in App Group defaults.
     private func registerHomeGeofenceIfConfigured() {
@@ -381,23 +608,29 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             return
         }
 
-        // Remove any existing home region before re-registering.
-        for region in locationManager.monitoredRegions {
-            if region.identifier == Self.homeRegionIdentifier {
-                locationManager.stopMonitoring(for: region)
-            }
+        chainGeofenceMutation { [weak self] in
+            guard let self else { return }
+            await self.removeGeofence(identifier: Self.homeRegionIdentifier)
+            await self.addGeofence(
+                identifier: Self.homeRegionIdentifier,
+                center: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                radius: Self.homeRadiusMeters
+            )
+            self.logDiag("Home geofence registered at (\(String(format: "%.4f", lat)), \(String(format: "%.4f", lon))) radius \(Int(Self.homeRadiusMeters))m")
         }
+    }
 
-        let center = CLLocationCoordinate2D(latitude: lat, longitude: lon)
-        let region = CLCircularRegion(
-            center: center,
-            radius: min(Self.homeRadiusMeters, locationManager.maximumRegionMonitoringDistance),
-            identifier: Self.homeRegionIdentifier
-        )
-        region.notifyOnEntry = true
-        region.notifyOnExit = true
-        locationManager.startMonitoring(for: region)
-        logDiag("Home geofence registered at (\(String(format: "%.4f", lat)), \(String(format: "%.4f", lon))) radius \(Int(Self.homeRadiusMeters))m")
+    /// Append a geofence-mutating piece of work to the serialized chain.
+    /// Each call captures the prior `lastGeofenceMutationTask` and awaits
+    /// it before running the new body, preventing interleaved adds/removes
+    /// from concurrent `registerNamedPlaces` / `registerHomeGeofenceIfConfigured`
+    /// calls.
+    private func chainGeofenceMutation(_ body: @escaping @Sendable () async -> Void) {
+        let previous = lastGeofenceMutationTask
+        lastGeofenceMutationTask = Task {
+            _ = await previous?.value
+            await body()
+        }
     }
 
     // MARK: - On-Demand & Heartbeat Refresh
@@ -584,25 +817,42 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
 
     // MARK: - Named Place Geofences
 
-    /// Register CLCircularRegions for named places. Called after syncNamedPlaces command.
-    /// iOS limit: 20 regions. Home uses 1, so max 19 named places.
+    /// Register CLMonitor geofences for named places. Called after the
+    /// syncNamedPlaces command. iOS limit: 20 geofences total. Home uses 1,
+    /// so max 19 named places.
+    ///
+    /// Mutations are serialized through `chainGeofenceMutation` so back-to-back
+    /// calls don't interleave their remove/add cycles. The "to remove" set
+    /// is computed from CLMonitor's PERSISTED identifiers (not the
+    /// in-memory cache) because conditions persist across app launches —
+    /// otherwise deleted named places from a prior process would never
+    /// get cleaned up.
     func registerNamedPlaces(_ places: [NamedPlace]) {
-        // Remove existing named place regions (keep home)
-        for region in locationManager.monitoredRegions {
-            if region.identifier.hasPrefix(Self.namedPlacePrefix) {
-                locationManager.stopMonitoring(for: region)
-            }
+        struct PlaceEntry: Sendable {
+            let identifier: String
+            let center: CLLocationCoordinate2D
+            let radius: CLLocationDistance
         }
-        // Register up to 19 places
-        for place in places.prefix(19) {
-            let region = CLCircularRegion(
+        let toAdd = places.prefix(19).map { place in
+            PlaceEntry(
+                identifier: "\(Self.namedPlacePrefix)\(place.id.uuidString)",
                 center: CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude),
-                radius: min(place.radiusMeters, locationManager.maximumRegionMonitoringDistance),
-                identifier: "\(Self.namedPlacePrefix)\(place.id.uuidString)"
+                radius: place.radiusMeters
             )
-            region.notifyOnEntry = true
-            region.notifyOnExit = true
-            locationManager.startMonitoring(for: region)
+        }
+        let prefix = Self.namedPlacePrefix
+        chainGeofenceMutation { [weak self] in
+            guard let self else { return }
+            // Query CLMonitor for what's actually persisted, not the in-memory shadow.
+            if let monitor = await self.ensureGeofenceMonitor() {
+                let persisted = await monitor.identifiers
+                for id in persisted where id.hasPrefix(prefix) {
+                    await self.removeGeofence(identifier: id)
+                }
+            }
+            for entry in toAdd {
+                await self.addGeofence(identifier: entry.identifier, center: entry.center, radius: entry.radius)
+            }
         }
         // Persist places for lookup on entry/exit
         if let data = try? JSONEncoder().encode(places) {
@@ -610,7 +860,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
                 .set(data, forKey: "namedPlaces")
         }
         #if DEBUG
-        print("[LocationService] Registered \(min(places.count, 19)) named place geofences")
+        print("[LocationService] Registering \(min(places.count, 19)) named place geofences via CLMonitor")
         #endif
     }
 
@@ -624,14 +874,19 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         return places.first { $0.id.uuidString == idStr }
     }
 
-    func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+    /// CLMonitor reported region entry. Replaces the old
+    /// `locationManager(_:didEnterRegion:)` delegate method. Same logic,
+    /// just driven by the CLMonitor.events() async iteration in
+    /// `geofenceEventTask` instead of the deprecated delegate callback.
+    @MainActor
+    private func handleGeofenceEntered(identifier: String) {
         #if DEBUG
-        print("[LocationService] Entered region: \(region.identifier)")
+        print("[LocationService] Entered region: \(identifier)")
         #endif
 
         // Named place arrival
-        if let place = namedPlace(for: region.identifier) {
-            logDiag("Geofence ENTER: \(place.name) (\(region.identifier))")
+        if let place = namedPlace(for: identifier) {
+            logDiag("Geofence ENTER: \(place.name) (\(identifier))")
             eventLogger?.log(.namedPlaceArrival, details: "Arrived at \(place.name)")
             Task { try? await eventLogger?.syncPendingEvents() }
             lastBreadcrumbSaveAt = nil
@@ -640,7 +895,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             return
         }
 
-        guard region.identifier == Self.homeRegionIdentifier else {
+        guard identifier == Self.homeRegionIdentifier else {
             locationManager.requestLocation()
             return
         }
@@ -653,14 +908,22 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         onRequestImmediateHeartbeat?()
     }
 
-    func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+    /// CLMonitor reported region exit. Replaces the old
+    /// `locationManager(_:didExitRegion:)` delegate method. The previous
+    /// version called `beginBackgroundTask("geofenceExit")` to keep the
+    /// app alive long enough for high-frequency tracking to take over;
+    /// CLMonitor's event delivery is robust across app suspension and the
+    /// system gives us a longer keep-alive window, so the bridge is no
+    /// longer required.
+    @MainActor
+    private func handleGeofenceExited(identifier: String) {
         #if DEBUG
-        print("[LocationService] Exited region: \(region.identifier)")
+        print("[LocationService] Exited region: \(identifier)")
         #endif
 
         // Named place departure
-        if let place = namedPlace(for: region.identifier) {
-            logDiag("Geofence EXIT: \(place.name) (\(region.identifier))")
+        if let place = namedPlace(for: identifier) {
+            logDiag("Geofence EXIT: \(place.name) (\(identifier))")
             eventLogger?.log(.namedPlaceDeparture, details: "Left \(place.name)")
             Task { try? await eventLogger?.syncPendingEvents() }
             lastBreadcrumbSaveAt = nil
@@ -669,16 +932,15 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             return
         }
 
-        guard region.identifier == Self.homeRegionIdentifier else {
+        guard identifier == Self.homeRegionIdentifier else {
             locationManager.requestLocation()
             return
         }
-        // Left home — start a background task to keep the app alive long enough
-        // for high-frequency tracking to activate and start delivering updates.
-        // Without this, iOS may suspend the app before startUpdatingLocation kicks in.
-        let bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "geofenceExit") {
-            // Expiration handler — nothing to clean up, tracking is already started
-        }
+        // Three reviewers flagged that even with CLMonitor's wake delivery,
+        // iOS can still suspend us between this handler returning and
+        // `startUpdatingLocation` actually establishing its keep-alive.
+        // Restore the 10-second background assertion as a safety bridge.
+        let bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "geofenceExit") { }
         logDiag("Geofence EXIT: Home → high-frequency tracking activated (bg task \(bgTaskID.rawValue))")
         eventLogger?.log(.namedPlaceDeparture, details: "Left Home")
         Task { try? await eventLogger?.syncPendingEvents() }
@@ -690,21 +952,23 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         lastBreadcrumbSaveAt = nil
         locationManager.requestLocation()
         onRequestImmediateHeartbeat?()
-        // End the background task after 10s — by then, startUpdatingLocation
-        // with showsBackgroundLocationIndicator=true should be keeping us alive.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-            if bgTaskID != .invalid {
-                UIApplication.shared.endBackgroundTask(bgTaskID)
+        // Schedule end-of-task with cancellation safety so the bg
+        // assertion always gets released even if our Task is cancelled
+        // mid-sleep (round-2 audit caught this).
+        Task.detached {
+            await withTaskCancellationHandler {
+                try? await Task.sleep(for: .seconds(10))
+                await MainActor.run {
+                    if bgTaskID != .invalid { UIApplication.shared.endBackgroundTask(bgTaskID) }
+                }
+            } onCancel: {
+                Task { @MainActor in
+                    if bgTaskID != .invalid { UIApplication.shared.endBackgroundTask(bgTaskID) }
+                }
             }
         }
         #if DEBUG
         print("[LocationService] Exited home geofence — high-frequency tracking activated")
-        #endif
-    }
-
-    func locationManager(_ manager: CLLocationManager, monitoringDidFailFor region: CLRegion?, withError error: Error) {
-        #if DEBUG
-        print("[LocationService] Region monitoring failed for \(region?.identifier ?? "nil"): \(error.localizedDescription)")
         #endif
     }
 
