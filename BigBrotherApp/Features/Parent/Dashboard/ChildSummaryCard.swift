@@ -731,27 +731,19 @@ struct ChildSummaryCard: View {
     private var locationLine: some View {
         if let loc = locationInfo {
             infoRow(icon: "location.fill", color: Self.mutedBlue) {
-                // Address + " · age" is ONE Text so the timestamp wraps with
-                // the address instead of sticking to the first line while
-                // the rest of the address overflows below it. Movement icon
-                // stays on the first baseline via HStack alignment so it
-                // doesn't jump to a new row when the address wraps.
-                HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text("\(loc.address) \u{00B7} \(formatAge(loc.age))")
-                        .foregroundStyle(.secondary)
-                        .lineLimit(locationExpanded ? nil : 1)
-                        .truncationMode(.middle)
-                    if let movement = movementIndicator {
-                        Image(systemName: movement.icon)
-                            .font(.system(size: 9))
-                            .foregroundStyle(movement.color)
+                // Address + " · age" + movement icon is ONE Text so
+                // everything wraps together as a single contiguous unit.
+                // The icon is inlined via `Text(Image(...))` concatenation so
+                // it trails at the end of the timestamp regardless of which
+                // line the string wraps onto.
+                locationText(loc: loc)
+                    .lineLimit(locationExpanded ? nil : 1)
+                    .truncationMode(.middle)
+                    .animation(.easeInOut(duration: 0.2), value: locationExpanded)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation { locationExpanded.toggle() }
                     }
-                }
-                .animation(.easeInOut(duration: 0.2), value: locationExpanded)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation { locationExpanded.toggle() }
-                }
             }
         } else if isLocationExpected {
             infoRow(icon: "location.slash.fill", color: Self.mutedRed) {
@@ -759,6 +751,21 @@ struct ChildSummaryCard: View {
                     .foregroundStyle(Self.mutedRed)
             }
         }
+    }
+
+    /// Build the single Text that contains address + " · age" + movement
+    /// icon. Concatenating Text (including `Text(Image(...))`) gives us
+    /// one contiguous wrappable string with per-segment foreground colors
+    /// preserved, so the car icon flows with the text and settles at the
+    /// end of the timestamp rather than sticking to the first baseline.
+    private func locationText(loc: (address: String, age: TimeInterval)) -> Text {
+        let base = Text("\(loc.address) \u{00B7} \(formatAge(loc.age))")
+            .foregroundColor(.secondary)
+        guard let movement = movementIndicator else { return base }
+        return base
+            + Text(" ")
+            + Text(Image(systemName: movement.icon))
+                .foregroundColor(movement.color)
     }
 
     /// True if location tracking is configured for this child but no location data is arriving from the iPhone.
