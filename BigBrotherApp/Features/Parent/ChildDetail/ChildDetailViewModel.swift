@@ -1291,6 +1291,7 @@ final class ChildDetailViewModel: CommandSendable {
         return usage.first(where: { $0.appName == appName })?.minutes ?? 0
     }
 
+    @discardableResult
     private func refreshDayScopedStateIfNeeded() -> Bool {
         let today = Self.todayDateString()
         guard today != currentDayString else { return false }

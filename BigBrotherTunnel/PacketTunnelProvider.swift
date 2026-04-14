@@ -3357,7 +3357,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             "dns.shouldBlackhole": "\(shouldBlackhole)",
             "dns.proxyBlackholeMode": "\(dnsProxy?.isBlackholeMode ?? false)",
             "dns.lastAppliedBlackholeState": "\(lastAppliedBlackholeState)",
-            "dns.upstreamState": "\(dnsProxy?.upstreamSessionState.map { "\($0)" } ?? "nil")",
+            "dns.upstreamState": "\(dnsProxy?.upstreamConnectionState.map { "\($0)" } ?? "nil")",
             "dns.pendingQueryCount": "\(dnsProxy?.pendingCount ?? 0)",
             "lastHeartbeatSentAt": "\(defaults?.double(forKey: AppGroupKeys.lastHeartbeatSentAt) ?? 0)",
             "mainAppLastActiveAt": "\(defaults?.double(forKey: AppGroupKeys.mainAppLastActiveAt) ?? 0)",

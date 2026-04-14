@@ -1,14 +1,79 @@
 import Foundation
+import Network
 import NetworkExtension
 import BigBrotherCore
 
 /// Minimal DNS proxy: intercept queries, forward upstream, return responses.
 /// Activity logging is fire-and-forget on a background queue.
+///
+/// ## Upstream transport: NWConnection, not NWUDPSession
+///
+/// Earlier versions used `NEPacketTunnelProvider.createUDPSession` which
+/// returns an `NWUDPSession`. That API was introduced in iOS 9, is
+/// effectively deprecated, and has a long tail of bugs around path
+/// migration:
+///   - Sessions stay `.ready` while silently bound to a dead interface
+///     after wifi→cellular handoff (Simon's iPhone 17,4 bug, Apr 14 2026).
+///   - Every interface swap on hotspot churned up dozens of write errors
+///     requiring full session rebuilds (Sebastian's iPad, Apr 14 2026:
+///     82 reconnects per handoff).
+///   - No observable state for "iOS is temporarily handling a path
+///     disruption — wait for it to recover." Every blip was indistinguishable
+///     from a permanent failure.
+///
+/// `NWConnection` (Network framework, iOS 12+) is Apple's current API.
+/// It handles path migration internally: when the active interface
+/// changes, the connection rebinds its underlying socket without
+/// surfacing to our code. It exposes a proper state machine including
+/// `.waiting(error)` for transient disruptions and `.failed(error)` for
+/// terminal ones — so we can distinguish "give iOS a moment" from
+/// "we need a fresh connection." We observe the state and trigger
+/// reconnect only when it actually fails.
+///
+/// NWConnection runs inside the NE process; iOS routes its traffic
+/// around the tunnel automatically (same as NWUDPSession did) to avoid
+/// the loop. No special `prohibitedInterfaceTypes` needed.
 final class DNSProxy {
 
     private weak var provider: NEPacketTunnelProvider?
-    private var upstreamSession: NWUDPSession?
-    private let upstreamDNS: NWHostEndpoint
+    private var upstreamConnection: NWConnection?
+    private let upstreamHost: Network.NWEndpoint.Host
+    private let upstreamPort: Network.NWEndpoint.Port
+    private let upstreamHostDescription: String
+    /// Serial queue for all upstream connection callbacks (state updates,
+    /// receive completions). Serial so we never process two callbacks
+    /// concurrently — the pending-queue and onUpstreamResponse logic
+    /// assumes single-threaded invocation from the upstream path.
+    private let upstreamQueue = DispatchQueue(label: "fr.bigbrother.tunnel.dnsUpstream")
+    /// Generation ID for the current upstream connection. Every
+    /// `setupUpstreamConnection()` bumps this; callbacks from older
+    /// connections check their captured generation against this and bail
+    /// out, preventing a stale receive loop from clobbering the fresh
+    /// connection's responses (same pattern as `readLoopGeneration` for
+    /// the packet flow).
+    private var upstreamGeneration: Int = 0
+    private let upstreamGenerationLock = NSLock()
+    /// When the current connection entered `.waiting` state, if any.
+    /// Used to force a rebuild if iOS stays in `.waiting` for too long
+    /// (usually it recovers in seconds; stuck beyond a few seconds
+    /// means the path isn't coming back and we should cancel and
+    /// create a new connection rather than keep queuing sends).
+    private var waitingEnteredAt: Date?
+    private let waitingStuckThreshold: TimeInterval = 8
+    /// When the current connection was created. Used to apply a brief
+    /// startup grace period where `.failed` doesn't trigger an immediate
+    /// rebuild — a fresh NWConnection can transition through
+    /// `.preparing → .failed → .preparing → .ready` during routine path
+    /// setup (especially on mid-process install where routing is
+    /// still coalescing). An instant rebuild loop in that window
+    /// creates cascading failures that look worse than doing nothing.
+    private var connectionCreatedAt: Date?
+    private let startupGracePeriod: TimeInterval = 3
+    /// Once the current connection reaches `.ready` at least once, flip
+    /// this so later `.failed` transitions bypass the grace period —
+    /// a connection that WAS working and now failed is a real wedge,
+    /// rebuild immediately.
+    private var currentConnectionReachedReady: Bool = false
     private let tunnelIP: Data = Data([198, 18, 0, 1])
     private let storage: AppGroupStorage
 
@@ -153,7 +218,9 @@ final class DNSProxy {
 
     init(provider: NEPacketTunnelProvider, upstreamDNSServer: String, storage: AppGroupStorage) {
         self.provider = provider
-        self.upstreamDNS = NWHostEndpoint(hostname: upstreamDNSServer, port: "53")
+        self.upstreamHost = Network.NWEndpoint.Host(upstreamDNSServer)
+        self.upstreamPort = Network.NWEndpoint.Port(integerLiteral: 53)
+        self.upstreamHostDescription = upstreamDNSServer
         self.storage = storage
     }
 
@@ -172,61 +239,28 @@ final class DNSProxy {
         timeLimitBlockedDomains = storage.readTimeLimitBlockedDomains()
         timeLimitBlockedExpiry = Date().addingTimeInterval(5)
         blocklistLock.unlock()
-        upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
-        upstreamSession?.setReadHandler({ [weak self] datagrams, error in
-            if let error {
-                NSLog("[DNSProxy] Upstream read error: \(error.localizedDescription)")
-                // b457: a read error usually means the underlying socket is
-                // bound to a dead interface (classic wifi→cell handoff).
-                // Drop the session immediately so the next query triggers a
-                // fresh one in the right network context.
-                self?.markUpstreamUnhealthy()
-            }
-            guard let datagrams else { return }
-            for d in datagrams { self?.onUpstreamResponse(d) }
-        }, maxDatagrams: 64)
+        setupUpstreamConnection(reason: "start")
         let gen = startReadLoopInternal()
-        NSLog("[DNSProxy] Started → \(upstreamDNS.hostname) (readLoop gen=\(gen))")
+        NSLog("[DNSProxy] Started → \(upstreamHostDescription) (readLoop gen=\(gen))")
     }
 
-    /// Record that the upstream session hit an error and should be reconnected
-    /// on the very next query. Without this, transient errors caused by
-    /// interface changes were silently logged and recovery waited for the
-    /// 30-second health check.
-    private var upstreamNeedsReconnect: Bool = false
-    private let reconnectLock = NSLock()
-
+    /// Telemetry-only hook for "a read/write on the upstream failed." The
+    /// actual reconnect decision lives in the connection's
+    /// `stateUpdateHandler` — NWConnection reports its state transitions
+    /// authoritatively, so we don't double-trigger rebuilds off individual
+    /// send errors. This is called from the send completion handler to
+    /// record that something went wrong; state handler will fire `.failed`
+    /// shortly after if it's terminal.
     func markUpstreamUnhealthy() {
-        reconnectLock.lock()
-        let alreadyFlagged = upstreamNeedsReconnect
-        upstreamNeedsReconnect = true
-        reconnectLock.unlock()
-        // Only count once per wedge — this method gets called from every
-        // read/write error on the stale session, which would otherwise
-        // double-count a single interface handoff.
-        if !alreadyFlagged {
-            TunnelTelemetry.update { $0.dnsUpstreamWriteErrors += 1 }
-        }
-    }
-
-    /// Check the reconnect flag and, if set, rebuild the upstream session
-    /// before forwarding the next query. Called from the onPacket forwarding
-    /// path so a single error triggers recovery immediately on the next
-    /// inbound DNS query — no 30-second wait for healthCheck.
-    private func reconnectIfFlagged() {
-        reconnectLock.lock()
-        let needs = upstreamNeedsReconnect
-        upstreamNeedsReconnect = false
-        reconnectLock.unlock()
-        if needs {
-            NSLog("[DNSProxy] upstreamNeedsReconnect flag set — rebinding session")
-            reconnectUpstream()
-        }
+        TunnelTelemetry.update { $0.dnsUpstreamWriteErrors += 1 }
     }
 
     func stop() {
-        upstreamSession?.cancel()
-        upstreamSession = nil
+        // Bump generation first so any in-flight receive callbacks from the
+        // cancelled connection drain without re-queuing.
+        bumpUpstreamGeneration()
+        upstreamConnection?.cancel()
+        upstreamConnection = nil
         // Invalidate the running read loop so its next completion drains
         // out. We don't need to actively cancel `readPackets` — Apple
         // doesn't expose that — but bumping the generation guarantees
@@ -234,6 +268,188 @@ final class DNSProxy {
         readLoopLock.lock()
         readLoopGeneration += 1
         readLoopLock.unlock()
+    }
+
+    // MARK: - Upstream Connection Management (NWConnection)
+
+    /// Bump the upstream generation counter. Every new connection gets a
+    /// fresh generation; in-flight receive callbacks from older
+    /// connections compare their captured gen to this and drain out.
+    /// Callers that need the new generation should read it back after
+    /// bumping.
+    @discardableResult
+    private func bumpUpstreamGeneration() -> Int {
+        upstreamGenerationLock.lock()
+        upstreamGeneration += 1
+        let gen = upstreamGeneration
+        upstreamGenerationLock.unlock()
+        return gen
+    }
+
+    private var currentUpstreamGeneration: Int {
+        upstreamGenerationLock.lock()
+        defer { upstreamGenerationLock.unlock() }
+        return upstreamGeneration
+    }
+
+    /// Build and start a fresh `NWConnection` to the upstream DNS server.
+    /// Cancels any existing connection first. Called from `start()` and
+    /// `reconnectUpstream()`.
+    private func setupUpstreamConnection(reason: String) {
+        // Cancel the old connection BEFORE bumping generation so its state
+        // handler sees `.cancelled` and stops firing for us. Bumping
+        // generation after cancel ensures any queued-up completions from
+        // the old connection are detected as stale by their generation
+        // check.
+        upstreamConnection?.cancel()
+
+        let gen = bumpUpstreamGeneration()
+        waitingEnteredAt = nil
+        connectionCreatedAt = Date()
+        currentConnectionReachedReady = false
+
+        // UDP parameters. We intentionally DON'T set
+        // `prohibitedInterfaceTypes` — iOS excludes the NE process's own
+        // traffic from the tunnel automatically, so NWConnection here
+        // behaves the same as NWUDPSession did: goes through the system
+        // networking stack, not through our own packet flow.
+        let parameters = NWParameters.udp
+        // Allow expired DNS entries during brief outages — better to
+        // connect with a slightly stale resolution than to error out.
+        parameters.expiredDNSBehavior = .allow
+        // Disable multipath — we only want one interface at a time, matching
+        // the NWUDPSession behavior. iOS still migrates to a new interface
+        // when the active one dies.
+        parameters.multipathServiceType = .disabled
+
+        let connection = NWConnection(host: upstreamHost, port: upstreamPort, using: parameters)
+
+        connection.stateUpdateHandler = { [weak self] state in
+            self?.handleUpstreamStateChange(state, generation: gen, reason: reason)
+        }
+
+        upstreamConnection = connection
+        connection.start(queue: upstreamQueue)
+
+        // Kick off the receive loop. It's a recursive self-scheduling chain;
+        // each `receiveMessage` returns one datagram, we hand it off and
+        // re-arm.
+        receiveNextUpstream(on: connection, generation: gen)
+
+        NSLog("[DNSProxy] Upstream connection created (gen=\(gen), reason=\(reason))")
+    }
+
+    /// Handle state transitions from the upstream connection. This is the
+    /// single source of truth for "is the upstream healthy?" — replaces
+    /// the old `upstreamNeedsReconnect` flag that every send-error call
+    /// site had to remember to set.
+    private func handleUpstreamStateChange(_ state: NWConnection.State, generation: Int, reason: String) {
+        // If a newer connection has been created while this callback was
+        // queued, drop — our opinions about this (old) connection are no
+        // longer relevant.
+        guard generation == currentUpstreamGeneration else { return }
+
+        switch state {
+        case .ready:
+            waitingEnteredAt = nil
+            currentConnectionReachedReady = true
+            NSLog("[DNSProxy] Upstream state → ready (gen=\(generation))")
+
+        case .preparing:
+            NSLog("[DNSProxy] Upstream state → preparing (gen=\(generation))")
+
+        case .waiting(let error):
+            // Transient: iOS is trying to recover path connectivity. Sends
+            // in this state are queued internally until iOS reports ready
+            // or failed. Record the entry time so we can force a rebuild
+            // if we stay stuck here — but DON'T tear down on entry. Most
+            // `.waiting` transitions resolve in a fraction of a second
+            // during a handoff.
+            if waitingEnteredAt == nil {
+                waitingEnteredAt = Date()
+            }
+            NSLog("[DNSProxy] Upstream state → waiting: \(error.debugDescription) (gen=\(generation))")
+
+        case .failed(let error):
+            // Startup grace period: if this connection never reached
+            // `.ready` and is within `startupGracePeriod` of creation,
+            // schedule a delayed rebuild instead of looping immediately.
+            // Prevents the early-failure cycle observed on b548 where
+            // brand-new connections would go .preparing → .failed → rebuild
+            // → .preparing → .failed in a tight loop during the first
+            // few seconds of a tunnel restart.
+            let startupAge = connectionCreatedAt.map { Date().timeIntervalSince($0) } ?? .infinity
+            if !currentConnectionReachedReady && startupAge < startupGracePeriod {
+                NSLog("[DNSProxy] Upstream state → failed during startup (\(Int(startupAge))s, gen=\(generation)) — delaying rebuild")
+                markUpstreamUnhealthy()
+                let delay = startupGracePeriod - startupAge + 0.5
+                upstreamQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self else { return }
+                    // Only rebuild if we're still the current generation —
+                    // otherwise something else already handled it.
+                    guard generation == self.currentUpstreamGeneration else { return }
+                    NSLog("[DNSProxy] Startup grace expired (gen=\(generation)) — reconnecting")
+                    self.reconnectUpstream()
+                }
+                break
+            }
+            // Terminal — connection is dead. Trigger rebuild.
+            NSLog("[DNSProxy] Upstream state → failed: \(error.debugDescription) (gen=\(generation)) — reconnecting")
+            markUpstreamUnhealthy()
+            reconnectUpstream()
+
+        case .cancelled:
+            // Expected during our own tear-down. No action.
+            NSLog("[DNSProxy] Upstream state → cancelled (gen=\(generation))")
+
+        case .setup:
+            break
+
+        @unknown default:
+            break
+        }
+    }
+
+    /// Recursive receive loop. NWConnection's `receiveMessage` returns one
+    /// datagram per call; we process it, then re-arm. Errors bail the loop
+    /// — the state handler will have already triggered reconnect for the
+    /// root cause.
+    private func receiveNextUpstream(on connection: NWConnection, generation: Int) {
+        connection.receiveMessage { [weak self] content, _, _, error in
+            guard let self else { return }
+            // Drop stale callbacks from a superseded connection.
+            guard generation == self.currentUpstreamGeneration else { return }
+
+            if let error {
+                NSLog("[DNSProxy] Upstream receive error: \(error.debugDescription) (gen=\(generation))")
+                // Don't recall — state handler will fire failed/cancelled
+                // and rebuild will schedule a fresh receive loop on the
+                // new connection. Recalling here would race with rebuild.
+                return
+            }
+            if let content {
+                self.onUpstreamResponse(content)
+            }
+            // Re-arm — we'll be called again for the next datagram. This
+            // is the NWConnection equivalent of `setReadHandler`'s
+            // implicit continuous delivery.
+            self.receiveNextUpstream(on: connection, generation: generation)
+        }
+    }
+
+    /// Periodic safety net — if the connection has been in `.waiting` for
+    /// longer than `waitingStuckThreshold`, force a rebuild. iOS normally
+    /// recovers in seconds; staying stuck means the path isn't coming
+    /// back and new sends are just queuing indefinitely. Called from
+    /// `healthCheck()`.
+    private func checkWaitingStuck() {
+        guard let enteredAt = waitingEnteredAt,
+              Date().timeIntervalSince(enteredAt) > waitingStuckThreshold else {
+            return
+        }
+        NSLog("[DNSProxy] Upstream stuck in .waiting for \(Int(Date().timeIntervalSince(enteredAt)))s — forcing reconnect")
+        waitingEnteredAt = nil
+        reconnectUpstream()
     }
 
     /// Start a fresh read loop chain, superseding any previous one.
@@ -245,20 +461,25 @@ final class DNSProxy {
     }
 
     /// Periodic health check — call from the tunnel's liveness timer.
-    /// Detects stale upstream sessions and reconnects.
+    /// NWConnection handles most recovery internally via its state
+    /// machine, so this is mostly a safety net for two cases:
+    ///   1. Connection was never created (shouldn't happen post-`start()`).
+    ///   2. Connection stuck in `.waiting` longer than iOS typically
+    ///      takes to recover a path change.
+    /// Plus the active probe (catches rare cases where state stays `.ready`
+    /// but packets stop flowing — much less likely with NWConnection, but
+    /// kept as belt-and-suspenders).
     @discardableResult
     func healthCheck() -> Bool {
-        guard let session = upstreamSession else {
-            NSLog("[DNSProxy] Health: no upstream session — reconnecting")
+        guard upstreamConnection != nil else {
+            NSLog("[DNSProxy] Health: no upstream connection — creating")
             reconnectUpstream()
             return false
         }
-        // Session stuck in non-ready state
-        if session.state == .cancelled || session.state == .failed {
-            NSLog("[DNSProxy] Health: upstream session \(session.state.rawValue) — reconnecting")
-            reconnectUpstream()
-            return false
-        }
+        // Connection stuck in .waiting past the threshold — force a rebuild
+        // rather than continuing to queue sends against a path iOS can't
+        // establish.
+        checkWaitingStuck()
         // Check for query blackhole: many pending queries = responses not arriving
         pendingLock.lock()
         let count = pending.count
@@ -269,47 +490,34 @@ final class DNSProxy {
             reconnectUpstream()
             return false
         }
-        // Active probe — catches the case where the session looks ready but
-        // is actually bound to a dead interface (no .cancelled/.failed state,
-        // client queries already backed off so the pending stall never fires).
-        // Probe reconnects on its own 2.5s timeout via asyncAfter, so it
-        // doesn't block this return.
+        // Active probe — safety net for the rare case where state stays
+        // `.ready` but traffic stops flowing. NWConnection should make this
+        // very rare, but zero cost to keep.
         runActiveProbe()
         return true
     }
 
-    /// Recreate the upstream UDP session after a network change (WiFi↔cellular).
-    /// The old NWUDPSession becomes invalid when the network path changes.
+    /// Recreate the upstream connection. Called when the state handler
+    /// reports `.failed`, when `healthCheck()` detects a stuck `.waiting`,
+    /// or from probe timeouts. NWConnection migrates paths internally for
+    /// routine interface swaps — this path is for terminal failures only.
     func reconnectUpstream() {
-        // Drop any in-flight probes — they were sent via the old session and
-        // their responses would never arrive. Keeping them would cause the
-        // scheduled timeout checks to call `reconnectUpstream()` again even
-        // though the new session is healthy. Also reset the
+        // Drop any in-flight probes — they were sent via the old connection
+        // and their responses won't arrive on the new one. Also reset the
         // proof-of-life timestamp so the next fast-path tick fires a probe
-        // to validate the new session.
+        // to validate the fresh connection.
         probeLock.lock()
         outstandingProbes.removeAll()
         lastProbeAt = .distantPast
         lastUpstreamResponseAt = .distantPast
         probeLock.unlock()
 
-        // Telemetry: count every reconnect regardless of trigger (probe
-        // timeout, cancelled state, pending-queue stall, write error).
+        // Telemetry: count every reconnect regardless of trigger.
         TunnelTelemetry.update { telemetry in
             telemetry.dnsReconnects += 1
             telemetry.lastReconnectAt = Date().timeIntervalSince1970
         }
 
-        upstreamSession?.cancel()
-        upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
-        upstreamSession?.setReadHandler({ [weak self] datagrams, error in
-            if let error {
-                NSLog("[DNSProxy] Upstream read error after reconnect: \(error.localizedDescription)")
-                self?.markUpstreamUnhealthy()
-            }
-            guard let datagrams else { return }
-            for d in datagrams { self?.onUpstreamResponse(d) }
-        }, maxDatagrams: 64)
         // Drain orphaned queries with REFUSED so clients get an immediate error
         // instead of waiting for a timeout that never comes. Use the original
         // client txn ID so the browser can demux the refused back to the
@@ -323,9 +531,13 @@ final class DNSProxy {
                 let refused = buildRefusedResponseWithOriginalTxn(entry: entry)
                 writeResponse(refused, destIP: entry.ip, destPort: entry.port)
             }
-            NSLog("[DNSProxy] Upstream reconnected → \(upstreamDNS.hostname) (\(orphaned.count) orphaned queries refused)")
+        }
+
+        setupUpstreamConnection(reason: "reconnect")
+        if !orphaned.isEmpty {
+            NSLog("[DNSProxy] Upstream reconnected → \(upstreamHostDescription) (\(orphaned.count) orphaned queries refused)")
         } else {
-            NSLog("[DNSProxy] Upstream reconnected → \(upstreamDNS.hostname)")
+            NSLog("[DNSProxy] Upstream reconnected → \(upstreamHostDescription)")
         }
     }
 
@@ -518,28 +730,39 @@ final class DNSProxy {
         upstreamDns[0] = UInt8(upstreamTxn >> 8)
         upstreamDns[1] = UInt8(upstreamTxn & 0xFF)
 
-        // Eager reconnect: if a prior read/write raised an error, the flag was
-        // set and the very next query rebuilds the session before forwarding.
-        // This turns "30s healthCheck timer recovery" into "first-query-
-        // after-error recovery" — exactly what you want during a wifi flap.
-        reconnectIfFlagged()
-
-        // Check session health before forwarding
-        if let session = upstreamSession {
-            if session.state == .cancelled || session.state == .failed {
-                NSLog("[DNSProxy] Upstream session dead (state=\(session.state.rawValue)) — reconnecting")
-                reconnectUpstream()
-            }
+        // If the connection is in a terminal state, rebuild before
+        // sending. NWConnection's state handler normally beats us to this,
+        // but there's a brief window between `.failed` and our rebuild
+        // where a query could race in.
+        if let connection = upstreamConnection,
+           case .failed = connection.state {
+            NSLog("[DNSProxy] Upstream connection in .failed state — reconnecting before forward")
+            reconnectUpstream()
         }
 
-        upstreamSession?.writeDatagram(upstreamDns) { [weak self] error in
-            if let error {
-                NSLog("[DNSProxy] Upstream write failed: \(error.localizedDescription)")
-                // b457: write errors also indicate a dead session. Flag so
-                // the next query reconnects before forwarding.
-                self?.markUpstreamUnhealthy()
+        // NWConnection's internal queue handles sends in `.preparing` and
+        // `.waiting` states — they're held until the connection becomes
+        // ready. We don't need to buffer on our side. Completion handler
+        // fires when OS accepts (contentProcessed) or when the connection
+        // errors out.
+        //
+        // Capture generation at send time so completions from sends
+        // issued to a since-cancelled connection (pending sends that
+        // drain on `.cancel()`) don't inflate the write-error counter.
+        // State handler remains the authoritative signal for "connection
+        // is dead."
+        let sendGen = currentUpstreamGeneration
+        upstreamConnection?.send(
+            content: upstreamDns,
+            completion: .contentProcessed { [weak self] error in
+                if let error {
+                    guard let self,
+                          sendGen == self.currentUpstreamGeneration else { return }
+                    NSLog("[DNSProxy] Upstream send failed: \(error.debugDescription)")
+                    self.markUpstreamUnhealthy()
+                }
             }
-        }
+        )
 
         // Log async
         if let domain { bgLog(domain) }
@@ -626,14 +849,21 @@ final class DNSProxy {
     /// `healthCheck()` — the timeout check runs on a dispatch-after so
     /// this method returns immediately.
     func runActiveProbe() {
-        guard let session = upstreamSession else { return }
-        // Don't probe a session that's already in a terminal state — caller
-        // already handles those via the normal healthCheck path.
-        if session.state == .cancelled || session.state == .failed { return }
+        guard let connection = upstreamConnection else { return }
+        // Don't probe a connection that's already in a terminal state —
+        // state handler already triggered rebuild. Also skip `.setup` /
+        // `.preparing` since the connection hasn't had a chance to
+        // establish yet.
+        switch connection.state {
+        case .failed, .cancelled, .setup, .preparing:
+            return
+        default:
+            break
+        }
 
         let now = Date()
         // Proof-of-life shortcut — if real client traffic got a response
-        // recently, the session is obviously healthy. Skip the probe to
+        // recently, the connection is obviously healthy. Skip the probe to
         // keep probe rate near-zero during active browsing.
         probeLock.lock()
         let lastResponse = lastUpstreamResponseAt
@@ -661,12 +891,18 @@ final class DNSProxy {
         probeLock.unlock()
 
         let query = Self.buildProbeQuery(txn: txn)
-        session.writeDatagram(query) { [weak self] error in
-            if let error {
-                NSLog("[DNSProxy] Probe write failed: \(error.localizedDescription) — flagging reconnect")
-                self?.markUpstreamUnhealthy()
+        let sendGen = currentUpstreamGeneration
+        connection.send(
+            content: query,
+            completion: .contentProcessed { [weak self] error in
+                if let error {
+                    guard let self,
+                          sendGen == self.currentUpstreamGeneration else { return }
+                    NSLog("[DNSProxy] Probe send failed: \(error.debugDescription)")
+                    self.markUpstreamUnhealthy()
+                }
             }
-        }
+        )
 
         // Capture txn for the timeout check.
         let probedTxn = txn
@@ -1196,8 +1432,8 @@ final class DNSProxy {
         return pending.count
     }
 
-    /// Current upstream session state for diagnostic reporting.
-    var upstreamSessionState: NWUDPSessionState? {
-        upstreamSession?.state
+    /// Current upstream connection state for diagnostic reporting.
+    var upstreamConnectionState: NWConnection.State? {
+        upstreamConnection?.state
     }
 }
