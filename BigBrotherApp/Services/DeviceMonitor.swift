@@ -27,10 +27,10 @@ final class DeviceMonitor {
     private let appState: AppState
 
     /// Timer that fires the tampering-signal check.
-    private var checkTimer: Timer?
+    private var checkTask: Task<Void, Never>?
 
     /// Timer that periodically refreshes dashboard data from CloudKit.
-    private var refreshTimer: Timer?
+    private var refreshTask: Task<Void, Never>?
 
     /// Tracks devices that have an active FamilyControls revocation alert.
     private var notifiedTamperDevices: Set<String> = []
@@ -54,17 +54,23 @@ final class DeviceMonitor {
         requestNotificationPermission()
 
         // Periodic tampering-signal check.
-        let chkTimer = Timer(timeInterval: Self.checkIntervalSeconds, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+        let checkInterval = Self.checkIntervalSeconds
+        checkTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(checkInterval))
+                } catch { return }
                 self?.checkDeviceStatus()
             }
         }
-        RunLoop.main.add(chkTimer, forMode: .common)
-        checkTimer = chkTimer
 
         // Periodic dashboard refresh so heartbeat data stays current.
-        let refTimer = Timer(timeInterval: Self.dashboardRefreshIntervalSeconds, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        let refreshInterval = Self.dashboardRefreshIntervalSeconds
+        refreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(refreshInterval))
+                } catch { return }
                 guard let self else { return }
                 do {
                     try await self.appState.refreshDashboard()
@@ -78,8 +84,6 @@ final class DeviceMonitor {
                 }
             }
         }
-        RunLoop.main.add(refTimer, forMode: .common)
-        refreshTimer = refTimer
 
         // Run an initial check right now.
         checkDeviceStatus()
@@ -90,10 +94,10 @@ final class DeviceMonitor {
     }
 
     func stopMonitoring() {
-        checkTimer?.invalidate()
-        checkTimer = nil
-        refreshTimer?.invalidate()
-        refreshTimer = nil
+        checkTask?.cancel()
+        checkTask = nil
+        refreshTask?.cancel()
+        refreshTask = nil
         notifiedTamperDevices.removeAll()
 
         #if DEBUG
@@ -288,16 +292,18 @@ final class DeviceMonitor {
         // Suppress during onboarding — PermissionFixerView handles notifications.
         let defaults = UserDefaults.appGroup
         if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true { return }
-        UNUserNotificationCenter.current().requestAuthorization(
-            options: [.alert, .sound, .badge]
-        ) { granted, error in
-            #if DEBUG
-            if let error {
-                print("[DeviceMonitor] Notification auth error: \(error.localizedDescription)")
-            } else {
+        Task {
+            do {
+                let granted = try await UNUserNotificationCenter.current()
+                    .requestAuthorization(options: [.alert, .sound, .badge])
+                #if DEBUG
                 print("[DeviceMonitor] Notification permission granted: \(granted)")
+                #endif
+            } catch {
+                #if DEBUG
+                print("[DeviceMonitor] Notification auth error: \(error.localizedDescription)")
+                #endif
             }
-            #endif
         }
     }
 

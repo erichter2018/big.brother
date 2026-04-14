@@ -308,7 +308,7 @@ final class AppState {
     internal var deviceMonitor: DeviceMonitor?
 
     /// Periodic timer that checks for new unlock requests (parent mode only).
-    private var unlockRequestPollTimer: Timer?
+    private var unlockRequestPollTask: Task<Void, Never>?
 
     /// Last extension diagnostic timestamp printed to the debug console.
     private var lastPrintedExtensionDiagnosticAt: Date?
@@ -1590,18 +1590,21 @@ final class AppState {
     /// This ensures that when a kid opens BB, everything is instantly up to date.
     private var isForegroundSyncing = false
 
-    /// Timer that polls for commands while the app is in foreground.
+    /// Task that polls for commands while the app is in foreground.
     /// Push notifications are unreliable (iOS throttles silent pushes, iCloud
-    /// account changes break CK subscriptions). This 5-second poll ensures
+    /// account changes break CK subscriptions). This 3-second poll ensures
     /// commands are processed promptly when the parent sends them.
-    private var foregroundCommandPollTimer: Timer?
+    private var foregroundCommandPollTask: Task<Void, Never>?
 
     /// Start polling for commands while the app is in foreground.
     func startForegroundCommandPoll() {
         guard deviceRole == .child else { return }
         stopForegroundCommandPoll()
-        foregroundCommandPollTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { [weak self] in
+        foregroundCommandPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch { return }
                 try? await self?.commandProcessor?.processIncomingCommands()
             }
         }
@@ -1609,8 +1612,8 @@ final class AppState {
 
     /// Stop polling when the app goes to background.
     func stopForegroundCommandPoll() {
-        foregroundCommandPollTimer?.invalidate()
-        foregroundCommandPollTimer = nil
+        foregroundCommandPollTask?.cancel()
+        foregroundCommandPollTask = nil
     }
 
     func performForegroundSync() {
@@ -2307,15 +2310,16 @@ final class AppState {
 
     /// Start polling for unlock requests every 10 seconds (parent mode).
     func startUnlockRequestPolling() {
-        unlockRequestPollTimer?.invalidate()
+        unlockRequestPollTask?.cancel()
         guard let familyID = parentState?.familyID else { return }
-        let urTimer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
+        unlockRequestPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(10))
+                } catch { return }
                 self?.checkForUnlockRequestNotifications(familyID: familyID)
             }
         }
-        RunLoop.main.add(urTimer, forMode: .common)
-        unlockRequestPollTimer = urTimer
         // Also check immediately on start.
         checkForUnlockRequestNotifications(familyID: familyID)
         #if DEBUG
@@ -2331,8 +2335,8 @@ final class AppState {
 
     /// Stop polling for unlock requests.
     func stopUnlockRequestPolling() {
-        unlockRequestPollTimer?.invalidate()
-        unlockRequestPollTimer = nil
+        unlockRequestPollTask?.cancel()
+        unlockRequestPollTask = nil
     }
 
     // MARK: - Timer Integration
@@ -2705,9 +2709,9 @@ final class AppState {
 
     // MARK: - Child Actions
 
-    private var commandPollTimer: Timer?
-    private var scheduleSyncTimer: Timer?
-    private var eventSyncTimer: Timer?
+    private var commandPollTask: Task<Void, Never>?
+    private var scheduleSyncTask: Task<Void, Never>?
+    private var eventSyncTask: Task<Void, Never>?
 
     /// Start periodic sync for child devices.
     func startChildSync() {
@@ -2763,30 +2767,32 @@ final class AppState {
     /// Stop periodic sync.
     func stopChildSync() {
         heartbeatService?.stopHeartbeat()
-        commandPollTimer?.invalidate()
-        commandPollTimer = nil
-        scheduleSyncTimer?.invalidate()
-        scheduleSyncTimer = nil
-        eventSyncTimer?.invalidate()
-        eventSyncTimer = nil
+        commandPollTask?.cancel()
+        commandPollTask = nil
+        scheduleSyncTask?.cancel()
+        scheduleSyncTask = nil
+        eventSyncTask?.cancel()
+        eventSyncTask = nil
     }
 
     /// Poll for commands every 5 seconds for fast response to parent actions.
-    /// Uses RunLoop.main + .common mode so polling continues even while the
-    /// child is actively scrolling / touching the screen.
+    /// A Task loop is used (not `Timer.scheduledTimer`) so the cadence
+    /// doesn't slip when the main run loop is busy with scroll/touch and
+    /// so cancellation is structured through the task tree.
     private func startCommandPolling() {
-        commandPollTimer?.invalidate()
-        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task {
+        commandPollTask?.cancel()
+        commandPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                } catch { return }
+                guard let self else { return }
                 try? await self.commandProcessor?.processIncomingCommands()
                 await MainActor.run { self.refreshLocalState() }
                 // Send heartbeat after processing commands so parent sees mode confirmation quickly.
                 try? await self.heartbeatService?.sendNow(force: false)
             }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        commandPollTimer = timer
         // Fire immediately.
         Task {
             #if DEBUG
@@ -2803,10 +2809,12 @@ final class AppState {
     /// Short interval ensures unlock requests reach CloudKit quickly so parents
     /// get notified promptly.
     private func startEventSync() {
-        eventSyncTimer?.invalidate()
-        let evTimer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor [weak self] in
+        eventSyncTask?.cancel()
+        eventSyncTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                } catch { return }
                 guard let self else { return }
                 try? await self.eventLogger?.syncPendingEvents()
                 #if DEBUG
@@ -2828,8 +2836,6 @@ final class AppState {
                 #endif
             }
         }
-        RunLoop.main.add(evTimer, forMode: .common)
-        eventSyncTimer = evTimer
         #if DEBUG
         print("[BigBrother] Event sync started (every 5s)")
         #endif
@@ -3033,10 +3039,13 @@ final class AppState {
     /// This 10-second check is what actually catches and fixes shield mismatches.
     private var enforcementTickCount = 0
     private func startScheduleSync() {
-        scheduleSyncTimer?.invalidate()
-        let schTimer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
+        scheduleSyncTask?.cancel()
+        scheduleSyncTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(10))
+                } catch { return }
+                guard let self else { return }
                 // Verify enforcement every 10 seconds (fast path)
                 self.verifyAndFixEnforcement()
                 // Schedule sync every 60 seconds (slow path — CloudKit queries)
@@ -3047,8 +3056,6 @@ final class AppState {
                 }
             }
         }
-        RunLoop.main.add(schTimer, forMode: .common)
-        scheduleSyncTimer = schTimer
         // Fire immediately on startup.
         Task {
             await syncScheduleProfile()

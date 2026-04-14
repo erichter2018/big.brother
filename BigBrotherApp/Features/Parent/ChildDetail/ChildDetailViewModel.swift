@@ -125,7 +125,7 @@ final class ChildDetailViewModel: CommandSendable {
     var onlineActivityWeek: DomainActivitySnapshot?
     /// Per-day DNS snapshots keyed by date string ("2026-03-29"), for timeline day-by-day scrubbing.
     var onlineActivityByDay: [String: DomainActivitySnapshot] = [:]
-    private var refreshTimer: Timer?
+    private var refreshTask: Task<Void, Never>?
     private var currentDayString: String
 
     /// Parent-side restriction state for this child (persisted in UserDefaults).
@@ -405,11 +405,14 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     func startAutoRefresh() {
-        guard refreshTimer == nil else { return }
+        guard refreshTask == nil else { return }
         ensureDataLoaded()
 
-        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        refreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch { return }
                 let dayChanged = self?.refreshDayScopedStateIfNeeded() ?? false
                 await self?.loadEvents()
                 if dayChanged {
@@ -420,13 +423,11 @@ final class ChildDetailViewModel: CommandSendable {
                 await self?.loadPendingAppReviews() // Must run after loadTimeLimits
             }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        refreshTimer = timer
     }
 
     func stopAutoRefresh() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
+        refreshTask?.cancel()
+        refreshTask = nil
     }
 
     var devices: [ChildDevice] {

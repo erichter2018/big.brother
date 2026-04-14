@@ -24,6 +24,15 @@ public enum SnapshotCommitResult: Sendable, Equatable {
 ///
 /// This is the authoritative store for the current policy state.
 /// All policy changes should flow through this store.
+///
+/// ## Thread safety
+///
+/// `@unchecked Sendable` because all mutable state is guarded by `lock`
+/// (NSLock). The underlying `storage` (`SharedStorageProtocol`) handles
+/// cross-process safety via its own NSLock + flock() pattern. Actor
+/// conversion isn't useful here because the store is almost always read
+/// from synchronous contexts that can't introduce awaits (enforcement
+/// hot path, extensions).
 public final class PolicySnapshotStore: @unchecked Sendable {
 
     private let storage: any SharedStorageProtocol

@@ -546,7 +546,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         record["speed"] = location.speed as NSNumber
         record["course"] = location.course as NSNumber
         record["accuracy"] = location.horizontalAccuracy as NSNumber
-        record["timestamp"] = Date() as NSDate
+        record["timestamp"] = Date()
         _ = try? await db.save(record)
     }
 

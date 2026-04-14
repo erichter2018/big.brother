@@ -156,10 +156,12 @@ final class LocalParentUnlockViewModel {
     }
 
     private func postLocalNotification(title: String, body: String) {
-        let center = UNUserNotificationCenter.current()
-        // Request permission if not yet granted (no-op if already decided).
-        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            guard granted else { return }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            // Request permission if not yet granted (no-op if already decided).
+            guard let granted = try? await center.requestAuthorization(
+                options: [.alert, .sound]
+            ), granted else { return }
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
@@ -169,7 +171,7 @@ final class LocalParentUnlockViewModel {
                 content: content,
                 trigger: nil // deliver immediately
             )
-            center.add(request)
+            try? await center.add(request)
         }
     }
 }

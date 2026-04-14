@@ -48,6 +48,22 @@ private enum CommandError: Error {
 ///
 /// Uses `ProcessingGate` to prevent concurrent execution of `processIncomingCommands()`
 /// (which can happen when poll timer and push notification fire simultaneously).
+///
+/// ## Thread safety
+///
+/// `@unchecked Sendable` because:
+///   1. Most instance fields are immutable `let`s set in `init`.
+///   2. `ProcessingGate` serializes `processIncomingCommands()` — the only
+///      entry point that mutates per-invocation state.
+///   3. Callback closures (`onRequestHeartbeat`, `onRequestLocation`, etc.)
+///      are set once at wiring time by `AppState` and dispatched back to
+///      MainActor via `Task { @MainActor in ... }` before firing.
+///   4. CloudKit / storage / keychain / enforcement dependencies manage
+///      their own thread safety (documented on their respective types).
+///
+/// Actor conversion would require every caller (including synchronous
+/// heartbeat paths from timers that can't await) to hop through an async
+/// boundary, and the `onXxx` callback pattern wouldn't compose cleanly.
 final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable {
 
     private let cloudKit: any CloudKitServiceProtocol
@@ -662,13 +678,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .requestHeartbeat:
                 eventLogger.log(.commandApplied, details: "Heartbeat requested")
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestHeartbeat?()
                 }
                 return .applied
 
             case .requestAppConfiguration:
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestAppConfiguration?()
                 }
                 eventLogger.log(.commandApplied, details: "App configuration requested by parent")
@@ -685,7 +701,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     ))
                 }
                 // Clear enrollment state and reset to unconfigured.
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onUnenroll?()
                 }
                 return .applied
@@ -734,7 +750,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return handleRevokeAllApps()
 
             case .requestAlwaysAllowedSetup:
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestAlwaysAllowedSetup?()
                 }
                 eventLogger.log(.commandApplied, details: "Always-allowed setup requested by parent")
@@ -760,7 +776,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 eventLogger.log(.commandApplied, details: "Returned to schedule-driven mode")
                 // Trigger immediate schedule sync from CloudKit — the child may have
                 // a stale schedule. After sync completes, re-apply enforcement.
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onScheduleSyncNeeded?()
                 }
                 return .applied
@@ -926,21 +942,21 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             case .setLocationMode(let mode):
                 UserDefaults.appGroup?
                     .set(mode.rawValue, forKey: "locationTrackingMode")
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onLocationModeChanged?(mode)
                 }
                 eventLogger.log(.commandApplied, details: "Location mode set to \(mode.rawValue)")
                 return .applied
 
             case .requestLocation:
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestLocation?()
                 }
                 eventLogger.log(.commandApplied, details: "Location requested")
                 return .applied
 
             case .requestPermissions:
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestPermissions?()
                 }
                 eventLogger.log(.commandApplied, details: "Permissions re-request triggered")
@@ -951,14 +967,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 defaults?.set(latitude, forKey: "homeLatitude")
                 defaults?.set(longitude, forKey: "homeLongitude")
                 // Trigger LocationService to register the geofence immediately.
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestLocation?() // Reuses location callback to refresh
                 }
                 eventLogger.log(.commandApplied, details: "Home geofence set at (\(latitude), \(longitude))")
                 return .applied
 
             case .syncNamedPlaces:
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onSyncNamedPlaces?()
                 }
                 eventLogger.log(.commandApplied, details: "Named places sync requested")
@@ -973,7 +989,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return .applied
 
             case .requestDiagnostics:
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestDiagnostics?()
                 }
                 eventLogger.log(.commandApplied, details: "Diagnostic report requested")
@@ -983,7 +999,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 UserDefaults.appGroup?
                     .set(enabled, forKey: "safeSearchEnabled")
                 // Restart the VPN tunnel to pick up the new DNS settings
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRestartVPNTunnel?()
                 }
                 eventLogger.log(.commandApplied, details: "Safe search \(enabled ? "enabled" : "disabled")")
@@ -993,21 +1009,21 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 // Legacy: internet blocking is now inherent to .lockedDown mode.
                 // The tunnel reads mode from App Group and applies DNS blackhole automatically.
                 // Just restart the tunnel to re-evaluate.
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRestartVPNTunnel?()
                 }
                 eventLogger.log(.commandApplied, details: "Internet block state synced (mode-driven)")
                 return .applied
 
             case .requestTimeLimitSetup:
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestTimeLimitSetup?()
                 }
                 eventLogger.log(.commandApplied, details: "Time limit setup requested by parent (Mode 1)")
                 return .applied
 
             case .requestChildAppPick:
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     self?.onRequestChildAppPick?()
                 }
                 eventLogger.log(.commandApplied, details: "App pick requested by parent (Mode 2)")

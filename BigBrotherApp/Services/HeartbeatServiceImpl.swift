@@ -22,8 +22,15 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     private let storage: any SharedStorageProtocol
     private let enforcement: (any EnforcementServiceProtocol)?
 
-    private var timer: Timer?
-    private var extensionCheckTimer: Timer?
+    /// Heartbeat send task — runs on an `interval` cadence. Replaces the
+    /// older `Timer.scheduledTimer` approach: Task loops honor structured
+    /// concurrency cancellation and don't depend on the main run loop
+    /// which can slip under interaction/load.
+    private var heartbeatTask: Task<Void, Never>?
+    /// Supplementary liveness check task — runs every 30s. Handles the
+    /// App Group timestamp writes, VPN ping, extension heartbeat request
+    /// acknowledgement, and movement-based heartbeat triggers.
+    private var extensionCheckTask: Task<Void, Never>?
     private let interval: TimeInterval
 
     /// Called after a successful heartbeat send — piggyback command processing
@@ -75,56 +82,64 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
     func startHeartbeat() {
         stopHeartbeat()
-        let hbTimer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task {
+        let sendInterval = interval
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(sendInterval))
+                } catch { return }
+                guard let self else { return }
                 try? await self.sendNow(force: self.acknowledgeExtensionHeartbeatRequest())
             }
         }
-        RunLoop.main.add(hbTimer, forMode: .common)
-        timer = hbTimer
-        // Check every 30s for extension-requested heartbeats, movement-based sends,
-        // and ping the VPN tunnel to prove liveness.
-        let extTimer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self else { return }
-
-            // Write liveness timestamp for the VPN tunnel to read.
-            let liveDefaults = UserDefaults.appGroup
-            liveDefaults?.set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
-            // Refresh lock state timestamp so tunnel knows the value is fresh.
-            liveDefaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
-
-            // Ping the VPN tunnel (IPC liveness signal).
-            self.vpnManager?.sendPing()
-
-            if let vpn = self.vpnManager {
-                Task { await vpn.restartIfNeeded() }
-            }
-
-            // Extension heartbeat request.
-            if self.acknowledgeExtensionHeartbeatRequest() {
-                Task { try? await self.sendNow(force: true) }
-                return
-            }
-            // While moving, send heartbeats more frequently (every ~60s).
-            if self.locationService?.isMoving == true {
-                let sinceLastSend = Date().timeIntervalSince(self.lastSendAt ?? .distantPast)
-                if sinceLastSend >= Self.movingHeartbeatInterval {
-                    Task { try? await self.sendNow(force: false) }
-                }
+        extensionCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch { return }
+                guard let self else { return }
+                await self.runExtensionCheckTick()
             }
         }
-        RunLoop.main.add(extTimer, forMode: .common)
-        extensionCheckTimer = extTimer
         // Fire immediately on start.
         Task { try? await sendNow(force: false) }
     }
 
     func stopHeartbeat() {
-        timer?.invalidate()
-        timer = nil
-        extensionCheckTimer?.invalidate()
-        extensionCheckTimer = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        extensionCheckTask?.cancel()
+        extensionCheckTask = nil
+    }
+
+    /// Body of the 30s extension-check loop. Extracted so the Task loop
+    /// in `startHeartbeat` stays readable.
+    private func runExtensionCheckTick() async {
+        // Write liveness timestamp for the VPN tunnel to read.
+        let liveDefaults = UserDefaults.appGroup
+        liveDefaults?.set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+        // Refresh lock state timestamp so tunnel knows the value is fresh.
+        liveDefaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
+
+        // Ping the VPN tunnel (IPC liveness signal).
+        vpnManager?.sendPing()
+
+        if let vpn = vpnManager {
+            await vpn.restartIfNeeded()
+        }
+
+        // Extension heartbeat request.
+        if acknowledgeExtensionHeartbeatRequest() {
+            try? await sendNow(force: true)
+            return
+        }
+        // While moving, send heartbeats more frequently (every ~60s).
+        if locationService?.isMoving == true {
+            let sinceLastSend = Date().timeIntervalSince(lastSendAt ?? .distantPast)
+            if sinceLastSend >= Self.movingHeartbeatInterval {
+                try? await sendNow(force: false)
+            }
+        }
     }
 
     /// Check if the Monitor extension requested a heartbeat via App Group flag.

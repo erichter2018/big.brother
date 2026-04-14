@@ -95,8 +95,8 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.profileID] = seedPrefix
         r[CKFieldName.name] = "_seed_"
         r[CKFieldName.avatarName] = ""
-        r[CKFieldName.createdAt] = Date() as NSDate
-        r[CKFieldName.updatedAt] = Date() as NSDate
+        r[CKFieldName.createdAt] = Date()
+        r[CKFieldName.updatedAt] = Date()
         return r
     }
 
@@ -108,7 +108,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.displayName] = "_seed_"
         r[CKFieldName.modelIdentifier] = ""
         r[CKFieldName.osVersion] = ""
-        r[CKFieldName.enrolledAt] = Date() as NSDate
+        r[CKFieldName.enrolledAt] = Date()
         r[CKFieldName.familyControlsOK] = 0 as NSNumber
         return r
     }
@@ -130,8 +130,8 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.targetID] = seedPrefix
         r[CKFieldName.actionJSON] = "{}"
         r[CKFieldName.issuedBy] = "_seed_"
-        r[CKFieldName.issuedAt] = Date() as NSDate
-        r[CKFieldName.expiresAt] = Date() as NSDate
+        r[CKFieldName.issuedAt] = Date()
+        r[CKFieldName.expiresAt] = Date()
         r[CKFieldName.status] = "expired"
         r[CKFieldName.alertTitle] = "_seed_"
         r[CKFieldName.alertBody] = "_seed_"
@@ -143,7 +143,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.familyID] = seedFamilyID
         r[CKFieldName.commandID] = seedPrefix
         r[CKFieldName.deviceID] = seedPrefix
-        r[CKFieldName.appliedAt] = Date() as NSDate
+        r[CKFieldName.appliedAt] = Date()
         r[CKFieldName.status] = "expired"
         return r
     }
@@ -152,7 +152,7 @@ enum CloudKitSchemaBootstrap {
         let r = seed(CKRecordType.heartbeat)
         r[CKFieldName.familyID] = seedFamilyID
         r[CKFieldName.deviceID] = seedPrefix
-        r[CKFieldName.timestamp] = Date() as NSDate
+        r[CKFieldName.timestamp] = Date()
         r[CKFieldName.currentMode] = "unlocked"
         r[CKFieldName.policyVersion] = 0 as NSNumber
         r[CKFieldName.fcAuthorized] = 0 as NSNumber
@@ -170,7 +170,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.deviceID] = seedPrefix
         r[CKFieldName.eventID] = seedPrefix
         r[CKFieldName.eventType] = "schemaBootstrap"
-        r[CKFieldName.timestamp] = Date() as NSDate
+        r[CKFieldName.timestamp] = Date()
         r[CKFieldName.details] = "Schema seed record"
         return r
     }
@@ -180,8 +180,8 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.familyID] = seedFamilyID
         r[CKFieldName.code] = "\(seedPrefix)CODE"
         r[CKFieldName.profileID] = seedPrefix
-        r[CKFieldName.createdAt] = Date() as NSDate
-        r[CKFieldName.expiresAt] = Date() as NSDate
+        r[CKFieldName.createdAt] = Date()
+        r[CKFieldName.expiresAt] = Date()
         r[CKFieldName.used] = 1 as NSNumber
         r[CKFieldName.revoked] = 0 as NSNumber
         return r
@@ -209,7 +209,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.activeWindowsJSON] = "[]"
         r[CKFieldName.maxHeartbeatGap] = 7200.0 as NSNumber
         r[CKFieldName.isDefault] = 0 as NSNumber
-        r[CKFieldName.updatedAt] = Date() as NSDate
+        r[CKFieldName.updatedAt] = Date()
         return r
     }
 
@@ -220,7 +220,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.placeLatitude] = 0.0 as NSNumber
         r[CKFieldName.placeLongitude] = 0.0 as NSNumber
         r[CKFieldName.placeRadius] = 150.0 as NSNumber
-        r[CKFieldName.timestamp] = Date() as NSDate
+        r[CKFieldName.timestamp] = Date()
         r[CKFieldName.placeCreatedBy] = "seed"
         r[CKFieldName.placeChildProfileIDs] = ["_seed_"] as [NSString]
         return r
@@ -230,7 +230,7 @@ enum CloudKitSchemaBootstrap {
         let r = seed(CKRecordType.diagnosticReport)
         r[CKFieldName.deviceID] = seedFamilyID
         r[CKFieldName.familyID] = seedFamilyID
-        r[CKFieldName.timestamp] = Date() as NSDate
+        r[CKFieldName.timestamp] = Date()
         r[CKFieldName.diagReportJSON] = "{}"
         return r
     }
@@ -243,7 +243,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.essentialWindowsJSON] = "[]"
         r[CKFieldName.lockedMode] = LockMode.restricted.rawValue
         r[CKFieldName.isDefault] = 0 as NSNumber
-        r[CKFieldName.updatedAt] = Date() as NSDate
+        r[CKFieldName.updatedAt] = Date()
         return r
     }
 
@@ -254,7 +254,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.locLatitude] = 0.0 as NSNumber
         r[CKFieldName.locLongitude] = 0.0 as NSNumber
         r[CKFieldName.locAccuracy] = 0.0 as NSNumber
-        r[CKFieldName.locTimestamp] = Date() as NSDate
+        r[CKFieldName.locTimestamp] = Date()
         r[CKFieldName.locAddress] = "_seed_"
         return r
     }
@@ -267,8 +267,8 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.appName] = "_seed_"
         r[CKFieldName.dailyLimitMinutes] = 0 as NSNumber
         r[CKFieldName.timeLimitIsActive] = 1 as NSNumber
-        r[CKFieldName.createdAt] = Date() as NSDate
-        r[CKFieldName.updatedAt] = Date() as NSDate
+        r[CKFieldName.createdAt] = Date()
+        r[CKFieldName.updatedAt] = Date()
         return r
     }
 
@@ -280,8 +280,8 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.appFingerprint] = "_seed_"
         r[CKFieldName.appName] = "_seed_"
         r[CKFieldName.nameResolved] = 0 as NSNumber
-        r[CKFieldName.createdAt] = Date() as NSDate
-        r[CKFieldName.updatedAt] = Date() as NSDate
+        r[CKFieldName.createdAt] = Date()
+        r[CKFieldName.updatedAt] = Date()
         return r
     }
 
@@ -292,7 +292,7 @@ enum CloudKitSchemaBootstrap {
         r[CKFieldName.enfCategory] = "enforcement"
         r[CKFieldName.enfMessage] = "_seed_"
         r[CKFieldName.enfDetails] = "_seed_"
-        r[CKFieldName.timestamp] = Date() as NSDate
+        r[CKFieldName.timestamp] = Date()
         r[CKFieldName.enfBuild] = 0 as NSNumber
         return r
     }

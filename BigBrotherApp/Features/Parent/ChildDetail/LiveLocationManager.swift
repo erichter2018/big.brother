@@ -16,7 +16,7 @@ final class LiveLocationManager {
     private(set) var speedMPH: Int?
     private(set) var isLive = false
 
-    private var pollTimer: Timer?
+    private var pollTask: Task<Void, Never>?
     private static let maxTrailPoints = 60
 
     init(deviceID: DeviceID) {
@@ -24,18 +24,22 @@ final class LiveLocationManager {
     }
 
     func start() {
-        guard pollTimer == nil else { return }
+        guard pollTask == nil else { return }
         isLive = true
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.poll() }
+        pollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                await self?.poll()
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch { return }
+            }
         }
-        Task { await poll() }
     }
 
     func stop() {
         isLive = false
-        pollTimer?.invalidate()
-        pollTimer = nil
+        pollTask?.cancel()
+        pollTask = nil
     }
 
     private func poll() async {

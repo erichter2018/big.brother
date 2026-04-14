@@ -19,7 +19,7 @@ struct PermissionFixerView: View {
     @State private var isGrantingFamilyControls = false
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 VStack(spacing: 0) {
                     if permissionsToFix.isEmpty {

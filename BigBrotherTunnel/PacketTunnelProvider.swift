@@ -837,7 +837,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         record["familyID"] = enrollment.familyID.rawValue
         record["eventType"] = "authorizationLost"
         record["details"] = entry.details
-        record["timestamp"] = Date() as NSDate
+        record["timestamp"] = Date()
         _ = try? await db.save(record)
     }
 
@@ -2066,7 +2066,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if let results = try? await db.records(matching: query, resultsLimit: 1),
            let record = try? results.matchResults.first?.1.get() {
             record["appName"] = "\(detectedName) (child said: \(watch.childGivenName))" as NSString
-            record["updatedAt"] = Date() as NSDate
+            record["updatedAt"] = Date()
             _ = try? await db.save(record)
             NSLog("[Tunnel] Updated CloudKit app name to '\(detectedName)' (was '\(watch.childGivenName)')")
         }
@@ -2791,71 +2791,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private static func performCKQuery(db: CKDatabase, query: CKQuery, resultsLimit: Int = 100) async throws -> [CKRecord] {
-        try await withCheckedThrowingContinuation { continuation in
-            let lock = NSLock()
-            var records: [CKRecord] = []
-            var resumed = false
-
-            let op = CKQueryOperation(query: query)
-            op.resultsLimit = resultsLimit
-            op.qualityOfService = .userInitiated
-            op.configuration.timeoutIntervalForRequest = 15
-            op.configuration.timeoutIntervalForResource = 25
-
-            op.recordMatchedBlock = { _, result in
-                if let r = try? result.get() {
-                    lock.lock()
-                    records.append(r)
-                    lock.unlock()
-                }
-            }
-            op.queryResultBlock = { result in
-                lock.lock()
-                guard !resumed else { lock.unlock(); return }
-                resumed = true
-                let snapshot = records
-                lock.unlock()
-                switch result {
-                case .success: continuation.resume(returning: snapshot)
-                case .failure(let e): continuation.resume(throwing: e)
-                }
-            }
-            db.add(op)
-        }
+        // CKDatabase.records(matching:resultsLimit:) (iOS 15+) replaces the
+        // older `CKQueryOperation` + completion-block pattern. The tuple it
+        // returns is `(matchResults: [(CKRecord.ID, Result<CKRecord, Error>)],
+        // queryCursor: CKQueryOperation.Cursor?)`. We unwrap successes and
+        // drop per-record failures (matches prior behavior — the old code
+        // silently ignored failed matches inside `recordMatchedBlock`).
+        let (matchResults, _) = try await db.records(
+            matching: query,
+            resultsLimit: resultsLimit
+        )
+        return matchResults.compactMap { try? $0.1.get() }
     }
 
     private static func performCKFetch(db: CKDatabase, recordID: CKRecord.ID) async throws -> CKRecord {
-        try await withCheckedThrowingContinuation { continuation in
-            let lock = NSLock()
-            var resumed = false
-
-            let op = CKFetchRecordsOperation(recordIDs: [recordID])
-            op.qualityOfService = .userInitiated
-            op.configuration.timeoutIntervalForRequest = 10
-            op.configuration.timeoutIntervalForResource = 15
-
-            op.perRecordResultBlock = { _, result in
-                lock.lock()
-                guard !resumed else { lock.unlock(); return }
-                resumed = true
-                lock.unlock()
-                switch result {
-                case .success(let r): continuation.resume(returning: r)
-                case .failure(let e): continuation.resume(throwing: e)
-                }
-            }
-            op.fetchRecordsResultBlock = { result in
-                lock.lock()
-                guard !resumed else { lock.unlock(); return }
-                resumed = true
-                lock.unlock()
-                let err = (try? result.get()) == nil
-                    ? CKError(.unknownItem)
-                    : CKError(.internalError)
-                continuation.resume(throwing: err)
-            }
-            db.add(op)
-        }
+        // `CKDatabase.record(for:)` (iOS 15+) is the async replacement for
+        // `CKFetchRecordsOperation` with completion blocks. Errors propagate
+        // through the async throws — no manual continuation bridging, no
+        // lock for resume-once-only semantics.
+        try await db.record(for: recordID)
     }
 
     private static func performCKSave(db: CKDatabase, record: CKRecord) async -> Bool {
@@ -3491,7 +3445,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                 recordID: CKRecord.ID(recordName: "BBDiagnosticReport_\(report.id.uuidString)"))
         ckRecord["deviceID"] = enrollment.deviceID.rawValue
         ckRecord["familyID"] = enrollment.familyID.rawValue
-        ckRecord["timestamp"] = Date() as NSDate
+        ckRecord["timestamp"] = Date()
         if let json = try? JSONEncoder().encode(report),
            let str = String(data: json, encoding: .utf8) {
             ckRecord["diagJSON"] = str
@@ -3548,7 +3502,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Core identity
         record["deviceID"] = enrollment.deviceID.rawValue
         record["familyID"] = enrollment.familyID.rawValue
-        record["timestamp"] = Date() as NSDate
+        record["timestamp"] = Date()
         record["hbAppBuildNumber"] = AppConstants.appBuildNumber as NSNumber
         let mainAppBuild = UserDefaults.appGroup?.integer(forKey: AppGroupKeys.mainAppLastLaunchedBuild) ?? 0
         if mainAppBuild > 0 {
@@ -3913,7 +3867,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         stRecord["deviceID"] = enrollment.deviceID.rawValue
         stRecord["familyID"] = enrollment.familyID.rawValue
         stRecord["date"] = dateStr
-        stRecord["timestamp"] = Date() as NSDate
+        stRecord["timestamp"] = Date()
         stRecord["minutes"] = minutes as NSNumber
         stRecord["unlocks"] = unlocks as NSNumber
 

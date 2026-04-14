@@ -6,8 +6,26 @@ import Foundation
 /// All writes use atomic file operations (Data.write with .atomic option)
 /// to prevent extensions from reading a partially written file.
 ///
-/// Thread safety: NSLock protects read-modify-write sequences on
-/// collection-type files (event queue, processed commands, diagnostics).
+/// ## Thread safety
+///
+/// Shared across main app, Monitor, Shield, ShieldAction, Tunnel — every
+/// process. Claims `@unchecked Sendable` because:
+///   1. `lock` (NSLock) guards all read-modify-write sequences on
+///      collection-type files (event queue, processed commands, diagnostics).
+///   2. `withFileLock(name:body:)` acquires an `flock()` on a sentinel file
+///      under the App Group container for cross-process mutual exclusion.
+///      Single-process locking via `lock` isn't enough here because multiple
+///      processes hit the same files concurrently.
+///   3. `encoder` / `decoder` are stateless Foundation types — concurrent
+///      reads on `JSONEncoder`/`JSONDecoder` are documented as safe.
+///   4. `fileManager` is `FileManager.default`, thread-safe per Apple's
+///      documented behavior for read-only queries.
+///   5. `containerURL` is an immutable `let`.
+///
+/// Actor conversion is NOT practical here: every call site (including many
+/// synchronous extension entry points like ShieldAction that can't await)
+/// would need to go through an async bridge, which the extension lifetimes
+/// can't reliably afford. The NSLock + flock pattern is the right tool.
 public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
 
     private let containerURL: URL
@@ -116,13 +134,34 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         if !fileManager.fileExists(atPath: lockURL.path) {
             fileManager.createFile(atPath: lockURL.path, contents: nil)
         }
-        let fd = open(lockURL.path, O_RDWR | O_CREAT, 0o666)
+        // Bounded retry on open() failure — first-boot races (file created
+        // concurrently, container not yet mounted) usually resolve within a
+        // few tens of milliseconds. If it persists, we log a DIAGNOSTIC
+        // entry (visible in the parent dashboard, not just DEBUG prints)
+        // and proceed unprotected rather than block the caller forever.
+        var fd: Int32 = -1
+        for attempt in 0..<5 {
+            fd = open(lockURL.path, O_RDWR | O_CREAT, 0o666)
+            if fd >= 0 { break }
+            let wait = useconds_t(20_000 * (1 << attempt)) // 20ms, 40, 80, 160, 320 = ~620ms total
+            usleep(wait)
+        }
         guard fd >= 0 else {
-            // Lock file can't be opened — may be first boot before ensureSharedFilesExist().
-            // Run without lock but log warning so we can diagnose if this persists.
+            // Persistent open() failure — record to the diagnostic log so
+            // the parent dashboard surfaces it, then run the body without
+            // the lock. This is still a silent race risk, but the
+            // alternative (throwing) would block legitimate first-boot
+            // setup paths.
+            let errnoSnapshot = errno
+            let msg = "withFileLock: open() failed for \(name) after 5 retries, errno=\(errnoSnapshot)"
             #if DEBUG
-            print("[BigBrother] ⚠️ withFileLock: open() failed for \(name), errno=\(errno) — running unprotected")
+            print("[BigBrother] ⚠️ \(msg) — running unprotected")
             #endif
+            try? appendDiagnosticEntry(DiagnosticEntry(
+                category: .command,
+                message: msg,
+                details: "Cross-process file lock acquisition failed; body ran without lock. If this recurs, the App Group container may be misconfigured."
+            ))
             return try body()
         }
         defer { close(fd) }
@@ -659,6 +698,9 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
 
     /// Write an Encodable value encrypted with the App Group encryption key.
     /// Falls back to unencrypted write if Keychain is unavailable (extension context).
+    /// The fallback is LOGGED explicitly — silent plaintext writes on a device
+    /// where Keychain should be available would be a real security regression
+    /// we want visibility into, not just a shrug.
     private func writeEncrypted<T: Encodable>(_ value: T, to fileName: String) throws {
         let plaintext: Data
         do {
@@ -671,7 +713,15 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
         if let encrypted = try? AppGroupEncryption.encrypt(plaintext, keychain: keychain) {
             try writeRawData(encrypted, toFile: fileName)
         } else {
-            // Fallback: write unencrypted (extension may not have Keychain access)
+            // Fallback: write unencrypted (extension may not have Keychain access).
+            // Log every fallback so we can see in the diagnostic stream if this
+            // is happening in the main app (where Keychain SHOULD work) vs
+            // extensions (where it legitimately may not).
+            try? appendDiagnosticEntry(DiagnosticEntry(
+                category: .auth,
+                message: "AppGroupEncryption unavailable — wrote \(fileName) as plaintext",
+                details: "Keychain access failed. Expected in extensions; unexpected in main app. If seen in main app logs, auth keychain state may be corrupt."
+            ))
             try writeRawData(plaintext, toFile: fileName)
         }
     }

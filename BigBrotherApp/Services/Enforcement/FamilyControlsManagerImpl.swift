@@ -1,5 +1,4 @@
 import Foundation
-import Combine
 import FamilyControls
 import BigBrotherCore
 
@@ -36,7 +35,13 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
 
     private var changeHandler: (@Sendable (FCAuthorizationStatus) -> Void)?
     private let storage: (any SharedStorageProtocol)?
-    private var cancellable: AnyCancellable?
+    /// Background task observing `AuthorizationCenter.authorizationStatus`
+    /// via Observation. Replaces the older Combine `.sink` subscription +
+    /// `AnyCancellable` pattern — iOS 17's Observation framework lets us
+    /// use `withObservationTracking` to observe any `@Observable` without
+    /// Combine. Cancelling this task is the only way to stop observing,
+    /// which matches how `AnyCancellable` worked.
+    private var observationTask: Task<Void, Never>?
 
     /// Persisted in UserDefaults so it survives app restarts.
     private static let authTypeKey = "fr.bigbrother.authorizationType"
@@ -60,11 +65,16 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
     }
 
     var isChildAuthorization: Bool {
-        UserDefaults.appGroup!.string(forKey: Self.authTypeKey) == "child"
+        // App group entitlement is required for the app to function at all;
+        // if it's nil here something is fundamentally broken. Fail safe
+        // (returns false = .individual auth) rather than crashing.
+        UserDefaults.appGroup?.string(forKey: Self.authTypeKey) == "child"
     }
 
     func requestAuthorization() async throws {
-        let defaults = UserDefaults.appGroup!
+        guard let defaults = UserDefaults.appGroup else {
+            throw FamilyControlsError.authorizationCanceled
+        }
 
         // b431: Critical guard. AuthorizationCenter.requestAuthorization() is
         // a no-op on an already-approved device — it returns immediately
@@ -169,16 +179,48 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
 
     func observeAuthorizationChanges(handler: @escaping @Sendable (FCAuthorizationStatus) -> Void) {
         self.changeHandler = handler
+        observationTask?.cancel()
 
-        cancellable = AuthorizationCenter.shared.$authorizationStatus
-            .dropFirst()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
+        // Observe `AuthorizationCenter.shared.authorizationStatus` using
+        // Swift Observation — no Combine, no AnyCancellable. Each access
+        // inside the tracking closure registers a dependency; when any
+        // observed property changes, the `willSet` fires, the task wakes,
+        // and we re-register for the next change. Matches the old behavior
+        // of firing on every status change except we no longer need
+        // `.dropFirst()` — we only re-read and fire when Observation
+        // actually reports a change.
+        observationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let current = AuthorizationCenter.shared.authorizationStatus
+                _ = await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    withObservationTracking {
+                        _ = AuthorizationCenter.shared.authorizationStatus
+                    } onChange: {
+                        cont.resume()
+                    }
+                }
                 guard let self else { return }
                 let newStatus = self.status
+                // Ignore spurious fires where the mapped status hasn't
+                // changed (e.g., internal Observation bookkeeping).
+                guard FamilyControlsManagerImpl.mapStatus(current) != newStatus else { continue }
                 self.updateAuthorizationHealth(newStatus: newStatus)
                 self.changeHandler?(newStatus)
             }
+        }
+    }
+
+    deinit {
+        observationTask?.cancel()
+    }
+
+    private static func mapStatus(_ s: AuthorizationStatus) -> FCAuthorizationStatus {
+        switch s {
+        case .notDetermined: return .notDetermined
+        case .approved: return .authorized
+        case .denied: return .denied
+        @unknown default: return .denied
+        }
     }
 
     // MARK: - Private
@@ -218,9 +260,5 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
                 ))
             }
         }
-    }
-
-    deinit {
-        cancellable?.cancel()
     }
 }

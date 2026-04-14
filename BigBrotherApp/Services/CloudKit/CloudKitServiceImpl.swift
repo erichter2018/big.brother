@@ -4,6 +4,15 @@ import UIKit
 import BigBrotherCore
 
 /// Concrete CloudKit service using the public database with familyID partitioning.
+///
+/// ## Thread safety
+///
+/// `@unchecked Sendable` because `container` and `database` are immutable
+/// `let` fields initialized in `init`. `CKContainer` and `CKDatabase` are
+/// documented by Apple as thread-safe and do their own internal
+/// serialization for network ops. Internal helpers (`LockedCounter`,
+/// `LockedSet`) use NSLock explicitly. No mutable instance state outside
+/// those locked helpers, so no cross-call synchronization is needed.
 final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     private let container: CKContainer
