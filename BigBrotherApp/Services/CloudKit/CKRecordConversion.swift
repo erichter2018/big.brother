@@ -396,9 +396,16 @@ enum CKRecordConversion {
         record[CKFieldName.hbDeviceLocked] = hb.isDeviceLocked.map { NSNumber(value: $0) }
         record[CKFieldName.hbInternetBlocked] = hb.internetBlocked.map { NSNumber(value: $0) }
         record["hbInternetBlockedReason"] = hb.internetBlockedReason
-        if let usage = hb.appUsageMinutes, let data = try? JSONEncoder().encode(usage) {
+        if let usage = hb.appUsageMinutes,
+           !usage.isEmpty,
+           let data = try? JSONEncoder().encode(usage) {
             record["hbAppUsageMinutes"] = String(data: data, encoding: .utf8)
+        } else {
+            record["hbAppUsageMinutes"] = nil
         }
+        record[CKFieldName.hbExhaustedAppFingerprints] = hb.exhaustedAppFingerprints.flatMap { $0.isEmpty ? nil : $0 as NSArray }
+        record[CKFieldName.hbExhaustedAppBundleIDs] = hb.exhaustedAppBundleIDs.flatMap { $0.isEmpty ? nil : $0 as NSArray }
+        record[CKFieldName.hbExhaustedAppNames] = hb.exhaustedAppNames.flatMap { $0.isEmpty ? nil : $0 as NSArray }
         record[CKFieldName.hbShieldsActive] = hb.shieldsActive.map { NSNumber(value: $0) }
         record[CKFieldName.hbScheduleResolvedMode] = hb.scheduleResolvedMode
         record[CKFieldName.hbLastShieldChangeReason] = hb.lastShieldChangeReason
@@ -480,6 +487,9 @@ enum CKRecordConversion {
             appUsageMinutes: (record["hbAppUsageMinutes"] as? String).flatMap { str in
                 str.data(using: .utf8).flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) }
             },
+            exhaustedAppFingerprints: record[CKFieldName.hbExhaustedAppFingerprints] as? [String],
+            exhaustedAppBundleIDs: record[CKFieldName.hbExhaustedAppBundleIDs] as? [String],
+            exhaustedAppNames: record[CKFieldName.hbExhaustedAppNames] as? [String],
             timeZoneIdentifier: record[CKFieldName.hbTimeZoneID] as? String,
             timeZoneOffsetSeconds: (record[CKFieldName.hbTimeZoneOffset] as? Int64).map { Int($0) },
             screenTimeMinutes: (record[CKFieldName.hbScreenTimeMinutes] as? Int64).map { Int($0) },

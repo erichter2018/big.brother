@@ -40,10 +40,52 @@ final class ChildHomeViewModel {
     /// that the parent already approved on a sibling device — without this, the request
     /// sits in "Pending Parent Approval" forever because the fingerprint doesn't match
     /// between devices even though the parent already said yes by name.
-    private var activeAppNames: Set<String> = []
-    private var activeAppBundleIDs: Set<String> = []
-    private var activeAppFingerprints: Set<String> = []
+    private var knownConfigs: [TimeLimitConfig] = []
+    private var activeConfigs: [TimeLimitConfig] = []
     private var lastActiveConfigRefresh: Date = .distantPast
+
+    private static func normalizeAppName(_ name: String) -> String {
+        name
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isUsefulAppName(_ name: String) -> Bool {
+        let normalized = normalizeAppName(name).lowercased()
+        return !normalized.isEmpty &&
+            normalized != "app" &&
+            normalized != "an app" &&
+            normalized != "unknown" &&
+            normalized != "unknown app" &&
+            !normalized.hasPrefix("app ") &&
+            !normalized.hasPrefix("temporary") &&
+            !normalized.hasPrefix("blocked app ") &&
+            !normalized.contains("token(") &&
+            !normalized.contains("data:") &&
+            !normalized.contains("bytes)")
+    }
+
+    private func applyKnownConfigs(_ configs: [TimeLimitConfig]) {
+        knownConfigs = configs
+        let active = configs.filter(\.isActive)
+        activeConfigs = active
+        lastActiveConfigRefresh = Date()
+        refreshPendingReviews()
+    }
+
+    private func fetchKnownTimeLimitConfigs() async -> [TimeLimitConfig] {
+        guard let cloudKit = appState.cloudKit,
+              let enrollment = try? KeychainManager().get(
+                  ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
+              ),
+              let configs = try? await cloudKit.fetchTimeLimitConfigs(
+                  childProfileID: enrollment.childProfileID
+              ) else {
+            return []
+        }
+        applyKnownConfigs(configs)
+        return configs
+    }
 
     func refreshPendingReviews() {
         guard let data = appState.storage.readRawData(forKey: "pending_review_local.json"),
@@ -52,90 +94,220 @@ final class ChildHomeViewModel {
             return
         }
 
-        let (live, resolved) = Self.partitionReviews(
-            reviews,
-            activeNames: activeAppNames,
-            activeBundleIDs: activeAppBundleIDs,
-            activeFingerprints: activeAppFingerprints
-        )
+        let (live, approved, superseded) = partitionReviews(reviews)
 
-        if !resolved.isEmpty {
+        if !approved.isEmpty || !superseded.isEmpty {
             // Persist the filtered list back so the kid UI and future reads stay clean.
             if let encoded = try? JSONEncoder().encode(live) {
                 try? appState.storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
-            // Allow the tokens locally + wipe the CK records (parent already decided).
-            allowTokensLocally(for: resolved)
-            Task { await deleteResolvedReviews(resolved) }
+            // Apply the current parent decision to the freshly requested local token.
+            applyResolvedReviewsLocally(approved)
+            Task { await deleteResolvedReviews(approved + superseded) }
         }
 
         pendingReviews = live.sorted { $0.createdAt > $1.createdAt }
     }
 
-    /// Add tokens from auto-resolved reviews to the local allowed list so the shield
-    /// drops immediately — otherwise the kid sees the request disappear but the app
-    /// still gets shielded until the next parent command arrives.
-    private func allowTokensLocally(for resolved: [PendingAppReview]) {
-        let storage = appState.storage
-        var allowed = Set<ApplicationToken>()
-        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
-           let existing = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data) {
-            allowed = existing
-        }
-        var added = false
+    /// Apply the current active config to a resolved review's local token binding.
+    /// This is what makes sibling-device and token-rotation re-requests converge
+    /// without needing the parent to decide a second time.
+    private func applyResolvedReviewsLocally(_ resolved: [PendingAppReview]) {
         for review in resolved {
             guard let b64 = review.tokenDataBase64,
                   let tokenData = Data(base64Encoded: b64),
-                  let token = try? JSONDecoder().decode(ApplicationToken.self, from: tokenData) else { continue }
-            if allowed.insert(token).inserted { added = true }
-        }
-        guard added else { return }
-        if let encoded = try? JSONEncoder().encode(allowed) {
-            try? storage.writeRawData(encoded, forKey: StorageKeys.allowedAppTokens)
-        }
-        // Kick enforcement so ManagedSettings drops the shield for the newly allowed apps.
-        if let snapshot = storage.readPolicySnapshot() {
-            try? appState.enforcement?.apply(snapshot.effectivePolicy)
+                  let config = appState.matchingActiveTimeLimitConfig(
+                      appName: review.appName,
+                      bundleID: review.bundleID,
+                      fingerprint: review.appFingerprint,
+                      in: activeConfigs
+                  ) else { continue }
+            _ = appState.applyTimeLimitConfigLocally(
+                config,
+                tokenData: tokenData,
+                fallbackAppName: review.appName,
+                bundleID: review.bundleID
+            )
         }
     }
 
-    private static func partitionReviews(
-        _ reviews: [PendingAppReview],
-        activeNames: Set<String>,
-        activeBundleIDs: Set<String>,
-        activeFingerprints: Set<String>
-    ) -> (live: [PendingAppReview], resolved: [PendingAppReview]) {
+    private func partitionReviews(
+        _ reviews: [PendingAppReview]
+    ) -> (live: [PendingAppReview], approved: [PendingAppReview], superseded: [PendingAppReview]) {
         var live: [PendingAppReview] = []
-        var resolved: [PendingAppReview] = []
+        var approved: [PendingAppReview] = []
+        var superseded: [PendingAppReview] = []
         for review in reviews {
-            let matchesActive: Bool = {
-                if let bid = review.bundleID?.lowercased(), activeBundleIDs.contains(bid) { return true }
-                if activeFingerprints.contains(review.appFingerprint) { return true }
-                if review.nameResolved, activeNames.contains(review.appName.lowercased()) { return true }
-                return false
-            }()
-            if matchesActive { resolved.append(review) } else { live.append(review) }
+            if let config = appState.matchingTimeLimitConfig(
+                appName: review.appName,
+                bundleID: review.bundleID,
+                fingerprint: review.appFingerprint,
+                in: knownConfigs
+            ) {
+                if config.isActive {
+                    approved.append(review)
+                    continue
+                }
+                if config.updatedAt >= review.updatedAt {
+                    superseded.append(review)
+                    continue
+                }
+            }
+            live.append(review)
         }
-        return (live, resolved)
+        return (live, approved, superseded)
     }
 
     /// Fetch active TimeLimitConfigs from CloudKit, refresh the name/bundleID/fingerprint
     /// caches, then re-run the local filter so the UI clears matched entries immediately.
     func refreshActiveAppConfigs() async {
-        guard let cloudKit = appState.cloudKit,
-              let enrollment = try? KeychainManager().get(
-                  ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
-              ) else { return }
-        guard let configs = try? await cloudKit.fetchTimeLimitConfigs(
-            childProfileID: enrollment.childProfileID
-        ) else { return }
+        _ = await fetchKnownTimeLimitConfigs()
+    }
 
-        let active = configs.filter(\.isActive)
-        activeAppNames = Set(active.map { $0.appName.lowercased() })
-        activeAppBundleIDs = Set(active.compactMap { $0.bundleID?.lowercased() })
-        activeAppFingerprints = Set(active.map { $0.appFingerprint })
-        lastActiveConfigRefresh = Date()
+    func ensureActiveAppConfigsFresh() async {
+        if activeConfigs.isEmpty || Date().timeIntervalSince(lastActiveConfigRefresh) > 60 {
+            await refreshActiveAppConfigs()
+        }
+    }
+
+    func submitAppRequest(token: ApplicationToken, name: String, bundleID: String?) async {
+        guard let enrollment = appState.enrollmentState else { return }
+
+        let storage = appState.storage
+        let encoder = JSONEncoder()
+
+        guard let tokenData = try? encoder.encode(token) else { return }
+        let fingerprint = TokenFingerprint.fingerprint(for: tokenData)
+        let tokenKey = tokenData.base64EncodedString()
+
+        // Exact-token duplicate suppression on this device only. Cross-device and
+        // token-rotation repeats still flow through so they can auto-bind by identity.
+        let cachedName = storage.readAllCachedAppNames()[tokenKey]
+        let hasUsableCachedName: Bool = {
+            guard let n = cachedName?.trimmingCharacters(in: .whitespaces),
+                  !n.isEmpty else { return false }
+            if n.hasPrefix("App ") { return false }
+            if n.hasPrefix("Temporary") { return false }
+            if n == "App" || n == "Unknown" { return false }
+            return true
+        }()
+        if hasUsableCachedName {
+            if let allowedData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+               let allowedTokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: allowedData),
+               allowedTokens.contains(token) {
+                return
+            }
+            for limit in storage.readAppTimeLimits() where limit.tokenData.base64EncodedString() == tokenKey {
+                return
+            }
+        }
+
+        let localCanonicalName = appState.storedCanonicalAppName(
+            fingerprint: fingerprint,
+            tokenKey: tokenKey
+        )
+        let knownConfigs = await fetchKnownTimeLimitConfigs()
+        let matchingConfig = appState.matchingTimeLimitConfig(
+            appName: name,
+            bundleID: bundleID,
+            fingerprint: fingerprint,
+            in: knownConfigs
+        )
+        let resolvedName = localCanonicalName ?? matchingConfig?.appName ?? name
+
+        if let config = matchingConfig, config.isActive {
+            _ = appState.applyTimeLimitConfigLocally(
+                config,
+                tokenData: tokenData,
+                fallbackAppName: resolvedName,
+                bundleID: bundleID
+            )
+            refreshPendingReviews()
+            appState.childConfirmationMessage = "\(config.appName) is ready."
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                if self?.appState.childConfirmationMessage == "\(config.appName) is ready." {
+                    self?.appState.childConfirmationMessage = nil
+                }
+            }
+            return
+        }
+
+        // Replace any stale pending review for the same token fingerprint with the
+        // new request. The current token bytes win.
+        var existingPending: [PendingAppReview] = {
+            guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
+            return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
+        }()
+        existingPending.removeAll { $0.appFingerprint == fingerprint }
+        if let encoded = try? JSONEncoder().encode(existingPending) {
+            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+        }
+
+        // Keep the token in the managed picker selection so enforcement can
+        // re-bind it locally when the parent approves or auto-approval kicks in.
+        var pickerSelection: FamilyActivitySelection
+        if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+           let existing = try? JSONDecoder().decode(FamilyActivitySelection.self, from: data) {
+            pickerSelection = existing
+        } else {
+            pickerSelection = FamilyActivitySelection()
+        }
+        pickerSelection.applicationTokens.insert(token)
+        if let encoded = try? encoder.encode(pickerSelection) {
+            try? storage.writeRawData(encoded, forKey: StorageKeys.familyActivitySelection)
+        }
+
+        storage.cacheAppName(resolvedName, forTokenKey: tokenKey)
+
+        let review = PendingAppReview(
+            familyID: enrollment.familyID,
+            childProfileID: enrollment.childProfileID,
+            deviceID: enrollment.deviceID,
+            appFingerprint: fingerprint,
+            appName: resolvedName,
+            bundleID: bundleID,
+            nameResolved: true,
+            tokenDataBase64: tokenKey
+        )
+
+        if localCanonicalName == nil && matchingConfig == nil {
+            let watch = UnverifiedAppWatch(
+                fingerprint: fingerprint,
+                childGivenName: resolvedName,
+                deviceID: enrollment.deviceID,
+                childProfileID: enrollment.childProfileID
+            )
+            var watches: [UnverifiedAppWatch] = {
+                guard let d = storage.readRawData(forKey: "unverified_app_watches.json") else { return [] }
+                return (try? JSONDecoder().decode([UnverifiedAppWatch].self, from: d)) ?? []
+            }()
+            watches.append(watch)
+            if let encoded = try? JSONEncoder().encode(watches) {
+                try? storage.writeRawData(encoded, forKey: "unverified_app_watches.json")
+            }
+        }
+
+        var pending: [PendingAppReview] = {
+            guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
+            return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
+        }()
+        pending.append(review)
+        if let encoded = try? JSONEncoder().encode(pending) {
+            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+        }
+
         refreshPendingReviews()
+
+        let enforcementRef = appState.enforcement
+        let storageRef = appState.storage
+        Task.detached {
+            if let snapshot = storageRef.readPolicySnapshot() {
+                try? enforcementRef?.apply(snapshot.effectivePolicy)
+            }
+        }
+
+        _ = try? await appState.cloudKit?.savePendingAppReview(review)
     }
 
     private func deleteResolvedReviews(_ resolved: [PendingAppReview]) async {
@@ -524,16 +696,6 @@ final class ChildHomeViewModel {
             category: .tokenNameResearch,
             message: message
         ))
-    }
-
-    private static func isUsefulAppName(_ name: String) -> Bool {
-        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return !normalized.isEmpty &&
-            normalized != "app" &&
-            normalized != "an app" &&
-            normalized != "unknown" &&
-            normalized != "unknown app" &&
-            !normalized.hasPrefix("blocked app ")
     }
 
     private static func shouldRetainUploadedUnlockRequest(_ event: EventLogEntry) -> Bool {

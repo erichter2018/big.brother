@@ -189,6 +189,9 @@ enum CKFieldName {
     static let hbPermissions = "hbPermissions"
     static let hbDeviceLocked = "hbLocked"
     static let hbInternetBlocked = "hbInetBlocked"
+    static let hbExhaustedAppFingerprints = "hbExhaustedFPs"
+    static let hbExhaustedAppBundleIDs = "hbExhaustedBIDs"
+    static let hbExhaustedAppNames = "hbExhaustedNames"
 
     // BBDeviceLocation (speed)
     static let locSpeed = "locSpeed"

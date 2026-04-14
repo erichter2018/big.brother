@@ -1034,7 +1034,6 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 return handleBlockAppForToday(fingerprint: fingerprint)
 
             // Live tracking handled automatically by LocationService when moving
-                return .applied
             }
 
         } catch {
@@ -2062,8 +2061,49 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         nameMap["fp:\(fingerprint)"] = name
         defaults?.set(nameMap, forKey: "tokenToAppName")
 
+        var harvestedNames = defaults?.dictionary(forKey: AppGroupKeys.harvestedAppNames) as? [String: String] ?? [:]
+        harvestedNames[fingerprint] = name
+        defaults?.set(harvestedNames, forKey: AppGroupKeys.harvestedAppNames)
+
         eventLogger.log(.commandApplied, details: "App named: \(name) (fingerprint \(fingerprint))")
         return .applied
+    }
+
+    private func authoritativeAppName(fingerprint: String, tokenData: Data? = nil) -> String? {
+        let defaults = UserDefaults.appGroup
+        if let fingerprintName = (defaults?.dictionary(forKey: AppGroupKeys.tokenToAppName) as? [String: String])?["fp:\(fingerprint)"],
+           Self.isUsefulAppName(fingerprintName) {
+            return fingerprintName
+        }
+        if let harvestedName = (defaults?.dictionary(forKey: AppGroupKeys.harvestedAppNames) as? [String: String])?[fingerprint],
+           Self.isUsefulAppName(harvestedName) {
+            return harvestedName
+        }
+        if let tokenData,
+           let cachedName = storage.readAllCachedAppNames()[tokenData.base64EncodedString()],
+           Self.isUsefulAppName(cachedName) {
+            return cachedName
+        }
+        return nil
+    }
+
+    private func removePendingAppReviewsLocally(fingerprint: String) {
+        if let data = storage.readRawData(forKey: "pending_review_local.json"),
+           var pending = try? JSONDecoder().decode([PendingAppReview].self, from: data) {
+            let before = pending.count
+            pending.removeAll { $0.appFingerprint == fingerprint }
+            if pending.count != before, let encoded = try? JSONEncoder().encode(pending) {
+                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+            }
+        }
+    }
+
+    private func reviewDispositionLabel(_ disposition: AppDisposition) -> String {
+        switch disposition {
+        case .allowAlways: return "allowed"
+        case .timeLimit: return "limited"
+        case .keepBlocked: return "rejected"
+        }
     }
 
     /// Handle "revoke all apps" — clear all permanent and temporary allow lists,
@@ -2118,6 +2158,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Token rotation breaks fingerprint match — fall back to fresh tokens
         // from event log + pending unlock requests + name cache via app name lookup.
         let appNameForLookup: String = {
+            if let authoritativeName = authoritativeAppName(fingerprint: fingerprint) {
+                return authoritativeName
+            }
             // Try to find a known app name for this fingerprint to use as fallback
             if let limit = limits.first(where: { $0.fingerprint == fingerprint }) {
                 return limit.appName
@@ -2190,6 +2233,21 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // fingerprint (post-reinstall token rotation) returns .applied with no
         // visible side effects — the parent thinks the command worked, the
         // shield never drops, and there's no log line to debug from.
+        if token == nil && disposition == .keepBlocked {
+            limits.removeAll { $0.fingerprint == fingerprint }
+            var exhausted = storage.readTimeLimitExhaustedApps()
+            exhausted.removeAll { $0.fingerprint == fingerprint }
+            try? storage.writeAppTimeLimits(limits)
+            try? storage.writeTimeLimitExhaustedApps(exhausted)
+            removePendingAppReviewsLocally(fingerprint: fingerprint)
+            reapplyCurrentEnforcement()
+            eventLogger.log(
+                .commandApplied,
+                details: "App rejected: fp \(fingerprint.prefix(8)) (no local token binding)"
+            )
+            return .applied
+        }
+
         if token == nil {
             return .failedValidation(
                 reason: "reviewApp: no token bound to fingerprint \(fingerprint.prefix(8)) " +
@@ -2201,6 +2259,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Clean up: remove from ALL lists first (clean transition)
         if let token {
             allowedTokens.remove(token)
+            if let tokenData = try? encoder.encode(token),
+               let authoritativeName = authoritativeAppName(
+                   fingerprint: fingerprint,
+                   tokenData: tokenData
+               ) {
+                storage.cacheAppName(authoritativeName, forTokenKey: tokenData.base64EncodedString())
+            }
         }
         limits.removeAll { $0.fingerprint == fingerprint }
         var exhausted = storage.readTimeLimitExhaustedApps()
@@ -2215,10 +2280,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         case .timeLimit:
             let dailyMinutes = minutes ?? 60
             if let token, let tokenData = try? encoder.encode(token) {
-                let appName = storage.readAllCachedAppNames()[tokenData.base64EncodedString()] ?? "App"
+                let appName = authoritativeAppName(fingerprint: fingerprint, tokenData: tokenData)
+                    ?? storage.readAllCachedAppNames()[tokenData.base64EncodedString()]
+                    ?? appNameForLookup
                 let limit = AppTimeLimit(
                     appName: appName,
                     tokenData: tokenData,
+                    bundleID: Application(token: token).bundleIdentifier,
                     fingerprint: fingerprint,
                     dailyLimitMinutes: dailyMinutes,
                     wasAlreadyAllowed: false
@@ -2283,17 +2351,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // parent decides. Without this, the card stays stale until the next
         // foreground sync wipes the entire file (which has its own bugs).
         // Match by fingerprint — the parent acted on this exact fingerprint.
-        if let data = storage.readRawData(forKey: "pending_review_local.json"),
-           var pending = try? JSONDecoder().decode([PendingAppReview].self, from: data) {
-            let before = pending.count
-            pending.removeAll { $0.appFingerprint == fingerprint }
-            if pending.count != before, let encoded = try? JSONEncoder().encode(pending) {
-                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
-            }
-        }
+        removePendingAppReviewsLocally(fingerprint: fingerprint)
 
         reapplyCurrentEnforcement()
-        eventLogger.log(.commandApplied, details: "App \(disposition.rawValue): fp \(fingerprint.prefix(8))\(minutes.map { " \($0)m" } ?? "")")
+        eventLogger.log(
+            .commandApplied,
+            details: "App \(reviewDispositionLabel(disposition)): fp \(fingerprint.prefix(8))\(minutes.map { " \($0)m" } ?? "")"
+        )
         return .applied
     }
 

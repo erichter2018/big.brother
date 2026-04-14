@@ -630,8 +630,11 @@ struct RemoteDiagnosticsView: View {
     /// Copy structured snapshot as text for pasting to Claude/chat.
     private func formatSnapshotAsText(_ s: DiagnosticSnapshot, device: ChildDevice) -> String {
         var lines: [String] = []
-        let name = DeviceIcon.displayName(for: device.modelIdentifier)
-        lines.append("=== \(name) DIAGNOSTIC ===")
+        let deviceName = DeviceIcon.displayName(for: device.modelIdentifier)
+        // Header includes the child name so pasted heartbeats are self-
+        // identifying — no need to guess which kid/device a snapshot
+        // belongs to when comparing multiple in a chat.
+        lines.append("=== \(child.name)'s \(deviceName) DIAGNOSTIC ===")
         lines.append("Mode: \(s.mode) (\(s.authority))")
         lines.append("Reason: \(s.reason)")
         lines.append("Shields: \(s.shieldsUp ? "UP" : "DOWN") (expected: \(s.shieldsExpected ? "UP" : "DOWN"))")
@@ -652,6 +655,27 @@ struct RemoteDiagnosticsView: View {
         lines.append("Builds: app=b\(s.builds.app) tunnel=b\(s.builds.tunnel) monitor=b\(s.builds.monitor) shield=b\(s.builds.shield) action=b\(s.builds.shieldAction)")
         lines.append("Monitor: \(s.monitorAge.map { "\($0)s ago" } ?? "?"), Tunnel: \(s.tunnelAge.map { "\($0)s ago" } ?? "?")")
         lines.append("LastPush: \(s.lastPushAge.map { "\($0)s ago" } ?? "NEVER"), APNs: \(s.apnsTokenAge.map { "\($0)s ago" } ?? "NEVER")")
+
+        if let t = s.telemetry {
+            lines.append("\n--- TELEMETRY (today \(t.dateString)) ---")
+            lines.append("DNS probe timeouts: \(t.dnsProbeTimeouts)")
+            lines.append("DNS reconnects: \(t.dnsReconnects)")
+            lines.append("DNS upstream write errors: \(t.dnsUpstreamWriteErrors)")
+            if let ts = t.lastReconnectAt, ts > 0 {
+                let age = Int(Date().timeIntervalSince1970 - ts)
+                lines.append("Last reconnect: \(age)s ago")
+            } else {
+                lines.append("Last reconnect: never today")
+            }
+            if let ts = t.lastProbeTimeoutAt, ts > 0 {
+                let age = Int(Date().timeIntervalSince1970 - ts)
+                lines.append("Last probe timeout: \(age)s ago")
+            }
+            lines.append("Path changes: \(t.pathChanges)")
+            let ladder = "L1=\(t.networkRecoveryL1) L2=\(t.networkRecoveryL2) L3=\(t.networkRecoveryL3) L4=\(t.networkRecoveryL4)"
+            lines.append("Recovery ladder: \(ladder)")
+            lines.append("Tunnel starts: \(t.tunnelStarts)")
+        }
 
         if !s.transitions.isEmpty {
             lines.append("\n--- TRANSITIONS ---")

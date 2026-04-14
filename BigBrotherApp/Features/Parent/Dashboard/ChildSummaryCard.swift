@@ -686,7 +686,7 @@ struct ChildSummaryCard: View {
 
     @ViewBuilder
     private func heartbeatLine(cached: PrecomputedValues) -> some View {
-        if let lastSeen = cached.latestHeartbeatAge {
+        if cached.latestHeartbeatAge != nil {
             if cached.isAppForceClosed {
                 infoRow(icon: "exclamationmark.triangle.fill", color: Self.mutedOrange) {
                     Text("app not running")
@@ -731,25 +731,26 @@ struct ChildSummaryCard: View {
     private var locationLine: some View {
         if let loc = locationInfo {
             infoRow(icon: "location.fill", color: Self.mutedBlue) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 3) {
-                        Text("\(loc.address) \u{00B7} \(formatAge(loc.age))")
-                            .foregroundStyle(.secondary)
-                            .lineLimit(locationExpanded ? nil : 1)
-                            .truncationMode(.middle)
-                        if !locationExpanded, let movement = movementIndicator {
-                            Image(systemName: movement.icon)
-                                .font(.system(size: 9))
-                                .foregroundStyle(movement.color)
-                        }
-                    }
-                    if locationExpanded, let movement = movementIndicator {
+                // Address expands across multiple lines when tapped; the
+                // " · age" + movement icon stays as a single trailing unit
+                // on the first baseline so the car icon doesn't jump to a
+                // new row when the address wraps.
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text(loc.address)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(locationExpanded ? nil : 1)
+                        .truncationMode(.middle)
+                    Text("\u{00B7} \(formatAge(loc.age))")
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                    if let movement = movementIndicator {
                         Image(systemName: movement.icon)
                             .font(.system(size: 9))
                             .foregroundStyle(movement.color)
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: locationExpanded)
+                .contentShape(Rectangle())
                 .onTapGesture {
                     withAnimation { locationExpanded.toggle() }
                 }

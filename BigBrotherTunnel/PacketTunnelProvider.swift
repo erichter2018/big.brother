@@ -105,6 +105,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         NSLog("[Tunnel] startTunnel called (b\(AppConstants.appBuildNumber))")
         tunnelStartedAt = Date()
 
+        // Telemetry: count every tunnel start. A high count = iOS is
+        // churning the NE process (memory pressure or an install loop).
+        TunnelTelemetry.update { $0.tunnelStarts += 1 }
+
         // Write tunnel build number to App Group so the main app can detect
         // stale processes (devicectl install updates the tunnel but may not
         // restart the main app).
@@ -1770,6 +1774,43 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             blockedDomains.formUnion(domains)
         }
         try? storage.writeTimeLimitBlockedDomains(blockedDomains)
+    }
+
+    private func currentExhaustedAppState() -> (fingerprints: [String]?, bundleIDs: [String]?, names: [String]?) {
+        let today = screenTimeTodayString()
+        let exhausted = storage.readTimeLimitExhaustedApps().filter { $0.dateString == today }
+        guard !exhausted.isEmpty else { return (nil, nil, nil) }
+
+        let limitsByFingerprint = Dictionary(
+            uniqueKeysWithValues: storage.readAppTimeLimits().map { ($0.fingerprint, $0) }
+        )
+
+        var fingerprints = Set<String>()
+        var bundleIDs = Set<String>()
+        var names = Set<String>()
+
+        for entry in exhausted {
+            fingerprints.insert(entry.fingerprint)
+
+            if let bundleID = limitsByFingerprint[entry.fingerprint]?.bundleID?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+               !bundleID.isEmpty {
+                bundleIDs.insert(bundleID)
+            }
+
+            let canonicalName = (limitsByFingerprint[entry.fingerprint]?.appName ?? entry.appName)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if Self.isUsefulAppName(canonicalName) {
+                names.insert(canonicalName)
+            }
+        }
+
+        return (
+            fingerprints: fingerprints.isEmpty ? nil : Array(fingerprints).sorted(),
+            bundleIDs: bundleIDs.isEmpty ? nil : Array(bundleIDs).sorted(),
+            names: names.isEmpty ? nil : Array(names).sorted()
+        )
     }
 
     /// Sync pending unlock request events from App Group to CloudKit.
@@ -3495,6 +3536,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let recordID = CKRecord.ID(recordName: "BBHeartbeat_\(enrollment.deviceID.rawValue)")
         let record: CKRecord
+        let exhaustedAppState = currentExhaustedAppState()
 
         // Fetch existing record to preserve change tag (QoS: userInitiated)
         do {
@@ -3633,7 +3675,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             + storage.readTimeLimitBlockedDomains().count
         if dnsCount > 0 {
             record["hbDnsBlockedDomainCount"] = dnsCount as NSNumber
+        } else {
+            record["hbDnsBlockedDomainCount"] = nil
         }
+        // Tunnel heartbeats reuse the same CK record as main-app heartbeats.
+        // Clear stale per-app usage when the tunnel is the writer, then report
+        // the authoritative exhausted-app set from local storage.
+        record["hbAppUsageMinutes"] = nil
+        record["hbExhaustedFPs"] = exhaustedAppState.fingerprints.flatMap { $0.isEmpty ? nil : $0 as NSArray }
+        record["hbExhaustedBIDs"] = exhaustedAppState.bundleIDs.flatMap { $0.isEmpty ? nil : $0 as NSArray }
+        record["hbExhaustedNames"] = exhaustedAppState.names.flatMap { $0.isEmpty ? nil : $0 as NSArray }
 
         // b431: Forward ghost shield detection from ShieldConfiguration extension.
         // Same 24h auto-expiry logic as the main-app heartbeat path.
@@ -3692,6 +3743,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // fall back to the mode-derived expectation.
             effectiveShieldsUp = modeResolution.mode != .unlocked
         }
+        // Keys match `TunnelTelemetry` stored-property names so the parent
+        // can decode the top-level JSON as a `DiagnosticSnapshot` without a
+        // custom CodingKeys mapping.
+        let telemetry = TunnelTelemetry.load()
+        var telemetryDict: [String: Any] = [
+            "dateString": telemetry.dateString,
+            "dnsProbeTimeouts": telemetry.dnsProbeTimeouts,
+            "dnsReconnects": telemetry.dnsReconnects,
+            "dnsUpstreamWriteErrors": telemetry.dnsUpstreamWriteErrors,
+            "pathChanges": telemetry.pathChanges,
+            "networkRecoveryL1": telemetry.networkRecoveryL1,
+            "networkRecoveryL2": telemetry.networkRecoveryL2,
+            "networkRecoveryL3": telemetry.networkRecoveryL3,
+            "networkRecoveryL4": telemetry.networkRecoveryL4,
+            "tunnelStarts": telemetry.tunnelStarts,
+        ]
+        if let ts = telemetry.lastReconnectAt { telemetryDict["lastReconnectAt"] = ts }
+        if let ts = telemetry.lastProbeTimeoutAt { telemetryDict["lastProbeTimeoutAt"] = ts }
         let tunnelDiagJSON: [String: Any] = [
             "mode": modeResolution.mode.rawValue,
             "authority": modeResolution.controlAuthority.rawValue,
@@ -3719,6 +3788,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             "tokenVerdicts": [],
             "shieldRenders": (defaults?.array(forKey: "shieldRenderLog") as? [[String: Any]]) ?? [],
             "monitorConfirmedAt": defaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0,
+            "telemetry": telemetryDict,
         ]
         if let diagData = try? JSONSerialization.data(withJSONObject: tunnelDiagJSON, options: []),
            let diagStr = String(data: diagData, encoding: .utf8) {
@@ -3986,8 +4056,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         lastPathInterfaceSignature = signature
 
         let nowSatisfied = path.status == .satisfied
-        let wasSatisfied = lastPathStatusSatisfied
         lastPathStatusSatisfied = nowSatisfied
+
+        // Telemetry: count real interface transitions (wifi↔cell swaps,
+        // satisfied↔unsatisfied flips). Excludes the first-callback seed.
+        TunnelTelemetry.update { $0.pathChanges += 1 }
 
         NSLog("[Tunnel] Network path changed — was '\(previous)', now '\(signature)' (status: \(path.status))")
 
@@ -4109,6 +4182,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 details: "Failures=\(count), reason=\(reason). APNs working (recent ping), REST/DNS failing — classic stale NWUDPSession."
             ))
             reapplyNetworkSettings(force: true)
+            TunnelTelemetry.update { $0.networkRecoveryL3 += 1 }
             return
         }
 
@@ -4122,6 +4196,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 details: "Failures=\(count), reason=\(reason)"
             ))
             dnsProxy?.reconnectUpstream()
+            TunnelTelemetry.update { $0.networkRecoveryL1 += 1 }
             return
         }
 
@@ -4135,6 +4210,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 details: "Failures=\(count), reason=\(reason)"
             ))
             recreateDNSProxy()
+            TunnelTelemetry.update { $0.networkRecoveryL2 += 1 }
             return
         }
 
@@ -4149,6 +4225,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             ))
             reasserting = true
             reapplyNetworkSettings(force: true)
+            TunnelTelemetry.update { $0.networkRecoveryL3 += 1 }
             return
         }
 
@@ -4161,6 +4238,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 message: "L4 Recovery: Restarting tunnel after \(count) consecutive health failures",
                 details: "Last failure reason: \(reason)"
             ))
+            TunnelTelemetry.update { $0.networkRecoveryL4 += 1 }
             // Clear reasserting first so iOS treats the cancel as a real failure and relaunches us.
             reasserting = false
             cancelTunnelWithError(NSError(domain: "fr.bigbrother.recovery", code: 4, userInfo: [NSLocalizedDescriptionKey: "L4 Network Recovery: \(reason)"]))
@@ -4370,5 +4448,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let cal = Calendar(identifier: .gregorian)
         let comps = cal.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", comps.year ?? 0, comps.month ?? 0, comps.day ?? 0)
+    }
+
+    private static func isUsefulAppName(_ name: String) -> Bool {
+        let normalized = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        return normalized != "app"
+            && normalized != "application"
+            && normalized != "unknown"
+            && normalized != "restricted app"
     }
 }

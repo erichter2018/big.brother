@@ -115,6 +115,15 @@ public struct DiagnosticSnapshot: Codable, Sendable {
     /// keep the embedded heartbeat JSON bounded.
     public let tokenVerdicts: [TokenVerdict]
 
+    // MARK: - Tunnel Telemetry (b547)
+    //
+    // Daily-resetting counters tracking DNS proxy recovery activity.
+    // Lets the parent tell WHICH internet-loss failure mode a kid hit
+    // (active-probe wedge vs path flap vs iOS tunnel restart vs other)
+    // without pulling raw logs. See BigBrotherCore/Sources/BigBrotherCore/
+    // Models/TunnelTelemetry.swift for semantics.
+    public let telemetry: TunnelTelemetry?
+
     // MARK: - Nested Types
 
     public struct ComponentBuilds: Codable, Sendable {
@@ -204,7 +213,8 @@ public struct DiagnosticSnapshot: Codable, Sendable {
         internetBlocked: Bool? = nil, internetBlockReason: String? = nil, dnsBlockedDomains: Int? = nil,
         transitions: [TransitionEntry], recentLogs: [LogEntry],
         applyStartedAt: Date? = nil, applyFinishedAt: Date? = nil,
-        tokenVerdicts: [TokenVerdict] = []
+        tokenVerdicts: [TokenVerdict] = [],
+        telemetry: TunnelTelemetry? = nil
     ) {
         self.mode = mode; self.authority = authority; self.reason = reason
         self.isTemporary = isTemporary; self.expiresAt = expiresAt
@@ -224,5 +234,6 @@ public struct DiagnosticSnapshot: Codable, Sendable {
         self.applyStartedAt = applyStartedAt
         self.applyFinishedAt = applyFinishedAt
         self.tokenVerdicts = tokenVerdicts
+        self.telemetry = telemetry
     }
 }

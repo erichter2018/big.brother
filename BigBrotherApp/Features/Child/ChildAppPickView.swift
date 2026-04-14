@@ -60,7 +60,7 @@ struct ChildAppPickView: View {
                 }
 
             Button {
-                processSelection()
+                Task { await processSelection() }
             } label: {
                 Text("Done")
                     .frame(maxWidth: .infinity)
@@ -171,7 +171,7 @@ struct ChildAppPickView: View {
         dismiss()
     }
 
-    private func processSelection() {
+    private func processSelection() async {
         guard let enrollment = try? KeychainManager().get(
             ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
         ) else { return }
@@ -200,11 +200,21 @@ struct ChildAppPickView: View {
 
         var newReviews: [PendingAppReview] = []
         var newTokens: [ApplicationToken] = []
+        var autoApproved: [(config: TimeLimitConfig, tokenData: Data, appName: String, bundleID: String?)] = []
         var addedCount = 0
         var skipped = 0
 
         let nameCache = storage.readAllCachedAppNames()
-
+        let selectedApplications = applicationsByTokenKey()
+        let knownConfigs: [TimeLimitConfig]
+        if let cloudKit = appState.cloudKit,
+           let configs = try? await cloudKit.fetchTimeLimitConfigs(
+               childProfileID: enrollment.childProfileID
+           ) {
+            knownConfigs = configs
+        } else {
+            knownConfigs = []
+        }
         for token in selection.applicationTokens {
             // Skip if already in picker selection or always-allowed
             if existingTokens.contains(token) { skipped += 1; continue }
@@ -213,11 +223,37 @@ struct ChildAppPickView: View {
             guard let tokenData = try? encoder.encode(token) else { continue }
             let fingerprint = TokenFingerprint.fingerprint(for: tokenData)
             let tokenKey = tokenData.base64EncodedString()
-
-            let name = nameCache[tokenKey] ?? "App \(addedCount + 1)"
+            let application = selectedApplications[tokenKey]
+            let bundleID = application?.bundleIdentifier
+            let fallbackName = application?.bundleIdentifier?
+                .split(separator: ".")
+                .last
+                .map(String.init)
+            let discoveredName = nameCache[tokenKey] ??
+                application?.localizedDisplayName ??
+                fallbackName ??
+                "App \(addedCount + 1)"
+            let localCanonicalName = appState.storedCanonicalAppName(
+                fingerprint: fingerprint,
+                tokenKey: tokenKey
+            )
+            let matchingConfig = appState.matchingTimeLimitConfig(
+                appName: discoveredName,
+                bundleID: bundleID,
+                fingerprint: fingerprint,
+                in: knownConfigs
+            )
+            let name = localCanonicalName ?? matchingConfig?.appName ?? discoveredName
 
             // Add to picker selection — enforcement will put it in shield.applications.
             pickerSelection.applicationTokens.insert(token)
+
+            if let config = matchingConfig, config.isActive {
+                autoApproved.append((config, tokenData, name, bundleID))
+                skipped += 1
+                storage.cacheAppName(name, forTokenKey: tokenKey)
+                continue
+            }
 
             let review = PendingAppReview(
                 familyID: enrollment.familyID,
@@ -225,7 +261,9 @@ struct ChildAppPickView: View {
                 deviceID: enrollment.deviceID,
                 appFingerprint: fingerprint,
                 appName: name,
-                nameResolved: false
+                bundleID: bundleID,
+                nameResolved: false,
+                tokenDataBase64: tokenKey
             )
             newReviews.append(review)
             newTokens.append(token)
@@ -238,6 +276,15 @@ struct ChildAppPickView: View {
         // Save updated picker selection — enforcement reads this for shield.applications
         if let encoded = try? encoder.encode(pickerSelection) {
             try? storage.writeRawData(encoded, forKey: StorageKeys.familyActivitySelection)
+        }
+
+        for item in autoApproved {
+            _ = appState.applyTimeLimitConfigLocally(
+                item.config,
+                tokenData: item.tokenData,
+                fallbackAppName: item.appName,
+                bundleID: item.bundleID
+            )
         }
 
         // Save reviews locally for ShieldConfiguration name resolution
@@ -266,6 +313,12 @@ struct ChildAppPickView: View {
         savedTokens = newTokens
         savedReviews = newReviews
         isSaving = false
+
+        guard !newReviews.isEmpty else {
+            dismiss()
+            return
+        }
+
         showNaming = true
 
         // Push reviews to CloudKit directly from the main app — don't wait for tunnel.
@@ -328,6 +381,16 @@ struct ChildAppPickView: View {
         } catch {
             await MainActor.run { cloudKitStatus = "ERROR: \(error.localizedDescription)" }
         }
+    }
+
+    private func applicationsByTokenKey() -> [String: Application] {
+        var result: [String: Application] = [:]
+        for application in selection.applications {
+            guard let token = application.token,
+                  let tokenData = try? JSONEncoder().encode(token) else { continue }
+            result[tokenData.base64EncodedString()] = application
+        }
+        return result
     }
 }
 #endif

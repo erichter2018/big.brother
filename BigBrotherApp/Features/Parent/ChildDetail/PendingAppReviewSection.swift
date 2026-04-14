@@ -2,7 +2,7 @@ import SwiftUI
 import BigBrotherCore
 
 /// Parent-facing section showing apps the child selected that need review.
-/// Each app can be: allowed always, given a time limit, or kept blocked.
+/// Each app can be: allowed always, given a time limit, or rejected.
 ///
 /// Names cannot be resolved automatically — ShieldConfiguration (the only process
 /// that can read app names) cannot write to ANY persistent storage. The child sees
@@ -105,7 +105,7 @@ struct PendingAppReviewSection: View {
                         .foregroundStyle(.orange)
                 }
                 if viewModel.isPreviouslyBlocked(review) {
-                    Text("previously blocked")
+                    Text("previously denied")
                         .font(.caption2)
                         .foregroundStyle(.red)
                 }
@@ -145,7 +145,7 @@ struct PendingAppReviewSection: View {
                     Button {
                         Task { await viewModel.reviewApp(review, disposition: .keepBlocked) }
                     } label: {
-                        Text("Block")
+                        Text("Reject")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.red.opacity(0.9))
                             .padding(.horizontal, 10)

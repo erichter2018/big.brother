@@ -15,13 +15,13 @@ struct ChildSingleAppPickSheet: View {
     /// Optional starting text for the name field, used when ShieldConfiguration
     /// already resolved the app's name.
     let initialName: String
-    let onSubmit: (ApplicationToken, String) -> Void
+    let onSubmit: (ApplicationToken, String, String?) async -> Void
 
     init(
         appState: AppState,
         promptHint: String? = nil,
         initialName: String = "",
-        onSubmit: @escaping (ApplicationToken, String) -> Void
+        onSubmit: @escaping (ApplicationToken, String, String?) async -> Void
     ) {
         self.appState = appState
         self.promptHint = promptHint
@@ -32,6 +32,7 @@ struct ChildSingleAppPickSheet: View {
 
     @State private var selection = FamilyActivitySelection()
     @State private var pickedToken: ApplicationToken?
+    @State private var pickedBundleID: String?
     @State private var enteredName: String
     @State private var nameFromCloudKit = false
     @State private var isSaving = false
@@ -91,7 +92,8 @@ struct ChildSingleAppPickSheet: View {
                             return
                         }
                         pickedToken = token
-                        lookupExistingName(token: token)
+                        pickedBundleID = selectedBundleID(for: token)
+                        lookupExistingName(token: token, bundleID: pickedBundleID)
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                             nameFieldFocused = true
                         }
@@ -153,8 +155,10 @@ struct ChildSingleAppPickSheet: View {
                     return
                 }
                 isSaving = true
-                onSubmit(token, name)
-                dismiss()
+                Task {
+                    await onSubmit(token, name, pickedBundleID)
+                    dismiss()
+                }
             } label: {
                 Text("Submit for Review")
                     .frame(maxWidth: .infinity)
@@ -211,20 +215,27 @@ struct ChildSingleAppPickSheet: View {
 
     /// Check CloudKit for an existing name for this token fingerprint.
     /// If found (from a previous add/remove cycle), auto-populate and lock the field.
-    private func lookupExistingName(token: ApplicationToken) {
+    private func lookupExistingName(token: ApplicationToken, bundleID: String?) {
         guard let tokenData = try? JSONEncoder().encode(token) else { return }
         let fp = TokenFingerprint.fingerprint(for: tokenData)
-
-        // Check local cache first (App Group storage)
-        let storage = AppGroupStorage()
-        let nameCache = storage.readAllCachedAppNames()
         let tokenKey = tokenData.base64EncodedString()
+
+        let storage = AppGroupStorage()
+        if let authoritative = appState.storedCanonicalAppName(
+            fingerprint: fp,
+            tokenKey: tokenKey
+        ) {
+            enteredName = authoritative
+            nameFromCloudKit = true
+            storage.cacheAppName(authoritative, forTokenKey: tokenKey)
+            return
+        }
+
+        let nameCache = storage.readAllCachedAppNames()
         if let cached = nameCache[tokenKey],
            cached != "App", !cached.hasPrefix("App "), !cached.hasPrefix("Temporary"),
            cached.count > 2 {
             enteredName = cached
-            nameFromCloudKit = true
-            return
         }
 
         // Check CloudKit TimeLimitConfigs (includes inactive/revoked ones with preserved names)
@@ -235,14 +246,40 @@ struct ChildSingleAppPickSheet: View {
 
         Task {
             if let configs = try? await cloudKit.fetchTimeLimitConfigs(childProfileID: enrollment.childProfileID) {
-                if let match = configs.first(where: { $0.appFingerprint == fp }) {
+                let match = await MainActor.run {
+                    appState.matchingTimeLimitConfig(
+                        appName: enteredName,
+                        bundleID: bundleID,
+                        fingerprint: fp,
+                        in: configs
+                    )
+                }
+                if let match {
+                    let matchedName = match.appName
                     await MainActor.run {
-                        enteredName = match.appName
+                        enteredName = matchedName
                         nameFromCloudKit = true
                     }
+                    storage.cacheAppName(matchedName, forTokenKey: tokenKey)
                 }
             }
         }
+    }
+
+    private func selectedBundleID(for token: ApplicationToken) -> String? {
+        let encoder = JSONEncoder()
+        guard let targetData = try? encoder.encode(token) else { return nil }
+        let targetKey = targetData.base64EncodedString()
+
+        for application in selection.applications {
+            guard let appToken = application.token,
+                  let appData = try? encoder.encode(appToken),
+                  appData.base64EncodedString() == targetKey else {
+                continue
+            }
+            return application.bundleIdentifier
+        }
+        return Application(token: token).bundleIdentifier
     }
 }
 #endif

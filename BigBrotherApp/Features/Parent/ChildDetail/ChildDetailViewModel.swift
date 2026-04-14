@@ -97,12 +97,26 @@ final class ChildDetailViewModel: CommandSendable {
     /// Bedtime compliance results keyed by "yyyy-MM-dd".
     var bedtimeCompliance: [String: BedtimeComplianceResult] = [:]
 
-    /// Per-app time limit configs from CloudKit.
-    var timeLimitConfigs: [TimeLimitConfig] = []
+    /// Per-app time limit configs from CloudKit. CloudKit is authoritative;
+    /// this list is seeded from a local cache at init so the UI renders
+    /// immediately, then replaced by the CK fetch in `loadTimeLimits()`.
+    /// Every mutation writes back to the cache so a parent restart picks
+    /// up the latest known-good state without waiting for CloudKit.
+    var timeLimitConfigs: [TimeLimitConfig] = [] {
+        didSet {
+            guard didFinishInit else { return }
+            persistTimeLimitConfigCache()
+        }
+    }
 
     /// Fingerprints of apps blocked for today, persisted in UserDefaults keyed by child+date.
     var blockedForTodayFingerprints: Set<String> {
         didSet { Self.saveBlockedForToday(blockedForTodayFingerprints, childID: child.id) }
+    }
+    /// Local record of extra-time grants issued today, keyed by fingerprint.
+    /// Used to ignore stale pre-grant heartbeat state until the child reports back.
+    var grantedExtraTimestamps: [String: TimeInterval] {
+        didSet { Self.saveGrantedExtraTimestamps(grantedExtraTimestamps, childID: child.id) }
     }
 
     /// DNS-based online activity snapshot for this child (today only, with slot data for timeline scrubbing).
@@ -112,6 +126,7 @@ final class ChildDetailViewModel: CommandSendable {
     /// Per-day DNS snapshots keyed by date string ("2026-03-29"), for timeline day-by-day scrubbing.
     var onlineActivityByDay: [String: DomainActivitySnapshot] = [:]
     private var refreshTimer: Timer?
+    private var currentDayString: String
 
     /// Parent-side restriction state for this child (persisted in UserDefaults).
     var restrictions: DeviceRestrictions {
@@ -161,10 +176,49 @@ final class ChildDetailViewModel: CommandSendable {
     init(appState: AppState, child: ChildProfile) {
         self.appState = appState
         self.child = child
+        self.currentDayString = Self.todayDateString()
         self.blockedForTodayFingerprints = Self.loadBlockedForToday(childID: child.id)
         self.grantedExtraMinutes = Self.loadGrantedExtra(childID: child.id)
+        self.grantedExtraTimestamps = Self.loadGrantedExtraTimestamps(childID: child.id)
         self.selfUnlockBudget = Self.loadSelfUnlockBudget(for: child.id)
+        // Seed from persisted cache so Always Allowed / Time-Limited render
+        // immediately on Child Detail open. The live CloudKit fetch runs via
+        // `loadTimeLimits()` and replaces this with the authoritative list.
+        self.timeLimitConfigs = Self.loadCachedTimeLimitConfigs(childID: child.id)
         self.didFinishInit = true
+    }
+
+    // MARK: - Time-Limit Config Cache
+    //
+    // CloudKit is the source of truth for these records, but the parent
+    // dashboard needs them available without a round-trip every time the
+    // user opens a kid. We persist the last-known list in UserDefaults,
+    // keyed by child ID, so the Always Allowed / Time-Limited sections
+    // render immediately. `loadTimeLimits()` still fetches fresh from CK
+    // on every open to pick up changes from other parent devices.
+
+    private static func timeLimitCacheKey(childID: ChildProfileID) -> String {
+        "timeLimitConfigsCache.\(childID.rawValue)"
+    }
+
+    private static func loadCachedTimeLimitConfigs(childID: ChildProfileID) -> [TimeLimitConfig] {
+        guard let data = UserDefaults.standard.data(forKey: timeLimitCacheKey(childID: childID)),
+              let decoded = try? JSONDecoder().decode([TimeLimitConfig].self, from: data) else {
+            return []
+        }
+        return decoded.sorted { $0.appName < $1.appName }
+    }
+
+    private static func saveCachedTimeLimitConfigs(
+        _ configs: [TimeLimitConfig],
+        childID: ChildProfileID
+    ) {
+        guard let data = try? JSONEncoder().encode(configs) else { return }
+        UserDefaults.standard.set(data, forKey: timeLimitCacheKey(childID: childID))
+    }
+
+    private func persistTimeLimitConfigCache() {
+        Self.saveCachedTimeLimitConfigs(timeLimitConfigs, childID: child.id)
     }
 
     private func showError(_ message: String) {
@@ -249,6 +303,10 @@ final class ChildDetailViewModel: CommandSendable {
         return f
     }()
 
+    private static func todayDateString() -> String {
+        dateFormatter.string(from: Date())
+    }
+
     private static func blockedKey(childID: ChildProfileID) -> String {
         let today = dateFormatter.string(from: Date())
         return "blockedForToday.\(childID.rawValue).\(today)"
@@ -263,6 +321,24 @@ final class ChildDetailViewModel: CommandSendable {
     private static func saveBlockedForToday(_ fingerprints: Set<String>, childID: ChildProfileID) {
         let key = blockedKey(childID: childID)
         UserDefaults.standard.set(Array(fingerprints), forKey: key)
+    }
+
+    private static func grantedExtraTimestampKey(childID: ChildProfileID) -> String {
+        let today = dateFormatter.string(from: Date())
+        return "grantedExtraAt.\(childID.rawValue).\(today)"
+    }
+
+    private static func loadGrantedExtraTimestamps(childID: ChildProfileID) -> [String: TimeInterval] {
+        let key = grantedExtraTimestampKey(childID: childID)
+        return (UserDefaults.standard.dictionary(forKey: key) as? [String: TimeInterval]) ?? [:]
+    }
+
+    private static func saveGrantedExtraTimestamps(
+        _ timestamps: [String: TimeInterval],
+        childID: ChildProfileID
+    ) {
+        let key = grantedExtraTimestampKey(childID: childID)
+        UserDefaults.standard.set(timestamps, forKey: key)
     }
 
     /// Toggle a single restriction and send to all child devices.
@@ -316,6 +392,7 @@ final class ChildDetailViewModel: CommandSendable {
         guard !hasLoadedInitialData else { return }
         hasLoadedInitialData = true
         Task { @MainActor in
+            refreshDayScopedStateIfNeeded()
             async let e: () = loadEvents()
             async let s: () = loadWeeklyScreenTime()
             async let o: () = loadOnlineActivity()
@@ -332,8 +409,13 @@ final class ChildDetailViewModel: CommandSendable {
         ensureDataLoaded()
 
         let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
-            Task { [weak self] in
+            Task { @MainActor [weak self] in
+                let dayChanged = self?.refreshDayScopedStateIfNeeded() ?? false
                 await self?.loadEvents()
+                if dayChanged {
+                    await self?.loadWeeklyScreenTime()
+                    await self?.loadOnlineActivity()
+                }
                 await self?.loadTimeLimits()
                 await self?.loadPendingAppReviews() // Must run after loadTimeLimits
             }
@@ -718,8 +800,7 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     /// Send an app name to the child device so ShieldAction uses it in future requests.
-    func sendAppNameToChild(name: String, rawAppName: String, deviceID: DeviceID?) async {
-        guard let fingerprint = ParentAppNameMapping.extractFingerprint(from: rawAppName) else { return }
+    func sendAppNameToChild(name: String, fingerprint: String, deviceID: DeviceID?) async {
         if let deviceID {
             await performCommand(.nameApp(fingerprint: fingerprint, name: name), target: .device(deviceID))
         } else {
@@ -906,6 +987,7 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     func refresh() async {
+        refreshDayScopedStateIfNeeded()
         // Dashboard populates devices/heartbeats which loadWeeklyScreenTime +
         // loadOnlineActivity both read from — block on it first.
         try? await appState.refreshDashboard()
@@ -931,6 +1013,7 @@ final class ChildDetailViewModel: CommandSendable {
         guard let cloudKit = appState.cloudKit else { return }
         if let configs = try? await cloudKit.fetchTimeLimitConfigs(childProfileID: child.id) {
             timeLimitConfigs = configs.sorted { $0.appName < $1.appName }
+            persistTimeLimitConfigCache()
         }
 
         // Backfill categories for existing configs that don't have one
@@ -1011,7 +1094,7 @@ final class ChildDetailViewModel: CommandSendable {
         if let idx = timeLimitConfigs.firstIndex(where: { $0.id == config.id }) {
             timeLimitConfigs[idx] = updated
         }
-        await sendAppNameToChild(name: newName, rawAppName: config.appName, deviceID: config.deviceID)
+        await sendAppNameToChild(name: newName, fingerprint: config.appFingerprint, deviceID: config.deviceID)
     }
 
     /// Convert a time-limited app to always allowed.
@@ -1081,8 +1164,10 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     func blockAppForToday(config: TimeLimitConfig) async {
+        refreshDayScopedStateIfNeeded()
         blockedForTodayFingerprints.insert(config.appFingerprint)
         grantedExtraMinutes.removeValue(forKey: config.appFingerprint)
+        grantedExtraTimestamps.removeValue(forKey: config.appFingerprint)
         await performCommand(
             .blockAppForToday(appFingerprint: config.appFingerprint),
             target: .child(config.childProfileID)
@@ -1093,7 +1178,7 @@ final class ChildDetailViewModel: CommandSendable {
     func isAppBlockedForToday(_ config: TimeLimitConfig) -> Bool {
         if blockedForTodayFingerprints.contains(config.appFingerprint) { return true }
         guard config.dailyLimitMinutes > 0 else { return false }
-        return appUsageMinutes(for: config) >= Double(config.dailyLimitMinutes)
+        return heartbeatReportsAppBlockedToday(config)
     }
 
     /// Extra minutes granted today, keyed by app fingerprint. Persisted in UserDefaults by child+date.
@@ -1102,7 +1187,9 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     func grantExtraTime(config: TimeLimitConfig, minutes: Int) async {
+        refreshDayScopedStateIfNeeded()
         grantedExtraMinutes[config.appFingerprint, default: 0] += minutes
+        grantedExtraTimestamps[config.appFingerprint] = Date().timeIntervalSince1970
         dismissRequest(for: config)
         await performCommand(.grantExtraTime(appFingerprint: config.appFingerprint, extraMinutes: minutes), target: .child(config.childProfileID))
     }
@@ -1178,12 +1265,17 @@ final class ChildDetailViewModel: CommandSendable {
     /// App usage in minutes. Uses precise DeviceActivityEvent data when available
     /// (from heartbeat's appUsageMinutes), falls back to DNS estimate.
     func appUsageMinutes(for config: TimeLimitConfig) -> Double {
-        // Precise: from DeviceActivityEvent milestones via heartbeat.
+        let todayStart = Calendar.current.startOfDay(for: Date())
         let deviceIDs = Set(devices.map(\.id))
+        var bestHeartbeatUsage = 0
         for hb in appState.latestHeartbeats where deviceIDs.contains(hb.deviceID) {
+            guard hb.timestamp >= todayStart else { continue }
             if let usage = hb.appUsageMinutes, let minutes = usage[config.appFingerprint] {
-                return Double(minutes)
+                bestHeartbeatUsage = max(bestHeartbeatUsage, minutes)
             }
+        }
+        if bestHeartbeatUsage > 0 {
+            return Double(bestHeartbeatUsage)
         }
         // Fallback: DNS estimate.
         return estimatedAppUsage(for: config.appName)
@@ -1191,9 +1283,58 @@ final class ChildDetailViewModel: CommandSendable {
 
     /// Estimated app usage in minutes from DNS data for today.
     func estimatedAppUsage(for appName: String) -> Double {
-        guard let activity = onlineActivity else { return 0 }
+        guard let activity = onlineActivity,
+              activity.date == Self.todayDateString() else {
+            return 0
+        }
         let usage = activity.estimatedAppUsage()
         return usage.first(where: { $0.appName == appName })?.minutes ?? 0
+    }
+
+    private func refreshDayScopedStateIfNeeded() -> Bool {
+        let today = Self.todayDateString()
+        guard today != currentDayString else { return false }
+        currentDayString = today
+        blockedForTodayFingerprints = Self.loadBlockedForToday(childID: child.id)
+        grantedExtraMinutes = Self.loadGrantedExtra(childID: child.id)
+        grantedExtraTimestamps = Self.loadGrantedExtraTimestamps(childID: child.id)
+        return true
+    }
+
+    private func heartbeatReportsAppBlockedToday(_ config: TimeLimitConfig) -> Bool {
+        let todayStart = Calendar.current.startOfDay(for: Date())
+        let deviceIDs = Set(devices.map(\.id))
+        let grantedAt = grantedExtraTimestamps[config.appFingerprint]
+
+        return appState.latestHeartbeats.contains { hb in
+            guard deviceIDs.contains(hb.deviceID),
+                  hb.timestamp >= todayStart else {
+                return false
+            }
+            if let grantedAt,
+               hb.timestamp.timeIntervalSince1970 < grantedAt {
+                return false
+            }
+            return Self.heartbeat(hb, reportsBlockedTodayFor: config)
+        }
+    }
+
+    private static func heartbeat(
+        _ heartbeat: DeviceHeartbeat,
+        reportsBlockedTodayFor config: TimeLimitConfig
+    ) -> Bool {
+        if let bundleID = normalizeBundleID(config.bundleID),
+           heartbeat.exhaustedAppBundleIDs?.contains(bundleID) == true {
+            return true
+        }
+        if heartbeat.exhaustedAppFingerprints?.contains(config.appFingerprint) == true {
+            return true
+        }
+        guard isUsefulAppName(config.appName) else { return false }
+        let normalizedName = normalizeAppName(config.appName)
+        return heartbeat.exhaustedAppNames?.contains(where: {
+            normalizeAppName($0) == normalizedName
+        }) == true
     }
 
     /// Fetch daily screen time snapshots for the last 7 days.
@@ -1485,7 +1626,80 @@ final class ChildDetailViewModel: CommandSendable {
     private(set) var blockedAppNames: Set<String> = []
 
     func isPreviouslyBlocked(_ review: PendingAppReview) -> Bool {
-        review.nameResolved && blockedAppNames.contains(review.appName.lowercased())
+        Self.isUsefulAppName(review.appName) &&
+            blockedAppNames.contains(Self.normalizeAppName(review.appName).lowercased())
+    }
+
+    private static func normalizeBundleID(_ bundleID: String?) -> String? {
+        guard let bid = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bid.isEmpty else {
+            return nil
+        }
+        return bid.lowercased()
+    }
+
+    private static func isUsefulAppName(_ name: String) -> Bool {
+        let normalized = normalizeAppName(name).lowercased()
+        return !normalized.isEmpty &&
+            normalized != "app" &&
+            normalized != "an app" &&
+            normalized != "unknown" &&
+            normalized != "unknown app" &&
+            !normalized.hasPrefix("app ") &&
+            !normalized.hasPrefix("temporary") &&
+            !normalized.hasPrefix("blocked app ") &&
+            !normalized.contains("token(") &&
+            !normalized.contains("data:") &&
+            !normalized.contains("bytes)")
+    }
+
+    private static func review(_ review: PendingAppReview, matches config: TimeLimitConfig) -> Bool {
+        if let reviewBundleID = normalizeBundleID(review.bundleID),
+           normalizeBundleID(config.bundleID) == reviewBundleID {
+            return true
+        }
+        if config.appFingerprint == review.appFingerprint {
+            return true
+        }
+        return isUsefulAppName(review.appName) &&
+            isUsefulAppName(config.appName) &&
+            appNamesMatch(review.appName, config.appName)
+    }
+
+    private static func review(_ review: PendingAppReview, isSupersededBy config: TimeLimitConfig) -> Bool {
+        guard Self.review(review, matches: config) else { return false }
+        return config.isActive || config.updatedAt >= review.updatedAt
+    }
+
+    private static func reviewsMatch(_ lhs: PendingAppReview, _ rhs: PendingAppReview) -> Bool {
+        if let lhsBundleID = normalizeBundleID(lhs.bundleID),
+           let rhsBundleID = normalizeBundleID(rhs.bundleID),
+           lhsBundleID == rhsBundleID {
+            return true
+        }
+        if lhs.appFingerprint == rhs.appFingerprint {
+            return true
+        }
+        return isUsefulAppName(lhs.appName) &&
+            isUsefulAppName(rhs.appName) &&
+            appNamesMatch(lhs.appName, rhs.appName)
+    }
+
+    private func matchingTimeLimitConfig(for review: PendingAppReview) -> TimeLimitConfig? {
+        timeLimitConfigs
+            .filter { Self.review(review, matches: $0) }
+            .sorted {
+                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+                if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                if $0.isActive != $1.isActive { return $0.isActive && !$1.isActive }
+                return $0.id.uuidString > $1.id.uuidString
+            }
+            .first
+    }
+
+    private func matchingTimeLimitConfigIndex(for review: PendingAppReview) -> Int? {
+        guard let match = matchingTimeLimitConfig(for: review) else { return nil }
+        return timeLimitConfigs.firstIndex(where: { $0.id == match.id })
     }
 
     func loadPendingAppReviews() async {
@@ -1497,10 +1711,9 @@ final class ChildDetailViewModel: CommandSendable {
         do {
             let allFromCK = try await cloudKit.fetchPendingAppReviews(childProfileID: child.id)
 
-            // Drop reviews from dead devices (>48h no heartbeat). That's the only
-            // filter the parent applies — kid-side auto-cleanup handles the
-            // "already approved/blocked" cases before they reach CK. If a review
-            // is here, it needs parent attention.
+            // Drop reviews from dead devices and suppress stale reviews that were
+            // already superseded by a newer parent decision. A later re-request
+            // still shows up because its review timestamp is newer than the revoke.
             let heartbeatCutoff = Date().addingTimeInterval(-48 * 3600)
             let aliveDeviceIDs: Set<DeviceID> = {
                 var ids = Set<DeviceID>()
@@ -1513,19 +1726,31 @@ final class ChildDetailViewModel: CommandSendable {
                 }
                 return ids
             }()
+
             let live: [PendingAppReview]
             let orphans: [PendingAppReview]
             if aliveDeviceIDs.isEmpty {
-                live = allFromCK
+                live = allFromCK.filter { review in
+                    if timeLimitConfigs.contains(where: { Self.review(review, isSupersededBy: $0) }) {
+                        return false
+                    }
+                    return true
+                }
                 orphans = []
             } else {
-                live = allFromCK.filter { aliveDeviceIDs.contains($0.deviceID) }
+                live = allFromCK.filter { review in
+                    guard aliveDeviceIDs.contains(review.deviceID) else { return false }
+                    if timeLimitConfigs.contains(where: { Self.review(review, isSupersededBy: $0) }) {
+                        return false
+                    }
+                    return true
+                }
                 orphans = allFromCK.filter { !aliveDeviceIDs.contains($0.deviceID) }
             }
 
             // Maintain blockedAppNames (used by isPreviouslyBlocked UI hint).
             let blockedConfigs = timeLimitConfigs.filter { !$0.isActive }
-            blockedAppNames = Set(blockedConfigs.map { $0.appName.lowercased() })
+            blockedAppNames = Set(blockedConfigs.map { Self.normalizeAppName($0.appName).lowercased() })
 
             let sorted = live.sorted { $0.createdAt < $1.createdAt }
             pendingAppReviews = sorted
@@ -1600,18 +1825,20 @@ final class ChildDetailViewModel: CommandSendable {
         await performCommand(.requestChildAppPick, target: .device(device.id))
     }
 
-    /// Parent decides on a pending app: allow always, time limit, or keep blocked.
-    /// Simple flow: one request → one command → one config → one delete.
-    /// If the same app is requested on multiple devices, each shows as its own
-    /// row and is approved separately. Kid-side auto-cleanup handles the case
-    /// where the app is already approved/blocked on a sibling device — the
-    /// child app filters its local pending list against active TimeLimitConfigs
-    /// every 60s, so duplicate requests never reach the parent a second time.
+    /// Parent decides on a pending app. The decision is child-scoped, so if
+    /// the same app is pending on multiple devices right now, all matching
+    /// review rows are cleared and each device gets its own fingerprint-specific
+    /// command.
     func reviewApp(_ review: PendingAppReview, disposition: AppDisposition, minutes: Int? = nil) async {
         guard let cloudKit = appState.cloudKit else { return }
+        let matchingReviews = {
+            let matches = pendingAppReviews.filter { Self.reviewsMatch($0, review) }
+            return matches.isEmpty ? [review] : matches
+        }()
+        let matchingIDs = Set(matchingReviews.map(\.id))
 
         // Optimistic UI — drop the card NOW, do the work in the background.
-        pendingAppReviews.removeAll { $0.id == review.id }
+        pendingAppReviews.removeAll { matchingIDs.contains($0.id) }
         if pendingAppReviews.isEmpty {
             appState.childrenWithPendingRequests.remove(child.id)
         }
@@ -1625,9 +1852,13 @@ final class ChildDetailViewModel: CommandSendable {
         }
 
         // Seed local config so the next refresh doesn't re-surface this review.
-        if let idx = timeLimitConfigs.firstIndex(where: { $0.appFingerprint == review.appFingerprint }) {
+        if let idx = matchingTimeLimitConfigIndex(for: review) {
             timeLimitConfigs[idx].isActive = isActive
             timeLimitConfigs[idx].dailyLimitMinutes = dailyMinutes
+            timeLimitConfigs[idx].appName = review.appName
+            if let bid = review.bundleID {
+                timeLimitConfigs[idx].bundleID = bid
+            }
             timeLimitConfigs[idx].updatedAt = Date()
         } else {
             timeLimitConfigs.append(TimeLimitConfig(
@@ -1646,12 +1877,27 @@ final class ChildDetailViewModel: CommandSendable {
             guard let self else { return }
             let category = await AppStoreLookup.lookupCategory(appName: review.appName)
 
-            await self.performCommand(
-                .reviewApp(fingerprint: review.appFingerprint, disposition: disposition, minutes: minutes),
-                target: .device(review.deviceID)
-            )
+            var seenCommandKeys = Set<String>()
+            for matchedReview in matchingReviews {
+                let commandKey = "\(matchedReview.deviceID.rawValue)::\(matchedReview.appFingerprint)"
+                guard seenCommandKeys.insert(commandKey).inserted else { continue }
 
-            if let idx = self.timeLimitConfigs.firstIndex(where: { $0.appFingerprint == review.appFingerprint }) {
+                await self.sendAppNameToChild(
+                    name: review.appName,
+                    fingerprint: matchedReview.appFingerprint,
+                    deviceID: matchedReview.deviceID
+                )
+                await self.performCommand(
+                    .reviewApp(
+                        fingerprint: matchedReview.appFingerprint,
+                        disposition: disposition,
+                        minutes: minutes
+                    ),
+                    target: .device(matchedReview.deviceID)
+                )
+            }
+
+            if let idx = self.matchingTimeLimitConfigIndex(for: review) {
                 var updated = self.timeLimitConfigs[idx]
                 updated.dailyLimitMinutes = dailyMinutes
                 updated.isActive = isActive
@@ -1669,7 +1915,13 @@ final class ChildDetailViewModel: CommandSendable {
                 }
             }
 
-            try? await cloudKit.deletePendingAppReview(review.id)
+            let allFromCK = (try? await cloudKit.fetchPendingAppReviews(childProfileID: self.child.id)) ?? matchingReviews
+            let staleReviews = allFromCK.filter { Self.reviewsMatch($0, review) }
+            await withTaskGroup(of: Void.self) { group in
+                for staleReview in staleReviews {
+                    group.addTask { try? await cloudKit.deletePendingAppReview(staleReview.id) }
+                }
+            }
         }
     }
 

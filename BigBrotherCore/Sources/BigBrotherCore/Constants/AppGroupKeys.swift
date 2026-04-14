@@ -374,6 +374,33 @@ public enum AppGroupKeys {
     /// Drive settings JSON blob (speed thresholds, named places). Read by
     /// the tunnel and monitor for in-vehicle enforcement.
     public static let drivingSettings = "drivingSettings"
+
+    // MARK: - DNS Proxy / Tunnel Telemetry (b547)
+    //
+    // Daily-resetting counters that measure how often the tunnel is
+    // actually detecting and recovering from the wedged-NWUDPSession bug
+    // (b545 active probe) vs other causes of internet loss. Parent's
+    // Remote Diagnostics view renders these so we can tell WHICH failure
+    // mode a kid is hitting without pulling logs.
+    //
+    // Semantics:
+    //   - Stored as a single JSON-encoded TunnelTelemetry struct in
+    //     `tunnelTelemetry`. Single blob so atomic update works without
+    //     key races between probe, reconnect, and path-change writers
+    //     that all run on the tunnel's liveness timer.
+    //   - `dateString` is "YYYY-MM-DD" in UTC. On write, if stored date
+    //     != today, counters reset to 0 and yesterday's snapshot is
+    //     copied into `previousDayTelemetry` for parent comparison.
+
+    /// JSON-encoded `TunnelTelemetry` — written by the tunnel on every
+    /// counted event, read by the tunnel heartbeat builder and the parent
+    /// diagnostic UI.
+    public static let tunnelTelemetry = "tunnelTelemetry"
+
+    /// JSON-encoded `TunnelTelemetry` from the most recent completed day.
+    /// Preserved after midnight rollover so the parent can compare
+    /// yesterday's counts with today's.
+    public static let tunnelTelemetryYesterday = "tunnelTelemetryYesterday"
 }
 
 /// Convenience accessor so callers don't re-type the App Group suite name.

@@ -3,6 +3,7 @@ import CloudKit
 import CoreLocation
 import DeviceActivity
 import FamilyControls
+import ManagedSettings
 import UIKit
 import Observation
 import UserNotifications
@@ -482,7 +483,7 @@ final class AppState {
         approvedApps.filter { $0.deviceID == deviceID }
     }
 
-    private static func normalizeAppName(_ appName: String) -> String {
+    nonisolated private static func normalizeAppName(_ appName: String) -> String {
         appName
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -518,10 +519,465 @@ final class AppState {
         }
     }
 
-    private static func isPlaceholderAppName(_ name: String) -> Bool {
+    nonisolated private static func isPlaceholderAppName(_ name: String) -> Bool {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return n.isEmpty || n == "unknown" || n == "an app" || n == "app"
             || n.hasPrefix("blocked app ") || n.contains("token(")
+    }
+
+    nonisolated private static func normalizeBundleID(_ bundleID: String?) -> String? {
+        guard let bid = bundleID?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !bid.isEmpty else {
+            return nil
+        }
+        return bid.lowercased()
+    }
+
+    nonisolated private static func isUsefulManagedAppName(_ appName: String) -> Bool {
+        let normalized = normalizeAppName(appName).lowercased()
+        return !normalized.isEmpty &&
+            normalized != "app" &&
+            normalized != "an app" &&
+            normalized != "unknown" &&
+            normalized != "unknown app" &&
+            !normalized.hasPrefix("app ") &&
+            !normalized.hasPrefix("temporary") &&
+            !normalized.hasPrefix("blocked app ") &&
+            !normalized.contains("token(") &&
+            !normalized.contains("data:") &&
+            !normalized.contains("bytes)")
+    }
+
+    nonisolated private static func currentDateString() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private func timeLimitConfigMatches(
+        _ config: TimeLimitConfig,
+        matchesAppName appName: String,
+        bundleID: String?,
+        fingerprint: String?
+    ) -> Bool {
+        let normalizedBundleID = Self.normalizeBundleID(bundleID)
+        if let normalizedBundleID,
+           Self.normalizeBundleID(config.bundleID) == normalizedBundleID {
+            return true
+        }
+        if let fingerprint, config.appFingerprint == fingerprint {
+            return true
+        }
+        return Self.isUsefulManagedAppName(appName) &&
+            Self.normalizeAppName(config.appName) == Self.normalizeAppName(appName)
+    }
+
+    private func matchesTimeLimitConfig(_ config: TimeLimitConfig, limit: AppTimeLimit) -> Bool {
+        timeLimitConfigMatches(
+            config,
+            matchesAppName: limit.appName,
+            bundleID: limit.bundleID,
+            fingerprint: limit.fingerprint
+        )
+    }
+
+    private func matchesTimeLimitConfig(
+        _ config: TimeLimitConfig,
+        exhaustedEntry: TimeLimitExhaustedApp,
+        nameCache: [String: String]
+    ) -> Bool {
+        if config.appFingerprint == exhaustedEntry.fingerprint {
+            return true
+        }
+        if timeLimitConfigMatches(
+            config,
+            matchesAppName: exhaustedEntry.appName,
+            bundleID: nil,
+            fingerprint: exhaustedEntry.fingerprint
+        ) {
+            return true
+        }
+        let tokenKey = exhaustedEntry.tokenData.base64EncodedString()
+        if let cachedName = nameCache[tokenKey],
+           timeLimitConfigMatches(
+               config,
+               matchesAppName: cachedName,
+               bundleID: nil,
+               fingerprint: exhaustedEntry.fingerprint
+           ) {
+            return true
+        }
+        return false
+    }
+
+    nonisolated private static func shouldPreferTimeLimitConfig(
+        _ lhs: TimeLimitConfig,
+        over rhs: TimeLimitConfig
+    ) -> Bool {
+        if lhs.updatedAt != rhs.updatedAt {
+            return lhs.updatedAt > rhs.updatedAt
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt > rhs.createdAt
+        }
+        if lhs.isActive != rhs.isActive {
+            return lhs.isActive && !rhs.isActive
+        }
+        return lhs.id.uuidString > rhs.id.uuidString
+    }
+
+    nonisolated private static func pendingReview(
+        _ review: PendingAppReview,
+        matches config: TimeLimitConfig
+    ) -> Bool {
+        if let reviewBundleID = normalizeBundleID(review.bundleID),
+           normalizeBundleID(config.bundleID) == reviewBundleID {
+            return true
+        }
+        if config.appFingerprint == review.appFingerprint {
+            return true
+        }
+        return isUsefulManagedAppName(review.appName) &&
+            isUsefulManagedAppName(config.appName) &&
+            normalizeAppName(review.appName) == normalizeAppName(config.appName)
+    }
+
+    nonisolated private static func pendingReview(
+        _ review: PendingAppReview,
+        isSupersededBy config: TimeLimitConfig
+    ) -> Bool {
+        guard pendingReview(review, matches: config) else { return false }
+        return config.isActive || config.updatedAt >= review.updatedAt
+    }
+
+    func matchingTimeLimitConfig(
+        appName: String,
+        bundleID: String?,
+        fingerprint: String,
+        in configs: [TimeLimitConfig]
+    ) -> TimeLimitConfig? {
+        configs
+            .filter {
+                timeLimitConfigMatches(
+                    $0,
+                    matchesAppName: appName,
+                    bundleID: bundleID,
+                    fingerprint: fingerprint
+                )
+            }
+            .sorted { Self.shouldPreferTimeLimitConfig($0, over: $1) }
+            .first
+    }
+
+    func matchingActiveTimeLimitConfig(
+        appName: String,
+        bundleID: String?,
+        fingerprint: String,
+        in configs: [TimeLimitConfig]
+    ) -> TimeLimitConfig? {
+        matchingTimeLimitConfig(
+            appName: appName,
+            bundleID: bundleID,
+            fingerprint: fingerprint,
+            in: configs.filter(\.isActive)
+        )
+    }
+
+    func storedCanonicalAppName(fingerprint: String, tokenKey: String? = nil) -> String? {
+        let defaults = UserDefaults.appGroup
+
+        if let nameMap = defaults?.dictionary(forKey: AppGroupKeys.tokenToAppName) as? [String: String] {
+            if let fingerprintName = nameMap["fp:\(fingerprint)"],
+               Self.isUsefulManagedAppName(fingerprintName) {
+                return fingerprintName
+            }
+            if let tokenKey,
+               let tokenName = nameMap[tokenKey],
+               Self.isUsefulManagedAppName(tokenName) {
+                return tokenName
+            }
+        }
+
+        if let harvested = (defaults?.dictionary(forKey: AppGroupKeys.harvestedAppNames) as? [String: String])?[fingerprint],
+           Self.isUsefulManagedAppName(harvested) {
+            return harvested
+        }
+
+        if let tokenKey,
+           let cached = storage.readAllCachedAppNames()[tokenKey],
+           Self.isUsefulManagedAppName(cached) {
+            return cached
+        }
+
+        return nil
+    }
+
+    private struct ManagedTokenCandidate {
+        let tokenData: Data
+        let fingerprint: String
+        let appName: String?
+        let bundleID: String?
+    }
+
+    private func localManagedTokenCandidates() -> [ManagedTokenCandidate] {
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+        let limits = storage.readAppTimeLimits()
+        let nameCache = storage.readAllCachedAppNames()
+
+        var candidates: [ManagedTokenCandidate] = []
+        var seenTokenKeys = Set<String>()
+
+        func append(
+            tokenData: Data,
+            appName: String?,
+            bundleID: String?
+        ) {
+            let tokenKey = tokenData.base64EncodedString()
+            guard seenTokenKeys.insert(tokenKey).inserted else { return }
+            candidates.append(
+                ManagedTokenCandidate(
+                    tokenData: tokenData,
+                    fingerprint: TokenFingerprint.fingerprint(for: tokenData),
+                    appName: appName,
+                    bundleID: bundleID
+                )
+            )
+        }
+
+        for limit in limits {
+            append(tokenData: limit.tokenData, appName: limit.appName, bundleID: limit.bundleID)
+        }
+
+        var selectionTokens = Set<ApplicationToken>()
+        if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+           let selection = try? decoder.decode(FamilyActivitySelection.self, from: data) {
+            selectionTokens.formUnion(selection.applicationTokens)
+        }
+        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let allowedTokens = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
+            selectionTokens.formUnion(allowedTokens)
+        }
+
+        for token in selectionTokens {
+            guard let tokenData = try? encoder.encode(token) else { continue }
+            let tokenKey = tokenData.base64EncodedString()
+            let existingLimit = limits.first { $0.tokenData == tokenData }
+            let application = Application(token: token)
+            append(
+                tokenData: tokenData,
+                appName: nameCache[tokenKey] ?? existingLimit?.appName ?? application.localizedDisplayName,
+                bundleID: existingLimit?.bundleID ?? application.bundleIdentifier
+            )
+        }
+
+        return candidates
+    }
+
+    @discardableResult
+    func removeTimeLimitConfigLocally(
+        _ config: TimeLimitConfig,
+        removeAllowedTokens: Bool,
+        shouldReapplyEnforcement: Bool = true
+    ) -> Bool {
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+        let limitsBefore = storage.readAppTimeLimits()
+        let cache = storage.readAllCachedAppNames()
+        var localLimits = limitsBefore
+        var exhausted = storage.readTimeLimitExhaustedApps()
+
+        var changed = false
+
+        let originalLimitCount = localLimits.count
+        localLimits.removeAll { matchesTimeLimitConfig(config, limit: $0) }
+        if localLimits.count != originalLimitCount {
+            changed = true
+        }
+
+        let originalExhaustedCount = exhausted.count
+        exhausted.removeAll { matchesTimeLimitConfig(config, exhaustedEntry: $0, nameCache: cache) }
+        if exhausted.count != originalExhaustedCount {
+            changed = true
+        }
+
+        var allowedTokens = Set<ApplicationToken>()
+        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let existing = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
+            allowedTokens = existing
+        }
+
+        if removeAllowedTokens {
+            let filtered = Set(allowedTokens.filter { token in
+                guard let tokenData = try? encoder.encode(token) else { return true }
+                let tokenKey = tokenData.base64EncodedString()
+                let limit = limitsBefore.first { $0.tokenData == tokenData }
+                let application = Application(token: token)
+                let appName = cache[tokenKey] ?? limit?.appName ?? application.localizedDisplayName ?? ""
+                let bundleID = limit?.bundleID ?? application.bundleIdentifier
+                return !timeLimitConfigMatches(
+                    config,
+                    matchesAppName: appName,
+                    bundleID: bundleID,
+                    fingerprint: TokenFingerprint.fingerprint(for: tokenData)
+                )
+            })
+            if filtered != allowedTokens {
+                allowedTokens = filtered
+                changed = true
+            }
+        }
+
+        guard changed else { return false }
+
+        if let data = try? encoder.encode(allowedTokens) {
+            try? storage.writeRawData(data, forKey: StorageKeys.allowedAppTokens)
+        }
+        try? storage.writeAppTimeLimits(localLimits)
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+        if familyControlsAvailable {
+            ScheduleRegistrar.registerTimeLimitEvents(limits: localLimits)
+        }
+        if shouldReapplyEnforcement,
+           let snapshot = storage.readPolicySnapshot() {
+            try? enforcement?.apply(snapshot.effectivePolicy)
+        }
+        return true
+    }
+
+    @discardableResult
+    func applyTimeLimitConfigLocally(
+        _ config: TimeLimitConfig,
+        tokenData: Data,
+        fallbackAppName: String,
+        bundleID: String?,
+        shouldReapplyEnforcement: Bool = true
+    ) -> Bool {
+        guard let token = try? JSONDecoder().decode(ApplicationToken.self, from: tokenData) else {
+            return false
+        }
+
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+        let tokenKey = tokenData.base64EncodedString()
+        let tokenFingerprint = TokenFingerprint.fingerprint(for: tokenData)
+        let resolvedName = Self.isUsefulManagedAppName(config.appName) ? config.appName : fallbackAppName
+        let resolvedBundleID = bundleID ?? config.bundleID
+
+        var selection: FamilyActivitySelection
+        if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+           let existing = try? decoder.decode(FamilyActivitySelection.self, from: data) {
+            selection = existing
+        } else {
+            selection = FamilyActivitySelection()
+        }
+
+        var allowedTokens = Set<ApplicationToken>()
+        if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+           let existing = try? decoder.decode(Set<ApplicationToken>.self, from: data) {
+            allowedTokens = existing
+        }
+
+        var localLimits = storage.readAppTimeLimits()
+        let originalLimits = localLimits
+        var exhausted = storage.readTimeLimitExhaustedApps()
+        let nameCache = storage.readAllCachedAppNames()
+
+        var changed = false
+        let previousWasAlreadyAllowed = allowedTokens.contains(token) ||
+            localLimits.contains(where: { matchesTimeLimitConfig(config, limit: $0) && $0.wasAlreadyAllowed })
+
+        let staleRemoved = exhausted.first {
+            matchesTimeLimitConfig(config, exhaustedEntry: $0, nameCache: nameCache)
+        }
+        exhausted.removeAll { matchesTimeLimitConfig(config, exhaustedEntry: $0, nameCache: nameCache) }
+
+        localLimits.removeAll { matchesTimeLimitConfig(config, limit: $0) }
+
+        func isStaleMatch(_ candidate: ApplicationToken) -> Bool {
+            guard let candidateData = try? encoder.encode(candidate) else { return false }
+            if candidateData == tokenData { return false }
+
+            let candidateKey = candidateData.base64EncodedString()
+            let existingLimit = originalLimits.first { $0.tokenData == candidateData }
+            let application = Application(token: candidate)
+            let candidateName = nameCache[candidateKey] ?? existingLimit?.appName ?? application.localizedDisplayName ?? ""
+            let candidateBundleID = existingLimit?.bundleID ?? application.bundleIdentifier
+
+            return timeLimitConfigMatches(
+                config,
+                matchesAppName: candidateName,
+                bundleID: candidateBundleID,
+                fingerprint: TokenFingerprint.fingerprint(for: candidateData)
+            )
+        }
+
+        let filteredSelection = Set(selection.applicationTokens.filter { !isStaleMatch($0) })
+        if filteredSelection != selection.applicationTokens {
+            selection.applicationTokens = filteredSelection
+            changed = true
+        }
+        if selection.applicationTokens.insert(token).inserted {
+            changed = true
+        }
+
+        let filteredAllowed = Set(allowedTokens.filter { !isStaleMatch($0) })
+        if filteredAllowed != allowedTokens {
+            allowedTokens = filteredAllowed
+            changed = true
+        }
+
+        storage.cacheAppName(resolvedName, forTokenKey: tokenKey)
+
+        if config.dailyLimitMinutes > 0 {
+            let newLimit = AppTimeLimit(
+                appName: resolvedName,
+                tokenData: tokenData,
+                bundleID: resolvedBundleID,
+                fingerprint: tokenFingerprint,
+                dailyLimitMinutes: config.dailyLimitMinutes,
+                wasAlreadyAllowed: previousWasAlreadyAllowed
+            )
+            localLimits.append(newLimit)
+            if let staleRemoved,
+               staleRemoved.dateString == Self.currentDateString() {
+                exhausted.append(TimeLimitExhaustedApp(
+                    timeLimitID: newLimit.id,
+                    appName: resolvedName,
+                    tokenData: tokenData,
+                    fingerprint: tokenFingerprint,
+                    exhaustedAt: staleRemoved.exhaustedAt,
+                    dateString: staleRemoved.dateString
+                ))
+            }
+            changed = true
+        } else if staleRemoved != nil {
+            changed = true
+        }
+
+        if allowedTokens.insert(token).inserted {
+            changed = true
+        }
+
+        guard changed else { return false }
+
+        if let data = try? encoder.encode(selection) {
+            try? storage.writeRawData(data, forKey: StorageKeys.familyActivitySelection)
+        }
+        if let data = try? encoder.encode(allowedTokens) {
+            try? storage.writeRawData(data, forKey: StorageKeys.allowedAppTokens)
+        }
+        try? storage.writeAppTimeLimits(localLimits)
+        try? storage.writeTimeLimitExhaustedApps(exhausted)
+        if familyControlsAvailable {
+            ScheduleRegistrar.registerTimeLimitEvents(limits: localLimits)
+        }
+        if shouldReapplyEnforcement,
+           let snapshot = storage.readPolicySnapshot() {
+            try? enforcement?.apply(snapshot.effectivePolicy)
+        }
+        return true
     }
 
     /// Whether FamilyControls/ManagedSettings are available.
@@ -1226,7 +1682,6 @@ final class AppState {
             // VPN install). Awaiting any of it serially used to add 6-15s of
             // pointless blocking after the mode change had already taken
             // effect locally.
-            let storageRef = storage
             Task.detached { [weak self] in
                 await self?.syncResolvedPendingReviews()
                 await self?.syncScheduleProfile()
@@ -2021,23 +2476,9 @@ final class AppState {
             }
             return ids
         }()
-        let blockedConfigs = configs.filter { !$0.isActive }
-        let blockedNames = Set(blockedConfigs.map { $0.appName.lowercased() })
-        let blockedFingerprints = Set(blockedConfigs.map { $0.appFingerprint })
-        let blockedBundleIDs = Set(blockedConfigs.compactMap { $0.bundleID?.lowercased() })
-        let activeConfigs = configs.filter(\.isActive)
-        let activeNames = Set(activeConfigs.map { $0.appName.lowercased() })
-        let activeFingerprints = Set(activeConfigs.map { $0.appFingerprint })
-        let activeBundleIDs = Set(activeConfigs.compactMap { $0.bundleID?.lowercased() })
-
         let liveReviews = allReviews.filter { review in
             if !aliveDeviceIDs.isEmpty && !aliveDeviceIDs.contains(review.deviceID) { return false }
-            if let bid = review.bundleID?.lowercased(), blockedBundleIDs.contains(bid) { return false }
-            if blockedFingerprints.contains(review.appFingerprint) { return false }
-            if review.nameResolved && blockedNames.contains(review.appName.lowercased()) { return false }
-            if let bid = review.bundleID?.lowercased(), activeBundleIDs.contains(bid) { return false }
-            if activeFingerprints.contains(review.appFingerprint) { return false }
-            if review.nameResolved && activeNames.contains(review.appName.lowercased()) { return false }
+            if configs.contains(where: { Self.pendingReview(review, isSupersededBy: $0) }) { return false }
             return true
         }
 
@@ -2075,6 +2516,7 @@ final class AppState {
                 group.addTask { [cloudKit] in
                     let all = (try? await cloudKit.fetchPendingAppReviews(childProfileID: profile.id)) ?? []
                     guard !all.isEmpty else { return nil }
+                    let configs = (try? await cloudKit.fetchTimeLimitConfigs(childProfileID: profile.id)) ?? []
                     let alive: Set<DeviceID> = {
                         var ids = Set<DeviceID>()
                         for d in kidDevices {
@@ -2083,7 +2525,12 @@ final class AppState {
                         }
                         return ids
                     }()
-                    let live = alive.isEmpty ? all : all.filter { alive.contains($0.deviceID) }
+                    let live = (alive.isEmpty ? all : all.filter { alive.contains($0.deviceID) }).filter { review in
+                        if configs.contains(where: { Self.pendingReview(review, isSupersededBy: $0) }) {
+                            return false
+                        }
+                        return true
+                    }
                     let orphans = alive.isEmpty ? [] : all.filter { !alive.contains($0.deviceID) }
                     return (profile, live, orphans)
                 }
@@ -2537,31 +2984,40 @@ final class AppState {
 
         do {
             let configs = try await cloudKit.fetchTimeLimitConfigs(childProfileID: enrollment.childProfileID)
-            var localLimits = storage.readAppTimeLimits()
             var changed = false
+            let candidates = localManagedTokenCandidates()
 
-            for config in configs where config.isActive {
-                if let idx = localLimits.firstIndex(where: { $0.fingerprint == config.appFingerprint }) {
-                    if localLimits[idx].dailyLimitMinutes != config.dailyLimitMinutes {
-                        localLimits[idx].dailyLimitMinutes = config.dailyLimitMinutes
-                        localLimits[idx].appName = config.appName
-                        localLimits[idx].updatedAt = Date()
-                        changed = true
-                    }
+            for config in configs where !config.isActive {
+                if removeTimeLimitConfigLocally(
+                    config,
+                    removeAllowedTokens: true,
+                    shouldReapplyEnforcement: false
+                ) {
+                    changed = true
                 }
             }
 
-            // Remove limits whose config was deleted in CloudKit
-            let activeFingerprints = Set(configs.filter(\.isActive).map(\.appFingerprint))
-            let before = localLimits.count
-            localLimits.removeAll { $0.dailyLimitMinutes > 0 && !activeFingerprints.contains($0.fingerprint) }
-            if localLimits.count != before { changed = true }
-
-            if changed {
-                try? storage.writeAppTimeLimits(localLimits)
-                if familyControlsAvailable {
-                    ScheduleRegistrar.registerTimeLimitEvents(limits: localLimits)
+            for config in configs where config.isActive {
+                if let candidate = candidates.first(where: {
+                    timeLimitConfigMatches(
+                        config,
+                        matchesAppName: $0.appName ?? "",
+                        bundleID: $0.bundleID,
+                        fingerprint: $0.fingerprint
+                    )
+                }), applyTimeLimitConfigLocally(
+                    config,
+                    tokenData: candidate.tokenData,
+                    fallbackAppName: candidate.appName ?? config.appName,
+                    bundleID: candidate.bundleID,
+                    shouldReapplyEnforcement: false
+                ) {
+                    changed = true
                 }
+            }
+
+            if changed, let snapshot = storage.readPolicySnapshot() {
+                try? enforcement?.apply(snapshot.effectivePolicy)
             }
         } catch {
             #if DEBUG

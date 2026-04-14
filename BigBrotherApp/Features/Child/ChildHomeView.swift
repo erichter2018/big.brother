@@ -1,6 +1,5 @@
 import SwiftUI
 import CoreLocation
-import CloudKit
 import BigBrotherCore
 #if canImport(FamilyControls)
 import FamilyControls
@@ -556,172 +555,13 @@ struct ChildHomeView: View {
                 appState: viewModel.appState,
                 promptHint: singleAppPromptHint,
                 initialName: singleAppName,
-                onSubmit: { token, name in
-                    submitSingleApp(token: token, name: name)
+                onSubmit: { token, name, bundleID in
+                    await viewModel.submitAppRequest(token: token, name: name, bundleID: bundleID)
                 }
             )
         }
         #endif
     }
-
-    #if canImport(FamilyControls)
-    private func submitSingleApp(token: ApplicationToken, name: String) {
-        guard let enrollment = try? KeychainManager().get(
-            ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
-        ) else { return }
-
-        let storage = AppGroupStorage()
-        let encoder = JSONEncoder()
-
-        guard let tokenData = try? encoder.encode(token) else { return }
-        let fingerprint = TokenFingerprint.fingerprint(for: tokenData)
-
-        // Only block submission if this exact token is already in the working
-        // allowed set or has a matching time-limit binding AND we already have
-        // a usable cached name for it. Pre-naming-era allowed apps with no name
-        // (or just "App N") MUST be re-pickable so the user can give them a
-        // real name on this pass. Stale picker-selection entries and stale
-        // pending reviews never block — those need fresh PendingAppReviews to
-        // re-bind rotated tokens.
-        let tokenKey = tokenData.base64EncodedString()
-        let cachedName = storage.readAllCachedAppNames()[tokenKey]
-        let hasUsableCachedName: Bool = {
-            guard let n = cachedName?.trimmingCharacters(in: .whitespaces),
-                  !n.isEmpty else { return false }
-            if n.hasPrefix("App ") { return false }
-            if n.hasPrefix("Temporary") { return false }
-            if n == "App" || n == "Unknown" { return false }
-            return true
-        }()
-        if hasUsableCachedName {
-            if let allowedData = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
-               let allowedTokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: allowedData),
-               allowedTokens.contains(token) {
-                return
-            }
-            for limit in storage.readAppTimeLimits() {
-                if limit.tokenData.base64EncodedString() == tokenKey {
-                    return
-                }
-            }
-        }
-        // Drop any existing pending review with the same fingerprint — it's stale.
-        // We're about to write a fresh one with the current token bytes.
-        var existingPending: [PendingAppReview] = {
-            guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
-            return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
-        }()
-        existingPending.removeAll { $0.appFingerprint == fingerprint }
-        if let encoded = try? JSONEncoder().encode(existingPending) {
-            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
-        }
-
-        // Add to picker selection for enforcement
-        var pickerSelection: FamilyActivitySelection
-        if let data = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
-           let existing = try? JSONDecoder().decode(FamilyActivitySelection.self, from: data) {
-            pickerSelection = existing
-        } else {
-            pickerSelection = FamilyActivitySelection()
-        }
-        pickerSelection.applicationTokens.insert(token)
-        if let encoded = try? encoder.encode(pickerSelection) {
-            try? storage.writeRawData(encoded, forKey: StorageKeys.familyActivitySelection)
-        }
-
-        // Cache the name keyed by tokenData base64 so findTokensForAppName can resolve
-        // it later when the parent's auto-approve sends allowManagedApp(appName:).
-        // Without this, picker-captured names live only in pending_review_local.json
-        // and CommandProcessor's name lookup misses them entirely.
-        storage.cacheAppName(name, forTokenKey: tokenData.base64EncodedString())
-
-        // Create pending review with the name the child entered
-        let review = PendingAppReview(
-            familyID: enrollment.familyID,
-            childProfileID: enrollment.childProfileID,
-            deviceID: enrollment.deviceID,
-            appFingerprint: fingerprint,
-            appName: name,
-            nameResolved: true
-        )
-
-        // Create DNS verification watch (child-named = unverified)
-        let watch = UnverifiedAppWatch(
-            fingerprint: fingerprint,
-            childGivenName: name,
-            deviceID: enrollment.deviceID,
-            childProfileID: enrollment.childProfileID
-        )
-        var watches: [UnverifiedAppWatch] = {
-            guard let d = storage.readRawData(forKey: "unverified_app_watches.json") else { return [] }
-            return (try? JSONDecoder().decode([UnverifiedAppWatch].self, from: d)) ?? []
-        }()
-        watches.append(watch)
-        if let encoded = try? JSONEncoder().encode(watches) {
-            try? storage.writeRawData(encoded, forKey: "unverified_app_watches.json")
-        }
-
-        // Save locally
-        var pending: [PendingAppReview] = {
-            guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
-            return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
-        }()
-        pending.append(review)
-        if let encoded = try? JSONEncoder().encode(pending) {
-            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
-        }
-        UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
-
-        // Refresh pending reviews immediately so card appears
-        viewModel.refreshPendingReviews()
-
-        // Re-apply enforcement. b439: MUST dispatch to a detached background
-        // task — apply() is synchronous, takes the static applyLock, and can
-        // fall into the deep daemon rescue (6+ seconds of Thread.sleep). This
-        // runs inside the "Submit for Review" button action on the MainActor,
-        // so a direct call freezes the UI and makes the submit look stuck.
-        // Some apps (fast apply path) appear to work; others (slow/rescue
-        // path) hang for up to a minute. Detaching the apply fixes the hang.
-        let enforcementRef = viewModel.appState.enforcement
-        let storageRef = viewModel.appState.storage
-        Task.detached {
-            if let snapshot = storageRef.readPolicySnapshot() {
-                try? enforcementRef?.apply(snapshot.effectivePolicy)
-            }
-        }
-
-        // Push to CloudKit
-        Task {
-            let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
-            let db = container.publicCloudDatabase
-            let recordID = CKRecord.ID(recordName: "BBPendingAppReview_\(review.id.uuidString)")
-            let record = CKRecord(recordType: "BBPendingAppReview", recordID: recordID)
-            record["familyID"] = review.familyID.rawValue
-            record["profileID"] = review.childProfileID.rawValue
-            record["deviceID"] = review.deviceID.rawValue
-            record["appFingerprint"] = review.appFingerprint
-            record["appName"] = review.appName
-            record["nameResolved"] = 1 as NSNumber
-            record["createdAt"] = review.createdAt as NSDate
-            record["updatedAt"] = review.updatedAt as NSDate
-            let op = CKModifyRecordsOperation(recordsToSave: [record])
-            op.savePolicy = .changedKeys
-            op.qualityOfService = .userInitiated
-            do {
-                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                    op.modifyRecordsResultBlock = { result in
-                        switch result {
-                        case .success: cont.resume()
-                        case .failure(let error): cont.resume(throwing: error)
-                        }
-                    }
-                    db.add(op)
-                }
-            } catch { }
-        }
-    }
-    #endif
 
     // Reset All Apps button removed from child view — too dangerous.
     // Available only via parent "Revoke All Apps" command.

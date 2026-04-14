@@ -109,6 +109,11 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// Precise per-app foreground usage in minutes, keyed by fingerprint.
     /// From DeviceActivityEvent milestones — ground truth from iOS, not DNS estimates.
     public let appUsageMinutes: [String: Int]?
+    /// Apps currently exhausted for today on the child device.
+    /// Fingerprints are token-local; names and bundle IDs help parent-side matching.
+    public let exhaustedAppFingerprints: [String]?
+    public let exhaustedAppBundleIDs: [String]?
+    public let exhaustedAppNames: [String]?
 
     /// The device's current time zone identifier (e.g. "America/New_York").
     public let timeZoneIdentifier: String?
@@ -237,6 +242,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         internetBlockedReason: String? = nil,
         dnsBlockedDomainCount: Int? = nil,
         appUsageMinutes: [String: Int]? = nil,
+        exhaustedAppFingerprints: [String]? = nil,
+        exhaustedAppBundleIDs: [String]? = nil,
+        exhaustedAppNames: [String]? = nil,
         timeZoneIdentifier: String? = nil,
         timeZoneOffsetSeconds: Int? = nil,
         screenTimeMinutes: Int? = nil,
@@ -311,6 +319,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.internetBlockedReason = internetBlockedReason
         self.dnsBlockedDomainCount = dnsBlockedDomainCount
         self.appUsageMinutes = appUsageMinutes
+        self.exhaustedAppFingerprints = exhaustedAppFingerprints
+        self.exhaustedAppBundleIDs = exhaustedAppBundleIDs
+        self.exhaustedAppNames = exhaustedAppNames
         self.timeZoneIdentifier = timeZoneIdentifier
         self.timeZoneOffsetSeconds = timeZoneOffsetSeconds
         self.screenTimeMinutes = screenTimeMinutes
@@ -369,6 +380,7 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case lastCommandProcessedAt
         case monitorLastActiveAt
         case vpnDetected, internetBlocked, internetBlockedReason, dnsBlockedDomainCount, appUsageMinutes
+        case exhaustedAppFingerprints, exhaustedAppBundleIDs, exhaustedAppNames
         case timeZoneIdentifier
         case timeZoneOffsetSeconds
         case screenTimeMinutes
@@ -432,6 +444,9 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         internetBlockedReason = try container.decodeIfPresent(String.self, forKey: .internetBlockedReason)
         dnsBlockedDomainCount = try container.decodeIfPresent(Int.self, forKey: .dnsBlockedDomainCount)
         appUsageMinutes = try container.decodeIfPresent([String: Int].self, forKey: .appUsageMinutes)
+        exhaustedAppFingerprints = try container.decodeIfPresent([String].self, forKey: .exhaustedAppFingerprints)
+        exhaustedAppBundleIDs = try container.decodeIfPresent([String].self, forKey: .exhaustedAppBundleIDs)
+        exhaustedAppNames = try container.decodeIfPresent([String].self, forKey: .exhaustedAppNames)
         timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
         timeZoneOffsetSeconds = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetSeconds)
         screenTimeMinutes = try container.decodeIfPresent(Int.self, forKey: .screenTimeMinutes)

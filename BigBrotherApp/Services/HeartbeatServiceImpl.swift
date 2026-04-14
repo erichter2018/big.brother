@@ -342,6 +342,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         // Last shield change reason
         let lastShieldChangeReason = UserDefaults.appGroup?
             .string(forKey: "lastShieldChangeReason")
+        let exhaustedAppState = Self.currentExhaustedAppState(from: storage)
 
         let heartbeat = DeviceHeartbeat(
             deviceID: enrollment.deviceID,
@@ -400,6 +401,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                 guard snapshot.dateString == f.string(from: Date()) else { return nil }
                 return snapshot.usageByFingerprint.isEmpty ? nil : snapshot.usageByFingerprint
             }(),
+            exhaustedAppFingerprints: exhaustedAppState.fingerprints,
+            exhaustedAppBundleIDs: exhaustedAppState.bundleIDs,
+            exhaustedAppNames: exhaustedAppState.names,
             timeZoneIdentifier: TimeZone.current.identifier,
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
@@ -950,7 +954,8 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                 let ts = defaults?.double(forKey: "enforcementApplyFinishedAt") ?? 0
                 return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
             }(),
-            tokenVerdicts: enforcement?.computeTokenVerdicts(for: resolution.mode) ?? []
+            tokenVerdicts: enforcement?.computeTokenVerdicts(for: resolution.mode) ?? [],
+            telemetry: TunnelTelemetry.load()
         )
 
         // JSON-encode — compact, no pretty print (saves ~30% space)
@@ -1036,6 +1041,42 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let today = SelfUnlockState.todayDateString()
         guard defaults.string(forKey: "screenTimeDate") == today else { return nil }
         return defaults.integer(forKey: "screenTimeMinutes")
+    }
+
+    private static func currentExhaustedAppState(
+        from storage: any SharedStorageProtocol
+    ) -> (fingerprints: [String]?, bundleIDs: [String]?, names: [String]?) {
+        let today = SelfUnlockState.todayDateString()
+        let exhausted = storage.readTimeLimitExhaustedApps().filter { $0.dateString == today }
+        guard !exhausted.isEmpty else { return (nil, nil, nil) }
+
+        let limitsByFingerprint = Dictionary(
+            uniqueKeysWithValues: storage.readAppTimeLimits().map { ($0.fingerprint, $0) }
+        )
+
+        var fingerprints = Set<String>()
+        var bundleIDs = Set<String>()
+        var names = Set<String>()
+
+        for entry in exhausted {
+            fingerprints.insert(entry.fingerprint)
+            if let bundleID = limitsByFingerprint[entry.fingerprint]?.bundleID?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !bundleID.isEmpty {
+                bundleIDs.insert(bundleID.lowercased())
+            }
+            let name = (limitsByFingerprint[entry.fingerprint]?.appName ?? entry.appName)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if isUsefulAppName(name) {
+                names.insert(name)
+            }
+        }
+
+        return (
+            fingerprints: fingerprints.isEmpty ? nil : Array(fingerprints).sorted(),
+            bundleIDs: bundleIDs.isEmpty ? nil : Array(bundleIDs).sorted(),
+            names: names.isEmpty ? nil : Array(names).sorted()
+        )
     }
 
     /// Detect build type: debug, testflight, or appstore.

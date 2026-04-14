@@ -148,6 +148,20 @@ enum BackgroundRefreshHandler {
         // the instant the push is dispatched.
         if let inline = pendingReviewFromNotification(queryNotif) {
             let childID = inline.childProfileID
+            let configs = (try? await cloudKit.fetchTimeLimitConfigs(childProfileID: childID)) ?? []
+            if shouldSuppressPendingReview(inline, configs: configs) {
+                Task.detached { [cloudKit] in
+                    try? await cloudKit.deletePendingAppReview(inline.id)
+                }
+                await MainActor.run {
+                    appState.removePendingReviews(childID: childID) { $0.id == inline.id }
+                    if (appState.pendingReviewsByChild[childID] ?? []).isEmpty {
+                        appState.childrenWithPendingRequests.remove(childID)
+                    }
+                }
+                NSLog("[BigBrother] Push review INLINE suppressed: child=\(childID.rawValue.prefix(8)) app=\(inline.appName)")
+                return .newData
+            }
             await MainActor.run {
                 appState.upsertPendingReview(inline)
                 appState.childrenWithPendingRequests.insert(childID)
@@ -165,7 +179,21 @@ enum BackgroundRefreshHandler {
             // filters catch up without making the UI wait.
             Task.detached { [cloudKit] in
                 if let full = try? await cloudKit.fetchPendingAppReviews(childProfileID: childID) {
-                    await MainActor.run { appState.setPendingReviews(full, for: childID) }
+                    let liveReviews = full.filter { !shouldSuppressPendingReview($0, configs: configs) }
+                    await MainActor.run {
+                        appState.setPendingReviews(liveReviews, for: childID)
+                        if liveReviews.isEmpty {
+                            appState.childrenWithPendingRequests.remove(childID)
+                        } else {
+                            appState.childrenWithPendingRequests.insert(childID)
+                        }
+                    }
+                    let stale = full.filter { review in
+                        !liveReviews.contains(where: { $0.id == review.id })
+                    }
+                    for staleReview in stale {
+                        try? await cloudKit.deletePendingAppReview(staleReview.id)
+                    }
                 }
             }
             return .newData
@@ -179,20 +207,36 @@ enum BackgroundRefreshHandler {
             return .failed
         }
         let childID = review.childProfileID
+        let configs = (try? await cloudKit.fetchTimeLimitConfigs(childProfileID: childID)) ?? []
         let allForChild = (try? await cloudKit.fetchPendingAppReviews(childProfileID: childID)) ?? [review]
+        let liveReviews = allForChild.filter { !shouldSuppressPendingReview($0, configs: configs) }
         await MainActor.run {
-            appState.setPendingReviews(allForChild, for: childID)
-            appState.childrenWithPendingRequests.insert(childID)
+            appState.setPendingReviews(liveReviews, for: childID)
+            if liveReviews.isEmpty {
+                appState.childrenWithPendingRequests.remove(childID)
+            } else {
+                appState.childrenWithPendingRequests.insert(childID)
+            }
         }
         let name = await MainActor.run {
             appState.childProfiles.first(where: { $0.id == childID })?.name ?? "Child"
         }
         AppReviewNotificationService.checkAndNotify(
-            reviews: allForChild,
+            reviews: liveReviews,
             childName: name,
             childProfileID: childID
         )
-        NSLog("[BigBrother] Push review FETCH upsert: child=\(childID.rawValue.prefix(8)) count=\(allForChild.count)")
+        let stale = allForChild.filter { review in
+            !liveReviews.contains(where: { $0.id == review.id })
+        }
+        if !stale.isEmpty {
+            Task.detached { [cloudKit] in
+                for review in stale {
+                    try? await cloudKit.deletePendingAppReview(review.id)
+                }
+            }
+        }
+        NSLog("[BigBrother] Push review FETCH upsert: child=\(childID.rawValue.prefix(8)) count=\(liveReviews.count)")
         return .newData
     }
 
@@ -234,6 +278,54 @@ enum BackgroundRefreshHandler {
             createdAt: createdAt,
             updatedAt: updatedAt
         )
+    }
+
+    private static func normalizeBundleID(_ bundleID: String?) -> String? {
+        guard let bid = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bid.isEmpty else {
+            return nil
+        }
+        return bid.lowercased()
+    }
+
+    private static func normalizeAppName(_ appName: String) -> String {
+        appName
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isUsefulAppName(_ appName: String) -> Bool {
+        let normalized = normalizeAppName(appName).lowercased()
+        return !normalized.isEmpty &&
+            normalized != "app" &&
+            normalized != "an app" &&
+            normalized != "unknown" &&
+            normalized != "unknown app" &&
+            !normalized.hasPrefix("app ") &&
+            !normalized.hasPrefix("temporary") &&
+            !normalized.hasPrefix("blocked app ") &&
+            !normalized.contains("token(") &&
+            !normalized.contains("data:") &&
+            !normalized.contains("bytes)")
+    }
+
+    private static func shouldSuppressPendingReview(
+        _ review: PendingAppReview,
+        configs: [TimeLimitConfig]
+    ) -> Bool {
+        configs.contains { config in
+            if let reviewBundleID = normalizeBundleID(review.bundleID),
+               normalizeBundleID(config.bundleID) == reviewBundleID {
+                return config.isActive || config.updatedAt >= review.updatedAt
+            }
+            if config.appFingerprint == review.appFingerprint {
+                return config.isActive || config.updatedAt >= review.updatedAt
+            }
+            return isUsefulAppName(review.appName) &&
+                isUsefulAppName(config.appName) &&
+                normalizeAppName(review.appName) == normalizeAppName(config.appName) &&
+                (config.isActive || config.updatedAt >= review.updatedAt)
+        }
     }
 
     /// Register for remote notifications.

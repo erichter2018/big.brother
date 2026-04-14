@@ -33,7 +33,33 @@ final class DNSProxy {
     }
     private var pending: [UInt16: PendingEntry] = [:]
     private let pendingLock = NSLock()
-    private var nextUpstreamTxn: UInt16 = UInt16.random(in: 0...UInt16.max)
+    /// Upstream txn IDs for client queries use the range [0, probeTxnBase).
+    /// IDs at or above `probeTxnBase` are reserved for active health probes
+    /// (see `activeProbe()`) so probe responses can be identified without a
+    /// parallel lookup table.
+    private static let probeTxnBase: UInt16 = 0xFFF0
+    private var nextUpstreamTxn: UInt16 = UInt16.random(in: 0..<probeTxnBase)
+
+    /// Active health probes keyed by their upstream txn ID. Value is the
+    /// time the probe was written to upstream; a scheduled check
+    /// `probeTimeoutSeconds` later looks the txn up — if it's still here,
+    /// the probe timed out and we treat the upstream as wedged (dead
+    /// interface / stale NWUDPSession).
+    private var outstandingProbes: [UInt16: Date] = [:]
+    private let probeLock = NSLock()
+    private var nextProbeTxn: UInt16 = probeTxnBase
+    /// Floor on probe cadence — prevents double-probe on back-to-back ticks
+    /// without blocking the normal 5s fast-path tick from firing one each
+    /// time the "recent activity" check fails.
+    private var lastProbeAt: Date = .distantPast
+    private let probeMinInterval: TimeInterval = 4
+    private let probeTimeoutSeconds: TimeInterval = 2.5
+    /// Last time we saw a real upstream response (client query or probe).
+    /// Used to skip probes when client traffic is proof-of-life — under
+    /// active browsing the probe is a no-op, only firing during idle or
+    /// suspected-wedge windows.
+    private var lastUpstreamResponseAt: Date = .distantPast
+    private let upstreamActivityWindow: TimeInterval = 5
 
     // Safe search cache (avoid disk I/O per query)
     private var safeSearchOn: Bool = false
@@ -172,8 +198,15 @@ final class DNSProxy {
 
     func markUpstreamUnhealthy() {
         reconnectLock.lock()
+        let alreadyFlagged = upstreamNeedsReconnect
         upstreamNeedsReconnect = true
         reconnectLock.unlock()
+        // Only count once per wedge — this method gets called from every
+        // read/write error on the stale session, which would otherwise
+        // double-count a single interface handoff.
+        if !alreadyFlagged {
+            TunnelTelemetry.update { $0.dnsUpstreamWriteErrors += 1 }
+        }
     }
 
     /// Check the reconnect flag and, if set, rebuild the upstream session
@@ -236,12 +269,37 @@ final class DNSProxy {
             reconnectUpstream()
             return false
         }
+        // Active probe — catches the case where the session looks ready but
+        // is actually bound to a dead interface (no .cancelled/.failed state,
+        // client queries already backed off so the pending stall never fires).
+        // Probe reconnects on its own 2.5s timeout via asyncAfter, so it
+        // doesn't block this return.
+        runActiveProbe()
         return true
     }
 
     /// Recreate the upstream UDP session after a network change (WiFi↔cellular).
     /// The old NWUDPSession becomes invalid when the network path changes.
     func reconnectUpstream() {
+        // Drop any in-flight probes — they were sent via the old session and
+        // their responses would never arrive. Keeping them would cause the
+        // scheduled timeout checks to call `reconnectUpstream()` again even
+        // though the new session is healthy. Also reset the
+        // proof-of-life timestamp so the next fast-path tick fires a probe
+        // to validate the new session.
+        probeLock.lock()
+        outstandingProbes.removeAll()
+        lastProbeAt = .distantPast
+        lastUpstreamResponseAt = .distantPast
+        probeLock.unlock()
+
+        // Telemetry: count every reconnect regardless of trigger (probe
+        // timeout, cancelled state, pending-queue stall, write error).
+        TunnelTelemetry.update { telemetry in
+            telemetry.dnsReconnects += 1
+            telemetry.lastReconnectAt = Date().timeIntervalSince1970
+        }
+
         upstreamSession?.cancel()
         upstreamSession = provider?.createUDPSession(to: upstreamDNS, from: nil)
         upstreamSession?.setReadHandler({ [weak self] datagrams, error in
@@ -417,7 +475,7 @@ final class DNSProxy {
         // to exhaust with our 300-entry cap.
         var upstreamTxn: UInt16 = nextUpstreamTxn
         var attempts = 0
-        while pending[upstreamTxn] != nil && attempts < 65536 {
+        while (pending[upstreamTxn] != nil || upstreamTxn >= Self.probeTxnBase) && attempts < 65536 {
             upstreamTxn &+= 1
             attempts += 1
         }
@@ -428,7 +486,9 @@ final class DNSProxy {
             NSLog("[DNSProxy] pending table full (65k) — dropping query")
             return
         }
-        nextUpstreamTxn = upstreamTxn &+ 1
+        // Advance pointer but never into the reserved probe range.
+        let advanced = upstreamTxn &+ 1
+        nextUpstreamTxn = advanced >= Self.probeTxnBase ? 0 : advanced
         pending[upstreamTxn] = PendingEntry(
             ip: srcIP, port: srcPort, at: now, query: dns, originalTxn: txn
         )
@@ -508,6 +568,23 @@ final class DNSProxy {
         // original ID before delivering.
         let upstreamTxn = UInt16(data[0]) << 8 | UInt16(data[1])
 
+        // Any upstream response — probe or real — is proof the session is
+        // healthy on the current interface. Update the liveness timestamp
+        // so the probe scheduler can skip unnecessary probes during active
+        // browsing.
+        probeLock.lock()
+        lastUpstreamResponseAt = Date()
+        probeLock.unlock()
+
+        // Active health probe response — clear the outstanding entry, never
+        // forward to a client.
+        if upstreamTxn >= Self.probeTxnBase {
+            probeLock.lock()
+            outstandingProbes.removeValue(forKey: upstreamTxn)
+            probeLock.unlock()
+            return
+        }
+
         pendingLock.lock()
         let p = pending.removeValue(forKey: upstreamTxn)
         pendingLock.unlock()
@@ -518,6 +595,119 @@ final class DNSProxy {
         restored[0] = UInt8(p.originalTxn >> 8)
         restored[1] = UInt8(p.originalTxn & 0xFF)
         writeResponse(restored, destIP: p.ip, destPort: p.port)
+    }
+
+    // MARK: - Active Health Probe
+    //
+    // An upstream NWUDPSession can sit in `.ready` state while being silently
+    // bound to a dead interface (e.g., after a wifi→cellular handoff on
+    // iPhone17,4). No existing heuristic catches that: writeDatagram's
+    // completion succeeds because the packet is queued into the kernel, but
+    // the packet never reaches the upstream and no response ever returns.
+    // The pending-queue-stall check (>20 stale for 3s) fails to fire once
+    // clients back off. Simon hit this on 2026-04-14 losing internet for
+    // ~15 minutes until APNs push woke the main app and reset the stack.
+    //
+    // Fix: `runActiveProbe()` fires from the 5s fast-path tick. If the
+    // upstream has responded to anything — client query or earlier probe —
+    // within the last `upstreamActivityWindow` seconds, we have proof of
+    // life and skip the probe entirely. Otherwise send a tiny DNS query for
+    // "dns.google" using a reserved txn ID range and schedule a
+    // `probeTimeoutSeconds` timeout. If the response doesn't come back,
+    // the session is wedged and we trigger `reconnectUpstream()`.
+    //
+    // End-to-end worst-case detection: one fast-path tick (≤5s) + probe
+    // timeout (2.5s) = ~7.5s. Amortized cost during active browsing: zero
+    // probes fired, because real client responses keep
+    // `lastUpstreamResponseAt` fresh.
+
+    /// Fire a synthetic DNS probe if the upstream has been silent longer
+    /// than `upstreamActivityWindow`. Call on the 5s fast-path tick via
+    /// `healthCheck()` — the timeout check runs on a dispatch-after so
+    /// this method returns immediately.
+    func runActiveProbe() {
+        guard let session = upstreamSession else { return }
+        // Don't probe a session that's already in a terminal state — caller
+        // already handles those via the normal healthCheck path.
+        if session.state == .cancelled || session.state == .failed { return }
+
+        let now = Date()
+        // Proof-of-life shortcut — if real client traffic got a response
+        // recently, the session is obviously healthy. Skip the probe to
+        // keep probe rate near-zero during active browsing.
+        probeLock.lock()
+        let lastResponse = lastUpstreamResponseAt
+        probeLock.unlock()
+        if now.timeIntervalSince(lastResponse) < upstreamActivityWindow {
+            return
+        }
+        // Floor the cadence at `probeMinInterval` so two adjacent fast-path
+        // ticks can't both fire a probe.
+        if now.timeIntervalSince(lastProbeAt) < probeMinInterval { return }
+        lastProbeAt = now
+
+        probeLock.lock()
+        let txn = nextProbeTxn
+        // Reserve up to 16 concurrent probe IDs (0xFFF0..0xFFFF); wrap around.
+        if outstandingProbes[txn] != nil {
+            // Previous probe at this slot is still outstanding — replace it
+            // with "timed out" semantics by continuing past it. The scheduled
+            // check for the old txn will find it missing and ignore it.
+            outstandingProbes.removeValue(forKey: txn)
+        }
+        let next = txn &+ 1
+        nextProbeTxn = next < Self.probeTxnBase ? Self.probeTxnBase : next
+        outstandingProbes[txn] = now
+        probeLock.unlock()
+
+        let query = Self.buildProbeQuery(txn: txn)
+        session.writeDatagram(query) { [weak self] error in
+            if let error {
+                NSLog("[DNSProxy] Probe write failed: \(error.localizedDescription) — flagging reconnect")
+                self?.markUpstreamUnhealthy()
+            }
+        }
+
+        // Capture txn for the timeout check.
+        let probedTxn = txn
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + probeTimeoutSeconds) { [weak self] in
+            guard let self else { return }
+            self.probeLock.lock()
+            let stillOutstanding = self.outstandingProbes.removeValue(forKey: probedTxn) != nil
+            self.probeLock.unlock()
+            if stillOutstanding {
+                NSLog("[DNSProxy] Active probe timed out after \(self.probeTimeoutSeconds)s — upstream wedged, reconnecting")
+                TunnelTelemetry.update { telemetry in
+                    telemetry.dnsProbeTimeouts += 1
+                    telemetry.lastProbeTimeoutAt = Date().timeIntervalSince1970
+                }
+                self.reconnectUpstream()
+            }
+        }
+    }
+
+    /// Build a minimal DNS query for `dns.google` (A record, standard RD=1)
+    /// with the given transaction ID. Upstream (1.1.1.1 or 185.228.168.168)
+    /// responds in <100ms under normal conditions; we treat a 2.5s timeout
+    /// as "the interface underneath the NWUDPSession is dead."
+    private static func buildProbeQuery(txn: UInt16) -> Data {
+        var q = Data()
+        q.append(UInt8(txn >> 8))
+        q.append(UInt8(txn & 0xFF))
+        q.append(contentsOf: [0x01, 0x00]) // flags: standard query, RD=1
+        q.append(contentsOf: [0x00, 0x01]) // QDCOUNT = 1
+        q.append(contentsOf: [0x00, 0x00]) // ANCOUNT
+        q.append(contentsOf: [0x00, 0x00]) // NSCOUNT
+        q.append(contentsOf: [0x00, 0x00]) // ARCOUNT
+        // QNAME: "dns.google"
+        q.append(0x03)
+        q.append(contentsOf: "dns".utf8)
+        q.append(0x06)
+        q.append(contentsOf: "google".utf8)
+        q.append(0x00)
+        q.append(contentsOf: [0x00, 0x01]) // QTYPE = A
+        q.append(contentsOf: [0x00, 0x01]) // QCLASS = IN
+        return q
     }
 
     private func writeResponse(_ payload: Data, destIP: Data, destPort: UInt16) {
@@ -856,62 +1046,14 @@ final class DNSProxy {
         }
     }
 
-    /// DNS-based time limit check — diagnostic only. DeviceActivity milestones
-    /// (Monitor extension) are the sole authority for exhausting time-limited apps.
-    /// DNS tracking overcounts because background ad SDKs generate queries when
-    /// the app isn't actively in use.
+    /// DNS-based time limit check — disabled at b529. DeviceActivity
+    /// milestones (Monitor extension) are the sole authority for
+    /// exhausting time-limited apps. DNS tracking overcounts because
+    /// background ad SDKs generate queries when the app isn't actively
+    /// in use. Stub kept so callers compile; prior implementation lives
+    /// in git history (commit 18a70ec "DNS time-limit exhaustion disabled").
     private func checkTimeLimitExhaustionLocked(_ appName: String) {
-        return
-        let now = Date()
-
-        // Refresh time limits cache every 30 seconds
-        if now >= timeLimitsCacheExpiry {
-            timeLimitsCache = storage.readAppTimeLimits()
-            timeLimitsCacheExpiry = now.addingTimeInterval(30)
-        }
-
-        // Find the limit for this app
-        guard let limit = timeLimitsCache.first(where: { $0.appName == appName }),
-              limit.dailyLimitMinutes > 0 else { return }
-
-        let minutes = appMinutes[appName] ?? 0
-        let threshold = Int(Double(limit.dailyLimitMinutes) * 1.1)
-        guard minutes >= threshold else { return }
-
-        // Check dedup: don't write if already exhausted for today
-        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
-        let today = fmt.string(from: now)
-        var exhausted = storage.readTimeLimitExhaustedApps()
-        if exhausted.contains(where: { $0.appName == appName && $0.dateString == today }) {
-            return
-        }
-
-        // Append new exhaustion entry
-        let entry = TimeLimitExhaustedApp(
-            timeLimitID: limit.id,
-            appName: appName,
-            tokenData: limit.tokenData,
-            fingerprint: limit.fingerprint,
-            exhaustedAt: now,
-            dateString: today
-        )
-        exhausted.append(entry)
-        try? storage.writeTimeLimitExhaustedApps(exhausted)
-
-        let resolution = ModeStackResolver.resolve(storage: storage)
-        if resolution.mode == .unlocked {
-            try? storage.writeTimeLimitBlockedDomains([])
-            updateTimeLimitBlocklistLocked([], expiry: now.addingTimeInterval(5))
-        } else {
-            var blockedDomains = Set<String>()
-            for app in exhausted where app.dateString == today {
-                blockedDomains.formUnion(DomainCategorizer.domainsForApp(app.appName))
-            }
-            try? storage.writeTimeLimitBlockedDomains(blockedDomains)
-            updateTimeLimitBlocklistLocked(blockedDomains, expiry: now.addingTimeInterval(5))
-        }
-
-        NSLog("[DNSProxy] DNS time limit exhausted: \(appName) (\(minutes)m >= \(limit.dailyLimitMinutes)m * 1.1)")
+        // Intentionally empty — see doc comment.
     }
 
     /// Persist current app usage to App Group. Called from flushToAppGroup().
