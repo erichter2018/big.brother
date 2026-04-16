@@ -525,6 +525,27 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
             // Process commands — device is online if heartbeat succeeded.
             onHeartbeatSent?()
+
+            // Periodic subscription self-heal. Every ~20 heartbeats (100 min
+            // at 5-min cadence), re-verify that the expected CKSubscriptions
+            // still exist on the server. setupSubscriptions() has a fast-path
+            // that returns immediately when all expected IDs are present, so
+            // this is cheap (one allSubscriptions call) in the healthy case.
+            // Closes the audit gap where pushes silently stop working after
+            // a server-side subscription purge (iCloud account change, Apple
+            // maintenance, stale APNs token) without an app relaunch.
+            if seqCounter % 20 == 0 {
+                let ck = cloudKit
+                let famID = enrollment.familyID
+                let devID = enrollment.deviceID
+                Task.detached {
+                    do {
+                        try await ck.setupSubscriptions(familyID: famID, deviceID: devID)
+                    } catch {
+                        NSLog("[Heartbeat] periodic subscription self-heal failed: \(error.localizedDescription)")
+                    }
+                }
+            }
         } catch {
             let failureStatus = attemptStatus.recordingFailure(reason: error.localizedDescription)
             try? storage.writeHeartbeatStatus(failureStatus)
