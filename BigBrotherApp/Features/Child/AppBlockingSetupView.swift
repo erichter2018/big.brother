@@ -179,8 +179,11 @@ struct AppBlockingSetupView: View {
             feedbackMessage = "Saved: \(selection.applicationTokens.count) apps, \(selection.categoryTokens.count) categories"
             // Re-apply enforcement so per-app blocking takes effect immediately.
             if let policy = appState.currentEffectivePolicy,
-               policy.resolvedMode != .unlocked {
-                try? appState.enforcement?.apply(policy)
+               policy.resolvedMode != .unlocked,
+               let enf = appState.enforcement {
+                Task.detached(priority: .userInitiated) {
+                    try? enf.apply(policy)
+                }
             }
             isSaving = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {

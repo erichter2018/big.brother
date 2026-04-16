@@ -143,6 +143,14 @@ public enum CommandAction: Codable, Sendable, Equatable {
     case removeTimeLimit(appFingerprint: String)
     /// Block an app for the rest of today (mark as exhausted without waiting for threshold).
     case blockAppForToday(appFingerprint: String)
+    /// Remote DNS kill switch. When `enabled == false`, the tunnel's DNSProxy
+    /// becomes a transparent pass-through for `durationSeconds` (auto-re-enables
+    /// after that). Blackhole, category filter, and policy-based blocking are
+    /// bypassed; fast-path (CloudKit/APNs/Apple ID) continues to work unchanged;
+    /// shields are NOT affected (DNS-only kill switch); logging stays on so we
+    /// can diagnose during the outage window. When `enabled == true`, re-enables
+    /// immediately and `durationSeconds` is ignored.
+    case setDNSFiltering(enabled: Bool, durationSeconds: Int)
 
     // Thread-safe date formatting via Date.FormatStyle (replaces non-thread-safe static DateFormatter)
 
@@ -193,6 +201,7 @@ public enum CommandAction: Codable, Sendable, Equatable {
         case .grantExtraTime(let fp, _): return "grantExtraTime.\(fp)"
         case .removeTimeLimit(let fp): return "removeTimeLimit.\(fp)"
         case .blockAppForToday(let fp): return "blockAppForToday.\(fp)"
+        case .setDNSFiltering: return "setDNSFiltering"
         }
     }
 
@@ -202,6 +211,27 @@ public enum CommandAction: Codable, Sendable, Equatable {
     public var isModeCommand: Bool {
         switch self {
         case .setMode, .temporaryUnlock, .timedUnlock, .lockUntil, .returnToSchedule:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Commands that must carry a valid ED25519 signature. Mode commands
+    /// qualify (they flip enforcement). High-impact configuration commands
+    /// that weaken enforcement — like the DNS kill switch — qualify even
+    /// though they're not mode commands: an unsigned `setDNSFiltering` would
+    /// let anyone with CloudKit write access disable DNS policy filtering on
+    /// a child device for 24h.
+    ///
+    /// Signature verification only kicks in when the device has trusted
+    /// keys in Keychain (see CommandProcessorImpl). Devices with wiped
+    /// Keychain log a warning and accept unsigned, matching existing mode-
+    /// command behavior.
+    public var requiresSignature: Bool {
+        if isModeCommand { return true }
+        switch self {
+        case .setDNSFiltering:
             return true
         default:
             return false
@@ -405,6 +435,10 @@ public enum CommandAction: Codable, Sendable, Equatable {
             return "Remove app time limit"
         case .blockAppForToday:
             return "Block app for today"
+        case .setDNSFiltering(let enabled, let seconds):
+            if enabled { return "Re-enable DNS filtering" }
+            let h = seconds / 3600
+            return h > 0 ? "Disable DNS filtering (\(h)h)" : "Disable DNS filtering"
         }
     }
 }

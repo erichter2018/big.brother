@@ -300,6 +300,17 @@ struct AppLaunchRestorer {
         let basePolicy = currentSnapshot?.effectivePolicy
         let corrected = EffectivePolicy(
             resolvedMode: scheduleMode,
+            // MUST pass controlAuthority = .schedule. Omitting this (previous
+            // behavior) meant the EffectivePolicy was serialized with
+            // controlAuthority = nil. ModeStackResolver coalesces nil →
+            // `.parentManual` at step 4, so this restoration snapshot was
+            // being misclassified as a parent manual override, hijacking the
+            // resolver's decision chain. Every later lockUntil/temporaryUnlock
+            // command then had to "win" against a phantom parent-manual
+            // snapshot — and when its own commit produced the same mode, it
+            // returned `.unchanged`, no transition logged, no visible effect.
+            // Root cause of Simon's "commands not responding" tonight.
+            controlAuthority: .schedule,
             isTemporaryUnlock: false,
             temporaryUnlockExpiresAt: nil,
             shieldedCategoriesData: basePolicy?.shieldedCategoriesData,

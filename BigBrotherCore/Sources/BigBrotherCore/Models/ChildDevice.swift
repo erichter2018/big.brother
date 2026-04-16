@@ -60,6 +60,19 @@ public struct ChildDevice: Codable, Sendable, Identifiable, Equatable {
         return Date().timeIntervalSince(hb) < AppConstants.onlineThresholdSeconds
     }
 
+    /// Sort rank for parent-facing device lists. Lower wins (appears first).
+    /// User preference: iPhone always above iPad, everywhere. Matches on the
+    /// model identifier prefix — Apple's convention is "iPhoneN,M" vs
+    /// "iPadN,M". Anything unrecognized sorts last so weird cases (Mac,
+    /// simulator model strings, new Apple product categories) don't silently
+    /// break the ordering above real devices.
+    public var deviceKindSortRank: Int {
+        let lower = modelIdentifier.lowercased()
+        if lower.hasPrefix("iphone") { return 0 }
+        if lower.hasPrefix("ipad") { return 1 }
+        return 2
+    }
+
     public init(
         id: DeviceID = .generate(),
         childProfileID: ChildProfileID,

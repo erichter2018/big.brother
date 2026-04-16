@@ -146,8 +146,11 @@ struct AlwaysAllowedSetupView: View {
 
             // Reapply enforcement so exemptions take effect immediately.
             if let policy = appState.currentEffectivePolicy,
-               policy.resolvedMode != .unlocked {
-                try? appState.enforcement?.apply(policy)
+               policy.resolvedMode != .unlocked,
+               let enf = appState.enforcement {
+                Task.detached(priority: .userInitiated) {
+                    try? enf.apply(policy)
+                }
             }
 
             // Bug 3 fix: persist picker approvals to CloudKit via

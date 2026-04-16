@@ -19,6 +19,7 @@ struct ChildSummaryCard: View {
     let selfUnlockBudget: Int?
     let avatarHexColor: String?
     let avatarImageUrl: String?
+    let firestoreKidID: String?
     let unlockOrigin: TemporaryUnlockOrigin?
     let isHeartbeatConfirmed: Bool
     let mismatchedDeviceTypes: [String]  // "iphone", "ipad" — which devices have mode mismatch
@@ -507,23 +508,32 @@ struct ChildSummaryCard: View {
 
     @ViewBuilder
     private var avatarContent: some View {
-        // Priority: CloudKit photo > CloudKit emoji > Firebase photo > initials
-        if let base64 = child.avatarPhotoBase64,
-           let data = Data(base64Encoded: base64),
-           let uiImage = UIImage(data: data) {
-            // CloudKit photo avatar
+        // Priority:
+        //   1. Firebase disk-cached PNG (instant lookup by firestore kid ID)
+        //   2. CloudKit base64 photo (newer upload flow)
+        //   3. Firebase live base64 from snapshot listener (once fired)
+        //   4. Emoji
+        //   5. Initials
+        //
+        // The disk-cached PNG is the fast path that actually eliminates the
+        // 15-second "no avatars" window on cold launch. Firebase's snapshot
+        // listener takes several seconds to connect, and before it fires
+        // `avatarImageUrl` is nil. AppState.init synchronously loads the
+        // per-kid PNGs from disk into AvatarImageCache at "firebase-kid:<id>"
+        // keys, so this synchronous lookup hits on the first view mount.
+        if let kidID = firestoreKidID,
+           let uiImage = AvatarImageCache.cachedByKey("firebase-kid:\(kidID)") {
             Image(uiImage: uiImage)
                 .resizable()
                 .scaledToFill()
                 .frame(width: 72, height: 72)
                 .clipShape(Circle())
-        } else if let base64 = avatarImageUrl,
-                  let data = Data(base64Encoded: base64),
-                  let uiImage = UIImage(data: data) {
-            // Firebase photo fallback
-            Image(uiImage: uiImage)
-                .resizable()
-                .scaledToFill()
+        } else if let base64 = child.avatarPhotoBase64 {
+            AsyncAvatarImage(base64: base64, fallback: { avatarFallback })
+                .frame(width: 72, height: 72)
+                .clipShape(Circle())
+        } else if let base64 = avatarImageUrl {
+            AsyncAvatarImage(base64: base64, fallback: { avatarFallback })
                 .frame(width: 72, height: 72)
                 .clipShape(Circle())
         } else if let emoji = child.avatarEmoji, !emoji.isEmpty {
@@ -542,6 +552,29 @@ struct ChildSummaryCard: View {
                 Circle()
                     .fill(avatarGradient)
                     .frame(width: 72, height: 72)
+                Text(initials)
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.white)
+            }
+        }
+    }
+
+    /// Shown inside `AsyncAvatarImage` while the photo decodes off-main.
+    /// Uses the same priority ladder as `avatarContent` minus the photo:
+    /// emoji > initials. Gives the card an immediate visual during the
+    /// <100ms background decode instead of a blank circle.
+    @ViewBuilder
+    private var avatarFallback: some View {
+        if let emoji = child.avatarEmoji, !emoji.isEmpty {
+            ZStack {
+                Circle().fill(avatarGradient).frame(width: 72, height: 72)
+                Text(emoji).font(.system(size: 36))
+            }
+        } else {
+            let initials = String(child.name.prefix(1)).uppercased()
+            ZStack {
+                Circle().fill(avatarGradient).frame(width: 72, height: 72)
                 Text(initials)
                     .font(.title2)
                     .fontWeight(.bold)
@@ -697,17 +730,17 @@ struct ChildSummaryCard: View {
                 HStack(spacing: 6) {
                     ForEach(Array(cached.deviceHeartbeats.enumerated()), id: \.offset) { _, dh in
                         HStack(spacing: 2) {
-                            if let locked = dh.isLocked {
-                                Image(systemName: locked ? "lock.fill" : "lock.open.fill")
-                                    .font(.system(size: 9))
-                                    .foregroundColor(locked ? .secondary : .yellow)
-                            }
                             Image(systemName: dh.isPhone ? "iphone" : "ipad")
                                 .font(.caption2)
                                 .foregroundStyle(dh.age < 600 ? .green : .secondary)
                             Text(dh.age < 30 ? "now" : formatAge(dh.age))
                                 .font(.caption2)
                                 .foregroundStyle(dh.age < 600 ? Color.secondary : Color.orange)
+                            if let locked = dh.isLocked {
+                                Image(systemName: locked ? "lock.fill" : "lock.open.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(locked ? .secondary : .yellow)
+                            }
                         }
                     }
                     Spacer()

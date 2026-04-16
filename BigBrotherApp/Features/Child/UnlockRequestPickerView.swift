@@ -114,8 +114,11 @@ struct UnlockRequestPickerView: View {
         try? appState.storage.clearUnlockPickerPending()
 
         if let policy = appState.currentEffectivePolicy,
-           policy.resolvedMode != .unlocked {
-            try? appState.enforcement?.apply(policy)
+           policy.resolvedMode != .unlocked,
+           let enf = appState.enforcement {
+            Task.detached(priority: .userInitiated) {
+                try? enf.apply(policy)
+            }
         }
 
         if requestCount > 0 {

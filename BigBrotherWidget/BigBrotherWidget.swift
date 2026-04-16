@@ -73,13 +73,21 @@ struct StatusProvider: TimelineProvider {
             currentMode = snapshot?.effectivePolicy.resolvedMode ?? .unlocked
         }
 
-        // Next transition.
-        let nextTransition = profile?.nextTransitionTime(from: now)
+        // Next transition. For restricted mode, skip past same-or-stricter
+        // boundaries to find the next actual unlock — "Restricted until 9:30 PM"
+        // is misleading when 9:30 is the handoff to locked.
+        let nextTransition: Date? = {
+            guard let profile else { return nil }
+            if currentMode == .restricted || currentMode == .lockedDown {
+                return profile.nextTime(resolvingTo: .unlocked, from: now)
+            }
+            return profile.nextTransitionTime(from: now)
+        }()
         let nextTransitionLabel: String? = {
-            guard let profile, let next = nextTransition else { return nil }
-            let _ = profile.resolvedMode(at: next.addingTimeInterval(60))
+            guard let next = nextTransition else { return nil }
             let formatter = DateFormatter()
-            formatter.dateFormat = "h:mm a"
+            let calendar = Calendar.current
+            formatter.dateFormat = calendar.isDateInToday(next) ? "h:mm a" : "E h:mm a"
             switch currentMode {
             case .unlocked:
                 return "Free until \(formatter.string(from: next))"

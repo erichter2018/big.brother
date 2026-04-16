@@ -97,16 +97,23 @@ final class ChildHomeViewModel {
         let (live, approved, superseded) = partitionReviews(reviews)
 
         if !approved.isEmpty || !superseded.isEmpty {
-            // Persist the filtered list back so the kid UI and future reads stay clean.
-            if let encoded = try? JSONEncoder().encode(live) {
+            // Mark resolved reviews instead of removing them — the sync
+            // loops filter on syncStatus != .resolved, so marking prevents
+            // re-upload to CK while keeping the entry for local bookkeeping.
+            var all = reviews
+            let resolvedIDs = Set((approved + superseded).map(\.id))
+            for i in all.indices where resolvedIDs.contains(all[i].id) {
+                all[i].syncStatus = .resolved
+            }
+            if let encoded = try? JSONEncoder().encode(all) {
                 try? appState.storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
-            // Apply the current parent decision to the freshly requested local token.
             applyResolvedReviewsLocally(approved)
             Task { await deleteResolvedReviews(approved + superseded) }
         }
 
-        pendingReviews = live.sorted { $0.createdAt > $1.createdAt }
+        pendingReviews = live.filter { $0.syncStatus != .resolved }
+            .sorted { $0.createdAt > $1.createdAt }
     }
 
     /// Apply the current active config to a resolved review's local token binding.
@@ -227,6 +234,23 @@ final class ChildHomeViewModel {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(5))
                 if self?.appState.childConfirmationMessage == "\(config.appName) is ready." {
+                    self?.appState.childConfirmationMessage = nil
+                }
+            }
+            return
+        }
+
+        // Parent has already decided on this app AND said "keep blocked"
+        // (config exists but isActive == false). Don't let the kid re-submit
+        // a pending review — that's the loop that spams the parent with
+        // repeated requests for an already-denied app. Show a brief message
+        // and bail. If the parent changes their mind later they can toggle
+        // the config to active; the kid doesn't need to re-ask.
+        if let config = matchingConfig, !config.isActive {
+            appState.childConfirmationMessage = "\(config.appName) is blocked by your parent."
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                if self?.appState.childConfirmationMessage == "\(config.appName) is blocked by your parent." {
                     self?.appState.childConfirmationMessage = nil
                 }
             }
@@ -427,8 +451,21 @@ final class ChildHomeViewModel {
                 }
                 return "Locked"
             } else {
-                if let transition = profile.nextTransitionTime(from: now) {
-                    return "Restricted until \(formatter.string(from: transition))"
+                // In restricted mode, the next transition may lead to locked
+                // (MORE restrictive) rather than unlocked. Saying "Restricted
+                // until 9:30 PM" is misleading when 9:30 PM is the handoff to
+                // locked — the child reads it as relief coming. Report the
+                // next actual unlock time, with a day-of-week prefix when it's
+                // not today.
+                if let nextUnlock = profile.nextTime(resolvingTo: .unlocked, from: now) {
+                    let calendar = Calendar.current
+                    if calendar.isDateInToday(nextUnlock) {
+                        return "Restricted until \(formatter.string(from: nextUnlock))"
+                    } else {
+                        let dayFormatter = DateFormatter()
+                        dayFormatter.dateFormat = "E h:mm a"
+                        return "Restricted until \(dayFormatter.string(from: nextUnlock))"
+                    }
                 }
                 return "Restricted — \(profile.name)"
             }
@@ -444,9 +481,19 @@ final class ChildHomeViewModel {
         let inFree = profile.isInUnlockedWindow(at: now)
         let inEssential = profile.isInLockedWindow(at: now)
         let label = inFree ? "Unlocked" : inEssential ? "Locked" : "Restricted"
-        if let transition = profile.nextTransitionTime(from: now) {
+        // When restricted, report the next time we'll actually be unlocked —
+        // not the next boundary, since that may lead to locked (stricter).
+        let boundary: Date? = inFree || inEssential
+            ? profile.nextTransitionTime(from: now)
+            : profile.nextTime(resolvingTo: .unlocked, from: now)
+        if let transition = boundary {
+            let calendar = Calendar.current
             let formatter = DateFormatter()
-            formatter.dateFormat = "h:mm a"
+            if calendar.isDateInToday(transition) {
+                formatter.dateFormat = "h:mm a"
+            } else {
+                formatter.dateFormat = "E h:mm a"
+            }
             return "\(label) until \(formatter.string(from: transition))"
         }
         return label
@@ -509,18 +556,17 @@ final class ChildHomeViewModel {
     /// When web access will next be available (next unlock window).
     var webAvailableAt: String? {
         guard isWebBlocked else { return nil }
-        if let profile = activeScheduleProfile,
-           let transition = profile.nextTransitionTime(from: now) {
-            let formatter = DateFormatter()
+        guard let profile = activeScheduleProfile,
+              let next = profile.nextTime(resolvingTo: .unlocked, from: now) else { return nil }
+        let calendar = Calendar.current
+        let formatter = DateFormatter()
+        if calendar.isDateInToday(next) {
             formatter.dateFormat = "h:mm a"
-            if Calendar.current.isDateInToday(transition) {
-                return "Available at \(formatter.string(from: transition))"
-            } else {
-                formatter.dateFormat = "E h:mm a"
-                return "Available \(formatter.string(from: transition))"
-            }
+            return "Available at \(formatter.string(from: next))"
+        } else {
+            formatter.dateFormat = "E h:mm a"
+            return "Available \(formatter.string(from: next))"
         }
-        return nil
     }
 
     var needsReauthorization: Bool {

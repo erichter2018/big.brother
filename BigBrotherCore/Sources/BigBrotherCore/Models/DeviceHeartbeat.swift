@@ -88,6 +88,11 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// When the last command was successfully processed (nil = never).
     public let lastCommandProcessedAt: Date?
 
+    /// The commandID of the last command successfully processed. Lets the parent
+    /// (or test harness) verify a SPECIFIC command landed — not just "some"
+    /// command landed around that time. Proves we're not measuring a coincidence.
+    public let lastCommandID: String?
+
     /// When the Monitor extension last fired (reconciliation, schedule transition).
     /// Used by parent to detect force-close: if this is recent but heartbeat is stale,
     /// the device is alive but the main app was force-closed.
@@ -105,6 +110,18 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// Number of app domains being selectively DNS-blocked by the VPN tunnel.
     /// Non-zero when enforcement blocked domains are written (shields may be down but DNS catches traffic).
     public let dnsBlockedDomainCount: Int?
+
+    /// Whether DNS policy filtering is currently active on the child's tunnel.
+    /// nil for older child builds that don't report it. `false` means the
+    /// kill switch has been engaged and blackhole / category / time-limit /
+    /// safe-search gates are all bypassed (fast path + shields unaffected).
+    public let dnsFilteringEnabled: Bool?
+
+    /// When `dnsFilteringEnabled` is false, the wall-clock instant when it's
+    /// expected to auto-re-enable. Helps the parent dashboard render
+    /// "DNS off — re-enables at 7:42pm" without re-deriving from disabledAt
+    /// + duration on the parent side.
+    public let dnsFilteringAutoReenableAt: Date?
 
     /// Precise per-app foreground usage in minutes, keyed by fingerprint.
     /// From DeviceActivityEvent milestones — ground truth from iOS, not DNS estimates.
@@ -236,11 +253,14 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         enforcementError: String? = nil,
         activeScheduleWindowName: String? = nil,
         lastCommandProcessedAt: Date? = nil,
+        lastCommandID: String? = nil,
         monitorLastActiveAt: Date? = nil,
         vpnDetected: Bool? = nil,
         internetBlocked: Bool? = nil,
         internetBlockedReason: String? = nil,
         dnsBlockedDomainCount: Int? = nil,
+        dnsFilteringEnabled: Bool? = nil,
+        dnsFilteringAutoReenableAt: Date? = nil,
         appUsageMinutes: [String: Int]? = nil,
         exhaustedAppFingerprints: [String]? = nil,
         exhaustedAppBundleIDs: [String]? = nil,
@@ -313,11 +333,14 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.enforcementError = enforcementError
         self.activeScheduleWindowName = activeScheduleWindowName
         self.lastCommandProcessedAt = lastCommandProcessedAt
+        self.lastCommandID = lastCommandID
         self.monitorLastActiveAt = monitorLastActiveAt
         self.vpnDetected = vpnDetected
         self.internetBlocked = internetBlocked
         self.internetBlockedReason = internetBlockedReason
         self.dnsBlockedDomainCount = dnsBlockedDomainCount
+        self.dnsFilteringEnabled = dnsFilteringEnabled
+        self.dnsFilteringAutoReenableAt = dnsFilteringAutoReenableAt
         self.appUsageMinutes = appUsageMinutes
         self.exhaustedAppFingerprints = exhaustedAppFingerprints
         self.exhaustedAppBundleIDs = exhaustedAppBundleIDs
@@ -378,8 +401,10 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case enforcementError
         case activeScheduleWindowName
         case lastCommandProcessedAt
+        case lastCommandID
         case monitorLastActiveAt
         case vpnDetected, internetBlocked, internetBlockedReason, dnsBlockedDomainCount, appUsageMinutes
+        case dnsFilteringEnabled, dnsFilteringAutoReenableAt
         case exhaustedAppFingerprints, exhaustedAppBundleIDs, exhaustedAppNames
         case timeZoneIdentifier
         case timeZoneOffsetSeconds
@@ -438,11 +463,14 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         enforcementError = try container.decodeIfPresent(String.self, forKey: .enforcementError)
         activeScheduleWindowName = try container.decodeIfPresent(String.self, forKey: .activeScheduleWindowName)
         lastCommandProcessedAt = try container.decodeIfPresent(Date.self, forKey: .lastCommandProcessedAt)
+        lastCommandID = try container.decodeIfPresent(String.self, forKey: .lastCommandID)
         monitorLastActiveAt = try container.decodeIfPresent(Date.self, forKey: .monitorLastActiveAt)
         vpnDetected = try container.decodeIfPresent(Bool.self, forKey: .vpnDetected)
         internetBlocked = try container.decodeIfPresent(Bool.self, forKey: .internetBlocked)
         internetBlockedReason = try container.decodeIfPresent(String.self, forKey: .internetBlockedReason)
         dnsBlockedDomainCount = try container.decodeIfPresent(Int.self, forKey: .dnsBlockedDomainCount)
+        dnsFilteringEnabled = try container.decodeIfPresent(Bool.self, forKey: .dnsFilteringEnabled)
+        dnsFilteringAutoReenableAt = try container.decodeIfPresent(Date.self, forKey: .dnsFilteringAutoReenableAt)
         appUsageMinutes = try container.decodeIfPresent([String: Int].self, forKey: .appUsageMinutes)
         exhaustedAppFingerprints = try container.decodeIfPresent([String].self, forKey: .exhaustedAppFingerprints)
         exhaustedAppBundleIDs = try container.decodeIfPresent([String].self, forKey: .exhaustedAppBundleIDs)

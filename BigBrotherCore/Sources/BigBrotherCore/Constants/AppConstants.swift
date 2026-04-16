@@ -38,7 +38,7 @@ public enum AppConstants {
 
     /// Manual build number — bump each time you deploy new code during development.
     /// Both parent and child read this constant; matching numbers = same code.
-    public static let appBuildNumber = 553
+    public static let appBuildNumber = 621
 
     // MARK: - Enrollment
 
@@ -136,6 +136,15 @@ public enum AppConstants {
 
     /// BGTaskScheduler identifier for enforcement re-lock at unlock expiry.
     public static let bgTaskRelock = "fr.bigbrother.app.relock"
+
+    // MARK: - Cross-process Darwin notifications
+
+    /// Posted by the main app whenever it receives a remote push. The VPN
+    /// tunnel observes this and triggers an immediate command poll, bypassing
+    /// its normal 1-second cadence. When iOS delivers pushes quickly this
+    /// collapses the poll wait to zero; when it doesn't, the 1s timer still
+    /// acts as the reliable backbone.
+    public static let darwinNotifTunnelPokeCommands = "fr.bigbrother.tunnel.pokeCommands"
 
     // MARK: - Snapshot History
 

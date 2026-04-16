@@ -441,6 +441,13 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
             (FileName.parentMessages, "[]"),
             ("app_time_limits.json", "[]"),
             ("time_limit_exhausted.json", "[]"),
+            // Pre-create so Monitor's `writeAppUsageSnapshot(_:)` at line 368
+            // has a file to modify. iOS App Group rules let extensions modify
+            // existing files but NOT create new ones — without this pre-create
+            // every Monitor milestone write silently failed on real devices,
+            // keeping `appUsageMinutes` empty even when time limits fired.
+            // Stub is a valid AppUsageSnapshot with today's date and empty map.
+            ("app_usage_snapshot.json", "{\"dateString\":\"1970-01-01\",\"usageByFingerprint\":{}}"),
         ]
 
         for (name, emptyContent) in allExtensionFiles {
@@ -773,7 +780,16 @@ public final class AppGroupStorage: SharedStorageProtocol, @unchecked Sendable {
             return try decoder.decode(T.self, from: data)
         } catch {
             #if DEBUG
-            print("[BigBrother] WARNING: Corrupted file \(fileName) (\(data.count) bytes): \(error.localizedDescription)")
+            // `ensureSharedFilesExist()` pre-creates extension-bound files
+            // with stub content (`{}` or `[]`) so extensions — which can't
+            // CREATE files in the App Group, only modify existing ones —
+            // always have something to write to. Before the first real
+            // write, decoding that stub against a non-trivial struct fails
+            // every read, which is expected startup state, not corruption.
+            // Only warn when the file has actual content we failed to parse.
+            if data.count > 2 {
+                print("[BigBrother] WARNING: Corrupted file \(fileName) (\(data.count) bytes): \(error.localizedDescription)")
+            }
             #endif
             return nil
         }

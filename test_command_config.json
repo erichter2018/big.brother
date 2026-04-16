@@ -1,0 +1,17 @@
+{
+    "_comment": "Configuration for test_command_delivery.sh. Set your familyID and default deviceID here.",
+    "familyID": "YOUR_FAMILY_ID_HERE",
+    "deviceID": "YOUR_DEVICE_ID_HERE",
+    "devices": {
+        "_comment": "Known device IDs from the device registry. Copy the CK device ID you want into deviceID above.",
+        "isla-iphone": "08A66081-1084-44E8-8126-E3B00F536832",
+        "isla-ipad": "294960A0-7FC0-44D9-AA71-8F2990A2CF77",
+        "juliet": "B99D9B61-F760-46C3-83AA-EAA881909D85",
+        "sebastian": "4744FC3A-53CD-47E7-A8B2-72460A78E591",
+        "simon": "5968290E-B2CB-4016-882A-A0FA0FE6BF2E",
+        "olivia": "BED217B0-4B3E-41B4-B069-8657995000BC",
+        "olivia-ipad": "B690EABF-676D-49D0-A36B-370FF3C2F4E3",
+        "daphne-iphone": "0A2405AE-83BB-437B-B0B4-9F47027B9A17",
+        "daphne-ipad": "21AF5BAE-C23B-451B-9DBC-B84F40CE2ED3"
+    }
+}

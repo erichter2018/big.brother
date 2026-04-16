@@ -19,6 +19,29 @@ extension EnforcementServiceProtocol {
     func apply(_ policy: EffectivePolicy) throws {
         try apply(policy, force: false)
     }
+
+    // MARK: - Off-Main-Thread Wrappers
+    // enforcement.apply() is synchronous XPC that blocks the calling thread.
+    // These async wrappers guarantee the XPC never runs on the main thread.
+    // Use from @MainActor contexts (SwiftUI views, AppState, ViewModels).
+
+    func applyOffMain(_ policy: EffectivePolicy, force: Bool = false) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try self.apply(policy, force: force)
+        }.value
+    }
+
+    func clearAllRestrictionsOffMain() async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try self.clearAllRestrictions()
+        }.value
+    }
+
+    func reconcileOffMain(with snapshot: PolicySnapshot) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try self.reconcile(with: snapshot)
+        }.value
+    }
 }
 
 struct ShieldDiagnostic {

@@ -25,10 +25,21 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     // MARK: - Child Profiles
 
+    // REST writes removed — all writes go through CK framework directly.
+
     func fetchChildProfiles(familyID: FamilyID) async throws -> [ChildProfile] {
-        let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
-        return try await query(CKRecordType.childProfile, predicate: predicate)
-            .compactMap(CKRecordConversion.childProfile)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.childProfile,
+                filters: [(CKFieldName.familyID, "EQUALS", familyID.rawValue, nil)]
+            )
+            return records.compactMap(CKRecordConversion.childProfile(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchChildProfiles REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
+            return try await query(CKRecordType.childProfile, predicate: predicate)
+                .compactMap(CKRecordConversion.childProfile)
+        }
     }
 
     func saveChildProfile(_ profile: ChildProfile) async throws {
@@ -44,15 +55,33 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Devices
 
     func fetchDevices(familyID: FamilyID) async throws -> [ChildDevice] {
-        let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
-        return try await query(CKRecordType.childDevice, predicate: predicate)
-            .compactMap(CKRecordConversion.childDevice)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.childDevice,
+                filters: [(CKFieldName.familyID, "EQUALS", familyID.rawValue, nil)]
+            )
+            return records.compactMap(CKRecordConversion.childDevice(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchDevices(family) REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
+            return try await query(CKRecordType.childDevice, predicate: predicate)
+                .compactMap(CKRecordConversion.childDevice)
+        }
     }
 
     func fetchDevices(childProfileID: ChildProfileID) async throws -> [ChildDevice] {
-        let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
-        return try await query(CKRecordType.childDevice, predicate: predicate)
-            .compactMap(CKRecordConversion.childDevice)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.childDevice,
+                filters: [(CKFieldName.profileID, "EQUALS", childProfileID.rawValue, nil)]
+            )
+            return records.compactMap(CKRecordConversion.childDevice(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchDevices(child) REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
+            return try await query(CKRecordType.childDevice, predicate: predicate)
+                .compactMap(CKRecordConversion.childDevice)
+        }
     }
 
     func saveDevice(_ device: ChildDevice) async throws {
@@ -113,7 +142,8 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
     func pushCommand(_ command: RemoteCommand) async throws {
         let record = CKRecordConversion.toCKRecord(command)
-        try await save(record)
+        try await saveUnbounded(record)
+        NSLog("[CloudKit] pushCommand succeeded: \(command.action.displayDescription)")
     }
 
     func fetchPendingModeCommands(familyID: FamilyID, target: CommandTarget) async throws -> [RemoteCommand] {
@@ -153,17 +183,14 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         childProfileID: ChildProfileID,
         familyID: FamilyID
     ) async throws -> [RemoteCommand] {
-        // Fetch commands targeting this device, this child, or all devices.
-        // Only fetch commands from the last 24 hours to avoid re-fetching
-        // hundreds of already-processed commands on every 5-second poll.
+        // Framework-only for command fetching. CK REST has eventual
+        // consistency — a just-pushed command may not appear in REST
+        // queries for seconds. Commands need sub-second reliability
+        // (parent taps unlock, child must respond immediately). The
+        // REST reads on heartbeats/dashboard solve parent-side cloudd
+        // wedging; child-side command fetch needs the framework's
+        // stronger consistency guarantee.
         let cutoff = Date().addingTimeInterval(-24 * 3600) as NSDate
-
-        // Run all 3 sub-queries in parallel. Sequential CK queries cost 1-3
-        // seconds each (round trip + indexing), so 3 queries serially used
-        // 3-9 seconds for every poll cycle. Parallel = ~max(query) instead
-        // of sum(query). This is the dominant latency in mode-transition
-        // wake paths — collapsing it speeds up "kid opens app and waits for
-        // mode change" by 6+ seconds.
         async let deviceCmds: [CKRecord] = query(
             CKRecordType.remoteCommand,
             predicate: NSPredicate(
@@ -300,7 +327,6 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Heartbeat
 
     func sendHeartbeat(_ heartbeat: DeviceHeartbeat) async throws {
-        // Fetch existing record to preserve change tag (avoids serverRecordChanged on repeat saves).
         let recordID = CKRecordConversion.recordID(heartbeat.deviceID.rawValue, type: CKRecordType.heartbeat)
         let existing: CKRecord
         do {
@@ -308,7 +334,6 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         } catch {
             existing = CKRecord(recordType: CKRecordType.heartbeat, recordID: recordID)
         }
-        // Don't overwrite a newer heartbeat with a stale one (clock skew / restart race).
         if let existingTimestamp = existing[CKFieldName.timestamp] as? Date,
            existingTimestamp > heartbeat.timestamp {
             #if DEBUG
@@ -320,8 +345,6 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         do {
             try await save(existing)
         } catch {
-            // "WRITE operation not permitted" means the record was created by a different
-            // iCloud account (e.g., after OurPact removal changed auth). Delete and recreate.
             let desc = error.localizedDescription.lowercased()
             if desc.contains("permission") || desc.contains("not permitted") {
                 #if DEBUG
@@ -338,9 +361,29 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     }
 
     func fetchLatestHeartbeats(familyID: FamilyID) async throws -> [DeviceHeartbeat] {
-        let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
-        return try await query(CKRecordType.heartbeat, predicate: predicate)
-            .compactMap(CKRecordConversion.deviceHeartbeat)
+        // REST-first: bypass `cloudd` for this query, which is on the hot
+        // dashboard path and the #1 "spinning forever" offender. The REST
+        // client has its own 20s URLSession timeout and no daemon
+        // dependency; even if the parent phone's cloudd is wedged,
+        // heartbeats still load.
+        //
+        // Framework fallback runs only if REST throws. We keep it because:
+        //  1. It's battle-tested on quirky CK edge cases REST might not handle.
+        //  2. If Apple ever rotates our ckAPIToken or the REST endpoint
+        //     changes shape, we don't want a hard failure — the framework
+        //     path gives us a graceful degrade.
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.heartbeat,
+                filters: [(CKFieldName.familyID, "EQUALS", familyID.rawValue, nil)]
+            )
+            return records.compactMap(CKRecordConversion.deviceHeartbeat(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchLatestHeartbeats REST failed (\(error.localizedDescription)) — falling back to framework")
+            let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
+            return try await query(CKRecordType.heartbeat, predicate: predicate)
+                .compactMap(CKRecordConversion.deviceHeartbeat)
+        }
     }
 
     func fetchHeartbeats(familyID: FamilyID, since: Date) async throws -> [DeviceHeartbeat] {
@@ -373,25 +416,37 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     }
 
     func fetchEventLogs(familyID: FamilyID, since: Date) async throws -> [EventLogEntry] {
-        let predicate = NSPredicate(
-            format: "%K == %@ AND %K >= %@",
-            CKFieldName.familyID, familyID.rawValue,
-            CKFieldName.timestamp, since as NSDate
-        )
-        return try await query(CKRecordType.eventLog, predicate: predicate)
-            .compactMap(CKRecordConversion.eventLogEntry)
+        let sinceMs = Int(since.timeIntervalSince1970 * 1000)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.eventLog,
+                filters: [
+                    (CKFieldName.familyID, "EQUALS", familyID.rawValue, nil),
+                    (CKFieldName.timestamp, "GREATER_THAN_OR_EQUALS", sinceMs, "TIMESTAMP")
+                ]
+            )
+            return records.compactMap(CKRecordConversion.eventLogEntry(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchEventLogs REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(
+                format: "%K == %@ AND %K >= %@",
+                CKFieldName.familyID, familyID.rawValue,
+                CKFieldName.timestamp, since as NSDate
+            )
+            return try await query(CKRecordType.eventLog, predicate: predicate)
+                .compactMap(CKRecordConversion.eventLogEntry)
+        }
     }
 
     func fetchEventLogs(familyID: FamilyID, since: Date, types: Set<EventType>) async throws -> [EventLogEntry] {
-        let typeStrings = types.map(\.rawValue) as [String]
-        let predicate = NSPredicate(
-            format: "%K == %@ AND %K >= %@ AND %K IN %@",
-            CKFieldName.familyID, familyID.rawValue,
-            CKFieldName.timestamp, since as NSDate,
-            CKFieldName.eventType, typeStrings
-        )
-        return try await query(CKRecordType.eventLog, predicate: predicate)
-            .compactMap(CKRecordConversion.eventLogEntry)
+        // Filter on the client side. CK REST's `IN` comparator with a
+        // type-tagged value list is unreliable across schema variants;
+        // fetching by familyID+since then post-filtering is a clean
+        // fallback that costs a few extra records per page. The type
+        // set is small (≤15) — filtering 2000 records against 15 types
+        // is negligible compared to the query latency.
+        let all = try await fetchEventLogs(familyID: familyID, since: since)
+        return all.filter { types.contains($0.eventType) }
     }
 
     // MARK: - Policy
@@ -425,15 +480,33 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Schedules
 
     func fetchSchedules(childProfileID: ChildProfileID) async throws -> [Schedule] {
-        let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
-        return try await query(CKRecordType.schedule, predicate: predicate)
-            .compactMap(CKRecordConversion.schedule)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.schedule,
+                filters: [(CKFieldName.profileID, "EQUALS", childProfileID.rawValue, nil)]
+            )
+            return records.compactMap(CKRecordConversion.schedule(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchSchedules(child) REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
+            return try await query(CKRecordType.schedule, predicate: predicate)
+                .compactMap(CKRecordConversion.schedule)
+        }
     }
 
     func fetchSchedules(familyID: FamilyID) async throws -> [Schedule] {
-        let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
-        return try await query(CKRecordType.schedule, predicate: predicate)
-            .compactMap(CKRecordConversion.schedule)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.schedule,
+                filters: [(CKFieldName.familyID, "EQUALS", familyID.rawValue, nil)]
+            )
+            return records.compactMap(CKRecordConversion.schedule(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchSchedules(family) REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
+            return try await query(CKRecordType.schedule, predicate: predicate)
+                .compactMap(CKRecordConversion.schedule)
+        }
     }
 
     func saveSchedule(_ schedule: Schedule) async throws {
@@ -467,9 +540,18 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Schedule Profiles
 
     func fetchScheduleProfiles(familyID: FamilyID) async throws -> [ScheduleProfile] {
-        let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
-        return try await query(CKRecordType.scheduleProfile, predicate: predicate)
-            .compactMap(CKRecordConversion.scheduleProfile)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.scheduleProfile,
+                filters: [(CKFieldName.familyID, "EQUALS", familyID.rawValue, nil)]
+            )
+            return records.compactMap(CKRecordConversion.scheduleProfile(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchScheduleProfiles REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
+            return try await query(CKRecordType.scheduleProfile, predicate: predicate)
+                .compactMap(CKRecordConversion.scheduleProfile)
+        }
     }
 
     func saveScheduleProfile(_ profile: ScheduleProfile) async throws {
@@ -490,14 +572,28 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     }
 
     func fetchLocationBreadcrumbs(deviceID: DeviceID, since: Date) async throws -> [DeviceLocation] {
-        let predicate = NSPredicate(
-            format: "%K == %@ AND %K > %@",
-            CKFieldName.deviceID, deviceID.rawValue,
-            CKFieldName.locTimestamp, since as NSDate
-        )
-        return try await query(CKRecordType.deviceLocation, predicate: predicate)
-            .compactMap(CKRecordConversion.deviceLocation)
-            .sorted { $0.timestamp < $1.timestamp }
+        let sinceMs = Int(since.timeIntervalSince1970 * 1000)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.deviceLocation,
+                filters: [
+                    (CKFieldName.deviceID, "EQUALS", deviceID.rawValue, nil),
+                    (CKFieldName.locTimestamp, "GREATER_THAN", sinceMs, "TIMESTAMP")
+                ]
+            )
+            return records.compactMap(CKRecordConversion.deviceLocation(fromREST:))
+                .sorted { $0.timestamp < $1.timestamp }
+        } catch {
+            NSLog("[CloudKit] fetchLocationBreadcrumbs REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(
+                format: "%K == %@ AND %K > %@",
+                CKFieldName.deviceID, deviceID.rawValue,
+                CKFieldName.locTimestamp, since as NSDate
+            )
+            return try await query(CKRecordType.deviceLocation, predicate: predicate)
+                .compactMap(CKRecordConversion.deviceLocation)
+                .sorted { $0.timestamp < $1.timestamp }
+        }
     }
 
     func purgeLocationBreadcrumbs(deviceID: DeviceID, olderThan: Date) async throws {
@@ -568,9 +664,18 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Pending App Reviews
 
     func fetchPendingAppReviews(childProfileID: ChildProfileID) async throws -> [PendingAppReview] {
-        let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
-        return try await query(CKRecordType.pendingAppReview, predicate: predicate)
-            .compactMap(CKRecordConversion.pendingAppReview)
+        do {
+            let records = try await CloudKitRESTClient.queryRecords(
+                recordType: CKRecordType.pendingAppReview,
+                filters: [(CKFieldName.profileID, "EQUALS", childProfileID.rawValue, nil)]
+            )
+            return records.compactMap(CKRecordConversion.pendingAppReview(fromREST:))
+        } catch {
+            NSLog("[CloudKit] fetchPendingAppReviews REST failed (\(error.localizedDescription)) — framework fallback")
+            let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
+            return try await query(CKRecordType.pendingAppReview, predicate: predicate)
+                .compactMap(CKRecordConversion.pendingAppReview)
+        }
     }
 
     func savePendingAppReview(_ review: PendingAppReview) async throws {
@@ -921,6 +1026,10 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     // MARK: - Private CloudKit Helpers
 
     private func save(_ record: CKRecord) async throws {
+        try await self.saveUnbounded(record)
+    }
+
+    private func saveUnbounded(_ record: CKRecord) async throws {
         let op = CKModifyRecordsOperation(recordsToSave: [record])
         op.savePolicy = .changedKeys
         op.qualityOfService = .userInitiated
@@ -1022,6 +1131,13 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         }
     }
 
+    /// Hard cap on pagination pages. Activity feed + other list queries
+    /// show recent data only — 10 pages × 200 records = 2 000 records is
+    /// far more than any UI renders, and it prevents a runaway cursor
+    /// from pinning the query on a family with tens of thousands of
+    /// event-log records.
+    private static let queryMaxPages: Int = 10
+
     private func query(_ recordType: String, predicate: NSPredicate) async throws -> [CKRecord] {
         // Retry once if the record type isn't found — CloudKit Development environment
         // can have propagation delays after schema bootstrap.
@@ -1032,6 +1148,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
 
                 // Paginate through all results (CloudKit returns max 200 per page).
                 var cursor: CKQueryOperation.Cursor?
+                var pages = 0
                 let (firstResults, firstCursor) = try await database.records(matching: query, resultsLimit: 200)
                 for (_, result) in firstResults {
                     switch result {
@@ -1044,8 +1161,9 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                     }
                 }
                 cursor = firstCursor
+                pages += 1
 
-                while let activeCursor = cursor {
+                while let activeCursor = cursor, pages < Self.queryMaxPages {
                     let (moreResults, nextCursor) = try await database.records(continuingMatchFrom: activeCursor, resultsLimit: 200)
                     for (_, result) in moreResults {
                         switch result {
@@ -1058,6 +1176,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                         }
                     }
                     cursor = nextCursor
+                    pages += 1
                 }
 
                 return allRecords
@@ -1087,12 +1206,16 @@ enum CloudKitError: Error, LocalizedError {
     case recordNotFound
     case invalidRecordData(String)
     case serverError(Error)
+    /// Distinguishes a timeout from server errors so UI can render
+    /// "Try again" instead of a generic failure.
+    case timedOut
 
     var errorDescription: String? {
         switch self {
         case .recordNotFound: "Record not found"
         case .invalidRecordData(let msg): "Invalid record data: \(msg)"
         case .serverError(let err): "CloudKit error: \(err.localizedDescription)"
+        case .timedOut: "CloudKit query timed out — try again."
         }
     }
 }

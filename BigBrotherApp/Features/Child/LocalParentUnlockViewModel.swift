@@ -133,7 +133,10 @@ final class LocalParentUnlockViewModel {
         do {
             let result = try snapshotStore.commit(output.snapshot)
             if case .committed(let snapshot) = result {
-                try enforcement.apply(snapshot.effectivePolicy)
+                let enf = enforcement
+                Task.detached(priority: .userInitiated) {
+                    try? enf.apply(snapshot.effectivePolicy)
+                }
                 try snapshotStore.markApplied()
                 appState.currentEffectivePolicy = snapshot.effectivePolicy
                 appState.activeWarnings = snapshot.effectivePolicy.warnings

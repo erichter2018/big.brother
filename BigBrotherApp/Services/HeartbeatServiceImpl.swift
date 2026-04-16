@@ -396,6 +396,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             enforcementError: Self.lastEnforcementError(from: storage),
             activeScheduleWindowName: Self.activeScheduleWindowName(from: storage),
             lastCommandProcessedAt: Self.lastCommandProcessedAt(from: storage),
+            lastCommandID: Self.lastCommandID(from: storage),
             monitorLastActiveAt: Self.monitorLastActiveAt(),
             vpnDetected: VPNDetector.isVPNActive(),
             internetBlocked: UserDefaults.appGroup?
@@ -409,6 +410,22 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                 let count = storage.readEnforcementBlockedDomains().count
                     + storage.readTimeLimitBlockedDomains().count
                 return count > 0 ? count : nil
+            }(),
+            dnsFilteringEnabled: {
+                // Compute current effective filtering state so parent sees
+                // "off" if the kill switch is engaged (even if the persisted
+                // state hasn't been rewritten by the 5s auto-reenable tick
+                // yet). Null when the persisted state is the default enabled —
+                // parent UI treats absence the same as true.
+                let current = DNSFilteringState.read(from: UserDefaults.appGroup)
+                let effective = current.effective(now: Date())
+                return effective.enabled ? nil : false
+            }(),
+            dnsFilteringAutoReenableAt: {
+                let current = DNSFilteringState.read(from: UserDefaults.appGroup)
+                let effective = current.effective(now: Date())
+                guard !effective.enabled, let disabledAt = effective.disabledAt else { return nil }
+                return disabledAt.addingTimeInterval(TimeInterval(effective.disabledDurationSeconds))
             }(),
             appUsageMinutes: {
                 guard let snapshot = storage.readAppUsageSnapshot() else { return nil }
@@ -1015,8 +1032,13 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
     private static func lastCommandProcessedAt(from storage: any SharedStorageProtocol) -> Date? {
         let defaults = UserDefaults.appGroup ?? .standard
-        let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
+        let timestamp = defaults.double(forKey: AppGroupKeys.lastCommandProcessedAt)
         return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
+    }
+
+    private static func lastCommandID(from storage: any SharedStorageProtocol) -> String? {
+        let defaults = UserDefaults.appGroup ?? .standard
+        return defaults.string(forKey: AppGroupKeys.lastCommandID)
     }
 
     private static func monitorLastActiveAt() -> Date? {

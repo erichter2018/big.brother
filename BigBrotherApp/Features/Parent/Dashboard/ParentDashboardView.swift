@@ -46,8 +46,9 @@ struct ParentDashboardView: View {
 
             case .loaded:
                 gridBody {
-                    ForEach(viewModel.childProfiles) { child in
+                    ForEach(Array(viewModel.childProfiles.enumerated()), id: \.element.id) { index, child in
                         childCard(child)
+                            .modifier(StaggeredAppear(index: index))
                     }
                 }
 
@@ -248,6 +249,7 @@ struct ParentDashboardView: View {
             selfUnlockBudget: viewModel.selfUnlockBudget(for: child),
             avatarHexColor: viewModel.penaltyTimer(for: child)?.avatarColor,
             avatarImageUrl: viewModel.penaltyTimer(for: child)?.avatarUrl,
+            firestoreKidID: viewModel.firestoreKidID(for: child),
             unlockOrigin: viewModel.unlockOrigin(for: child),
             isHeartbeatConfirmed: dominant.confirmed,
             mismatchedDeviceTypes: dominant.mismatchedDeviceTypes,
@@ -371,5 +373,36 @@ struct ParentDashboardView: View {
                 .font(.subheadline)
                 .foregroundStyle(done ? .secondary : .primary)
         }
+    }
+}
+
+/// Fades each child card in sequentially by its position in the list. Cards
+/// start slightly below their final position and slide up as they appear,
+/// which reads as a top-down reveal — the top card lands first, the bottom
+/// last — instead of the whole grid popping in simultaneously.
+///
+/// The reveal is per-card local @State so it triggers once per card mount.
+/// `childProfiles` is a stable-ID `ForEach`, so cards aren't remounted on
+/// every dashboard refresh (only on first appear after load/force-close),
+/// which is exactly when we want the stagger to play.
+private struct StaggeredAppear: ViewModifier {
+    let index: Int
+    @State private var visible = false
+
+    private static let perCardDelay: TimeInterval = 0.08
+    private static let duration: TimeInterval = 0.25
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(visible ? 1 : 0)
+            .offset(y: visible ? 0 : 12)
+            .onAppear {
+                let delay = Self.perCardDelay * Double(index)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    withAnimation(.easeOut(duration: Self.duration)) {
+                        visible = true
+                    }
+                }
+            }
     }
 }

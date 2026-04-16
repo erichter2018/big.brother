@@ -191,6 +191,34 @@ final class TimerIntegrationService {
                     guard let self else { return }
                     self.kidTimers = newTimers
                     self.onTimerDataChanged?(newTimers)
+                    // For each avatar, decode + downsample to 144pt@2x and
+                    // save as a tiny PNG keyed by firestore kid ID. Next
+                    // cold launch loads the PNG directly — no base64 work,
+                    // no JPEG decode, no ImageIO thumbnailing — so avatars
+                    // appear on first frame.
+                    var avatarPayloads: [(String, String)] = []
+                    var currentIDs: Set<String> = []
+                    for (id, state) in newTimers {
+                        currentIDs.insert(id)
+                        if let base64 = state.avatarUrl, !base64.isEmpty {
+                            avatarPayloads.append((id, base64))
+                        }
+                    }
+                    Task.detached(priority: .userInitiated) {
+                        FirebaseAvatarDiskCache.pruneExcept(currentIDs: currentIDs)
+                        await withTaskGroup(of: Void.self) { group in
+                            for (id, base64) in avatarPayloads {
+                                group.addTask {
+                                    if let image = FirebaseAvatarDiskCache.persist(
+                                        base64: base64,
+                                        for: id
+                                    ) {
+                                        AvatarImageCache.preload(image, for: base64)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
     }

@@ -442,8 +442,11 @@ struct TimeLimitSetupView: View {
     }
 
     private func reapplyEnforcement() {
-        if let snapshot = appState.snapshotStore?.loadCurrentSnapshot() {
-            try? appState.enforcement?.apply(snapshot.effectivePolicy)
+        if let snapshot = appState.snapshotStore?.loadCurrentSnapshot(),
+           let enf = appState.enforcement {
+            Task.detached(priority: .userInitiated) {
+                try? enf.apply(snapshot.effectivePolicy)
+            }
         }
     }
 

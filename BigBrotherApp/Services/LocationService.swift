@@ -196,6 +196,20 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         locationManager.requestAlwaysAuthorization()
     }
 
+    /// When true, the delegate will auto-escalate to `requestAlwaysAuthorization()`
+    /// as soon as the user grants "While Using". Set by the two-step permission flow:
+    /// iOS never offers "Always" on the first prompt from `.notDetermined`, so we must
+    /// request WhenInUse first, then follow up with Always to trigger the system's
+    /// "Keep Only While Using / Change to Always" escalation dialog.
+    private var pendingAlwaysEscalation = false
+
+    /// Begin the two-step Always flow: request WhenInUse now, then escalate to Always
+    /// automatically when the user grants WhenInUse.
+    func requestWhenInUseThenAlways() {
+        pendingAlwaysEscalation = true
+        locationManager.requestWhenInUseAuthorization()
+    }
+
     /// Current CLAuthorizationStatus as a heartbeat-friendly string.
     var authorizationStatusString: String {
         switch locationManager.authorizationStatus {
@@ -795,6 +809,12 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         #if DEBUG
         print("[LocationService] Authorization changed: \(status.rawValue)")
         #endif
+        if pendingAlwaysEscalation && status == .authorizedWhenInUse {
+            pendingAlwaysEscalation = false
+            manager.requestAlwaysAuthorization()
+        } else if status != .notDetermined {
+            pendingAlwaysEscalation = false
+        }
         if mode == .continuous && (status == .authorizedAlways || status == .authorizedWhenInUse) {
             startContinuousTracking()
         }

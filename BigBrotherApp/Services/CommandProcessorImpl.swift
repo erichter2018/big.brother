@@ -73,6 +73,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     private let eventLogger: any EventLoggerProtocol
     private let snapshotStore: PolicySnapshotStore
 
+    // NOTE: tunnelAppliedCommandIDs filter was removed in b608.
+    // The tunnel can't write ManagedSettings so its "processing" of mode
+    // commands is incomplete. The app processes ALL pending commands and
+    // uses its own processedIDs for dedup. Double-processing (tunnel + app)
+    // bumps policyVersion by 2 instead of 1 — harmless.
+
     /// Prevents concurrent execution of processIncomingCommands().
     private let processingGate = ProcessingGate()
 
@@ -214,17 +220,40 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         let refreshEpoch = enforcementDefaults?.double(forKey: AppGroupKeys.needsEnforcementRefresh) ?? 0
         if refreshEpoch > 0 {
             NSLog("[BigBrother] needsEnforcementRefresh flag set (epoch=\(refreshEpoch)) — applying enforcement")
+            // b602: Clear the flag FIRST to prevent the enforcement loop.
+            // Without this, every 3s/5s poll finds the flag still set and
+            // calls enforcement.apply() on the main actor — synchronous XPC
+            // to ManagedSettingsAgent blocks UI rendering, causing the freeze
+            // observed from b589+. Every other consumer (Monitor, tunnel,
+            // AppDelegate, ShieldAction) clears the flag after acting on it;
+            // CommandProcessorImpl was the only one that didn't.
+            enforcementDefaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
+
             // Layer 1: Try direct apply (works if app was recently foreground,
             // silently fails if XPC connection is stale from background).
+            // b602: Dispatch to detached task — EnforcementServiceImpl.apply()
+            // is synchronous, takes a static lock, and contains Thread.sleep.
+            // When called on the main actor, it blocks UI rendering.
             if let policy = snapshotStore.loadCurrentSnapshot()?.effectivePolicy {
-                try? enforcement?.apply(policy)
+                Task.detached { [weak self] in
+                    try? self?.enforcement?.apply(policy)
+                }
             }
             // Layer 2: Schedule Monitor wake at 65s. The main app HAS the
             // family-controls entitlement so the registration works even from
             // background. 65s ensures the minute component is in the future
             // (DeviceActivity has minute-level granularity). The Monitor
             // applies enforcement from its privileged context — guaranteed.
-            scheduleEnforcementRefreshActivity(source: "tunnelFlag", delaySeconds: 65)
+            //
+            // IMPORTANT: don't re-write needsEnforcementRefresh here. This
+            // branch is already consuming that signal. Re-setting it would
+            // make every subsequent poll see a "fresh" refresh request and
+            // re-run enforcement forever.
+            scheduleEnforcementRefreshActivity(
+                source: "tunnelFlag",
+                delaySeconds: 65,
+                writeWakeFlag: false
+            )
         }
 
         let commands = try await cloudKit.fetchPendingCommands(
@@ -234,29 +263,20 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         )
 
         let processedIDs = storage.readProcessedCommandIDs()
-        // Also check tunnel's processed command IDs — tunnel processes mode commands
-        // from CloudKit polling when the main app is dead. Without this check, the
-        // main app would re-process commands the tunnel already applied.
-        // The tunnel writes the FULL recordName ("BBRemoteCommand_<UUID>") which
-        // would never match the bare UUID string we compare against. Strip the
-        // prefix here so dedup actually works — without this, every mode command
-        // the tunnel processed got re-applied by the app on next poll, inflating
-        // policyVersion by thousands and burning the daemon.
-        let tunnelDefaults = UserDefaults.appGroup
-        let rawTunnelProcessed = tunnelDefaults?.stringArray(forKey: "tunnelAppliedCommandIDs") ?? []
-        let tunnelProcessed = Set(rawTunnelProcessed.map { entry in
-            entry.hasPrefix("BBRemoteCommand_")
-                ? String(entry.dropFirst("BBRemoteCommand_".count))
-                : entry
-        })
 
         #if DEBUG
-        print("[BigBrother] Found \(commands.count) pending commands, \(processedIDs.count) app + \(tunnelProcessed.count) tunnel already processed")
+        print("[BigBrother] Found \(commands.count) pending commands, \(processedIDs.count) already processed")
         #endif
 
-        // Filter out already-processed commands (by app OR tunnel).
+        // Filter out commands the app already processed. The app's own
+        // processedIDs is the ONLY dedup source — the tunnel's
+        // tunnelAppliedCommandIDs is intentionally NOT consulted here.
+        // The tunnel can't write ManagedSettings (no entitlement), so
+        // its "processing" is incomplete for mode commands. Letting the
+        // app also process them ensures enforcement is actually applied.
+        // Double-processing bumps policyVersion by 2 instead of 1 — harmless.
         let unprocessed = commands.filter {
-            !processedIDs.contains($0.id) && !tunnelProcessed.contains($0.id.uuidString)
+            !processedIDs.contains($0.id)
         }
 
         // Drop commands past their explicit expiry (default 24 hours from issuedAt).
@@ -334,13 +354,6 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             + latestConfig.values.sorted { $0.issuedAt < $1.issuedAt }
 
         let skippedConfig = configCommands.count - latestConfig.count
-        // If the tunnel processed mode commands, the snapshot is correct but
-        // ManagedSettings shields were never applied (tunnel lacks the
-        // family-controls entitlement). Re-apply enforcement for the current
-        // resolved mode so shields match the snapshot the tunnel wrote.
-        let tunnelHandledModeCommands = commands.filter { cmd in
-            tunnelProcessed.contains(cmd.id.uuidString) && cmd.action.isModeCommand
-        }
 
         #if DEBUG
         if sorted.isEmpty && !commands.isEmpty {
@@ -348,23 +361,11 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         } else {
             print("[BigBrother] \(effectiveModeCommands.count) mode + \(perAppCommands.count) per-app + \(latestConfig.count) config to process (\(skippedMode) mode + \(skippedConfig) config skipped)")
         }
-        if !tunnelHandledModeCommands.isEmpty {
-            print("[BigBrother] \(tunnelHandledModeCommands.count) tunnel-processed mode commands — re-applying enforcement")
-        }
         #endif
 
         var modeCommandResult: CommandProcessingResult?
-        // Open an enforcement batch around the whole command loop. Per-handler
-        // calls to reapplyCurrentEnforcement() are coalesced inside the batch
-        // and a single apply runs at the end. Prevents the burst-write daemon
-        // corruption pattern that breaks ManagedSettings under rapid command
-        // processing (~30 reviewApp calls in ~5 minutes degraded the agent).
         beginEnforcementBatch()
         defer { endEnforcementBatch() }
-
-        if !tunnelHandledModeCommands.isEmpty {
-            reapplyCurrentEnforcement()
-        }
 
         // Poison-pill: if the same command UUID has been processed >3 times in
         // the recent history (e.g. tunnel/app dedup mismatch, CK status update
@@ -520,10 +521,14 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         let cutoff = Date().addingTimeInterval(-AppConstants.processedCommandRetentionSeconds)
         try? storage.pruneProcessedCommands(olderThan: cutoff)
 
-        // Record last command processing time for heartbeat reporting.
+        // Record last command processing time + ID for heartbeat reporting.
+        // The commandID pairing lets parent/harness verify a SPECIFIC command
+        // landed (not just "some command around this time"), so latency
+        // measurements can't be confused by concurrent commands.
         if !sorted.isEmpty {
             let defaults = UserDefaults.appGroup ?? .standard
-            defaults.set(Date().timeIntervalSince1970, forKey: "fr.bigbrother.lastCommandProcessedAt")
+            defaults.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastCommandProcessedAt)
+            defaults.set(sorted.last!.id.uuidString, forKey: AppGroupKeys.lastCommandID)
 
             // Send heartbeat immediately so parent sees the confirmed mode change.
             onRequestHeartbeat?()
@@ -580,9 +585,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             return .ignoredExpired
         }
 
-        // Verify command signature for mode commands.
+        // Verify command signature for commands that flip enforcement state.
         // Children trust multiple parent public keys (one per parent device).
-        if command.action.isModeCommand {
+        if command.action.requiresSignature {
             let trustedKeys: [Data] = {
                 guard let data = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey) else { return [] }
                 // Try multi-key format (JSON array of base64 strings) first.
@@ -614,6 +619,19 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 // (e.g., MDM removal clears Keychain entries). Accept with warning for now.
                 // TODO: Once all devices have signing keys re-enrolled, switch to rejecting
                 // unsigned mode commands here (S3 in AUDIT_TODO.md).
+                //
+                // Exception: `.setDNSFiltering` is fail-safe — the default
+                // state (filter ON) is already the conservative posture, so
+                // refusing to process an unsigned disable only strands the
+                // kid in the safe state. Better to reject outright than to
+                // let an attacker on a key-wiped child disable filtering for
+                // 24h by forging a CloudKit record. Parent re-enrolls the
+                // child to restore key verification and unlock the feature.
+                if case .setDNSFiltering = command.action {
+                    eventLogger.log(.commandFailed, details: "Rejected unsigned .setDNSFiltering on key-wiped device: \(command.id)")
+                    try? await cloudKit.updateCommandStatus(command.id, status: .failed)
+                    return .rejectedSignature
+                }
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .command,
                     message: "WARNING: No trusted public keys in Keychain — accepting command \(command.id) unsigned. Re-enroll to restore key verification."
@@ -1049,6 +1067,24 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             case .blockAppForToday(let fingerprint):
                 return handleBlockAppForToday(fingerprint: fingerprint)
 
+            case .setDNSFiltering(let enabled, let durationSeconds):
+                // Remote DNS kill switch. Single atomic App Group JSON blob
+                // consumed by the tunnel's DNSProxy gate. No tunnel restart —
+                // picked up on the next ≤3s cache refresh.
+                let state: DNSFilteringState
+                if enabled {
+                    state = .defaultEnabled
+                } else {
+                    state = DNSFilteringState(
+                        enabled: false,
+                        disabledAt: Date(),
+                        disabledDurationSeconds: DNSFilteringState.clampDurationSeconds(durationSeconds)
+                    )
+                }
+                DNSFilteringState.write(state, to: UserDefaults.appGroup)
+                eventLogger.log(.commandApplied, details: "DNS filtering \(enabled ? "enabled" : "disabled (\(state.disabledDurationSeconds)s)")")
+                return .applied
+
             // Live tracking handled automatically by LocationService when moving
             }
 
@@ -1060,11 +1096,22 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
     /// Apply a mode change through the canonical snapshot pipeline.
     private func applyMode(_ mode: LockMode, enrollment: ChildEnrollmentState, commandID: UUID, controlAuthority: ControlAuthority = .parentManual) throws {
-        // If permissions are missing, force essential mode regardless of requested mode.
+        // Permission-deficiency safety: only protect against UNLOCK requests
+        // when FC is missing. The old rule ("promote anything that isn't
+        // .locked to .locked") was too broad — it mangled Restrict-for-1-hour
+        // and Restrict-indefinite into Lock (most restrictive) with no safety
+        // benefit (both modes need FC to enforce shields equally). The parent
+        // hit this tonight: "Restrict 1h" silently became Lock because of a
+        // transient FC auth deficiency, and subsequent commands returned
+        // `.unchanged` because the snapshot already matched.
+        //
+        // Promoting an unlock IS justified — we can't guarantee we'll get
+        // back to a restrictive state if FC isn't responsive, so blocking
+        // unlock attempts until permissions are restored is the right call.
         let effectiveMode: LockMode
-        if hasPermissionDeficiency() && mode != .locked {
+        if hasPermissionDeficiency() && mode == .unlocked {
             effectiveMode = .locked
-            eventLogger.log(.enforcementDegraded, details: "Permissions missing — forced essential mode (requested: \(mode.rawValue))")
+            eventLogger.log(.enforcementDegraded, details: "Permissions missing — unlock blocked, falling back to locked")
         } else {
             effectiveMode = mode
         }
@@ -1205,7 +1252,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 }
                 if !confirmed {
                     NSLog("[CommandProcessor] Monitor not confirmed within main-app window; scheduled refresh (~90s) will handle it")
-                    defaults?.set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+                    defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.needsEnforcementRefresh)
                 }
             }
 
@@ -1244,9 +1291,16 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         commandID: UUID,
         issuedAt: Date = Date()
     ) throws {
-        // Block unlock if permissions are missing
-        if hasPermissionDeficiency() {
-            eventLogger.log(.enforcementDegraded, details: "Temporary unlock blocked: permissions missing")
+        // Block unlock ONLY if FC authorization is explicitly denied. The
+        // old `hasPermissionDeficiency()` check also tripped on `.notDetermined`,
+        // which is normal for ~10s on a fresh install while iOS negotiates
+        // the grant — and in that window every temp unlock command failed
+        // silently with "permissions missing", exactly what happened tonight
+        // when Simon's reinstall rejected the parent's unlock attempt 10s
+        // after install completed. ManagedSettings writes work fine from
+        // `.notDetermined` state; only `.denied` is a real blocker.
+        if let enforcement, enforcement.authorizationStatus == .denied {
+            eventLogger.log(.enforcementDegraded, details: "Temporary unlock blocked: FamilyControls authorization DENIED")
             throw CommandError.permissionDeficiency
         }
 
@@ -1365,7 +1419,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             }
             if !confirmed {
                 NSLog("[CommandProcessor] Monitor did NOT confirm temp unlock after 10s — flag set")
-                defaults?.set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+                defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.needsEnforcementRefresh)
             }
         }
 
@@ -1712,6 +1766,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         let lockDefaults = UserDefaults.appGroup
         lockDefaults?.set(priorMode.rawValue, forKey: "lockUntilPreviousMode")
         lockDefaults?.set(date.timeIntervalSince1970, forKey: "lockUntilExpiresAt")
+        // Record the commandID of the CURRENT active lockUntil so the
+        // Monitor's intervalDidEnd handler can distinguish a natural expiry
+        // from a stopMonitoring() triggered by `cancelNonScheduleActivities()`
+        // above. Without this correlation, issuing a second lockUntil while
+        // the first is still active would fire intervalDidEnd on the old
+        // activity AFTER we've already re-written the keys for the new one
+        // — handleLockUntilExpired would wipe them and leave the resolver
+        // unable to see the new lockUntil. (Exact bug Simon hit: the 10:11
+        // Restrict-1h command was invisible because the 10:03 command's
+        // stopMonitoring-fired expiry handler deleted its state.)
+        lockDefaults?.set(commandID.uuidString, forKey: "lockUntilCommandID")
 
         // Apply lock immediately.
         try applyMode(.restricted, enrollment: enrollment, commandID: commandID, controlAuthority: .lockUntil)
@@ -2106,9 +2171,12 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     private func removePendingAppReviewsLocally(fingerprint: String) {
         if let data = storage.readRawData(forKey: "pending_review_local.json"),
            var pending = try? JSONDecoder().decode([PendingAppReview].self, from: data) {
-            let before = pending.count
-            pending.removeAll { $0.appFingerprint == fingerprint }
-            if pending.count != before, let encoded = try? JSONEncoder().encode(pending) {
+            var changed = false
+            for i in pending.indices where pending[i].appFingerprint == fingerprint {
+                pending[i].syncStatus = .resolved
+                changed = true
+            }
+            if changed, let encoded = try? JSONEncoder().encode(pending) {
                 try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
         }
@@ -2550,12 +2618,58 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
     private func performReapplyNow() -> Bool {
         guard let snapshot = snapshotStore.loadCurrentSnapshot() else { return false }
-        // Use ModeStackResolver as ground truth — the snapshot may have stale
-        // isTemporaryUnlock or mode from a previous command. Without this,
-        // revokeAllApps can trigger applyWideOpenShields() via a stale snapshot.
         let resolution = ModeStackResolver.resolve(storage: storage)
-        // Derive temp unlock from ModeStackResolver (checks expiry), NOT file existence.
-        // A stale temp-unlock file (failed delete) must not cause shields to clear.
+        let activeTempUnlock = resolution.isTemporary ? storage.readTemporaryUnlockState() : nil
+        let isTempUnlock = activeTempUnlock != nil && resolution.controlAuthority == .temporaryUnlock
+        var policy = snapshot.effectivePolicy
+        if resolution.mode != policy.resolvedMode || policy.isTemporaryUnlock != isTempUnlock {
+            policy = EffectivePolicy(
+                resolvedMode: resolution.mode,
+                controlAuthority: resolution.controlAuthority,
+                isTemporaryUnlock: isTempUnlock,
+                temporaryUnlockExpiresAt: activeTempUnlock?.expiresAt,
+                shieldedCategoriesData: policy.shieldedCategoriesData,
+                allowedAppTokensData: policy.allowedAppTokensData,
+                deviceRestrictions: policy.deviceRestrictions,
+                warnings: policy.warnings,
+                policyVersion: policy.policyVersion
+            )
+        }
+        // CRITICAL: enforcement.apply() is synchronous and contains
+        // ManagedSettings XPC + Thread.sleep + NSLock acquisition. If
+        // called on the main thread (which happens when any @MainActor
+        // context calls processIncomingCommands → endEnforcementBatch →
+        // performReapplyNow), it freezes the UI for the full duration of
+        // the XPC round-trip. Dispatch to a background queue so the XPC
+        // never touches the main thread regardless of the caller's
+        // context. Enforcement still applies within milliseconds — just
+        // not on the thread that renders SwiftUI.
+        let enf = enforcement
+        let stor = storage
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try enf?.apply(policy, force: true)
+            } catch {
+                try? stor.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Enforcement reapply failed: \(error.localizedDescription)"
+                ))
+            }
+        }
+        return true
+        // Original synchronous error handling moved into the dispatch block above.
+        // The return value is now always true (optimistic) since we can't
+        // synchronously wait for the background apply without blocking.
+        // Enforcement failures are logged to diagnostics, and the next
+        // reconciliation cycle re-attempts.
+    }
+
+    /// Original synchronous path, preserved for callers that genuinely need
+    /// synchronous enforcement (e.g., initial launch before UI renders).
+    /// NOT called from the command-processing hot path.
+    private func performReapplyNowSync() -> Bool {
+        guard let snapshot = snapshotStore.loadCurrentSnapshot() else { return false }
+        let resolution = ModeStackResolver.resolve(storage: storage)
         let activeTempUnlock = resolution.isTemporary ? storage.readTemporaryUnlockState() : nil
         let isTempUnlock = activeTempUnlock != nil && resolution.controlAuthority == .temporaryUnlock
         var policy = snapshot.effectivePolicy
@@ -2714,7 +2828,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
              .setAllowedWebDomains, .addTrustedSigningKey, .sendMessage,
              .setLocationMode, .requestLocation, .requestPermissions, .setHomeLocation,
              .syncNamedPlaces, .setDrivingSettings, .requestDiagnostics, .setSafeSearch,
-             .blockInternet:
+             .blockInternet, .setDNSFiltering:
             return false
         }
     }

@@ -150,7 +150,14 @@ struct ActivityFeedView: View {
             NavigationLink {
                 LocationMapView(
                     child: child,
-                    devices: viewModel.appState.childDevices.filter { $0.childProfileID == child.id },
+                    devices: viewModel.appState.childDevices
+                        .filter { $0.childProfileID == child.id }
+                        .sorted { lhs, rhs in
+                            if lhs.deviceKindSortRank != rhs.deviceKindSortRank {
+                                return lhs.deviceKindSortRank < rhs.deviceKindSortRank
+                            }
+                            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+                        },
                     heartbeats: viewModel.appState.latestHeartbeats(for: child.id),
                     cloudKit: viewModel.appState.cloudKit,
                     onLocate: {},

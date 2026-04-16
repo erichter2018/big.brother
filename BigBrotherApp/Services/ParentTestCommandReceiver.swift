@@ -27,16 +27,22 @@ enum ParentTestCommandReceiver {
         case unlocked     = "fr.bigbrother.parenttest.unlocked"
         case lockedDown   = "fr.bigbrother.parenttest.lockedDown"
         case tempUnlock   = "fr.bigbrother.parenttest.tempUnlock300"
+        case commandDeliveryTest = "fr.bigbrother.test.commandDelivery"
 
-        var action: CommandAction {
+        var action: CommandAction? {
             switch self {
             case .locked:     return .setMode(.locked)
             case .restricted: return .setMode(.restricted)
             case .unlocked:   return .setMode(.unlocked)
             case .lockedDown: return .setMode(.lockedDown)
             case .tempUnlock: return .temporaryUnlock(durationSeconds: 300)
+            case .commandDeliveryTest: return nil  // handled specially
             }
         }
+
+        /// Whether this notification triggers the command delivery test
+        /// instead of dispatching a single command.
+        var isDeliveryTest: Bool { self == .commandDeliveryTest }
     }
 
     /// Target file written by the harness to the App Group container via
@@ -100,12 +106,27 @@ final class ParentTestCommandBox {
             NSLog("[ParentTestCommandReceiver] No appState — ignoring \(name)")
             return
         }
+
+        // Command delivery test — uses hardcoded device ID, no target file needed.
+        if notif.isDeliveryTest {
+            NSLog("[ParentTestCommandReceiver] Starting command delivery test")
+            Task { @MainActor in
+                appState.runCommandDeliveryTest(
+                    targetDeviceID: AppState.commandDeliveryTestDeviceID
+                )
+            }
+            return
+        }
+
         guard let targetDevice = ParentTestCommandReceiver.readTarget() else {
             NSLog("[ParentTestCommandReceiver] No target file in App Group — ignoring \(name)")
             return
         }
 
-        let action = notif.action
+        guard let action = notif.action else {
+            NSLog("[ParentTestCommandReceiver] Notification \(name) has no action — ignoring")
+            return
+        }
         NSLog("[ParentTestCommandReceiver] Dispatching \(action.displayDescription) → device \(targetDevice.rawValue.prefix(8))")
 
         Task { @MainActor in

@@ -94,6 +94,17 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: "lastPushReceivedAt")
 
+        // Poke the VPN tunnel to poll for commands NOW, rather than waiting
+        // for its 1-second cadence. Darwin notifications are delivered
+        // synchronously across processes, so this shaves 0–1s off the apply
+        // latency whenever iOS delivers our CKSubscription push promptly.
+        // No-op if the tunnel is already polling or not running.
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName(AppConstants.darwinNotifTunnelPokeCommands as CFString),
+            nil, nil, true
+        )
+
         guard let appState else {
             #if DEBUG
             print("[BigBrother] No appState — ignoring push")

@@ -219,7 +219,7 @@ final class DeviceMonitor {
                     sendThrottledNotification(
                         id: "offline-\(key)",
                         title: "\(name) — Device Offline",
-                        body: "\(name)'s \(device.displayName) hasn't reported in \(Int(age / 60)) minutes.",
+                        body: "\(name)'s \(device.displayName) hasn't reported in \(Self.humanReadableDuration(age)).",
                         throttleHours: 4
                     )
                     let pingKey = "ping-\(key)"
@@ -243,7 +243,7 @@ final class DeviceMonitor {
                         sendThrottledNotification(
                             id: "maybe-deleted-\(key)",
                             title: "\(name) — App May Be Removed",
-                            body: "\(name)'s \(device.displayName) had \(Int(battery * 100))% battery but hasn't reported in \(Int(age / 3600)) hours. The app may have been deleted.",
+                            body: "\(name)'s \(device.displayName) had \(Int(battery * 100))% battery but hasn't reported in \(Self.humanReadableDuration(age)). The app may have been deleted.",
                             throttleHours: 12
                         )
                     }
@@ -360,5 +360,27 @@ final class DeviceMonitor {
             }
             #endif
         }
+    }
+
+    /// Format a duration in seconds as a human-readable string for push
+    /// notifications: "45m", "2h 15m", "3d 4h". Previously the offline
+    /// notification reported raw minutes ("3009 minutes") which is
+    /// unreadable for anything past an hour or so. Caps at the biggest
+    /// meaningful unit + one level of detail — no one needs
+    /// "3d 4h 12m 35s."
+    static func humanReadableDuration(_ seconds: TimeInterval) -> String {
+        let total = Int(max(0, seconds))
+        let days = total / 86400
+        let hoursRemainder = (total % 86400) / 3600
+        let hours = total / 3600
+        let minutesRemainder = (total % 3600) / 60
+        let minutes = total / 60
+        if days > 0 {
+            return hoursRemainder > 0 ? "\(days)d \(hoursRemainder)h" : "\(days)d"
+        }
+        if hours > 0 {
+            return minutesRemainder > 0 ? "\(hours)h \(minutesRemainder)m" : "\(hours)h"
+        }
+        return "\(max(1, minutes))m"
     }
 }

@@ -255,6 +255,16 @@ struct ChildAppPickView: View {
                 continue
             }
 
+            // Parent already decided "keep blocked" on this app. Skip review
+            // creation — same reasoning as ChildHomeViewModel: don't let a
+            // bulk re-pick loop spam the parent with requests for an app
+            // the parent has explicitly denied.
+            if let config = matchingConfig, !config.isActive {
+                skipped += 1
+                storage.cacheAppName(name, forTokenKey: tokenKey)
+                continue
+            }
+
             let review = PendingAppReview(
                 familyID: enrollment.familyID,
                 childProfileID: enrollment.childProfileID,
@@ -293,7 +303,9 @@ struct ChildAppPickView: View {
                 guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
                 return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
             }()
-            pending.append(contentsOf: newReviews)
+            let existingFingerprints = Set(pending.filter { $0.syncStatus != .resolved }.map(\.appFingerprint))
+            let dedupedReviews = newReviews.filter { !existingFingerprints.contains($0.appFingerprint) }
+            pending.append(contentsOf: dedupedReviews)
             if let encoded = try? JSONEncoder().encode(pending) {
                 try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
@@ -305,7 +317,7 @@ struct ChildAppPickView: View {
         // Re-apply enforcement — new tokens will appear in shield.applications
         if let enforcement = appState.enforcement,
            let snapshot = appState.snapshotStore?.loadCurrentSnapshot() {
-            try? enforcement.apply(snapshot.effectivePolicy)
+            try? await enforcement.applyOffMain(snapshot.effectivePolicy)
         }
 
         savedCount = addedCount
@@ -332,6 +344,7 @@ struct ChildAppPickView: View {
     private func pushReviewsToCloudKit(_ reviews: [PendingAppReview]) async {
         await MainActor.run { cloudKitStatus = "Pushing \(reviews.count) to CloudKit..." }
 
+        // Pure CK framework — no REST writes.
         let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
         let db = container.publicCloudDatabase
 
@@ -345,6 +358,7 @@ struct ChildAppPickView: View {
             record["appFingerprint"] = review.appFingerprint
             record["appName"] = review.appName
             record["appBundleID"] = review.bundleID
+            record["tokenDataBase64"] = review.tokenDataBase64
             record["nameResolved"] = (review.nameResolved ? 1 : 0) as NSNumber
             record["createdAt"] = review.createdAt as NSDate
             record["updatedAt"] = review.updatedAt as NSDate

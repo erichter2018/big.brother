@@ -436,6 +436,38 @@ final class AppState {
            let devices = try? decoder.decode([ChildDevice].self, from: data) {
             childDevices = devices
         }
+
+        // Pre-warm the avatar image cache in the background so by the time
+        // the dashboard view mounts its cards, `AsyncAvatarImage` hits the
+        // synchronous cache and renders the photo on first frame. Two sources:
+        //   1. CloudKit-backed ChildProfile.avatarPhotoBase64 (newer upload flow)
+        //   2. Firebase avatar cache persisted by TimerIntegrationService
+        //      (misnamed `avatarUrl` — actually base64). For this family ALL
+        //      avatars come from source #2, which is why earlier pre-warm
+        //      attempts that only scanned source #1 were silent no-ops.
+        // Firebase-delivered avatars: load pre-decoded PNGs synchronously from
+        // disk. Each file is ~15KB PNG at 288px — UIImage(data:) lands in a
+        // couple ms even on main. We register each one with AvatarImageCache
+        // keyed by its firestore kid ID via `AvatarImageCache.preloadByKey`
+        // so AsyncAvatarImage can look them up without holding the raw base64.
+        let firebasePNGs = FirebaseAvatarDiskCache.loadAllDecoded()
+        for (kidID, image) in firebasePNGs {
+            AvatarImageCache.preload(image, forKey: "firebase-kid:\(kidID)")
+        }
+
+        // CloudKit-backed ChildProfile.avatarPhotoBase64 still uses the
+        // existing base64-keyed cache; pre-warm off-main in case any exist.
+        let ckPhotos = childProfiles.compactMap { $0.avatarPhotoBase64 }
+        guard !ckPhotos.isEmpty else { return }
+        Task.detached(priority: .userInitiated) {
+            await withTaskGroup(of: Void.self) { group in
+                for base64 in ckPhotos {
+                    group.addTask {
+                        _ = await AvatarImageCache.image(for: base64)
+                    }
+                }
+            }
+        }
     }
 
     func persistDashboardCache() {
@@ -840,8 +872,11 @@ final class AppState {
             ScheduleRegistrar.registerTimeLimitEvents(limits: localLimits)
         }
         if shouldReapplyEnforcement,
-           let snapshot = storage.readPolicySnapshot() {
-            try? enforcement?.apply(snapshot.effectivePolicy)
+           let snapshot = storage.readPolicySnapshot(),
+           let enf = enforcement {
+            Task.detached(priority: .userInitiated) {
+                try? enf.apply(snapshot.effectivePolicy)
+            }
         }
         return true
     }
@@ -974,8 +1009,11 @@ final class AppState {
             ScheduleRegistrar.registerTimeLimitEvents(limits: localLimits)
         }
         if shouldReapplyEnforcement,
-           let snapshot = storage.readPolicySnapshot() {
-            try? enforcement?.apply(snapshot.effectivePolicy)
+           let snapshot = storage.readPolicySnapshot(),
+           let enf = enforcement {
+            Task.detached(priority: .userInitiated) {
+                try? enf.apply(snapshot.effectivePolicy)
+            }
         }
         return true
     }
@@ -993,6 +1031,8 @@ final class AppState {
 
         let ck = CloudKitServiceImpl()
         self.cloudKit = ck
+
+        // REST writes removed — CK framework handles all writes directly.
 
         // Create the snapshot store.
         let snapStore = PolicySnapshotStore(storage: storage)
@@ -1146,7 +1186,7 @@ final class AppState {
                     // The returnToSchedule already applied with whatever was local;
                     // if the sync changed the schedule, re-apply now.
                     if let snapshot = self.snapshotStore?.loadCurrentSnapshot() {
-                        try? self.enforcement?.apply(snapshot.effectivePolicy)
+                        try? await self.enforcement?.applyOffMain(snapshot.effectivePolicy)
                     }
                 }
             }
@@ -1370,11 +1410,12 @@ final class AppState {
             }
         }
 
-        // Upload each review (idempotent — savePendingAppReview uses upsert
-        // semantics so re-uploading an existing record is harmless). DO NOT
-        // wipe the file afterwards; handleReviewApp removes individual entries
-        // when the parent decides on each one.
-        for review in localReviews {
+        // Only upload reviews that haven't been resolved yet. Resolved reviews
+        // have been approved/blocked by the parent and their CK records deleted.
+        // Re-uploading them would resurrect the deleted records, causing the
+        // parent to see phantom duplicate requests.
+        let toUpload = localReviews.filter { $0.syncStatus != .resolved }
+        for review in toUpload {
             _ = try? await cloudKit.savePendingAppReview(review)
         }
     }
@@ -1600,12 +1641,21 @@ final class AppState {
     func startForegroundCommandPoll() {
         guard deviceRole == .child else { return }
         stopForegroundCommandPoll()
-        foregroundCommandPollTask = Task { [weak self] in
+        // b602: Use Task.detached to escape @MainActor inheritance.
+        // processIncomingCommands() calls enforcement.apply() which is
+        // synchronous (NSLock + ManagedSettings XPC). Running on the main
+        // actor blocks UI rendering for the duration of every XPC round-trip.
+        // Detaching moves CK fetch + enforcement writes to the cooperative
+        // pool, keeping the main thread free for SwiftUI layout.
+        let processor = commandProcessor
+        foregroundCommandPollTask = Task.detached(priority: .userInitiated) { [weak self] in
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(for: .seconds(3))
                 } catch { return }
-                try? await self?.commandProcessor?.processIncomingCommands()
+                // Check self is still alive (AppState not deallocated).
+                guard self != nil else { return }
+                try? await processor?.processIncomingCommands()
             }
         }
     }
@@ -1823,13 +1873,15 @@ final class AppState {
                 // After 5 minutes of denial, lock to essential mode
                 if !essentialApplied && Date().timeIntervalSince(denialStart) > 300 {
                     essentialApplied = true
-                    await MainActor.run {
-                        if let enforcement = self.enforcement {
-                            try? enforcement.applyEssentialOnly()
-                            #if DEBUG
-                            print("[BigBrother] VPN denied for 5+ min — essential mode applied")
-                            #endif
+                    if let enf = self.enforcement {
+                        Task.detached(priority: .userInitiated) {
+                            try? enf.applyEssentialOnly()
                         }
+                        #if DEBUG
+                        await MainActor.run {
+                            print("[BigBrother] VPN denied for 5+ min — essential mode applied")
+                        }
+                        #endif
                     }
                 }
 
@@ -2195,6 +2247,21 @@ final class AppState {
             )
         }
 
+        // Prefetch POI names for current heartbeat locations + recent breadcrumb
+        // endpoints. Populates the same on-disk poi-cache-v3 that LocationMapView
+        // reads, so the trips panel opens with names already resolved instead of
+        // blocking on live CLGeocoder + MKLocalSearch calls.
+        let hbsForPrefetch = latestHeartbeats
+        let deviceIDsForPrefetch = childDevices.map(\.id)
+        let ckForPrefetch = cloudKit
+        Task.detached(priority: .utility) {
+            await POIPrefetchService.prefetchHeartbeatLocations(hbsForPrefetch)
+            await POIPrefetchService.prefetchRecentBreadcrumbs(
+                cloudKit: ckForPrefetch,
+                deviceIDs: deviceIDsForPrefetch
+            )
+        }
+
         // Clean up stale pending commands — throttled to once per 5 minutes.
         let cleanupKey = "fr.bigbrother.lastCleanupAt"
         let lastCleanup = UserDefaults.standard.double(forKey: cleanupKey)
@@ -2230,14 +2297,22 @@ final class AppState {
         familyID: FamilyID
     ) async {
         do {
-            let since = Date().addingTimeInterval(-86400 * 2) // last 2 days
+            // Widened from 2 days to 7 so we catch older pending commands that
+            // slipped through earlier runs. The 370-stale print on a fresh
+            // launch was a hint that backlog was accumulating beyond the
+            // previous 2-day window — once old duplicates survive past the
+            // cutoff, they're invisible to the deduper and live forever.
+            let since = Date().addingTimeInterval(-86400 * 7)
             let commands = try await cloudKit.fetchRecentCommands(familyID: familyID, since: since)
-            // Only delete DUPLICATE config commands — keep the newest of each type per target,
-            // delete older duplicates. This way a budget change still reaches an offline kid,
-            // but 50 identical budget commands get collapsed to 1.
             let pending = commands.filter { $0.status == .pending }
 
-            // Group by (action description + target) to find duplicates.
+            // Delete two classes of stale pending commands:
+            //   A) Duplicate config commands — keep the newest per
+            //      (action, target), drop the rest. Prevents "50 identical
+            //      budget updates" from piling up for an offline kid.
+            //   B) Anything older than 3 days regardless of uniqueness —
+            //      a genuinely pending 3-day-old command is almost always
+            //      moot (target went offline permanently, intent is stale).
             var grouped: [String: [RemoteCommand]] = [:]
             for cmd in pending {
                 let targetKey: String
@@ -2250,18 +2325,24 @@ final class AppState {
                 grouped[key, default: []].append(cmd)
             }
 
-            // For each group with more than 1 command, keep the newest and delete the rest.
-            var stale: [RemoteCommand] = []
+            var stale: Set<UUID> = []
             for (_, cmds) in grouped where cmds.count > 1 {
                 let sorted = cmds.sorted { $0.issuedAt > $1.issuedAt }
-                stale.append(contentsOf: sorted.dropFirst()) // Keep newest, delete rest
+                for cmd in sorted.dropFirst() {
+                    stale.insert(cmd.id)
+                }
             }
+            let ageCutoff = Date().addingTimeInterval(-86400 * 3)
+            for cmd in pending where cmd.issuedAt < ageCutoff {
+                stale.insert(cmd.id)
+            }
+
             guard !stale.isEmpty else { return }
             #if DEBUG
-            print("[BigBrother] Parent cleaning up \(stale.count) stale pending commands")
+            print("[BigBrother] Parent cleaning up \(stale.count) stale pending commands (\(pending.count) total pending in 7d window)")
             #endif
-            for command in stale {
-                try? await cloudKit.deleteCommand(command.id)
+            for id in stale {
+                try? await cloudKit.deleteCommand(id)
             }
         } catch {
             #if DEBUG
@@ -2602,39 +2683,72 @@ final class AppState {
         // Expire stale pending mode commands for this target BEFORE pushing the new one.
         // This must complete synchronously so the child doesn't pick up stale commands
         // in the window between the old commands existing and the new one arriving.
+        //
+        // Wrapped in a 5-second deadline: `fetchPendingModeCommands` and
+        // `updateCommandStatus` still go through the CK framework (which
+        // routes through `cloudd`), so a wedged cloudd on the parent phone
+        // would hang this step forever and the new command would never be
+        // pushed. The child-side dedup is a safety net for commands that
+        // arrive out of order, so skipping supersession on timeout is
+        // acceptable — worst case, the child briefly sees a stale command
+        // it then supersedes itself.
+        // Pre-generate the command UUID + issued-at stamp BEFORE supersession
+        // fires so the supersede task can filter strictly OLDER commands.
+        // Multi-parent scenarios: if parent A's detached sweep runs after
+        // parent B has pushed a newer mode command, A must not expire B's
+        // command. Filtering by `issuedAt < myIssuedAt` preserves last-
+        // command-wins across devices — any command newer than ours is
+        // either the one we're about to push (excluded by strict-less-than)
+        // or a legitimate supersession from another parent that we have
+        // no business killing.
+        let newCommandID = UUID()
+        let newIssuedAt = Date()
+
         if action.isModeCommand {
-            do {
-                let stale = try await cloudKit.fetchPendingModeCommands(
-                    familyID: familyID, target: target
-                )
-                // Expire all stale commands concurrently for speed.
-                await withTaskGroup(of: Void.self) { group in
-                    for cmd in stale {
-                        group.addTask {
-                            try? await cloudKit.updateCommandStatus(cmd.id, status: .expired)
-                            #if DEBUG
-                            print("[BigBrother] Expired stale pending command: \(cmd.action.displayDescription) (id=\(cmd.id))")
-                            #endif
+            // Best-effort stale-command cleanup, detached. Previously we
+            // tried racing this against a 5-second deadline via
+            // `withTaskGroup`, but that pattern silently waits for non-
+            // cooperative children (any CK framework continuation) to
+            // finish anyway. Instead: fire and forget. `pushCommand`
+            // below runs immediately. Child-side dedup is the safety net
+            // for the brief window where the new command arrives before
+            // stale supersession completes.
+            Task.detached { [cloudKit] in
+                do {
+                    let stale = try await cloudKit.fetchPendingModeCommands(
+                        familyID: familyID, target: target
+                    )
+                    await withTaskGroup(of: Void.self) { inner in
+                        for cmd in stale where cmd.issuedAt < newIssuedAt {
+                            inner.addTask {
+                                try? await cloudKit.updateCommandStatus(cmd.id, status: .expired)
+                                #if DEBUG
+                                print("[BigBrother] Expired stale pending command: \(cmd.action.displayDescription) (id=\(cmd.id))")
+                                #endif
+                            }
                         }
                     }
+                } catch {
+                    #if DEBUG
+                    print("[BigBrother] Failed to expire stale commands: \(error)")
+                    #endif
                 }
-            } catch {
-                // Non-fatal — child-side dedup handles it as a safety net.
-                #if DEBUG
-                print("[BigBrother] Failed to expire stale commands: \(error)")
-                #endif
             }
         }
 
         var command = RemoteCommand(
+            id: newCommandID,
             familyID: familyID,
             target: target,
             action: action,
-            issuedBy: "Parent"
+            issuedBy: "Parent",
+            issuedAt: newIssuedAt
         )
 
-        // Sign mode commands with parent's ED25519 private key.
-        if action.isModeCommand,
+        // Sign commands that flip enforcement state (mode commands + DNS
+        // kill switch). Non-signed commands would let any CloudKit writer
+        // disable filtering on a child device.
+        if action.requiresSignature,
            let privateKeyData = try? keychain.getData(forKey: StorageKeys.commandSigningPrivateKey) {
             command.signatureBase64 = try? CommandSigner.sign(command: command, privateKeyData: privateKeyData)
         }
@@ -2781,27 +2895,36 @@ final class AppState {
     /// so cancellation is structured through the task tree.
     private func startCommandPolling() {
         commandPollTask?.cancel()
-        commandPollTask = Task { [weak self] in
+        // b602: Use Task.detached to escape @MainActor inheritance.
+        // Same rationale as startForegroundCommandPoll — enforcement.apply()
+        // is synchronous XPC that must not run on the main thread.
+        let processor = commandProcessor
+        let heartbeat = heartbeatService
+        commandPollTask = Task.detached(priority: .userInitiated) { [weak self] in
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(for: .seconds(5))
                 } catch { return }
-                guard let self else { return }
-                try? await self.commandProcessor?.processIncomingCommands()
-                await MainActor.run { self.refreshLocalState() }
+                guard self != nil else { return }
+                try? await processor?.processIncomingCommands()
+                await MainActor.run { self?.refreshLocalState() }
                 // Send heartbeat after processing commands so parent sees mode confirmation quickly.
-                try? await self.heartbeatService?.sendNow(force: false)
+                try? await heartbeat?.sendNow(force: false)
             }
         }
-        // Fire immediately.
-        Task {
+        // Fire immediately — but DETACHED to escape @MainActor. Without
+        // this, enforcement.apply() runs synchronous ManagedSettings XPC on
+        // the main thread, freezing the UI for the duration of the first
+        // command processing cycle. This was the SOLE remaining MainActor
+        // entry point after b602 detached the poll loop (the loop was
+        // detached but this initial fire wasn't).
+        Task.detached(priority: .userInitiated) { [weak self] in
             #if DEBUG
             print("[BigBrother] Command polling started (every 5s)")
             #endif
-            try? await commandProcessor?.processIncomingCommands()
-            refreshLocalState()
-            // Send immediate heartbeat so parent sees confirmed mode without waiting 5 min.
-            try? await heartbeatService?.sendNow(force: false)
+            try? await processor?.processIncomingCommands()
+            await MainActor.run { self?.refreshLocalState() }
+            try? await heartbeat?.sendNow(force: false)
         }
     }
 
@@ -2885,7 +3008,7 @@ final class AppState {
                     try? storage.writeDeviceRestrictions(synced)
                     // Re-apply enforcement so the change takes effect immediately.
                     if let snapshot = snapshotStore?.loadCurrentSnapshot() {
-                        try? enforcement?.apply(snapshot.effectivePolicy)
+                        try? await enforcement?.applyOffMain(snapshot.effectivePolicy)
                     }
                 }
             }
@@ -2915,7 +3038,7 @@ final class AppState {
                         effectivePolicy: corrected
                     )
                     _ = try? storage.commitCorrectedSnapshot(snap)
-                    try? enforcement?.apply(corrected)
+                    try? await enforcement?.applyOffMain(corrected)
                 }
                 return
             }
@@ -3023,7 +3146,7 @@ final class AppState {
             }
 
             if changed, let snapshot = storage.readPolicySnapshot() {
-                try? enforcement?.apply(snapshot.effectivePolicy)
+                try? await enforcement?.applyOffMain(snapshot.effectivePolicy)
             }
         } catch {
             #if DEBUG
@@ -3154,6 +3277,15 @@ final class AppState {
             let effectivelyTempUnlock = resolution.isTemporary && resolution.mode == .unlocked
             let corrected = EffectivePolicy(
                 resolvedMode: resolution.mode,
+                // MUST pass controlAuthority. Leaving it nil was causing the
+                // 60s enforcement fix to write phantom `.parentManual`
+                // snapshots — ModeStackResolver coalesces nil → .parentManual
+                // at step 4, hijacking the resolver into "Parent command:
+                // locked" on Simon's fresh install tonight even though he
+                // never manually locked. Use the resolution's authority so
+                // whatever REALLY drove the mode (schedule, lockUntil, etc.)
+                // survives the snapshot round-trip.
+                controlAuthority: resolution.controlAuthority,
                 isTemporaryUnlock: effectivelyTempUnlock,
                 temporaryUnlockExpiresAt: effectivelyTempUnlock ? resolution.expiresAt : nil,
                 shieldedCategoriesData: snapshotStore?.loadCurrentSnapshot()?.effectivePolicy.shieldedCategoriesData,
@@ -3403,3 +3535,165 @@ final class AppState {
         }
     }
 }
+
+// MARK: - Command Delivery Test
+
+#if DEBUG
+extension AppState {
+
+    /// Runs a locked/unlocked round-trip test against a live child device,
+    /// measuring end-to-end command delivery latency through the real
+    /// CloudKit pipeline.
+    ///
+    /// Triggered via Darwin notification `fr.bigbrother.test.commandDelivery`
+    /// from the Mac (e.g. `xcrun simctl spawn ... notify_post ...` or
+    /// `xcrun devicectl device notification post`).
+    ///
+    /// Each cycle:
+    ///   1. Send setMode(locked), poll heartbeat until currentMode == locked
+    ///   2. Send setMode(unlocked), poll heartbeat until currentMode == unlocked
+    ///
+    /// Logs per-cycle latency and a p50/p95/max/min/mean summary at the end.
+    /// Hardcoded target for Darwin-triggered test (Juliet's device).
+    static let commandDeliveryTestDeviceID = DeviceID(
+        rawValue: "B99D9B61-F760-46C3-83AA-EAA881909D85"
+    )
+
+    func runCommandDeliveryTest(targetDeviceID: DeviceID) {
+        guard let familyID = parentState?.familyID,
+              let ck = cloudKit else {
+            NSLog("[CommandDeliveryTest] ABORT — no familyID or cloudKit service")
+            return
+        }
+
+        // Run off MainActor but hop back for each sendCommand call
+        // (sendCommand is @MainActor-isolated on AppState).
+        Task.detached { [weak self] in
+            let totalCycles = 10
+            let pollInterval: UInt64 = 3_000_000_000  // 3 seconds in nanoseconds
+            let maxPollAttempts = 40                   // 40 * 3s = 2 min timeout per half-cycle
+
+            var latencies: [TimeInterval] = []
+
+            NSLog("[CommandDeliveryTest] === START === target=%@ cycles=%d",
+                  String(targetDeviceID.rawValue.prefix(8)), totalCycles)
+
+            for cycle in 1...totalCycles {
+                // --- Phase A: locked ---
+                let lockStart = Date()
+                do {
+                    try await self?.sendCommand(target: .device(targetDeviceID), action: .setMode(.locked))
+                } catch {
+                    NSLog("[CommandDeliveryTest] cycle %d: sendCommand(locked) FAILED — %@",
+                          cycle, error.localizedDescription)
+                    continue
+                }
+
+                let lockedConfirmed = await AppState.pollForMode(
+                    targetDeviceID: targetDeviceID,
+                    expectedMode: .locked,
+                    familyID: familyID,
+                    cloudKit: ck,
+                    pollInterval: pollInterval,
+                    maxAttempts: maxPollAttempts
+                )
+
+                if let lockedAt = lockedConfirmed {
+                    let lockLatency = lockedAt.timeIntervalSince(lockStart)
+                    latencies.append(lockLatency)
+                    NSLog("[CommandDeliveryTest] cycle %d LOCK confirmed in %.1fs", cycle, lockLatency)
+                } else {
+                    NSLog("[CommandDeliveryTest] cycle %d LOCK TIMEOUT after %d polls", cycle, maxPollAttempts)
+                }
+
+                // --- Phase B: unlocked ---
+                let unlockStart = Date()
+                do {
+                    try await self?.sendCommand(target: .device(targetDeviceID), action: .setMode(.unlocked))
+                } catch {
+                    NSLog("[CommandDeliveryTest] cycle %d: sendCommand(unlocked) FAILED — %@",
+                          cycle, error.localizedDescription)
+                    continue
+                }
+
+                let unlockedConfirmed = await AppState.pollForMode(
+                    targetDeviceID: targetDeviceID,
+                    expectedMode: .unlocked,
+                    familyID: familyID,
+                    cloudKit: ck,
+                    pollInterval: pollInterval,
+                    maxAttempts: maxPollAttempts
+                )
+
+                if let unlockedAt = unlockedConfirmed {
+                    let unlockLatency = unlockedAt.timeIntervalSince(unlockStart)
+                    latencies.append(unlockLatency)
+                    NSLog("[CommandDeliveryTest] cycle %d UNLOCK confirmed in %.1fs", cycle, unlockLatency)
+                } else {
+                    NSLog("[CommandDeliveryTest] cycle %d UNLOCK TIMEOUT after %d polls", cycle, maxPollAttempts)
+                }
+            }
+
+            // --- Summary ---
+            if latencies.isEmpty {
+                NSLog("[CommandDeliveryTest] === DONE === No successful measurements")
+                return
+            }
+
+            let sorted = latencies.sorted()
+            let count = sorted.count
+            let min = sorted.first!
+            let max = sorted.last!
+            let mean = sorted.reduce(0, +) / Double(count)
+            let p50 = sorted[count / 2]
+            let p95idx = Int(Double(count) * 0.95)
+            let p95 = sorted[Swift.min(p95idx, count - 1)]
+
+            NSLog("[CommandDeliveryTest] === SUMMARY ===")
+            NSLog("[CommandDeliveryTest]   samples: %d / %d expected", count, totalCycles * 2)
+            NSLog("[CommandDeliveryTest]   min:  %.1fs", min)
+            NSLog("[CommandDeliveryTest]   p50:  %.1fs", p50)
+            NSLog("[CommandDeliveryTest]   p95:  %.1fs", p95)
+            NSLog("[CommandDeliveryTest]   max:  %.1fs", max)
+            NSLog("[CommandDeliveryTest]   mean: %.1fs", mean)
+            NSLog("[CommandDeliveryTest] === END ===")
+        }
+    }
+
+    /// Poll heartbeats until the target device reports the expected mode.
+    /// Returns the Date when confirmation was seen, or nil on timeout.
+    /// Static + nonisolated so it can run from a detached Task.
+    private nonisolated static func pollForMode(
+        targetDeviceID: DeviceID,
+        expectedMode: LockMode,
+        familyID: FamilyID,
+        cloudKit: any CloudKitServiceProtocol,
+        pollInterval: UInt64,
+        maxAttempts: Int
+    ) async -> Date? {
+        for attempt in 1...maxAttempts {
+            try? await Task.sleep(nanoseconds: pollInterval)
+
+            do {
+                let heartbeats = try await cloudKit.fetchLatestHeartbeats(familyID: familyID)
+                if let hb = heartbeats.first(where: { $0.deviceID == targetDeviceID }) {
+                    if hb.currentMode == expectedMode {
+                        return Date()
+                    }
+                    if attempt % 5 == 0 {
+                        NSLog("[CommandDeliveryTest]   poll %d: mode=%@ (want %@)",
+                              attempt, hb.currentMode.rawValue, expectedMode.rawValue)
+                    }
+                } else if attempt == 1 {
+                    NSLog("[CommandDeliveryTest]   poll %d: no heartbeat for device %@",
+                          attempt, String(targetDeviceID.rawValue.prefix(8)))
+                }
+            } catch {
+                NSLog("[CommandDeliveryTest]   poll %d: fetch error — %@",
+                      attempt, error.localizedDescription)
+            }
+        }
+        return nil
+    }
+}
+#endif

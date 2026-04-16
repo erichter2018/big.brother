@@ -36,6 +36,33 @@ import BigBrotherCore
 final class DNSProxy {
 
     private weak var provider: NEPacketTunnelProvider?
+    /// Mutable upstream connection state. All four of `upstreamConnection`,
+    /// `waitingEnteredAt`, `connectionCreatedAt`, and
+    /// `currentConnectionReachedReady` are touched from multiple queues:
+    ///   - `upstreamQueue` (NWConnection state handler + receive callbacks)
+    ///   - `.global(qos: .userInitiated)` (5s liveness timer → `healthCheck`)
+    ///   - the path-monitor queue (PacketTunnelProvider path change handler
+    ///     calls `reconnectUpstream`)
+    ///   - the NE framework's internal queues (reapplyNetworkSettings
+    ///     completion calls `reconnectUpstream`)
+    ///   - the packet-flow read loop (`forwardToUpstream` reads
+    ///     `upstreamConnection.state` + sends on it)
+    /// Without a lock, concurrent access is a Swift data race (not just
+    /// theoretical — wifi↔cellular flaps on Simon's device produced the
+    /// exact interleavings where `setupUpstreamConnection` writes
+    /// `waitingEnteredAt = nil` on one queue while the state handler writes
+    /// `waitingEnteredAt = Date()` on `upstreamQueue`, or `checkWaitingStuck`
+    /// reads the field mid-write on a third queue). `upstreamStateLock`
+    /// serializes every read/write. Never hold across an `NWConnection`
+    /// method call or a reconnect — snapshot under the lock, release, act.
+    private let upstreamStateLock = NSLock()
+    /// Terminal flag. Set by `stop()`; once true, `setupUpstreamConnection`
+    /// refuses to create a fresh connection and `healthCheck`/probe-timeout
+    /// paths refuse to call `reconnectUpstream`. Prevents late-firing
+    /// callbacks (probe-timeout closure, debounced path-monitor work,
+    /// recovery-ladder dispatch) from resurrecting the upstream after the
+    /// tunnel has asked us to tear down. Guarded by `upstreamStateLock`.
+    private var stopped: Bool = false
     private var upstreamConnection: NWConnection?
     private let upstreamHost: Network.NWEndpoint.Host
     private let upstreamPort: Network.NWEndpoint.Port
@@ -76,6 +103,12 @@ final class DNSProxy {
     private var currentConnectionReachedReady: Bool = false
     private let tunnelIP: Data = Data([198, 18, 0, 1])
     private let storage: AppGroupStorage
+
+    /// Dedicated resolver for control-plane domains (CloudKit, APNs, Apple
+    /// ID). Runs fully independent of the main upstream connection above —
+    /// see `FastPathResolver` for the rationale. Initialized in `init` and
+    /// its lifecycle is owned by DNSProxy (start/stop wired through).
+    private var fastPathResolver: FastPathResolver!
 
     // Pending queries keyed by a PROXY-owned upstream txn ID, not the
     // client's original DNS txn ID. Clients can and do reuse txn IDs — two
@@ -151,17 +184,42 @@ final class DNSProxy {
         resolvedModeCacheExpiry = now.addingTimeInterval(3)
     }
 
-    private static let ckDomainSuffixes = [
-        "apple-cloudkit.com", "icloud-content.com", "icloud.com",
-        "apple.com", "mzstatic.com", "push.apple.com"
-    ]
+    /// DNS kill-switch cache. When the cached value is `false`, `onPacket`
+    /// skips ALL filtering gates (blackhole, enforcement, time-limit,
+    /// safe-search) and forwards the query as-is. Fast-path (critical
+    /// domains) runs BEFORE this check and is unaffected. Cache refreshes
+    /// every `dnsFilteringCacheTTL` seconds so a remote re-enable command
+    /// takes effect promptly without paying a disk read on every packet.
+    /// Both read and refresh happen inline on the packet-flow queue —
+    /// single-threaded — no lock needed.
+    ///
+    /// This path is PURE: no App Group writes from the read side. Auto-
+    /// re-enable is performed by the tunnel's liveness timer (see
+    /// `PacketTunnelProvider.maintainDNSFilteringAutoReenable`). Keeping
+    /// the read side side-effect-free means concurrent readers + a
+    /// concurrent writer (fresh disable command) can't race on App Group
+    /// and clobber each other's writes.
+    private var dnsFilteringEnabledCache: Bool = true
+    private var dnsFilteringCacheExpiry: Date = .distantPast
+    private let dnsFilteringCacheTTL: TimeInterval = 3
 
+    private func refreshDNSFilteringCache() {
+        let now = Date()
+        guard now >= dnsFilteringCacheExpiry else { return }
+        let persisted = DNSFilteringState.read(from: UserDefaults.appGroup)
+        dnsFilteringEnabledCache = persisted.effective(now: now).enabled
+        dnsFilteringCacheExpiry = now.addingTimeInterval(dnsFilteringCacheTTL)
+    }
+
+    /// Delegates to `CriticalDomains.matches` — single source of truth. The
+    /// previous implementation kept a separate local list that drifted out
+    /// of sync with `CriticalDomains.suffixes` (round-3 audit flagged three
+    /// domains missing from the copy). Fast path at top of `onPacket`
+    /// intercepts these first, so in practice this check runs only when
+    /// the fast path falls back to the slow path — but when it DOES run,
+    /// it must recognize exactly the same names the fast path does.
     private func isCloudKitDomain(_ domain: String) -> Bool {
-        let lower = domain.lowercased()
-        for suffix in Self.ckDomainSuffixes {
-            if lower == suffix || lower.hasSuffix("." + suffix) { return true }
-        }
-        return false
+        CriticalDomains.matches(domain)
     }
     private var knownApps: Set<String> = []
     /// b461: lock around all knownApps access (check + insert + persist +
@@ -171,27 +229,13 @@ final class DNSProxy {
     /// Called when a known app domain is seen. Parameters: (appName, rootDomain, timestamp)
     var onAppDomainSeen: ((String, String, Date) -> Void)?
 
-    /// Domains always allowed through the blackhole — Apple infrastructure for CloudKit
-    /// commands, APNS push delivery, and iCloud sync. Without these, a blackholed device
-    /// becomes permanently unreachable and parent can't send commands to fix it.
-    private static let blackholeExemptSuffixes = [
-        "icloud.com", "apple-cloudkit.com", "icloud-content.com",
-        "apple.com", "mzstatic.com", "push.apple.com",
-        "cdn-apple.com", "apple-dns.net"
-    ]
-
-    /// Match the domain against an exemption ONLY at DNS label boundaries.
-    /// The previous implementation used plain `hasSuffix`, which lets
-    /// `evilicloud.com` falsely match `icloud.com` — a trivial blackhole
-    /// bypass. Correct matching requires the exemption to be either the
-    /// whole domain or immediately preceded by a dot.
+    /// Domains always allowed through the blackhole — Apple infrastructure for
+    /// CloudKit commands, APNS push delivery, and iCloud sync. Delegates to
+    /// `CriticalDomains.matches` — single source of truth with label-boundary
+    /// match semantics. Previously kept a separate list that had already
+    /// drifted out of sync with the fast-path list on ship day.
     private func isBlackholeExempt(_ domain: String) -> Bool {
-        let lower = domain.lowercased()
-        for suffix in Self.blackholeExemptSuffixes {
-            if lower == suffix { return true }
-            if lower.hasSuffix("." + suffix) { return true }
-        }
-        return false
+        CriticalDomains.matches(domain)
     }
 
     // DNS-based per-app time tracking.
@@ -222,6 +266,13 @@ final class DNSProxy {
         self.upstreamPort = Network.NWEndpoint.Port(integerLiteral: 53)
         self.upstreamHostDescription = upstreamDNSServer
         self.storage = storage
+        // Closure captures `self` weakly via the writeResponse indirection
+        // so we don't form a retain cycle. The closure is invoked from the
+        // FastPathResolver's own queue; `writeResponse` hops to packetFlow
+        // which is thread-safe, so no extra dispatching is needed.
+        self.fastPathResolver = FastPathResolver(writeResponse: { [weak self] payload, destIP, destPort in
+            self?.writeResponse(payload, destIP: destIP, destPort: destPort)
+        })
     }
 
     // MARK: - Lifecycle
@@ -240,8 +291,9 @@ final class DNSProxy {
         timeLimitBlockedExpiry = Date().addingTimeInterval(5)
         blocklistLock.unlock()
         setupUpstreamConnection(reason: "start")
+        fastPathResolver.start()
         let gen = startReadLoopInternal()
-        NSLog("[DNSProxy] Started → \(upstreamHostDescription) (readLoop gen=\(gen))")
+        NSLog("[DNSProxy] Started → \(upstreamHostDescription) (readLoop gen=\(gen)), fastPath active")
     }
 
     /// Telemetry-only hook for "a read/write on the upstream failed." The
@@ -259,8 +311,16 @@ final class DNSProxy {
         // Bump generation first so any in-flight receive callbacks from the
         // cancelled connection drain without re-queuing.
         bumpUpstreamGeneration()
-        upstreamConnection?.cancel()
+        upstreamStateLock.lock()
+        stopped = true
+        let conn = upstreamConnection
         upstreamConnection = nil
+        waitingEnteredAt = nil
+        connectionCreatedAt = nil
+        currentConnectionReachedReady = false
+        upstreamStateLock.unlock()
+        conn?.cancel()
+        fastPathResolver.stop()
         // Invalidate the running read loop so its next completion drains
         // out. We don't need to actively cancel `readPackets` — Apple
         // doesn't expose that — but bumping the generation guarantees
@@ -296,18 +356,6 @@ final class DNSProxy {
     /// Cancels any existing connection first. Called from `start()` and
     /// `reconnectUpstream()`.
     private func setupUpstreamConnection(reason: String) {
-        // Cancel the old connection BEFORE bumping generation so its state
-        // handler sees `.cancelled` and stops firing for us. Bumping
-        // generation after cancel ensures any queued-up completions from
-        // the old connection are detected as stale by their generation
-        // check.
-        upstreamConnection?.cancel()
-
-        let gen = bumpUpstreamGeneration()
-        waitingEnteredAt = nil
-        connectionCreatedAt = Date()
-        currentConnectionReachedReady = false
-
         // UDP parameters. We intentionally DON'T set
         // `prohibitedInterfaceTypes` — iOS excludes the NE process's own
         // traffic from the tunnel automatically, so NWConnection here
@@ -322,13 +370,40 @@ final class DNSProxy {
         // when the active one dies.
         parameters.multipathServiceType = .disabled
 
+        // Bump generation and build the new connection before touching any
+        // state. Once the generation is bumped, any pending callback from
+        // the prior connection — including the `.cancelled` we're about to
+        // trigger — will fail its `generation == currentUpstreamGeneration`
+        // check and drain out without mutating shared state.
+        let gen = bumpUpstreamGeneration()
         let connection = NWConnection(host: upstreamHost, port: upstreamPort, using: parameters)
-
         connection.stateUpdateHandler = { [weak self] state in
             self?.handleUpstreamStateChange(state, generation: gen, reason: reason)
         }
 
+        // Atomic swap: install the new connection + reset state under lock,
+        // snapshot the old one for cancellation. Cancel OUTSIDE the lock —
+        // NWConnection.cancel() is non-blocking but we still don't want to
+        // block any other queue waiting on the state lock while iOS unwinds
+        // the old connection. The `stopped` check inside the lock closes the
+        // TOCTOU window: if `stop()` raced in between the generation bump and
+        // the install, we cancel the freshly-built connection here and bail
+        // without touching shared state. No resurrection possible.
+        upstreamStateLock.lock()
+        if stopped {
+            upstreamStateLock.unlock()
+            connection.cancel()
+            NSLog("[DNSProxy] setupUpstreamConnection racing stop — discarding fresh connection (reason=\(reason))")
+            return
+        }
+        let oldConnection = upstreamConnection
         upstreamConnection = connection
+        waitingEnteredAt = nil
+        connectionCreatedAt = Date()
+        currentConnectionReachedReady = false
+        upstreamStateLock.unlock()
+
+        oldConnection?.cancel()
         connection.start(queue: upstreamQueue)
 
         // Kick off the receive loop. It's a recursive self-scheduling chain;
@@ -351,8 +426,10 @@ final class DNSProxy {
 
         switch state {
         case .ready:
+            upstreamStateLock.lock()
             waitingEnteredAt = nil
             currentConnectionReachedReady = true
+            upstreamStateLock.unlock()
             NSLog("[DNSProxy] Upstream state → ready (gen=\(generation))")
 
         case .preparing:
@@ -365,9 +442,11 @@ final class DNSProxy {
             // if we stay stuck here — but DON'T tear down on entry. Most
             // `.waiting` transitions resolve in a fraction of a second
             // during a handoff.
+            upstreamStateLock.lock()
             if waitingEnteredAt == nil {
                 waitingEnteredAt = Date()
             }
+            upstreamStateLock.unlock()
             NSLog("[DNSProxy] Upstream state → waiting: \(error.debugDescription) (gen=\(generation))")
 
         case .failed(let error):
@@ -378,8 +457,11 @@ final class DNSProxy {
             // brand-new connections would go .preparing → .failed → rebuild
             // → .preparing → .failed in a tight loop during the first
             // few seconds of a tunnel restart.
+            upstreamStateLock.lock()
             let startupAge = connectionCreatedAt.map { Date().timeIntervalSince($0) } ?? .infinity
-            if !currentConnectionReachedReady && startupAge < startupGracePeriod {
+            let reachedReady = currentConnectionReachedReady
+            upstreamStateLock.unlock()
+            if !reachedReady && startupAge < startupGracePeriod {
                 NSLog("[DNSProxy] Upstream state → failed during startup (\(Int(startupAge))s, gen=\(generation)) — delaying rebuild")
                 markUpstreamUnhealthy()
                 let delay = startupGracePeriod - startupAge + 0.5
@@ -443,12 +525,16 @@ final class DNSProxy {
     /// back and new sends are just queuing indefinitely. Called from
     /// `healthCheck()`.
     private func checkWaitingStuck() {
-        guard let enteredAt = waitingEnteredAt,
+        upstreamStateLock.lock()
+        let enteredAt = waitingEnteredAt
+        upstreamStateLock.unlock()
+        guard let enteredAt,
               Date().timeIntervalSince(enteredAt) > waitingStuckThreshold else {
             return
         }
         NSLog("[DNSProxy] Upstream stuck in .waiting for \(Int(Date().timeIntervalSince(enteredAt)))s — forcing reconnect")
-        waitingEnteredAt = nil
+        // `setupUpstreamConnection` (called via `reconnectUpstream`) will
+        // reset `waitingEnteredAt` under the lock — no need to clear here.
         reconnectUpstream()
     }
 
@@ -471,7 +557,10 @@ final class DNSProxy {
     /// kept as belt-and-suspenders).
     @discardableResult
     func healthCheck() -> Bool {
-        guard upstreamConnection != nil else {
+        upstreamStateLock.lock()
+        let hasConn = upstreamConnection != nil
+        upstreamStateLock.unlock()
+        guard hasConn else {
             NSLog("[DNSProxy] Health: no upstream connection — creating")
             reconnectUpstream()
             return false
@@ -635,42 +724,77 @@ final class DNSProxy {
         let txn = UInt16(dns[0]) << 8 | UInt16(dns[1])
         let domain = parseDomain(dns)
 
-        refreshModeCache()
-        // GATE: unlocked mode = forward everything, zero blocking.
-        // Checked here (the single DNS decision point) so stale blocklist
-        // files can never cause blocking in unlocked mode.
-        let currentMode = resolvedModeCache
-        let domainIsCloudKit = domain.map { isCloudKitDomain($0) } ?? false
+        // FAST PATH — control-plane domains (CloudKit, APNs, Apple ID).
+        //
+        // Routed to FastPathResolver BEFORE any policy/blackhole/blocklist
+        // check. These domains MUST resolve for the parent to reach the
+        // device remotely. We don't care about the current mode, whether
+        // the main upstream connection is wedged, or whether some blacklist
+        // got corrupted — FastPathResolver has its own connection pool and
+        // fails open with SERVFAIL (never drops). The main proxy's state
+        // cannot affect this code path.
+        //
+        // Suffix match at DNS label boundaries — see CriticalDomains for
+        // the list and why plain hasSuffix isn't safe.
+        if let domain, CriticalDomains.matches(domain) {
+            fastPathResolver.resolve(
+                query: dns,
+                clientIP: srcIP,
+                clientPort: srcPort,
+                originalTxn: txn
+            )
+            bgLog(domain)
+            return
+        }
 
-        if currentMode != .unlocked {
-            if let domain, !domainIsCloudKit, isEnforcementBlocked(domain) {
+        // KILL SWITCH — parent can remotely disable all DNS filtering when
+        // the tunnel is making things worse (rare, but see
+        // `project_fast_path_plan.md` Part 2 for rationale). When disabled:
+        // skip blackhole, enforcement, time-limit, and safe-search gates and
+        // forward straight upstream. Fast-path for critical domains above is
+        // unaffected. Shields (ManagedSettings) are unaffected. Activity
+        // logging continues so diagnostics still work during the outage
+        // window. Auto-re-enables via the checkpoint in
+        // `resolvedDNSFilteringEnabled`.
+        refreshDNSFilteringCache()
+        if dnsFilteringEnabledCache {
+            refreshModeCache()
+            // GATE: unlocked mode = forward everything, zero blocking.
+            // Checked here (the single DNS decision point) so stale blocklist
+            // files can never cause blocking in unlocked mode.
+            let currentMode = resolvedModeCache
+            let domainIsCloudKit = domain.map { isCloudKitDomain($0) } ?? false
+
+            if currentMode != .unlocked {
+                if let domain, !domainIsCloudKit, isEnforcementBlocked(domain) {
+                    let resp = buildRefusedResponse(query: dns)
+                    writeResponse(resp, destIP: srcIP, destPort: srcPort)
+                    bgLog(domain)
+                    return
+                }
+
+                if let domain, !domainIsCloudKit, isTimeLimitBlocked(domain) {
+                    let resp = buildRefusedResponse(query: dns)
+                    writeResponse(resp, destIP: srcIP, destPort: srcPort)
+                    bgLog(domain)
+                    return
+                }
+            }
+
+            if isBlackholeMode, currentMode != .unlocked, let domain, !isBlackholeExempt(domain), !domainIsCloudKit {
                 let resp = buildRefusedResponse(query: dns)
                 writeResponse(resp, destIP: srcIP, destPort: srcPort)
                 bgLog(domain)
                 return
             }
 
-            if let domain, !domainIsCloudKit, isTimeLimitBlocked(domain) {
-                let resp = buildRefusedResponse(query: dns)
+            // 4. Safe search: redirect search engines to safe-search IPs.
+            if let domain, let ip = checkSafeSearch(domain) {
+                let resp = buildDNSResponse(query: dns, ip: ip)
                 writeResponse(resp, destIP: srcIP, destPort: srcPort)
                 bgLog(domain)
                 return
             }
-        }
-
-        if isBlackholeMode, currentMode != .unlocked, let domain, !isBlackholeExempt(domain), !domainIsCloudKit {
-            let resp = buildRefusedResponse(query: dns)
-            writeResponse(resp, destIP: srcIP, destPort: srcPort)
-            bgLog(domain)
-            return
-        }
-
-        // 4. Safe search: redirect search engines to safe-search IPs.
-        if let domain, let ip = checkSafeSearch(domain) {
-            let resp = buildDNSResponse(query: dns, ip: ip)
-            writeResponse(resp, destIP: srcIP, destPort: srcPort)
-            bgLog(domain)
-            return
         }
 
         // 5. Forward upstream.
@@ -734,8 +858,10 @@ final class DNSProxy {
         // sending. NWConnection's state handler normally beats us to this,
         // but there's a brief window between `.failed` and our rebuild
         // where a query could race in.
-        if let connection = upstreamConnection,
-           case .failed = connection.state {
+        upstreamStateLock.lock()
+        let sendConnection = upstreamConnection
+        upstreamStateLock.unlock()
+        if let sendConnection, case .failed = sendConnection.state {
             NSLog("[DNSProxy] Upstream connection in .failed state — reconnecting before forward")
             reconnectUpstream()
         }
@@ -751,8 +877,15 @@ final class DNSProxy {
         // drain on `.cancel()`) don't inflate the write-error counter.
         // State handler remains the authoritative signal for "connection
         // is dead."
+        //
+        // Re-read `upstreamConnection` under the lock AFTER the reconnect
+        // branch above — if `.failed` triggered a rebuild, we want the
+        // fresh connection, not the dead one we just inspected.
         let sendGen = currentUpstreamGeneration
-        upstreamConnection?.send(
+        upstreamStateLock.lock()
+        let liveConnection = upstreamConnection
+        upstreamStateLock.unlock()
+        liveConnection?.send(
             content: upstreamDns,
             completion: .contentProcessed { [weak self] error in
                 if let error {
@@ -789,7 +922,7 @@ final class DNSProxy {
         // stamped on the outbound query. Look up the pending entry by that
         // ID, then rewrite the response's txn bytes to the client's
         // original ID before delivering.
-        let upstreamTxn = UInt16(data[0]) << 8 | UInt16(data[1])
+        let upstreamTxn = UInt16(data[data.startIndex]) << 8 | UInt16(data[data.startIndex + 1])
 
         // Any upstream response — probe or real — is proof the session is
         // healthy on the current interface. Update the liveness timestamp
@@ -849,7 +982,10 @@ final class DNSProxy {
     /// `healthCheck()` — the timeout check runs on a dispatch-after so
     /// this method returns immediately.
     func runActiveProbe() {
-        guard let connection = upstreamConnection else { return }
+        upstreamStateLock.lock()
+        let connection = upstreamConnection
+        upstreamStateLock.unlock()
+        guard let connection else { return }
         // Don't probe a connection that's already in a terminal state —
         // state handler already triggered rebuild. Also skip `.setup` /
         // `.preparing` since the connection hasn't had a chance to
@@ -1043,16 +1179,17 @@ final class DNSProxy {
     // MARK: - DNS Parsing
 
     private func parseDomain(_ dns: Data) -> String? {
-        guard dns.count > 12, (UInt16(dns[4]) << 8 | UInt16(dns[5])) >= 1 else { return nil }
+        guard dns.count > 12, (UInt16(dns[dns.startIndex + 4]) << 8 | UInt16(dns[dns.startIndex + 5])) >= 1 else { return nil }
         var off = 12
         var labels: [String] = []
         while off < dns.count {
-            let len = Int(dns[off])
+            let len = Int(dns[dns.startIndex + off])
             if len == 0 { break }
             if len > 63 { return nil }
             off += 1
             guard off + len <= dns.count else { return nil }
-            if let s = String(data: dns.subdata(in: off..<off+len), encoding: .ascii) { labels.append(s) }
+            let labelData = dns.subdata(in: (dns.startIndex + off)..<(dns.startIndex + off + len))
+            if let s = String(data: labelData, encoding: .ascii) { labels.append(s) }
             off += len
         }
         return labels.isEmpty ? nil : labels.joined(separator: ".")
@@ -1062,9 +1199,34 @@ final class DNSProxy {
 
     /// Build a REFUSED DNS response. Works for any query type (A, AAAA, etc.)
     /// by returning the query's own question section with RCODE=5 (REFUSED).
+    ///
+    /// Uses `DNSMessage.truncateToQuestion` to strip any EDNS OPT / additional
+    /// bytes that would otherwise trail the response even after ARCOUNT is
+    /// zeroed. Strict stubs treat trailing garbage as malformed and drop
+    /// the response. Parity with FastPathResolver's SERVFAIL path.
     private func buildRefusedResponse(query: Data) -> Data {
-        guard query.count >= 12 else { return query }
-        var r = Data(query)
+        // We need at least 12 bytes for the header we're about to synthesize.
+        // A truncated packet (<12) that reached here shouldn't happen in
+        // practice because onPacket already guards `dns.count >= 12`, but
+        // force-indexing bytes 0 and 1 on a shorter buffer would crash.
+        // Minimum safe: 2 bytes to preserve the txn ID; fall through to
+        // the header-only synthesized response which zero-initializes.
+        if query.count < 2 {
+            return DNSMessage.headerOnlyResponse(txnID: 0, flagsHigh: 0x81, flagsLow: 0x05)
+        }
+        guard query.count >= 12 else {
+            let txnID = UInt16(query[query.startIndex]) << 8 | UInt16(query[query.startIndex + 1])
+            return DNSMessage.headerOnlyResponse(txnID: txnID, flagsHigh: 0x81, flagsLow: 0x05)
+        }
+        var r: Data
+        if let truncated = DNSMessage.truncateToQuestion(query) {
+            r = truncated
+        } else {
+            // Malformed question — return header-only REFUSED rather than
+            // echoing bad bytes forward.
+            let txnID = UInt16(query[query.startIndex]) << 8 | UInt16(query[query.startIndex + 1])
+            return DNSMessage.headerOnlyResponse(txnID: txnID, flagsHigh: 0x81, flagsLow: 0x05)
+        }
         // Set QR=1 (response), RCODE=5 (REFUSED)
         r[2] = 0x81  // QR=1, Opcode=0, AA=0, TC=0, RD=1
         r[3] = 0x05  // RA=0, Z=0, RCODE=5 (REFUSED)
@@ -1434,6 +1596,9 @@ final class DNSProxy {
 
     /// Current upstream connection state for diagnostic reporting.
     var upstreamConnectionState: NWConnection.State? {
-        upstreamConnection?.state
+        upstreamStateLock.lock()
+        let conn = upstreamConnection
+        upstreamStateLock.unlock()
+        return conn?.state
     }
 }

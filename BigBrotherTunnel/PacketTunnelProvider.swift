@@ -181,6 +181,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self?.startEnforcementLogSyncTimer()
             self?.startScreenLockMonitoring()
             self?.startNetworkPathMonitoring()
+            self?.installCommandPokeObserver()
 
             #if DEBUG
             // Install Darwin observers used by test_shield_cycle.sh --background
@@ -517,19 +518,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func startLivenessTimer() {
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
-        // Poll commands every 5 seconds for responsive command delivery.
+        // Poll commands every 1 second for responsive command delivery.
         // Push notifications for non-mode commands are throttled by iOS, and
         // even mode commands can take 30-90s for the alert push to arrive.
-        // The 5-second tunnel poll is the reliable backbone — every halving
-        // of the cadence cuts kid-perceived latency proportionally.
+        // The tunnel poll is the reliable backbone — every halving of the
+        // cadence cuts kid-perceived latency proportionally.
+        //   b619: 5s → 2s cut apply p50 from 5.5s to 2.5s.
+        //   b620: 2s → 1s expected to cut apply p50 to ~1.5-2s.
         // Heavier operations (schedule sync, blocklist persist, app liveness)
-        // still run every 30 seconds (every 6th tick now).
-        // Fire immediately on startup, then every 5 seconds. The first poll
+        // still run every 30 seconds (now every 30th tick at 1s cadence).
+        // Fire immediately on startup, then every 1 second. The first poll
         // is critical — a parent command may be waiting in CK from before the
         // tunnel restarted. Without the immediate fire, the first poll is
-        // delayed 5 seconds, and if it QoS-stalls, the tunnel is blind for
-        // the entire startup window.
-        timer.schedule(deadline: .now(), repeating: 5)
+        // delayed and if it QoS-stalls, the tunnel is blind for the startup window.
+        timer.schedule(deadline: .now(), repeating: 1)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.livenessTickCount += 1
@@ -583,8 +585,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.pollScreenLockState()
             self.checkFlushRequest()
 
-            // Slow path: heavier operations every 30 seconds (every 6th tick at 5s cadence)
-            if self.livenessTickCount % 6 == 0 {
+            // Auto-re-enable DNS filtering if the disable window has passed
+            // (or the child clock rewound). Centralizing the side effect here
+            // — on a dedicated timer — instead of in the DNSProxy read path
+            // eliminates a race where concurrent processes could observe an
+            // inconsistent intermediate state and clobber a fresh disable.
+            Self.maintainDNSFilteringAutoReenable()
+
+            // Slow path: heavier operations every 30 seconds (every 30th tick at 1s cadence; b620)
+            if self.livenessTickCount % 30 == 0 {
                 let livenessDefaults = UserDefaults.appGroup
                 livenessDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.tunnelLastActiveAt)
                 livenessDefaults?.set(self.shouldBlackhole, forKey: AppGroupKeys.tunnelInternetBlocked)
@@ -604,6 +613,47 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         timer.resume()
         livenessTimer = timer
+    }
+
+    /// Observer for the "tunnel.pokeCommands" Darwin notification. Posted by
+    /// the main app whenever it receives a CKSubscription push. The tunnel
+    /// responds by scheduling an immediate command poll on the next runloop
+    /// cycle — bypassing the 1-second cadence. When iOS delivers silent
+    /// pushes quickly (often sub-second), this collapses apply latency to
+    /// roughly REST + disk-IO time (~1.5s floor).
+    private func installCommandPokeObserver() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(
+            center,
+            observer,
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let provider = Unmanaged<PacketTunnelProvider>.fromOpaque(observer).takeUnretainedValue()
+                provider.triggerImmediatePoll(reason: "pushPoke")
+            },
+            AppConstants.darwinNotifTunnelPokeCommands as CFString,
+            nil,
+            .deliverImmediately
+        )
+        NSLog("[Tunnel] installed command-poke Darwin observer")
+    }
+
+    /// Fire a one-shot command poll now, outside the fast-path timer. Safe to
+    /// call from any thread. If a poll is already in flight (isPollingCommands
+    /// true) this is a no-op — the in-flight poll will see any newly-written
+    /// command anyway.
+    private func triggerImmediatePoll(reason: String) {
+        guard !isPollingCommands else {
+            NSLog("[Tunnel] pokePoll (\(reason)) skipped — poll already in flight")
+            return
+        }
+        isPollingCommands = true
+        NSLog("[Tunnel] pokePoll (\(reason)) firing immediate command poll")
+        Task {
+            await self.pollAndProcessCommands()
+            self.isPollingCommands = false
+        }
     }
 
     private func checkAppLiveness() {
@@ -1319,6 +1369,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
+        // Shields-back-up early exit: the emergency blackhole is a backstop for
+        // CONFIRMED-DOWN shields. If any routine — Monitor retry, foreground
+        // enforcement, tunnel apply, heartbeat rectify — has since written a
+        // fresh `shieldsActiveAtLastHeartbeat = true`, the backstop is no longer
+        // needed, regardless of app/Monitor liveness. Without this, the blackhole
+        // stuck around until the kid opened Big Brother (even though shields
+        // were already enforcing correctly), which is exactly what Isla hit.
+        if activeBlockReasons.contains(.emergencyAppDead) {
+            let shieldsUp = defaults?.object(forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat) as? Bool == true
+            let shieldsFlagAt = defaults?.double(forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt) ?? 0
+            // Require a fresh signal (<10 min old) so we don't lift the blackhole
+            // on a stale pre-transition "true" — `shieldsConfirmedDown` path that
+            // activated us only fires when the flag is false, so any non-false
+            // value newer than the activation is a real restoration.
+            let shieldsFlagAge = shieldsFlagAt > 0 ? Date().timeIntervalSince1970 - shieldsFlagAt : .infinity
+            if shieldsUp && shieldsFlagAge < 600 {
+                NSLog("[Tunnel] Shields confirmed UP (flag age \(Int(shieldsFlagAge))s) — lifting emergency blackhole, backstop no longer needed")
+                deactivateEmergencyBlackhole()
+                return
+            }
+        }
+
         // Only act when screen is unlocked (kid is actively using the phone)
         guard !(dnsProxy?.isDeviceLocked ?? true) else {
             emergencyCheckCount = 0
@@ -1870,11 +1942,60 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
+        // REST-first upload. The framework path below hits `cloudd` and
+        // hangs silently when the daemon is wedged — the exact scenario
+        // the tunnel is supposed to keep working through. Try REST first;
+        // if it succeeds, skip the framework path entirely.
+        var restSyncedIDs = Set<UUID>()
+        let restReqs = toUpload.map { review -> CloudKitRESTClient.ModifyRequest in
+            var fields: [String: [String: Any]] = [:]
+            if let fv = CloudKitRESTClient.fieldValue(review.familyID.rawValue) { fields["familyID"] = fv }
+            if let fv = CloudKitRESTClient.fieldValue(review.childProfileID.rawValue) { fields["profileID"] = fv }
+            if let fv = CloudKitRESTClient.fieldValue(review.deviceID.rawValue) { fields["deviceID"] = fv }
+            if let fv = CloudKitRESTClient.fieldValue(review.appFingerprint) { fields["appFingerprint"] = fv }
+            if let fv = CloudKitRESTClient.fieldValue(review.appName) { fields["appName"] = fv }
+            if let bid = review.bundleID, let fv = CloudKitRESTClient.fieldValue(bid) { fields["appBundleID"] = fv }
+            if let tok = review.tokenDataBase64, let fv = CloudKitRESTClient.fieldValue(tok) { fields["tokenDataBase64"] = fv }
+            if let fv = CloudKitRESTClient.fieldValue(review.nameResolved) { fields["nameResolved"] = fv }
+            if let fv = CloudKitRESTClient.fieldValue(review.createdAt) { fields["createdAt"] = fv }
+            if let fv = CloudKitRESTClient.fieldValue(review.updatedAt) { fields["updatedAt"] = fv }
+            return CloudKitRESTClient.ModifyRequest(
+                operationType: .forceReplace,
+                recordType: "BBPendingAppReview",
+                recordName: "BBPendingAppReview_\(review.id.uuidString)",
+                fields: fields
+            )
+        }
+        do {
+            _ = try await CloudKitRESTClient.modifyRecords(restReqs)
+            restSyncedIDs = Set(toUpload.map(\.id))
+            NSLog("[Tunnel] syncResolvedPendingReviews REST: \(restSyncedIDs.count)/\(toUpload.count) uploaded")
+        } catch {
+            NSLog("[Tunnel] syncResolvedPendingReviews REST failed (\(error.localizedDescription)) — framework fallback")
+        }
+
+        // Apply the REST-synced IDs directly if we got them all; otherwise
+        // fall through to framework for the rest.
+        if restSyncedIDs.count == toUpload.count {
+            // Update local state to reflect success — mirrors the framework
+            // path's post-op bookkeeping.
+            for i in reviews.indices {
+                if restSyncedIDs.contains(reviews[i].id) {
+                    reviews[i].syncStatus = .synced
+                }
+            }
+            if let newData = try? JSONEncoder().encode(reviews) {
+                try? storage.writeRawData(newData, forKey: AppGroupKeys.pendingReviewLocalJSON)
+            }
+            defaults?.removeObject(forKey: AppGroupKeys.pendingReviewNeedsSync)
+            return
+        }
+
         let container = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier)
         let db = container.publicCloudDatabase
 
         var records: [CKRecord] = []
-        for review in toUpload {
+        for review in toUpload where !restSyncedIDs.contains(review.id) {
             let recordID = CKRecord.ID(recordName: "BBPendingAppReview_\(review.id.uuidString)")
             let record = CKRecord(recordType: "BBPendingAppReview", recordID: recordID)
             record["familyID"] = review.familyID.rawValue
@@ -2724,7 +2845,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - CloudKit REST API (bypasses cloudd throttling)
 
     private static let ckAPIToken = "1a091d3460a9c1b488dd4259ae2f5c7bd9200ef9dd311a42c1b447da992766b7"
+    /// Environment must match the shared `CloudKitRESTClient` — otherwise
+    /// the tunnel's command poll talks to a different container than the
+    /// parent-app REST writes, and commands pushed to production become
+    /// invisible to the tunnel running against development (or vice
+    /// versa). Previously hardcoded to `development`, which broke Release
+    /// builds because the shared client correctly flipped to production.
+    #if DEBUG
     private static let ckRESTBase = "https://api.apple-cloudkit.com/database/1/\(AppConstants.cloudKitContainerIdentifier)/development/public"
+    #else
+    private static let ckRESTBase = "https://api.apple-cloudkit.com/database/1/\(AppConstants.cloudKitContainerIdentifier)/production/public"
+    #endif
 
     private static let restSession: URLSession = {
         let config = URLSessionConfiguration.default
@@ -2812,6 +2943,72 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         try await db.record(for: recordID)
     }
 
+    /// REST-based heartbeat save. Iterates every key on the assembled
+    /// CKRecord, marshals it into CK REST's `{value, type}` shape via
+    /// `CloudKitRESTClient.fieldValue(_:)`, and submits as a
+    /// `forceReplace` modification. Returns `true` if the server
+    /// acknowledged the save. Returns `false` (without throwing) on any
+    /// network/parse failure so the caller can fall back to the
+    /// framework path.
+    ///
+    /// Using `forceReplace` rather than `update` matches the framework's
+    /// default-save behavior for heartbeats, where the writer owns the
+    /// full record and we don't want phantom server-side fields from a
+    /// previous build's schema.
+    private static func saveHeartbeatViaREST(record: CKRecord) async -> Bool {
+        var fields: [String: [String: Any]] = [:]
+        for key in record.allKeys() {
+            let value = record[key]
+            // Unwrap NSNumber into its underlying primitive so the
+            // marshaler can pick the correct CK type (INT64 vs DOUBLE).
+            // Booleans that came in as `1 as NSNumber` become Int here —
+            // close enough; CK's INT64 accepts 0/1 as a bool proxy.
+            let unwrapped: Any
+            if let n = value as? NSNumber {
+                // NSNumber covers Int, Double, Bool. Use CFNumberType to
+                // pick the right Swift type.
+                let type = CFNumberGetType(n as CFNumber)
+                switch type {
+                case .doubleType, .float32Type, .float64Type, .cgFloatType, .floatType:
+                    unwrapped = n.doubleValue
+                default:
+                    unwrapped = n.int64Value
+                }
+            } else if let d = value as? Date {
+                unwrapped = d
+            } else if let s = value as? String {
+                unwrapped = s
+            } else if let arr = value as? [String] {
+                unwrapped = arr
+            } else if let arr = value as? NSArray {
+                unwrapped = arr as? [String] ?? []
+            } else if let v = value {
+                unwrapped = v
+            } else {
+                // Explicit nil — tell REST to clear the field.
+                fields[key] = ["value": NSNull()]
+                continue
+            }
+            if let fv = CloudKitRESTClient.fieldValue(unwrapped) {
+                fields[key] = fv
+            }
+        }
+
+        let req = CloudKitRESTClient.ModifyRequest(
+            operationType: .forceReplace,
+            recordType: record.recordType,
+            recordName: record.recordID.recordName,
+            fields: fields
+        )
+        do {
+            _ = try await CloudKitRESTClient.modifyRecords([req])
+            return true
+        } catch {
+            NSLog("[Tunnel] Heartbeat REST save failed: \(error.localizedDescription) — falling back to framework")
+            return false
+        }
+    }
+
     private static func performCKSave(db: CKDatabase, record: CKRecord) async -> Bool {
         await withCheckedContinuation { continuation in
             let lock = NSLock()
@@ -2835,6 +3032,43 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             db.add(op)
         }
+    }
+
+    /// Periodic auto-reenable check. Called from the 5s liveness timer.
+    /// Reads the persisted state and, if it has effectively expired (duration
+    /// elapsed or clock rewound), writes a fresh `.defaultEnabled` back to
+    /// App Group. Centralized here so the DNSProxy read path stays pure —
+    /// no side-effect writes from packet processing.
+    ///
+    /// ## Race mitigation
+    ///
+    /// The obvious implementation — `read → compute → write_if_flip` — has a
+    /// window where a concurrent fresh disable command can be clobbered:
+    ///   1. We read a stale expired state.
+    ///   2. Command handler writes a fresh disable.
+    ///   3. We write `.defaultEnabled`, silently cancelling the disable.
+    /// We close this by re-reading just before writing and bailing if the
+    /// state has changed. The remaining race window is the few microseconds
+    /// between the second read and the write, which is small enough that a
+    /// command arriving in that window would be applied a tick later. For a
+    /// remote command with tens/hundreds of ms of network latency inherent,
+    /// this is not a meaningful loss.
+    static func maintainDNSFilteringAutoReenable() {
+        let defaults = UserDefaults.appGroup
+        let snapshot = DNSFilteringState.read(from: defaults)
+        guard !snapshot.enabled else { return }
+        let effective = snapshot.effective(now: Date())
+        guard effective.enabled else { return }   // not yet expired
+
+        // Re-read and bail if the state was updated under us — avoids
+        // clobbering a just-installed fresh disable command.
+        let verify = DNSFilteringState.read(from: defaults)
+        guard verify == snapshot else {
+            NSLog("[Tunnel] DNS filtering auto-reenable deferred — state changed under us")
+            return
+        }
+        DNSFilteringState.write(.defaultEnabled, to: defaults)
+        NSLog("[Tunnel] DNS filtering auto-re-enabled")
     }
 
     private static func parseTunnelActionType(from json: String) -> String? {
@@ -2992,9 +3226,29 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let existingSnapshot = storage.readPolicySnapshot()
         let existingPolicy = existingSnapshot?.effectivePolicy
         let isTemp = actionType == "temporaryUnlock"
-        // returnToSchedule hands control back to the schedule; all other
-        // parent commands (setMode, lockUntil, etc.) override the schedule.
-        let authority: ControlAuthority = actionType == "returnToSchedule" ? .schedule : .parentManual
+        // Authority must match the action type so ModeStackResolver's
+        // priority chain works correctly. Previously this collapsed
+        // everything except returnToSchedule into `.parentManual`, which
+        // meant a parent's `.lockUntil` command (tap "Restrict for 1 hour")
+        // got committed as parentManual when the tunnel processed it ahead
+        // of the main app — resolver then fell into Step 4 "Parent command"
+        // instead of Step 3 "lockUntil active", overriding the lockUntil
+        // stack semantics entirely. Simon hit this repeatedly tonight.
+        let authority: ControlAuthority
+        switch actionType {
+        case "returnToSchedule":
+            authority = .schedule
+        case "lockUntil":
+            authority = .lockUntil
+        case "temporaryUnlock":
+            authority = .temporaryUnlock
+        case "timedUnlock":
+            authority = .timedUnlock
+        default:
+            // setMode, setRestrictions, lockDown, etc. — legitimate parent
+            // manual overrides that should win over schedule.
+            authority = .parentManual
+        }
         // **CRITICAL**: Read the always-allowed tokens FRESH from storage, not from
         // the existing snapshot's copy. The prior snapshot may have been written
         // before applyMode populated this field (pre-b449), in which case its
@@ -3047,9 +3301,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 .set(false, forKey: AppGroupKeys.scheduleDrivenMode)
         }
 
-        // 6. Mark command as applied in CloudKit
+        // 6. Mark command as applied in CloudKit — fire-and-forget so the
+        // confirmation heartbeat can fire immediately (b619). The status update
+        // is best-effort; local dedup (markCommandProcessed below) is the
+        // authoritative signal that prevents re-processing.
         record["status"] = "applied"
-        _ = await Self.performCKSave(db: db, record: record)
+        let statusRecord = record
+        Task { _ = await Self.performCKSave(db: db, record: statusRecord) }
 
         // 7. Mark in shared storage so main app's dedup catches it via readProcessedCommandIDs().
         // The recordName is "BBRemoteCommand_<UUID>" — strip the prefix before
@@ -3091,6 +3349,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if tunnelProcessed.count > 200 { tunnelProcessed = Array(tunnelProcessed.suffix(200)) }
         defaults?.set(tunnelProcessed, forKey: AppGroupKeys.tunnelProcessedCommandIDs)
 
+        // Write lastCommandProcessedAt + lastCommandID so the heartbeat (whether
+        // uploaded by the main app or by the tunnel itself) reports that THIS
+        // specific command landed. Without this, the parent/test-harness sees
+        // hbLastCmdID stuck at an older value whenever the tunnel — not the
+        // main app — applied the command. Parity with CommandProcessorImpl:527.
+        defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastCommandProcessedAt)
+        defaults?.set(bareName, forKey: AppGroupKeys.lastCommandID)
+
         // Notify the kid about the mode change.
         let notifContent = UNMutableNotificationContent()
         notifContent.title = "Mode Changed"
@@ -3108,6 +3374,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Signal Monitor to re-apply ManagedSettings from the snapshot we wrote.
         signalMonitorToReconcile()
+
+        // Fire an immediate heartbeat so the parent sees the confirmed mode
+        // change within seconds. Without this, a tunnel-processed command
+        // waits for the next periodic heartbeat (5 min) or the
+        // monitorConfirmation path (10–90 s) to surface as applied. The
+        // `force: true` bypasses the 120 s dedup gate — we specifically want
+        // this write to land even if the main app just heartbeated.
+        Task { await sendHeartbeatFromTunnel(reason: "modeCommandApplied", force: true) }
     }
 
     #if DEBUG
@@ -3655,6 +3929,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             record["hbFCDegraded"] = 1 as NSNumber
         }
 
+        // Forward lastCommandProcessedAt + lastCommandID so the heartbeat
+        // always reflects the most recent command applied — whether the main
+        // app or the tunnel did the apply. Matches the fields CommandProcessor
+        // and the tunnel's handleModeCommandFromTunnel write to UserDefaults.
+        let lastCmdAt = defaults?.double(forKey: AppGroupKeys.lastCommandProcessedAt) ?? 0
+        if lastCmdAt > 0 {
+            record["hbLastCmdAt"] = Date(timeIntervalSince1970: lastCmdAt) as NSDate
+        }
+        if let lastCmdID = defaults?.string(forKey: AppGroupKeys.lastCommandID), !lastCmdID.isEmpty {
+            record["hbLastCmdID"] = lastCmdID
+        }
+
         // Null out fields the tunnel can't provide — prevents stale main-app values
         record["hbDriving"] = nil
         record["hbSpeed"] = nil
@@ -3762,8 +4048,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         do {
-            let saved = await Self.performCKSave(db: db, record: record)
-            if !saved { throw NSError(domain: "CKSave", code: -1) }
+            // REST-first save. The framework's `db.save(_)` routes through
+            // cloudd, which hangs silently after ~3 min of backgrounding
+            // (tunnel-specific variant of the parent-side hangs that cost
+            // the user an afternoon on 2026-04-15). URLSession REST has a
+            // real timeout and no daemon dependency, so the child can keep
+            // uploading heartbeats even when cloudd on her device is
+            // wedged from install churn. Framework save is a last-resort
+            // fallback only.
+            let restSaved = await Self.saveHeartbeatViaREST(record: record)
+            if !restSaved {
+                let saved = await Self.performCKSave(db: db, record: record)
+                if !saved { throw NSError(domain: "CKSave", code: -1) }
+            }
             heartbeatPermissionFailures = 0
             // Don't feed heartbeat results into the recovery ladder.
             // Heartbeat CK saves hang after ~3 min of background (cloudd
@@ -3963,6 +4260,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func stopNetworkPathMonitoring() {
         pathMonitor?.cancel()
         pathMonitor = nil
+        // Cancel any pending debounced path-change work so it cannot fire
+        // after stopTunnel and trigger a rogue `dnsProxy.healthCheck()` →
+        // `reconnectUpstream()` that resurrects the upstream connection
+        // during teardown. `DNSProxy.stop()` also gates `setupUpstreamConnection`
+        // behind a `stopped` flag, but cancelling here avoids even the
+        // queued work's useless wakeup.
+        pathDebounceWork?.cancel()
+        pathDebounceWork = nil
     }
 
     /// Build a stable identity for an NWPath based on its interfaces and status.
@@ -4355,7 +4660,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let slotKey = String(slotIndex)
 
             // How many seconds fall in this slot?
-            let slotEnd = cal.date(bySettingHour: slotIndex / 4, minute: ((slotIndex % 4) + 1) * 15, second: 0, of: cursor) ?? endTime
+            // The end of slot N is the start of slot N+1. Computing `minute =
+            // ((slotIndex % 4) + 1) * 15` produced an invalid DateComponent of
+            // `minute: 60` for the last quarter (e.g. 14:45→15:00), which
+            // `Calendar.date(bySettingHour:minute:second:of:)` silently rejects
+            // — the `?? endTime` fallback then lumps every last-quarter chunk
+            // into the remainder-of-day, corrupting `slotsJSON` on the child
+            // detail timeline. Roll minute=60 → hour+1, minute=0.
+            let minuteInHour = ((slotIndex % 4) + 1) * 15
+            let (endHour, endMinute) = minuteInHour >= 60
+                ? ((slotIndex / 4) + 1, 0)
+                : (slotIndex / 4, minuteInHour)
+            let slotEnd = cal.date(bySettingHour: endHour, minute: endMinute, second: 0, of: cursor) ?? endTime
             let chunkEnd = min(slotEnd, endTime)
             let chunkSeconds = max(1, Int(chunkEnd.timeIntervalSince(cursor)))
 

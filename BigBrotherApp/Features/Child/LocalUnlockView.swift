@@ -204,7 +204,11 @@ struct LocalUnlockView: View {
         try? keychain.delete(forKey: StorageKeys.lastShieldedAppKeychain)
 
         // Clear enforcement (shields + restrictions).
-        try? appState.enforcement?.clearAllRestrictions()
+        if let enf = appState.enforcement {
+            Task.detached(priority: .userInitiated) {
+                try? enf.clearAllRestrictions()
+            }
+        }
 
         // Clear App Group storage using appState's storage instance.
         let storage = appState.storage

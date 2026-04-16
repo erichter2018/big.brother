@@ -183,6 +183,30 @@ public struct ScheduleProfile: Codable, Sendable, Identifiable, Equatable, Hasha
         return nil
     }
 
+    /// Next time the schedule resolves to `targetMode`. Unlike `nextTransitionTime`,
+    /// which returns any boundary, this walks forward through transitions until
+    /// one actually produces the requested mode — needed for "Available at X"
+    /// copy so we don't promise relief at a handoff to a MORE restrictive mode
+    /// (e.g. restricted → locked is still web-blocked; claiming "web available
+    /// at 9:30 PM" there misled the child).
+    public func nextTime(resolvingTo targetMode: LockMode,
+                         from date: Date,
+                         calendar: Calendar = .current) -> Date? {
+        var cursor = date
+        // Cap iterations — a schedule has at most a handful of transitions per
+        // day, and nextTransitionTime looks up to 7 days ahead. 64 is safe.
+        for _ in 0..<64 {
+            guard let next = nextTransitionTime(from: cursor, calendar: calendar) else { return nil }
+            // Step past the boundary so resolvedMode reflects the new state.
+            let after = next.addingTimeInterval(1)
+            if resolvedMode(at: after, calendar: calendar) == targetMode {
+                return next
+            }
+            cursor = after
+        }
+        return nil
+    }
+
     /// Built-in preset profiles for common device usage patterns.
     public static func presets(familyID: FamilyID) -> [ScheduleProfile] {
         let weekdays = DayOfWeek.weekdays

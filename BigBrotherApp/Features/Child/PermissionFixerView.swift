@@ -233,36 +233,20 @@ struct PermissionFixerView: View {
             items.append(.motion)
         }
 
-        // 4. Notifications
-        // Check synchronously from cached value or assume needed
-        let notifCenter = UNUserNotificationCenter.current()
-        Task {
-            let settings = await notifCenter.notificationSettings()
-            await MainActor.run {
-                if settings.authorizationStatus != .authorized {
-                    items.append(.notifications(status: settings.authorizationStatus))
-                }
-                // 5. VPN
-                if let vpn = appState.vpnManager {
-                    Task {
-                        let configured = await vpn.isConfigured()
-                        await MainActor.run {
-                            if !configured {
-                                items.append(.vpn)
-                            }
-                            self.permissionsToFix = items
-                            // Reset step if permissions changed
-                            if currentStep >= items.count {
-                                currentStep = 0
-                            }
-                        }
-                    }
-                } else {
-                    self.permissionsToFix = items
-                    if currentStep >= items.count {
-                        currentStep = 0
-                    }
-                }
+        // 4. Notifications + 5. VPN — both async. Run as a single flat Task so a
+        // dropped continuation can't leave the UI in a half-refreshed state.
+        let vpn = appState.vpnManager
+        Task { @MainActor in
+            let notifStatus = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+            if notifStatus != .authorized {
+                items.append(.notifications(status: notifStatus))
+            }
+            if let vpn, await vpn.isConfigured() == false {
+                items.append(.vpn)
+            }
+            self.permissionsToFix = items
+            if currentStep >= items.count {
+                currentStep = 0
             }
         }
     }
@@ -285,12 +269,20 @@ struct PermissionFixerView: View {
             }
 
         case .locationAlways(let current):
-            if current == .notDetermined {
-                // Can request directly
+            switch current {
+            case .notDetermined:
+                // iOS never offers "Always" on the first prompt — must request WhenInUse
+                // first, then escalate to Always so the system shows the
+                // "Keep Only While Using / Change to Always" dialog.
+                appState.locationService?.requestWhenInUseThenAlways()
+                waitingForReturn = true
+            case .authorizedWhenInUse:
+                // Already granted WhenInUse — directly trigger the Always escalation
+                // dialog without bouncing to Settings.
                 appState.locationService?.requestAlwaysAuthorization()
                 waitingForReturn = true
-            } else {
-                // Must go to Settings
+            default:
+                // .denied / .restricted — only Settings can change it.
                 openSettings()
             }
 
@@ -399,9 +391,12 @@ enum PermissionItem: Identifiable {
             return "Required to manage which apps are available. Without this, no app blocking works."
         case .locationAlways(let current):
             if current == .notDetermined {
-                return "Your parent needs to know where you are. Location must be set to \"Always\" for background tracking."
+                return "Your parent needs to know where you are. iOS will ask twice — tap \"Allow While Using\" first, then \"Change to Always\" on the second prompt."
             }
-            return "Location is currently set to \"\(current == .denied ? "Never" : "While Using")\". It needs to be \"Always\" so your parent can see where you are even when the app is in the background."
+            if current == .authorizedWhenInUse {
+                return "Almost there. iOS will now ask to upgrade to \"Always\" so your parent can see where you are even when the app is in the background."
+            }
+            return "Location is currently set to \"Never\". It needs to be \"Always\" so your parent can see where you are even when the app is in the background."
         case .motion:
             return "Detects when you're driving so safety features work. Without this, driving detection is disabled."
         case .notifications:

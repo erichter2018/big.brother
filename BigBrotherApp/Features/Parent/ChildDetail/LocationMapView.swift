@@ -667,30 +667,68 @@ struct LocationMapView: View {
     private func resolveTripPOIs() async {
         guard !trips.isEmpty else { return }
 
+        // Collect all endpoints needing a POI lookup (skip home — already labeled).
+        enum Field { case start, end, farthest }
+        struct Target { let tripIdx: Int; let field: Field; let latitude: Double; let longitude: Double }
+
+        var targets: [Target] = []
+        for i in trips.indices {
+            let t = trips[i]
+            if !isNearHome(t.startLocation) {
+                targets.append(Target(tripIdx: i, field: .start,
+                                       latitude: t.startLocation.latitude,
+                                       longitude: t.startLocation.longitude))
+            }
+            if !isNearHome(t.endLocation) {
+                targets.append(Target(tripIdx: i, field: .end,
+                                       latitude: t.endLocation.latitude,
+                                       longitude: t.endLocation.longitude))
+            }
+            if let f = t.farthestLocation, !isNearHome(f) {
+                targets.append(Target(tripIdx: i, field: .farthest,
+                                       latitude: f.latitude, longitude: f.longitude))
+            }
+        }
+        guard !targets.isEmpty else { return }
+
+        // Dedup to ~111m precision — trip N+1's start often equals trip N's end,
+        // so naive per-endpoint lookup triples the network cost.
+        func coordKey(_ lat: Double, _ lon: Double) -> String {
+            String(format: "%.3f,%.3f", lat, lon)
+        }
+        var uniqueCoords: [String: (Double, Double)] = [:]
+        for t in targets {
+            uniqueCoords[coordKey(t.latitude, t.longitude)] = (t.latitude, t.longitude)
+        }
+
+        // Parallel lookups across unique coords. Each lookupPOI may itself run up
+        // to 3 serial network calls, but fanning out trips-wide turns a ~9N serial
+        // chain into max(9) in flight.
+        var resolved: [String: String?] = [:]
+        await withTaskGroup(of: (String, String?).self) { group in
+            for (key, coord) in uniqueCoords {
+                group.addTask {
+                    let name = await lookupPOI(latitude: coord.0, longitude: coord.1)
+                    return (key, name)
+                }
+            }
+            for await (key, name) in group {
+                resolved[key] = name
+            }
+        }
+
+        for target in targets {
+            guard let name = resolved[coordKey(target.latitude, target.longitude)] ?? nil else { continue }
+            switch target.field {
+            case .start: trips[target.tripIdx].startName = name
+            case .end: trips[target.tripIdx].endName = name
+            case .farthest: trips[target.tripIdx].farthestName = name
+            }
+        }
+
+        // Auto-geofence any school POIs detected above.
         for i in trips.indices {
             let trip = trips[i]
-
-            // Skip if near home — we already label those "Home"
-            if !isNearHome(trip.startLocation) {
-                trips[i].startName = await lookupPOI(
-                    latitude: trip.startLocation.latitude,
-                    longitude: trip.startLocation.longitude
-                )
-            }
-            if !isNearHome(trip.endLocation) {
-                trips[i].endName = await lookupPOI(
-                    latitude: trip.endLocation.latitude,
-                    longitude: trip.endLocation.longitude
-                )
-            }
-            if let farthest = trip.farthestLocation, !isNearHome(farthest) {
-                trips[i].farthestName = await lookupPOI(
-                    latitude: farthest.latitude,
-                    longitude: farthest.longitude
-                )
-            }
-
-            // Auto-geofence: if a POI contains "School", auto-save as a named place
             for name in [trips[i].startName, trips[i].endName, trips[i].farthestName].compactMap({ $0 }) {
                 if isSchoolName(name) {
                     let loc = name == trips[i].startName ? trip.startLocation :
@@ -1760,22 +1798,55 @@ struct LocationMapView: View {
         }
         let cacheKey = deviceIDs.map(\.rawValue).sorted().joined(separator: ",")
 
-        // Return cached if fresh
+        // Return cached if fresh — fast path, no network.
         if let (cached, fetchedAt) = Self.breadcrumbCache[cacheKey],
            Date().timeIntervalSince(fetchedAt) < Self.breadcrumbCacheTTL {
             breadcrumbs = cached
             return
         }
 
-        isLoading = true
-        let since = Date().addingTimeInterval(-30 * 86400)
+        // Cache is stale or missing. Two strategies:
+        //   - If we have ANY cached entry (even past TTL), show it
+        //     immediately and refresh in-place from CloudKit. Trip list
+        //     renders yesterday's data instantly; newer entries arrive as
+        //     the fetch returns. Matches the user's mental model — "open
+        //     the screen, see trips, see updates" — rather than "open
+        //     screen, wait 90s watching a spinner, maybe get trips."
+        //   - If there's NO cache at all (first-ever load for this device
+        //     set), block on the fetch with the loading spinner because we
+        //     have nothing to show.
+        let hasStaleCache = Self.breadcrumbCache[cacheKey] != nil
+        if let (stale, _) = Self.breadcrumbCache[cacheKey] {
+            breadcrumbs = stale
+        }
+        isLoading = !hasStaleCache
+
+        // 7-day window: for a continuously-tracked device a 30-day CK query is
+        // thousands of records and drives the bulk of "Loading trips..." wait.
+        // Older history can be surfaced later via an explicit "load more" action.
+        let since = Date().addingTimeInterval(-7 * 86400)
+        // Fetch per-device in parallel so multi-device children don't serialize
+        // the CK round-trips.
         var all: [DeviceLocation] = []
-        for deviceID in deviceIDs {
-            if let crumbs = try? await cloudKit.fetchLocationBreadcrumbs(deviceID: deviceID, since: since) {
+        await withTaskGroup(of: [DeviceLocation].self) { group in
+            for deviceID in deviceIDs {
+                group.addTask { [cloudKit] in
+                    (try? await cloudKit.fetchLocationBreadcrumbs(deviceID: deviceID, since: since)) ?? []
+                }
+            }
+            for await crumbs in group {
                 all.append(contentsOf: crumbs)
             }
         }
         let sorted = all.sorted { $0.timestamp < $1.timestamp }
+        // If the fetch returned empty AND we already had stale cache
+        // visible, keep the stale cache — fetch probably timed out on a
+        // cloudd wedge. Silently holding yesterday's trips is a lot better
+        // than replacing them with "No trips found."
+        if sorted.isEmpty && hasStaleCache {
+            isLoading = false
+            return
+        }
         breadcrumbs = sorted
         Self.breadcrumbCache[cacheKey] = (sorted, Date())
         isLoading = false

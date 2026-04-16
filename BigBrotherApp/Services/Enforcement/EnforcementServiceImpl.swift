@@ -332,7 +332,15 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // recovery path that was a major shield-drop vector.
         var doubleCheckedFailure = false
         if expectedShielded != diag.shieldsActive || modeInconsistent {
-            Thread.sleep(forTimeInterval: 0.2)
+            // b602: Skip sleep on main thread to prevent UI freeze.
+            // ManagedSettings reads are often stale immediately after a write.
+            // When called from a background Task (detached), the 200ms sleep
+            // is fine and helps avoid false-positive recovery paths.
+            // When called from the main actor, blocking for 200ms + XPC latency
+            // is the primary cause of the reported UI freeze.
+            if !Thread.isMainThread {
+                Thread.sleep(forTimeInterval: 0.2)
+            }
             let retryDiag = shieldDiagnostic()
             let retryInconsistent: Bool = {
                 guard expectedShielded else { return false }
@@ -1385,7 +1393,8 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 func scheduleEnforcementRefreshActivity(
     source: String,
     delaySeconds: TimeInterval = 60,
-    intervalMinutes: Int = 16
+    intervalMinutes: Int = 16,
+    writeWakeFlag: Bool = true
 ) {
     let center = DeviceActivityCenter()
 
@@ -1413,8 +1422,15 @@ func scheduleEnforcementRefreshActivity(
     // Write the wake flag so Monitor's checkEnforcementRefreshSignal also
     // handles the refresh if it's running for any other reason (usage
     // threshold, natural boundary) in the interim.
-    UserDefaults.appGroup?
-        .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+    //
+    // Some callers are already CONSUMING an existing needsEnforcementRefresh
+    // signal right now and only need the DeviceActivity backup. Re-setting the
+    // flag in those paths creates a self-sustaining loop: the next 3s/5s poll
+    // sees the freshly written flag and re-applies enforcement again.
+    if writeWakeFlag {
+        UserDefaults.appGroup?
+            .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+    }
 
     do {
         try center.startMonitoring(activityName, during: schedule)

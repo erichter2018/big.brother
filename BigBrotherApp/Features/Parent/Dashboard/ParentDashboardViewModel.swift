@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 import BigBrotherCore
 
 @Observable @MainActor
@@ -10,6 +11,25 @@ final class ParentDashboardViewModel: CommandSendable {
     var isSendingCommand = false
     var commandFeedback: String?
     var isCommandError = false
+
+    /// Run a block with `isSendingCommand` held true, guaranteeing it
+    /// flips back to false when the block exits — even if the block
+    /// throws. With REST-first writes (real 20s timeouts) and the
+    /// framework fallback capped by our query-timeout wrapper (45s × 2),
+    /// no command path can hang indefinitely anymore, so no watchdog
+    /// is needed.
+    ///
+    /// A previous version fired a 15-second watchdog that forcibly
+    /// flipped `isSendingCommand = false` mid-body. That produced a
+    /// race: if `temporaryUnlock` was in flight and the watchdog fired,
+    /// the user could retap, send a second unlock command, and the
+    /// child would process both — extending the unlock window past the
+    /// parent's intent. Removed in favor of trusting the real timeouts.
+    func withCommandSending(_ body: () async throws -> Void) async rethrows {
+        isSendingCommand = true
+        defer { isSendingCommand = false }
+        try await body()
+    }
 
     /// Tracks temporary unlock expiry per child (parent-side countdown).
     /// Persisted in UserDefaults so it survives app relaunch.
@@ -116,8 +136,8 @@ final class ParentDashboardViewModel: CommandSendable {
 
         familyPauseExpiresAt = nil
         pauseSnapshot = nil
-        isSendingCommand = true
 
+        await withCommandSending {
         for child in childProfiles {
             lockDownExpiries.removeValue(forKey: child.id)
             let childKey = child.id.rawValue
@@ -180,7 +200,7 @@ final class ParentDashboardViewModel: CommandSendable {
         }
 
         commandFeedback = "Unpause — restored previous states"
-        isSendingCommand = false
+        }
         startCountdownTimer()
         startConfirmationPolling()
         autoDismissFeedback()
@@ -274,12 +294,21 @@ final class ParentDashboardViewModel: CommandSendable {
     // MARK: - Loading
 
     func loadDashboard() async {
-        // Only show the skeleton on the FIRST load. On subsequent refreshes
-        // (pull-to-refresh, returning from child detail) keep the existing
-        // cards visible while the new data fetches — wiping them to shimmer
-        // is what was producing "blank panes after refresh".
+        // On cold launch / force-close, the disk cache (populated during a
+        // previous session) is already loaded into appState.childProfiles by
+        // AppState.init → loadCachedDashboard(). If that cache has children,
+        // show them instantly and let the CK refresh happen in the background
+        // — otherwise the skeleton sits there for 10-15s while the full CK
+        // round-trip (profiles + devices + heartbeats + 2 profile types) runs,
+        // even though we already have perfectly-usable stale data on disk.
+        // Once the refresh lands, `.loaded` is re-assigned with fresh profiles
+        // and the cards update in place without any remount/flicker.
         if case .loaded = loadingState {} else if case .empty = loadingState {} else {
-            loadingState = .loading
+            if !appState.childProfiles.isEmpty {
+                loadingState = .loaded(appState.childProfiles)
+            } else {
+                loadingState = .loading
+            }
         }
         do {
             try await appState.refreshDashboard()
@@ -310,16 +339,16 @@ final class ParentDashboardViewModel: CommandSendable {
     // MARK: - Global Actions
 
     func restrictAll(duration: LockDuration = .indefinite) async {
-        isSendingCommand = true
-        commandFeedback = nil
-        unlockExpiries.removeAll()
-        timedUnlockPhases.removeAll()
-        scheduleActiveChildren.removeAll()
-        for child in childProfiles {
-            await restrictChildQuiet(child, duration: duration)
+        await withCommandSending {
+            commandFeedback = nil
+            unlockExpiries.removeAll()
+            timedUnlockPhases.removeAll()
+            scheduleActiveChildren.removeAll()
+            for child in childProfiles {
+                await restrictChildQuiet(child, duration: duration)
+            }
+            commandFeedback = "Lock All sent"
         }
-        commandFeedback = "Lock All sent"
-        isSendingCommand = false
         // Track for retry — use .restricted as the representative lock action.
         trackPendingCommand(.setMode(.restricted), target: .allDevices)
         startConfirmationPolling()
@@ -327,43 +356,43 @@ final class ParentDashboardViewModel: CommandSendable {
     }
 
     func lockAll() async {
-        isSendingCommand = true
-        commandFeedback = nil
-        unlockExpiries.removeAll()
-        timedUnlockPhases.removeAll()
-        timedUnlockPenaltyDeductions.removeAll()
-        lockDownExpiries.removeAll()
-        scheduleActiveChildren.removeAll()
-        for child in childProfiles {
-            await lockChild(child)
+        await withCommandSending {
+            commandFeedback = nil
+            unlockExpiries.removeAll()
+            timedUnlockPhases.removeAll()
+            timedUnlockPenaltyDeductions.removeAll()
+            lockDownExpiries.removeAll()
+            scheduleActiveChildren.removeAll()
+            for child in childProfiles {
+                await lockChild(child)
+            }
+            commandFeedback = "Lock All sent"
         }
-        commandFeedback = "Lock All sent"
-        isSendingCommand = false
         trackPendingCommand(.setMode(.locked), target: .allDevices)
         startConfirmationPolling()
         autoDismissFeedback()
     }
 
     func unlockAllWithTimer(seconds: Int) async {
-        isSendingCommand = true
-        commandFeedback = nil
-        for child in childProfiles {
-            await unlockChildWithTimer(child, seconds: seconds)
+        await withCommandSending {
+            commandFeedback = nil
+            for child in childProfiles {
+                await unlockChildWithTimer(child, seconds: seconds)
+            }
+            commandFeedback = "Unlock All + timer sent"
         }
-        commandFeedback = "Unlock All + timer sent"
-        isSendingCommand = false
         autoDismissFeedback()
     }
 
     func unlockAll(seconds: Int = 24 * 3600) async {
-        isSendingCommand = true
-        commandFeedback = nil
-        // Unlock each child individually so per-child expiry extension works correctly.
-        for child in childProfiles {
-            await unlockChild(child, seconds: seconds)
+        await withCommandSending {
+            commandFeedback = nil
+            // Unlock each child individually so per-child expiry extension works correctly.
+            for child in childProfiles {
+                await unlockChild(child, seconds: seconds)
+            }
+            commandFeedback = "Unlock All sent"
         }
-        commandFeedback = "Unlock All sent"
-        isSendingCommand = false
         autoDismissFeedback()
     }
 
@@ -537,16 +566,16 @@ final class ParentDashboardViewModel: CommandSendable {
             lockDownExpiries.removeValue(forKey: child.id)
         }
         // Send lockedDown mode — internet blocking is inherent to the mode.
-        isSendingCommand = true
-        do {
-            try await appState.sendCommand(target: .child(child.id), action: .setMode(.lockedDown))
-            let name = appState.childProfiles.first(where: { $0.id == child.id })?.name ?? ""
-            commandFeedback = "Locked Down sent to \(name)."
-        } catch {
-            commandFeedback = "Failed: \(error.localizedDescription)"
-            isCommandError = true
+        await withCommandSending {
+            do {
+                try await appState.sendCommand(target: .child(child.id), action: .setMode(.lockedDown))
+                let name = appState.childProfiles.first(where: { $0.id == child.id })?.name ?? ""
+                commandFeedback = "Locked Down sent to \(name)."
+            } catch {
+                commandFeedback = "Failed: \(error.localizedDescription)"
+                isCommandError = true
+            }
         }
-        isSendingCommand = false
         trackPendingCommand(.setMode(.locked), target: .child(child.id))
         await stopPenaltyTimer(for: child)
         startConfirmationPolling()
@@ -554,18 +583,18 @@ final class ParentDashboardViewModel: CommandSendable {
     }
 
     func lockDownAll(seconds: Int? = nil) async {
-        isSendingCommand = true
-        commandFeedback = nil
-        unlockExpiries.removeAll()
-        timedUnlockPhases.removeAll()
-        timedUnlockPenaltyDeductions.removeAll()
-        lockDownExpiries.removeAll()
-        scheduleActiveChildren.removeAll()
-        for child in childProfiles {
-            await lockDownChild(child, seconds: seconds)
+        await withCommandSending {
+            commandFeedback = nil
+            unlockExpiries.removeAll()
+            timedUnlockPhases.removeAll()
+            timedUnlockPenaltyDeductions.removeAll()
+            lockDownExpiries.removeAll()
+            scheduleActiveChildren.removeAll()
+            for child in childProfiles {
+                await lockDownChild(child, seconds: seconds)
+            }
+            commandFeedback = "Lock Down All sent"
         }
-        commandFeedback = "Lock Down All sent"
-        isSendingCommand = false
         trackPendingCommand(.setMode(.lockedDown), target: .allDevices)
         startConfirmationPolling()
         autoDismissFeedback()
@@ -574,9 +603,16 @@ final class ParentDashboardViewModel: CommandSendable {
     // MARK: - Schedule Mode
 
     /// Send requestHeartbeat to all devices. Triggers silent push → app wakes → heartbeat.
+    /// Haptic + banner confirms the tap registered — without them the action
+    /// was silent enough that users kept tapping thinking nothing happened.
     func pingAllDevices() async {
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        isCommandError = false
+        commandFeedback = "📡 Pinging all devices…"
         try? await appState.sendCommand(target: .allDevices, action: .requestHeartbeat)
         try? await appState.refreshDashboard()
+        commandFeedback = "✓ Ping sent — devices confirm in 10–30s"
+        autoDismissFeedback()
     }
 
     /// Put a child back on their schedule (clear overrides).
@@ -603,24 +639,24 @@ final class ParentDashboardViewModel: CommandSendable {
     /// Schedule all children. Children without a schedule default to locked (dailyMode)
     /// on the child side via the returnToSchedule command handler.
     func scheduleAll() async {
-        isSendingCommand = true
-        commandFeedback = nil
-        for child in childProfiles {
-            unlockExpiries.removeValue(forKey: child.id)
-            timedUnlockPhases.removeValue(forKey: child.id)
-            timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
-            if let profileID = appState.childDevices.first(where: { $0.childProfileID == child.id })?.scheduleProfileID,
-               let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) {
-                appState.expectedModes[child.id] = (profile.resolvedMode(at: Date()), Date())
-            } else {
-                appState.expectedModes.removeValue(forKey: child.id)
+        await withCommandSending {
+            commandFeedback = nil
+            for child in childProfiles {
+                unlockExpiries.removeValue(forKey: child.id)
+                timedUnlockPhases.removeValue(forKey: child.id)
+                timedUnlockPenaltyDeductions.removeValue(forKey: child.id)
+                if let profileID = appState.childDevices.first(where: { $0.childProfileID == child.id })?.scheduleProfileID,
+                   let profile = appState.scheduleProfiles.first(where: { $0.id == profileID }) {
+                    appState.expectedModes[child.id] = (profile.resolvedMode(at: Date()), Date())
+                } else {
+                    appState.expectedModes.removeValue(forKey: child.id)
+                }
+                scheduleActiveChildren.insert(child.id)
+                try? await appState.sendCommand(target: .child(child.id), action: .returnToSchedule)
             }
-            scheduleActiveChildren.insert(child.id)
-            try? await appState.sendCommand(target: .child(child.id), action: .returnToSchedule)
+            trackPendingCommand(.returnToSchedule, target: .allDevices)
+            commandFeedback = "Schedule All sent"
         }
-        trackPendingCommand(.returnToSchedule, target: .allDevices)
-        commandFeedback = "Schedule All sent"
-        isSendingCommand = false
         startConfirmationPolling()
         autoDismissFeedback()
     }
@@ -1243,6 +1279,15 @@ final class ParentDashboardViewModel: CommandSendable {
     // MARK: - Penalty Timer (Firebase with CloudKit fallback)
 
     /// Returns Firebase timer state if available, otherwise builds state from CloudKit device data.
+    /// Firestore kid ID for the child, resolved from TimerIntegrationConfig.
+    /// Available even before the Firebase snapshot listener has fired — used
+    /// by the dashboard to look up a disk-cached avatar by stable key during
+    /// the cold-launch window where `penaltyTimer(for:)?.avatarUrl` is nil.
+    func firestoreKidID(for child: ChildProfile) -> String? {
+        let config = TimerIntegrationConfig.load()
+        return config.kidMappings.first(where: { $0.childProfileID == child.id })?.firestoreKidID
+    }
+
     func penaltyTimer(for child: ChildProfile) -> TimerIntegrationService.KidTimerState? {
         // Try Firebase first
         if let service = appState.timerService {

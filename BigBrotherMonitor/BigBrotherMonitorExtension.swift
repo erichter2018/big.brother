@@ -153,6 +153,25 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
+        // Enforcement heartbeat is a pure signal activity — `rearmEnforcementHeartbeat`
+        // stops and restarts it on every eventDidReachThreshold to reschedule the
+        // next wake. Without this early return, restart→intervalDidStart falls
+        // through to the legacy block below and re-applies shields every ~30s
+        // (one cycle per rearm), causing constant ManagedSettings churn and
+        // battery drain. The common-setup block above (checkEnforcementRefreshSignal,
+        // liveness timestamps) still runs before this return.
+        if activity.rawValue == "bigbrother.enforcementHeartbeat" {
+            return
+        }
+
+        // Usage tracking activities are also pure signal — event thresholds fire
+        // on cumulative screen time; the activity itself doesn't imply any shield
+        // change. Falling through would re-apply shields on every usage-tracking
+        // rearm for the same reason.
+        if activity.rawValue.hasPrefix("bigbrother.usagetracking") {
+            return
+        }
+
         // Legacy / other schedule activity — use ModeStackResolver for ground truth.
         let resolution = ModeStackResolver.resolve(storage: storage)
         let mode = resolution.mode
@@ -246,6 +265,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             return
         }
 
+        // Enforcement heartbeat / usage tracking are pure signal activities.
+        // `rearmEnforcementHeartbeat` stops them on every rearm, which fires
+        // intervalDidEnd — without this guard, we'd re-apply shields on every
+        // rearm (same loop as intervalDidStart's fix).
+        if activity.rawValue == "bigbrother.enforcementHeartbeat" ||
+           activity.rawValue.hasPrefix("bigbrother.usagetracking") {
+            return
+        }
+
         // Legacy / other schedule — use ModeStackResolver for ground truth.
         // b513: was using profile.resolvedMode(at:) which reads raw schedule mode,
         // ignoring parent commands and temp unlocks. This caused locked shields
@@ -311,19 +339,92 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let minuteString = String(event.rawValue.dropFirst("usage.".count))
         guard let minutes = Int(minuteString) else { return }
 
-        // b518: Monitor no longer writes screenTimeMinutes — tunnel is sole owner.
-        // Store milestone separately for diagnostics only.
+        // Reverses b518: Monitor IS now the authoritative source for
+        // screenTimeMinutes. DeviceActivityEvent milestones fire when iOS
+        // itself has observed N minutes of actual device activity — the same
+        // signal Apple's Screen Time uses — so they're far more accurate than
+        // the tunnel's unlock→lock session counter, which depends on a lock
+        // flag written by the main app and silently undercounts when the app
+        // suspends. We keep the tunnel counter writing too; whichever source
+        // has the HIGHER monotonic value wins. In steady state that's always
+        // the Monitor milestone.
         let defaults = UserDefaults.appGroup
         let today = Self.todayDateString()
-        let existingDate = defaults?.string(forKey: "monitorMilestoneDate")
-        let existingMinutes = defaults?.integer(forKey: "monitorMilestoneMinutes") ?? 0
-        if existingDate == today {
-            if minutes > existingMinutes {
+
+        // Date rollover: if the stored date isn't today, reset the screen-time
+        // keys to 0 FIRST so yesterday's value doesn't linger into today.
+        // Otherwise a parent pulling a heartbeat at 6am would see yesterday's
+        // final total (e.g. 720 = 12h) even though today's cumulative is ~0.
+        // Reset must happen regardless of whether this milestone is valid for
+        // today, so stale cross-midnight deliveries don't prevent the wipe.
+        if defaults?.string(forKey: "screenTimeDate") != today {
+            defaults?.set(today, forKey: "screenTimeDate")
+            defaults?.set(0, forKey: "screenTimeAccumulatedSeconds")
+            defaults?.set(0, forKey: "screenTimeMinutes")
+        }
+        if defaults?.string(forKey: "monitorMilestoneDate") != today {
+            defaults?.set(today, forKey: "monitorMilestoneDate")
+            defaults?.set(0, forKey: "monitorMilestoneMinutes")
+        }
+
+        // Sanity clamp: a milestone value larger than "minutes since midnight"
+        // is physically impossible for today. iOS's DeviceActivity sometimes
+        // delivers an eventDidReachThreshold callback AFTER the interval has
+        // rolled over — e.g. yesterday hit the `usage.720` threshold at 11:58
+        // PM but the callback fires at 12:05 AM today. Without this clamp the
+        // Monitor would stamp today's screenTime as 720 min (12h) at 00:05 AM,
+        // which the heartbeat happily reports to the parent. That's the bug
+        // Simon hit: dashboard showed 12h screen time at 6am.
+        let clampNow = Date()
+        let startOfToday = Calendar.current.startOfDay(for: clampNow)
+        let minutesSinceMidnight = Int(clampNow.timeIntervalSince(startOfToday) / 60)
+        // Add a small slack (5 min) for clock skew and rounding.
+        let maxReasonableMinutes = minutesSinceMidnight + 5
+        if minutes > maxReasonableMinutes {
+            NSLog("[Monitor] Ignoring stale-delivery usage milestone: \(minutes)m claimed, only \(minutesSinceMidnight)m since midnight. Likely yesterday's threshold delivered late.")
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Screen time milestone ignored (stale cross-midnight delivery): \(minutes)m @ \(minutesSinceMidnight)m elapsed"
+            ))
+            // Don't write this value. The date rollover above has already
+            // reset yesterday's state; future legitimate milestones today
+            // will build up accumulation correctly.
+            return
+        }
+
+        // Diagnostic record (unchanged, kept for comparison).
+        let existingMilestoneDate = defaults?.string(forKey: "monitorMilestoneDate")
+        let existingMilestoneMinutes = defaults?.integer(forKey: "monitorMilestoneMinutes") ?? 0
+        if existingMilestoneDate == today {
+            if minutes > existingMilestoneMinutes {
                 defaults?.set(minutes, forKey: "monitorMilestoneMinutes")
             }
         } else {
             defaults?.set(today, forKey: "monitorMilestoneDate")
             defaults?.set(minutes, forKey: "monitorMilestoneMinutes")
+        }
+
+        // Promote to the authoritative keys the heartbeat reads.
+        // Keys are matched by string literal to the tunnel's declarations at
+        // PacketTunnelProvider.swift:4258-4260 — don't rename without updating
+        // both processes.
+        let existingDate = defaults?.string(forKey: "screenTimeDate")
+        let existingSeconds = defaults?.integer(forKey: "screenTimeAccumulatedSeconds") ?? 0
+        let newSeconds = minutes * 60
+        if existingDate == today {
+            // Monotonic: only raise the value, never lower it. The tunnel may
+            // have already accumulated some session seconds ahead of our
+            // milestone (e.g. early in the day before the first callback).
+            if newSeconds > existingSeconds {
+                defaults?.set(newSeconds, forKey: "screenTimeAccumulatedSeconds")
+                defaults?.set(minutes, forKey: "screenTimeMinutes")
+                defaults?.set("deviceActivity", forKey: "screenTimeSource")
+            }
+        } else {
+            defaults?.set(today, forKey: "screenTimeDate")
+            defaults?.set(newSeconds, forKey: "screenTimeAccumulatedSeconds")
+            defaults?.set(minutes, forKey: "screenTimeMinutes")
+            defaults?.set("deviceActivity", forKey: "screenTimeSource")
         }
 
         // Record Monitor activity timestamp.
@@ -789,10 +890,28 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// because the profile thought it was in a free window.
     private func handleLockUntilExpired(_ activity: DeviceActivityName) {
         let defaults = UserDefaults.appGroup
+
+        // Guard: only clean up if THIS activity's commandID matches the one
+        // currently stored in App Group. iOS fires intervalDidEnd both on
+        // natural expiry AND when the main app calls stopMonitoring() (which
+        // `cancelNonScheduleActivities()` does when a new lockUntil is
+        // issued). Without this check, the OLD activity's stopMonitoring
+        // would trigger handleLockUntilExpired AFTER the main app has already
+        // rewritten the App Group keys for the NEW lockUntil — wiping the
+        // new state and making the second Restrict-for-N-hours command
+        // disappear from the resolver's view.
+        let activityCommandID = String(activity.rawValue.dropFirst("bigbrother.lockuntil.".count))
+        let currentCommandID = defaults?.string(forKey: "lockUntilCommandID") ?? ""
+        if !currentCommandID.isEmpty && activityCommandID != currentCommandID {
+            logEvent(.policyReconciled, details: "lockUntil expiry from stale activity \(activityCommandID) — keeping current \(currentCommandID)")
+            return
+        }
+
         // Clean up saved state first so ModeStackResolver doesn't see
         // stale lockUntil bits when we call it below.
         defaults?.removeObject(forKey: "lockUntilPreviousMode")
         defaults?.removeObject(forKey: "lockUntilExpiresAt")
+        defaults?.removeObject(forKey: "lockUntilCommandID")
 
         let resolution = ModeStackResolver.resolve(storage: storage)
         let mode = resolution.mode
@@ -1196,6 +1315,28 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // the next real mode change re-applies cleanly. Definitive
         // unlock events (handleUnlockedWindowStart, handleTimedUnlockStart)
         // still use clearAllShieldStores — those are explicit transitions.
+        // Fast path: if current shield state already matches expected, skip
+        // the re-apply. Reconcile is a periodic safety net — re-writing
+        // ManagedSettings when nothing has drifted is pure churn. Before this
+        // guard, Simon's phone re-applied shields every ~60s during active
+        // use (one reconcile per usage-tracking event at the piggyback
+        // throttle) even though nothing had changed, costing battery and
+        // filling the diagnostic timeline with noise.
+        let extState = storage.readExtensionSharedState()
+        let currentMode = extState?.currentMode ?? .unlocked
+        let shieldsCurrentlyUp = reconcileDefaults?.bool(forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat) ?? false
+        let expectedShieldsUp = resolution.mode != .unlocked
+        if currentMode == resolution.mode && shieldsCurrentlyUp == expectedShieldsUp {
+            updateSharedState(
+                mode: resolution.mode,
+                isTemporaryUnlock: resolution.isTemporary,
+                temporaryUnlockExpiresAt: resolution.expiresAt
+            )
+            reconcileDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
+            logEvent(.policyReconciled, details: "Reconciliation: no drift (\(resolution.reason))")
+            return
+        }
+
         if resolution.mode == .unlocked {
             applyWideOpenShields()
             updateSharedState(
@@ -1387,6 +1528,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Clear BOTH DNS blocklists — enforcement AND time-limit.
         try? storage.writeEnforcementBlockedDomains([])
         try? storage.writeTimeLimitBlockedDomains([])
+
+        // Publish "shields down" so the tunnel's verifyEnforcementState
+        // doesn't keep reading a stale app-side `true`. Symmetric with the
+        // `true` write in applyShieldingToAllStores after a real apply.
+        let clearDefaults = UserDefaults.appGroup
+        clearDefaults?.set(false, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat)
+        clearDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt)
     }
 
     /// Apply shields to the enforcement store using the hybrid per-app + category strategy.
@@ -1547,6 +1695,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
             // DNS-block web versions of shielded apps (prevents Safari web app bypass).
             updateEnforcementBlockedDomains(allowedTokens: allowedTokens)
+
+            // Publish "shields up" to the App Group so the tunnel's
+            // verifyEnforcementState sees the current truth. Without this,
+            // the tunnel only ever reads what the app-side code wrote — which
+            // goes stale the moment the app is suspended, causing a
+            // mismatch-trigger→Monitor-apply→still-stale-flag→repeat loop
+            // on a ~30s cadence (one cycle per tunnel liveness tick). Simon's
+            // phone hit this: app wrote `false` during a 3:02 PM unlocked
+            // window, got suspended, schedule flipped to restricted at 3:30
+            // PM, and the Monitor silently re-applied shields every 31s for
+            // 12+ minutes because the tunnel kept seeing `false`.
+            defaults?.set(true, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat)
+            defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt)
         }
     }
 

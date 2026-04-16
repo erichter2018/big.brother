@@ -181,31 +181,34 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
         self.changeHandler = handler
         observationTask?.cancel()
 
-        // Observe `AuthorizationCenter.shared.authorizationStatus` using
-        // Swift Observation — no Combine, no AnyCancellable. Each access
-        // inside the tracking closure registers a dependency; when any
-        // observed property changes, the `willSet` fires, the task wakes,
-        // and we re-register for the next change. Matches the old behavior
-        // of firing on every status change except we no longer need
-        // `.dropFirst()` — we only re-read and fire when Observation
-        // actually reports a change.
+        // Poll-based observation. The previous implementation used
+        // `withObservationTracking` + `withCheckedContinuation` to watch
+        // `AuthorizationCenter.shared.authorizationStatus`. That approach
+        // leaked its continuation on EVERY launch (the runtime warning
+        // "observeAuthorizationChanges leaked its continuation") because
+        // the `onChange` closure only fires when the property ACTUALLY
+        // changes — if it never changes, the continuation never resumes.
+        // Worse: the combination of `withObservationTracking` registering
+        // an internal observer on `AuthorizationCenter` while enforcement
+        // code simultaneously reads the same property on the main actor
+        // appeared to cause a ~3-second-then-freeze deadlock on Olivia's
+        // device (b594-b599, every launch).
+        //
+        // Replaced with a simple 10-second poll. FamilyControls auth
+        // changes are rare (user grants/revokes in Settings, MDM changes).
+        // A 10s detection delay is acceptable. No continuation, no
+        // observation tracking, no deadlock risk.
         observationTask = Task { @MainActor [weak self] in
+            var lastStatus: FCAuthorizationStatus?
             while !Task.isCancelled {
-                let current = AuthorizationCenter.shared.authorizationStatus
-                _ = await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    withObservationTracking {
-                        _ = AuthorizationCenter.shared.authorizationStatus
-                    } onChange: {
-                        cont.resume()
-                    }
-                }
+                try? await Task.sleep(for: .seconds(10))
                 guard let self else { return }
-                let newStatus = self.status
-                // Ignore spurious fires where the mapped status hasn't
-                // changed (e.g., internal Observation bookkeeping).
-                guard FamilyControlsManagerImpl.mapStatus(current) != newStatus else { continue }
-                self.updateAuthorizationHealth(newStatus: newStatus)
-                self.changeHandler?(newStatus)
+                let current = self.status
+                if let last = lastStatus, last != current {
+                    self.updateAuthorizationHealth(newStatus: current)
+                    self.changeHandler?(current)
+                }
+                lastStatus = current
             }
         }
     }

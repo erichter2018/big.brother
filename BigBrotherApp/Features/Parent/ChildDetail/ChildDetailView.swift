@@ -80,7 +80,22 @@ struct ChildDetailView: View {
             .padding()
         }
         .navigationTitle(viewModel.child.name)
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                // Tapping the kid name copies a screen-time debug block to the
+                // pasteboard. Visual feedback is the shared commandFeedback
+                // banner; without it the tap registers as a no-op to the user.
+                Button {
+                    viewModel.copyScreenTimeDebug()
+                } label: {
+                    Text(viewModel.child.name)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(viewModel.child.name). Tap to copy screen time debug info.")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button { showSettings = true } label: {
                     Image(systemName: "gear")
@@ -1273,6 +1288,29 @@ struct ChildDetailView: View {
                                       toggle: { viewModel.toggleRestriction(\.denyWebGamesWhenRestricted) })
                     if viewModel.restrictions.denyWebGamesWhenRestricted {
                         Text("Blocks browser gaming sites (coolmathgames, poki, .io games, etc.) when device is restricted or locked.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                // DNS Kill Switch (for emergency use when the tunnel itself
+                // is degrading the child's connectivity — e.g., stuck
+                // `.waiting` on cellular). Disables ALL DNS policy filtering
+                // for 24h; shields stay up; fast-path keeps CloudKit/APNs
+                // reachable. Auto-re-enables after 24h on the child side.
+                Section("DNS Filtering") {
+                    Toggle(isOn: $viewModel.dnsFilteringEnabled) {
+                        Label("DNS filtering ON", systemImage: "shield.lefthalf.filled")
+                    }
+                    .onChange(of: viewModel.dnsFilteringEnabled) { _, enabled in
+                        Task { await viewModel.sendDNSFiltering(enabled: enabled) }
+                    }
+                    if !viewModel.dnsFilteringEnabled {
+                        Text("⚠ DNS filtering is OFF. Category blocking, time-limit DNS, and safe search are disabled. Shields stay active. Auto-re-enables in 24 hours on the child device.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text("Use only if the tunnel itself is causing connectivity issues. Shields remain active either way. Auto-re-enables after 24h.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

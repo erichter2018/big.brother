@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import CloudKit
 import UserNotifications
+import UIKit
 import BigBrotherCore
 
 /// Bedtime compliance result for a single day.
@@ -88,6 +89,168 @@ final class ChildDetailViewModel: CommandSendable {
     var isSendingCommand = false
     var commandFeedback: String?
     var isCommandError = false
+
+    /// Copy a structured screen-time debug block for this child to the pasteboard.
+    /// Used for hand-crafted troubleshooting sessions where the parent compares
+    /// Big.Brother's tracked values against an Apple Screen Time screenshot.
+    /// Grabs data from what the parent has readily available — `latestHeartbeats`
+    /// (current reading per device) plus the rolling `heartbeatHistory` (last 3)
+    /// — since the parent can't see kid-side DeviceActivity internals directly.
+    func copyScreenTimeDebug() {
+        let devices = appState.childDevices.filter { $0.childProfileID == child.id }
+        let deviceIDs = Set(devices.map { $0.id.rawValue })
+        let heartbeats = appState.latestHeartbeats.filter { deviceIDs.contains($0.deviceID.rawValue) }
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let todayString: String = {
+            let f = DateFormatter()
+            f.dateFormat = "yyyy-MM-dd"
+            return f.string(from: Date())
+        }()
+
+        var lines: [String] = []
+        lines.append("── Big.Brother Screen Time Debug ──")
+        lines.append("Child: \(child.name)")
+        lines.append("Date:  \(todayString)")
+        lines.append("Build: b\(AppConstants.appBuildNumber)")
+        lines.append("")
+
+        if heartbeats.isEmpty {
+            lines.append("No heartbeats found for this child's devices.")
+        } else {
+            for hb in heartbeats.sorted(by: { $0.timestamp > $1.timestamp }) {
+                let rawName = devices.first(where: { $0.id.rawValue == hb.deviceID.rawValue })?.displayName ?? hb.deviceID.rawValue
+                // Prefix with child name so the paste stands on its own next
+                // to an Apple Screen Time screenshot (which is also titled
+                // "<Kid>'s iPhone"). Skip if the device name already contains
+                // the child's name to avoid "Daphne's Daphne's iPhone".
+                let devName: String = rawName.localizedCaseInsensitiveContains(child.name)
+                    ? rawName
+                    : "\(child.name)'s \(rawName)"
+                let age = Int(Date().timeIntervalSince(hb.timestamp))
+                lines.append("── \(devName) ──")
+                lines.append("Heartbeat age:  \(age)s  (ts=\(dateFormatter.string(from: hb.timestamp)))")
+                lines.append("Source:         \(hb.heartbeatSource ?? "?")")
+                lines.append("Build:          app=b\(hb.appBuildNumber ?? 0) monitor=b\(hb.monitorBuildNumber ?? 0) shield=b\(hb.shieldBuildNumber ?? 0)")
+                if let st = hb.screenTimeMinutes {
+                    let h = st / 60
+                    let m = st % 60
+                    lines.append("Screen time:    \(st) min (\(h)h \(m)m)")
+                } else {
+                    lines.append("Screen time:    not reported")
+                }
+                if let unlocks = hb.screenUnlockCount {
+                    lines.append("Screen unlocks: \(unlocks) today")
+                }
+                lines.append("DNS blocked:    \(hb.dnsBlockedDomainCount ?? 0) domains")
+                if let appUsage = hb.appUsageMinutes, !appUsage.isEmpty {
+                    // Keys are FNV-1a fingerprints of ApplicationToken data.
+                    // Resolve to the human-readable appName via the child's
+                    // TimeLimitConfig list (which is already loaded on this VM
+                    // and persists even if the Monitor milestone came from an
+                    // app not shown on the current UI).
+                    let fingerprintNames = Dictionary(
+                        uniqueKeysWithValues: timeLimitConfigs.map { ($0.appFingerprint, $0.appName) }
+                    )
+                    lines.append("Per-app usage:")
+                    let sorted = appUsage.sorted { $0.value > $1.value }
+                    for (fingerprint, mins) in sorted.prefix(20) {
+                        let name = fingerprintNames[fingerprint] ?? "?(\(fingerprint.prefix(8)))"
+                        lines.append("  \(name): \(mins)m")
+                    }
+                    if sorted.count > 20 {
+                        lines.append("  …and \(sorted.count - 20) more")
+                    }
+                } else {
+                    lines.append("Per-app usage:  none reported")
+                }
+                lines.append("Mode:           \(hb.currentMode.rawValue)")
+                // `hb.vpnDetected` is the check for USER-CONFIGURED non-BB VPNs
+                // (ipsec/ppp/tap). BB's own tunnel is `utun` which that check
+                // deliberately excludes to avoid Private Relay false positives,
+                // so vpnDetected is ALWAYS false for BB-only setups and is not
+                // a useful signal. `hb.tunnelConnected` is the authoritative
+                // "BB's own VPN is up" flag.
+                lines.append("BB tunnel:      \(hb.tunnelConnected.map { $0 ? "CONNECTED ✓" : "DISCONNECTED ✗" } ?? "unknown")")
+                lines.append("Other VPN:      \(hb.vpnDetected == true ? "detected" : "none")")
+                if let blocked = hb.internetBlocked, blocked {
+                    lines.append("Internet block: ON (\(hb.internetBlockedReason ?? "unknown"))")
+                }
+                lines.append("")
+
+                // Rolling history for this device (last 3 from appState).
+                if let history = appState.heartbeatHistory[hb.deviceID.rawValue], history.count > 1 {
+                    lines.append("History (newest first):")
+                    for past in history.prefix(3) {
+                        let pastAge = Int(Date().timeIntervalSince(past.timestamp))
+                        let st = past.screenTimeMinutes.map { "\($0)m" } ?? "—"
+                        lines.append("  \(pastAge)s ago: st=\(st) src=\(past.heartbeatSource ?? "?")")
+                    }
+                    lines.append("")
+                }
+            }
+        }
+
+        // BB tracks screen time via THREE independent pipelines — the heartbeat
+        // field only surfaces the first. The dashboard card shows (1); the
+        // ChildDetail AppUsageSection shows (3). The user reported their
+        // per-app totals were higher than this dump was reporting, which is
+        // because (3) was missing. Include all three so the paste matches
+        // whatever on-screen number is being troubleshot.
+        //
+        //   1. Tunnel unlock→lock session counter → screenTimeMinutes
+        //      (above, from heartbeat). Undercounts when main app suspends.
+        //   2. Monitor DeviceActivityEvent milestones → appUsageMinutes
+        //      (above). Only for explicitly-watched apps (time limits,
+        //      always-allowed tokens). Empty if no such apps configured.
+        //   3. DNS-query proportional allocation → estimatedAppUsage()
+        //      (below). Derived from BBDNSActivity records. This is what
+        //      ChildDetail's AppUsageSection displays.
+        // Relabeled per three-way audit (codex + gemini + self): DNS-derived
+        // "minutes" are proportional-allocation estimates over 15-minute slots,
+        // not actual durations. A Pinterest keepalive ping can get credited
+        // with a 15-min slot the kid spent on TikTok, because TikTok uses QUIC
+        // and makes no visible DNS queries. Treat this as "which apps were
+        // seen on the network today", NOT as usage time.
+        lines.append("── Network activity hints (DNS — NOT real usage minutes) ──")
+        if let snapshot = onlineActivity {
+            let usage = snapshot.estimatedAppUsage()
+                .sorted { $0.minutes > $1.minutes }
+            if usage.isEmpty {
+                lines.append("No DNS activity today.")
+            } else {
+                lines.append("Total DNS queries today: \(snapshot.totalQueries)")
+                lines.append("Apps seen on network (ranked by allocation, not real time):")
+                for entry in usage.prefix(20) {
+                    lines.append("  \(entry.appName): \(Int(entry.minutes)) (hint only)")
+                }
+                if usage.count > 20 {
+                    lines.append("  …and \(usage.count - 20) more")
+                }
+            }
+        } else {
+            lines.append("Not loaded — open ChildDetail screen first to populate.")
+        }
+        lines.append("")
+
+        let text = lines.joined(separator: "\n")
+        UIPasteboard.general.string = text
+        // Haptic + visible banner. The banner alone was too subtle — users
+        // weren't sure the tap had done anything. `.success` feedback is a
+        // distinct double-tick tactile pattern so the kid-name tap now
+        // registers even when the phone is face-up on a desk.
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        commandFeedback = "✓ Copied: \(child.name)'s screen time debug"
+        isCommandError = false
+        let snapshot = commandFeedback
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            if self?.commandFeedback == snapshot {
+                self?.commandFeedback = nil
+            }
+        }
+    }
     var cloudKitError: String?
     var timeline: [TimelineEntry] = []
     /// Daily screen time for the last 7 days (date → minutes). Loaded from CloudKit heartbeats.
@@ -160,6 +323,20 @@ final class ChildDetailViewModel: CommandSendable {
     var safeSearchEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "safeSearch.\(child.id.rawValue)") }
         set { UserDefaults.standard.set(newValue, forKey: "safeSearch.\(child.id.rawValue)") }
+    }
+
+    /// Local mirror of the last-sent DNS-filtering state for this child. The
+    /// authoritative state lives on the child devices' App Group; this is
+    /// just UI memory so the parent sees what they last sent across app
+    /// launches. Defaults to true (filter ON) since that's the shipped
+    /// default.
+    var dnsFilteringEnabled: Bool {
+        get {
+            let key = "dnsFiltering.\(child.id.rawValue)"
+            if UserDefaults.standard.object(forKey: key) == nil { return true }
+            return UserDefaults.standard.bool(forKey: key)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "dnsFiltering.\(child.id.rawValue)") }
     }
 
     /// Whether any of this child's devices use .child FamilyControls authorization.
@@ -431,7 +608,20 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     var devices: [ChildDevice] {
-        appState.childDevices.filter { $0.childProfileID == child.id }
+        // User-set invariant: iPhone ALWAYS above iPad, everywhere. Sorted
+        // primarily by `deviceKindSortRank` (iPhone=0 < iPad=1 < other=2),
+        // and alphabetical by displayName as tiebreaker so multiple devices
+        // of the same kind still have a stable order. Do NOT resort by
+        // heartbeat/online state — that causes rows to leapfrog when a
+        // device drops offline, which is jarring.
+        appState.childDevices
+            .filter { $0.childProfileID == child.id }
+            .sorted { lhs, rhs in
+                if lhs.deviceKindSortRank != rhs.deviceKindSortRank {
+                    return lhs.deviceKindSortRank < rhs.deviceKindSortRank
+                }
+                return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+            }
     }
 
     /// Approved apps across all of this child's devices.
@@ -1839,7 +2029,34 @@ final class ChildDetailViewModel: CommandSendable {
         }()
         let matchingIDs = Set(matchingReviews.map(\.id))
 
-        // Optimistic UI — drop the card NOW, do the work in the background.
+        // Delete the pending-review records from CloudKit FIRST — before any
+        // other path can refetch and resurrect them, and before the optimistic
+        // UI removal. CK delete is the authoritative "this request is closed"
+        // signal; everything else (time-limit config, reviewApp command, UI
+        // state) is downstream of that authority. No tombstones, no race
+        // windows: by the time we remove from UI, the records don't exist
+        // on CloudKit anymore, so a concurrent refetch literally cannot see
+        // them.
+        //
+        // If the delete fails (network hiccup), we bail without touching UI
+        // state, surface the error, and the user retries. Worst case: the
+        // card stays visible with its original disposition, parent can tap
+        // again. Better than the old flow where a failed delete meant a
+        // re-appearing card after the refresh tick.
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for id in matchingIDs {
+                    group.addTask { try await cloudKit.deletePendingAppReview(id) }
+                }
+                try await group.waitForAll()
+            }
+        } catch {
+            showError("Couldn't close the review: \(error.localizedDescription)")
+            return
+        }
+
+        // CK delete committed. Safe to remove from UI now — nothing can
+        // refetch these records because they no longer exist server-side.
         pendingAppReviews.removeAll { matchingIDs.contains($0.id) }
         if pendingAppReviews.isEmpty {
             appState.childrenWithPendingRequests.remove(child.id)
@@ -1917,13 +2134,8 @@ final class ChildDetailViewModel: CommandSendable {
                 }
             }
 
-            let allFromCK = (try? await cloudKit.fetchPendingAppReviews(childProfileID: self.child.id)) ?? matchingReviews
-            let staleReviews = allFromCK.filter { Self.reviewsMatch($0, review) }
-            await withTaskGroup(of: Void.self) { group in
-                for staleReview in staleReviews {
-                    group.addTask { try? await cloudKit.deletePendingAppReview(staleReview.id) }
-                }
-            }
+            // Matching records were deleted synchronously at the top of this
+            // function — no stale-review cleanup needed here anymore.
         }
     }
 
@@ -1985,6 +2197,19 @@ final class ChildDetailViewModel: CommandSendable {
     func sendSafeSearch(enabled: Bool) async {
         await performCommand(
             .setSafeSearch(enabled: enabled),
+            target: .child(child.id)
+        )
+    }
+
+    // MARK: - DNS Kill Switch
+
+    /// Remotely enable/disable DNS filtering on all of the child's devices.
+    /// Default window when disabling is 24 hours — the tunnel auto-re-enables
+    /// after that, so a forgotten "off" can't leave a kid on unfiltered DNS
+    /// indefinitely. Shields are unaffected; only DNS policy enforcement is.
+    func sendDNSFiltering(enabled: Bool, durationSeconds: Int = 86400) async {
+        await performCommand(
+            .setDNSFiltering(enabled: enabled, durationSeconds: enabled ? 0 : durationSeconds),
             target: .child(child.id)
         )
     }

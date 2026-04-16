@@ -39,3 +39,9 @@ xcuserdata/
 *.p12
 *.mobileprovision
 *.cer
+
+# Claude Code runtime (per-user settings, scheduled tasks, worktrees)
+.claude/
+
+# Local audit artifacts (session-scoped, not repo history)
+.bb_*.md

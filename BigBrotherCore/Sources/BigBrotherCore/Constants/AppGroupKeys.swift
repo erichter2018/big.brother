@@ -166,6 +166,11 @@ public enum AppGroupKeys {
     /// just-applied result).
     public static let lastCommandProcessedAt = "fr.bigbrother.lastCommandProcessedAt"
 
+    /// CommandID of the most recent command processed. Paired with
+    /// `lastCommandProcessedAt` so the parent/test-harness can verify a
+    /// specific command landed.
+    public static let lastCommandID = "fr.bigbrother.lastCommandID"
+
     // MARK: - Reconcile signals
 
     /// Epoch seconds written by the main app when it wants the monitor
@@ -274,6 +279,17 @@ public enum AppGroupKeys {
 
     public static let safeSearchEnabled = "safeSearchEnabled"
     public static let forceCloseWebBlocked = "forceCloseWebBlocked"
+
+    // MARK: - DNS kill switch
+    /// JSON-encoded `DNSFilteringState` describing whether DNS policy filtering
+    /// is currently enabled, and if not, when it was disabled (child clock)
+    /// and for how long. Single atomic key — writes are race-free because
+    /// UserDefaults replaces the whole value in one store. Previously two
+    /// separate keys (`dnsFilteringEnabled`, `dnsFilteringDisabledUntil`) had
+    /// a visible intermediate state `(enabled=false, until=0)` that a
+    /// concurrent reader could interpret as corruption and flip back to
+    /// enabled, silently cancelling a fresh disable command.
+    public static let dnsFilteringStateJSON = "dnsFilteringStateJSON"
 
     // MARK: - Command processing
 

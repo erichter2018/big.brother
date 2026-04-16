@@ -377,6 +377,7 @@ enum CKRecordConversion {
         record[CKFieldName.hbEnforcementError] = hb.enforcementError
         record[CKFieldName.hbActiveScheduleWindow] = hb.activeScheduleWindowName
         record[CKFieldName.hbLastCommandProcessedAt] = hb.lastCommandProcessedAt.map { $0 as NSDate }
+        record[CKFieldName.hbLastCommandID] = hb.lastCommandID
         record[CKFieldName.hbMonitorLastActiveAt] = hb.monitorLastActiveAt.map { $0 as NSDate }
         record[CKFieldName.hbVPNDetected] = hb.vpnDetected.map { NSNumber(value: $0) }
         record[CKFieldName.hbTimeZoneID] = hb.timeZoneIdentifier
@@ -396,6 +397,8 @@ enum CKRecordConversion {
         record[CKFieldName.hbDeviceLocked] = hb.isDeviceLocked.map { NSNumber(value: $0) }
         record[CKFieldName.hbInternetBlocked] = hb.internetBlocked.map { NSNumber(value: $0) }
         record["hbInternetBlockedReason"] = hb.internetBlockedReason
+        record["hbDNSFilteringEnabled"] = hb.dnsFilteringEnabled.map { NSNumber(value: $0) }
+        record["hbDNSFilteringAutoReenableAt"] = hb.dnsFilteringAutoReenableAt.map { $0 as NSDate }
         if let usage = hb.appUsageMinutes,
            !usage.isEmpty,
            let data = try? JSONEncoder().encode(usage) {
@@ -480,10 +483,13 @@ enum CKRecordConversion {
             enforcementError: record[CKFieldName.hbEnforcementError] as? String,
             activeScheduleWindowName: record[CKFieldName.hbActiveScheduleWindow] as? String,
             lastCommandProcessedAt: record[CKFieldName.hbLastCommandProcessedAt] as? Date,
+            lastCommandID: record[CKFieldName.hbLastCommandID] as? String,
             monitorLastActiveAt: record[CKFieldName.hbMonitorLastActiveAt] as? Date,
             vpnDetected: (record[CKFieldName.hbVPNDetected] as? Int64).map { $0 != 0 },
             internetBlocked: (record[CKFieldName.hbInternetBlocked] as? Int64).map { $0 != 0 },
             internetBlockedReason: record["hbInternetBlockedReason"] as? String,
+            dnsFilteringEnabled: (record["hbDNSFilteringEnabled"] as? Int64).map { $0 != 0 },
+            dnsFilteringAutoReenableAt: record["hbDNSFilteringAutoReenableAt"] as? Date,
             appUsageMinutes: (record["hbAppUsageMinutes"] as? String).flatMap { str in
                 str.data(using: .utf8).flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) }
             },
@@ -522,6 +528,117 @@ enum CKRecordConversion {
             fcAuthDegraded: (record["hbFCDegraded"] as? Int64).map { $0 != 0 },
             ghostShieldsDetected: (record["hbGhostShields"] as? Int64).map { $0 != 0 },
             diagnosticSnapshot: record["hbDiagnosticSnapshot"] as? String
+        )
+    }
+
+    // MARK: - DeviceHeartbeat (REST decode path)
+
+    /// Decode a `DeviceHeartbeat` from a `CloudKitRESTClient.RESTRecord`.
+    /// Mirrors `deviceHeartbeat(from: CKRecord)` field-for-field but reads
+    /// through the REST-shaped `RESTRecord` accessors instead of CKRecord
+    /// subscripts. Used by the REST-based `fetchLatestHeartbeats` path —
+    /// the framework path (via `cloudd`) remains as a fallback.
+    ///
+    /// REST encodes booleans as INT64 (0/1) and Dates as TIMESTAMP
+    /// (milliseconds-since-epoch), which matches the framework's own
+    /// wire format; the accessors on `RESTRecord` handle the conversion
+    /// back to Bool / Date so callers don't need to care.
+    static func deviceHeartbeat(fromREST rec: CloudKitRESTClient.RESTRecord) -> DeviceHeartbeat? {
+        guard let deviceID = rec.string(CKFieldName.deviceID),
+              let familyID = rec.string(CKFieldName.familyID),
+              let timestamp = rec.date(CKFieldName.timestamp),
+              let modeRaw = rec.string(CKFieldName.currentMode),
+              let mode = LockMode.from(modeRaw),
+              let pv = rec.int64(CKFieldName.policyVersion),
+              let fc = rec.int64(CKFieldName.fcAuthorized)
+        else {
+            ckLogger.error("Failed to deserialize DeviceHeartbeat from REST record \(rec.recordName)")
+            return nil
+        }
+
+        let installID: UUID? = rec.string(CKFieldName.installID).flatMap(UUID.init)
+
+        return DeviceHeartbeat(
+            deviceID: DeviceID(rawValue: deviceID),
+            familyID: FamilyID(rawValue: familyID),
+            timestamp: timestamp,
+            currentMode: mode,
+            policyVersion: pv,
+            familyControlsAuthorized: fc != 0,
+            familyControlsAuthType: rec.string(CKFieldName.hbFCAuthType),
+            childAuthFailReason: rec.string(CKFieldName.hbFCChildFailReason),
+            permissionDetails: rec.string(CKFieldName.hbPermissions),
+            batteryLevel: rec.double(CKFieldName.batteryLevel),
+            isCharging: rec.bool(CKFieldName.isCharging),
+            appBlockingConfigured: rec.bool(CKFieldName.appBlockingConfigured),
+            blockedCategoryCount: rec.int(CKFieldName.blockedCategoryCount),
+            blockedAppCount: rec.int(CKFieldName.blockedAppCount),
+            blockedAppNames: rec.stringList(CKFieldName.blockedAppNames),
+            blockedCategoryNames: rec.stringList(CKFieldName.blockedCategoryNames),
+            installID: installID,
+            heartbeatSeq: rec.int64(CKFieldName.heartbeatSeq),
+            cloudKitStatus: rec.string(CKFieldName.cloudKitStatus),
+            allowedAppNames: rec.stringList(CKFieldName.allowedAppNames),
+            allowedAppCount: rec.int(CKFieldName.allowedAppCount),
+            temporaryAllowedAppNames: rec.stringList(CKFieldName.temporaryAllowedAppNames),
+            temporaryUnlockExpiresAt: rec.date(CKFieldName.temporaryUnlockExpiresAt),
+            isChildAuthorization: rec.bool(CKFieldName.isChildAuthorization),
+            availableDiskSpace: rec.int64(CKFieldName.availableDiskSpace),
+            totalDiskSpace: rec.int64(CKFieldName.totalDiskSpace),
+            selfUnlocksUsedToday: rec.int(CKFieldName.selfUnlocksUsedToday),
+            temporaryUnlockOrigin: rec.string(CKFieldName.temporaryUnlockOrigin).flatMap(TemporaryUnlockOrigin.init(rawValue:)),
+            osVersion: rec.string(CKFieldName.hbOSVersion),
+            modelIdentifier: rec.string(CKFieldName.hbModelIdentifier),
+            appBuildNumber: rec.int(CKFieldName.hbAppBuildNumber),
+            mainAppLastLaunchedBuild: rec.int(CKFieldName.hbMainAppBuild),
+            enforcementError: rec.string(CKFieldName.hbEnforcementError),
+            activeScheduleWindowName: rec.string(CKFieldName.hbActiveScheduleWindow),
+            lastCommandProcessedAt: rec.date(CKFieldName.hbLastCommandProcessedAt),
+            lastCommandID: rec.string(CKFieldName.hbLastCommandID),
+            monitorLastActiveAt: rec.date(CKFieldName.hbMonitorLastActiveAt),
+            vpnDetected: rec.bool(CKFieldName.hbVPNDetected),
+            internetBlocked: rec.bool(CKFieldName.hbInternetBlocked),
+            internetBlockedReason: rec.string("hbInternetBlockedReason"),
+            dnsFilteringEnabled: rec.bool("hbDNSFilteringEnabled"),
+            dnsFilteringAutoReenableAt: rec.date("hbDNSFilteringAutoReenableAt"),
+            appUsageMinutes: rec.string("hbAppUsageMinutes").flatMap { str in
+                str.data(using: .utf8).flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) }
+            },
+            exhaustedAppFingerprints: rec.stringList(CKFieldName.hbExhaustedAppFingerprints),
+            exhaustedAppBundleIDs: rec.stringList(CKFieldName.hbExhaustedAppBundleIDs),
+            exhaustedAppNames: rec.stringList(CKFieldName.hbExhaustedAppNames),
+            timeZoneIdentifier: rec.string(CKFieldName.hbTimeZoneID),
+            timeZoneOffsetSeconds: rec.int(CKFieldName.hbTimeZoneOffset),
+            screenTimeMinutes: rec.int(CKFieldName.hbScreenTimeMinutes),
+            screenUnlockCount: rec.int(CKFieldName.hbScreenUnlockCount),
+            hasSigningKeys: rec.bool("hbHasSigningKeys"),
+            jailbreakDetected: rec.bool(CKFieldName.hbJailbreakDetected),
+            jailbreakReason: rec.string(CKFieldName.hbJailbreakReason),
+            isDriving: rec.bool(CKFieldName.hbIsDriving),
+            currentSpeed: rec.double(CKFieldName.hbCurrentSpeed),
+            heartbeatSource: rec.string(CKFieldName.hbHeartbeatSource),
+            buildType: rec.string(CKFieldName.hbBuildType),
+            tunnelConnected: rec.bool(CKFieldName.hbTunnelConnected),
+            motionAuthorized: rec.bool(CKFieldName.hbMotionAuthorized),
+            notificationsAuthorized: rec.bool(CKFieldName.hbNotificationsAuthorized),
+            isDeviceLocked: rec.bool(CKFieldName.hbDeviceLocked),
+            shieldsActive: rec.bool(CKFieldName.hbShieldsActive),
+            scheduleResolvedMode: rec.string(CKFieldName.hbScheduleResolvedMode),
+            lastShieldChangeReason: rec.string(CKFieldName.hbLastShieldChangeReason),
+            shieldedAppCount: rec.int(CKFieldName.hbShieldedAppCount),
+            shieldCategoryActive: rec.bool(CKFieldName.hbShieldCategoryActive),
+            latitude: rec.double(CKFieldName.hbLatitude),
+            longitude: rec.double(CKFieldName.hbLongitude),
+            locationTimestamp: rec.date(CKFieldName.hbLocationTimestamp),
+            locationAddress: rec.string(CKFieldName.hbLocationAddress),
+            locationAccuracy: rec.double(CKFieldName.hbLocationAccuracy),
+            locationAuthorization: rec.string(CKFieldName.hbLocationAuthorization),
+            monitorBuildNumber: rec.int("hbMonitorBuild"),
+            shieldBuildNumber: rec.int("hbShieldBuild"),
+            shieldActionBuildNumber: rec.int("hbShieldActionBuild"),
+            fcAuthDegraded: rec.bool("hbFCDegraded"),
+            ghostShieldsDetected: rec.bool("hbGhostShields"),
+            diagnosticSnapshot: rec.string("hbDiagnosticSnapshot")
         )
     }
 
@@ -987,6 +1104,7 @@ enum CKRecordConversion {
         record[CKFieldName.appFingerprint] = review.appFingerprint
         record[CKFieldName.appName] = review.appName
         if let bundleID = review.bundleID { record["appBundleID"] = bundleID }
+        if let token = review.tokenDataBase64 { record["tokenDataBase64"] = token }
         record[CKFieldName.nameResolved] = (review.nameResolved ? 1 : 0) as NSNumber
         record[CKFieldName.createdAt] = review.createdAt as NSDate
         record[CKFieldName.updatedAt] = review.updatedAt as NSDate
@@ -1016,7 +1134,8 @@ enum CKRecordConversion {
             bundleID: record["appBundleID"] as? String,
             nameResolved: nameResolved,
             createdAt: createdAt,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            tokenDataBase64: record["tokenDataBase64"] as? String
         )
     }
 
@@ -1066,6 +1185,278 @@ enum CKRecordConversion {
             childProfileIDs: childIDStrings.map { ChildProfileID(rawValue: $0) },
             notifyArrival: (record["placeNotifyArrival"] as? Int64 ?? 1) != 0,
             notifyDeparture: (record["placeNotifyDeparture"] as? Int64 ?? 1) != 0
+        )
+    }
+
+    // MARK: - REST decoders
+    //
+    // Mirrors the `from: CKRecord` decoders above but reads the REST JSON
+    // shape (`{fieldName: {value, type}}`) via `RESTRecord`'s typed
+    // accessors. One-to-one with the framework decoders so a future
+    // schema change requires updating both. We accept that maintenance
+    // cost to get out from under `cloudd`.
+
+    static func childProfile(fromREST rec: CloudKitRESTClient.RESTRecord) -> ChildProfile? {
+        guard let profileID = rec.string(CKFieldName.profileID),
+              let familyID = rec.string(CKFieldName.familyID),
+              let name = rec.string(CKFieldName.name),
+              let createdAt = rec.date(CKFieldName.createdAt),
+              let updatedAt = rec.date(CKFieldName.updatedAt)
+        else { return nil }
+
+        var categories: Set<String> = []
+        if let json = rec.string(CKFieldName.alwaysAllowedCategoriesJSON),
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(Set<String>.self, from: data) {
+            categories = decoded
+        }
+
+        return ChildProfile(
+            id: ChildProfileID(rawValue: profileID),
+            familyID: FamilyID(rawValue: familyID),
+            name: name,
+            avatarName: rec.string(CKFieldName.avatarName),
+            avatarEmoji: rec.string(CKFieldName.avatarEmoji),
+            avatarColor: rec.string(CKFieldName.avatarColor),
+            avatarPhotoBase64: rec.string(CKFieldName.avatarPhotoBase64),
+            alwaysAllowedCategories: categories,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    static func childDevice(fromREST rec: CloudKitRESTClient.RESTRecord) -> ChildDevice? {
+        guard let deviceID = rec.string(CKFieldName.deviceID),
+              let profileID = rec.string(CKFieldName.profileID),
+              let familyID = rec.string(CKFieldName.familyID),
+              let displayName = rec.string(CKFieldName.displayName),
+              let modelID = rec.string(CKFieldName.modelIdentifier),
+              let osVer = rec.string(CKFieldName.osVersion),
+              let enrolledAt = rec.date(CKFieldName.enrolledAt)
+        else { return nil }
+
+        let fcOK = rec.bool(CKFieldName.familyControlsOK) ?? false
+        let hbProfileID = rec.string(CKFieldName.heartbeatProfileID).flatMap(UUID.init)
+        let schProfileID = rec.string(CKFieldName.scheduleProfileID).flatMap(UUID.init)
+
+        return ChildDevice(
+            id: DeviceID(rawValue: deviceID),
+            childProfileID: ChildProfileID(rawValue: profileID),
+            familyID: FamilyID(rawValue: familyID),
+            displayName: displayName,
+            modelIdentifier: modelID,
+            osVersion: osVer,
+            enrolledAt: enrolledAt,
+            familyControlsAuthorized: fcOK,
+            heartbeatProfileID: hbProfileID,
+            scheduleProfileID: schProfileID,
+            penaltySeconds: rec.int(CKFieldName.penaltySeconds),
+            penaltyTimerEndTime: rec.date(CKFieldName.penaltyTimerEndTime),
+            selfUnlocksPerDay: rec.int(CKFieldName.selfUnlocksPerDay),
+            scheduleProfileVersion: rec.date(CKFieldName.scheduleProfileVersion),
+            restrictionsJSON: rec.string(CKFieldName.restrictionsJSON)
+        )
+    }
+
+    static func eventLogEntry(fromREST rec: CloudKitRESTClient.RESTRecord) -> EventLogEntry? {
+        guard let idStr = rec.string(CKFieldName.eventID),
+              let id = UUID(uuidString: idStr),
+              let deviceID = rec.string(CKFieldName.deviceID),
+              let familyID = rec.string(CKFieldName.familyID),
+              let typeRaw = rec.string(CKFieldName.eventType),
+              let eventType = EventType(rawValue: typeRaw),
+              let timestamp = rec.date(CKFieldName.timestamp)
+        else { return nil }
+
+        return EventLogEntry(
+            id: id,
+            deviceID: DeviceID(rawValue: deviceID),
+            familyID: FamilyID(rawValue: familyID),
+            eventType: eventType,
+            details: rec.string(CKFieldName.details),
+            timestamp: timestamp,
+            uploadState: .uploaded
+        )
+    }
+
+    static func deviceLocation(fromREST rec: CloudKitRESTClient.RESTRecord) -> DeviceLocation? {
+        guard let deviceID = rec.string(CKFieldName.deviceID),
+              let familyID = rec.string(CKFieldName.familyID),
+              let lat = rec.double(CKFieldName.locLatitude),
+              let lon = rec.double(CKFieldName.locLongitude),
+              let acc = rec.double(CKFieldName.locAccuracy),
+              let ts = rec.date(CKFieldName.locTimestamp)
+        else { return nil }
+
+        let uuidStr = rec.recordName.replacingOccurrences(of: "\(CKRecordType.deviceLocation)_", with: "")
+
+        return DeviceLocation(
+            id: UUID(uuidString: uuidStr) ?? UUID(),
+            deviceID: DeviceID(rawValue: deviceID),
+            familyID: FamilyID(rawValue: familyID),
+            latitude: lat,
+            longitude: lon,
+            horizontalAccuracy: acc,
+            timestamp: ts,
+            address: rec.string(CKFieldName.locAddress),
+            speed: rec.double(CKFieldName.locSpeed),
+            course: rec.double(CKFieldName.locCourse)
+        )
+    }
+
+    static func pendingAppReview(fromREST rec: CloudKitRESTClient.RESTRecord) -> PendingAppReview? {
+        guard let familyID = rec.string(CKFieldName.familyID),
+              let childProfileID = rec.string(CKFieldName.profileID),
+              let deviceID = rec.string(CKFieldName.deviceID),
+              let fingerprint = rec.string(CKFieldName.appFingerprint),
+              let appName = rec.string(CKFieldName.appName),
+              let createdAt = rec.date(CKFieldName.createdAt),
+              let updatedAt = rec.date(CKFieldName.updatedAt)
+        else { return nil }
+
+        let nameResolved = rec.bool(CKFieldName.nameResolved) ?? false
+        let uuidStr = rec.recordName.replacingOccurrences(of: "BBPendingAppReview_", with: "")
+
+        return PendingAppReview(
+            id: UUID(uuidString: uuidStr) ?? UUID(),
+            familyID: FamilyID(rawValue: familyID),
+            childProfileID: ChildProfileID(rawValue: childProfileID),
+            deviceID: DeviceID(rawValue: deviceID),
+            appFingerprint: fingerprint,
+            appName: appName,
+            bundleID: rec.string("appBundleID"),
+            nameResolved: nameResolved,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            tokenDataBase64: rec.string("tokenDataBase64")
+        )
+    }
+
+    static func schedule(fromREST rec: CloudKitRESTClient.RESTRecord) -> Schedule? {
+        guard let familyID = rec.string(CKFieldName.familyID),
+              let profileID = rec.string(CKFieldName.profileID),
+              let name = rec.string(CKFieldName.scheduleName),
+              let modeRaw = rec.string(CKFieldName.mode),
+              let mode = LockMode.from(modeRaw),
+              let startH = rec.int(CKFieldName.startHour),
+              let startM = rec.int(CKFieldName.startMinute),
+              let endH = rec.int(CKFieldName.endHour),
+              let endM = rec.int(CKFieldName.endMinute),
+              let active = rec.bool(CKFieldName.isActive),
+              let updatedAt = rec.date(CKFieldName.updatedAt)
+        else { return nil }
+
+        var days: Set<DayOfWeek> = []
+        if let daysJSON = rec.string(CKFieldName.daysOfWeekJSON),
+           let daysData = daysJSON.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(Set<DayOfWeek>.self, from: daysData) {
+            days = decoded
+        }
+
+        let uuidStr = rec.recordName.replacingOccurrences(of: "\(CKRecordType.schedule)_", with: "")
+        guard let scheduleID = UUID(uuidString: uuidStr) else { return nil }
+
+        return Schedule(
+            id: scheduleID,
+            childProfileID: ChildProfileID(rawValue: profileID),
+            familyID: FamilyID(rawValue: familyID),
+            name: name,
+            mode: mode,
+            daysOfWeek: days,
+            startTime: DayTime(hour: startH, minute: startM),
+            endTime: DayTime(hour: endH, minute: endM),
+            isActive: active,
+            updatedAt: updatedAt
+        )
+    }
+
+    static func scheduleProfile(fromREST rec: CloudKitRESTClient.RESTRecord) -> ScheduleProfile? {
+        guard let familyID = rec.string(CKFieldName.familyID),
+              let name = rec.string(CKFieldName.name),
+              let lockedModeRaw = rec.string(CKFieldName.lockedMode),
+              let lockedMode = LockMode.from(lockedModeRaw),
+              let isDefault = rec.bool(CKFieldName.isDefault),
+              let updatedAt = rec.date(CKFieldName.updatedAt)
+        else { return nil }
+
+        let uuidStr = rec.recordName.replacingOccurrences(of: "\(CKRecordType.scheduleProfile)_", with: "")
+        guard let profileID = UUID(uuidString: uuidStr) else { return nil }
+
+        var windows: [ActiveWindow] = []
+        if let json = rec.string(CKFieldName.freeWindowsJSON),
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([ActiveWindow].self, from: data) {
+            windows = decoded
+        }
+
+        var lockedWindows: [ActiveWindow] = []
+        if let json = rec.string(CKFieldName.essentialWindowsJSON),
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([ActiveWindow].self, from: data) {
+            lockedWindows = decoded
+        }
+
+        var exceptionDates: [Date] = []
+        if let json = rec.string(CKFieldName.exceptionDatesJSON),
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([Date].self, from: data) {
+            exceptionDates = decoded
+        }
+
+        return ScheduleProfile(
+            id: profileID,
+            familyID: FamilyID(rawValue: familyID),
+            name: name,
+            unlockedWindows: windows,
+            lockedWindows: lockedWindows,
+            lockedMode: lockedMode,
+            exceptionDates: exceptionDates,
+            isDefault: isDefault,
+            updatedAt: updatedAt
+        )
+    }
+
+    // MARK: - RemoteCommand (REST decode)
+
+    static func remoteCommand(fromREST rec: CloudKitRESTClient.RESTRecord) -> RemoteCommand? {
+        guard let cmdIDStr = rec.string(CKFieldName.commandID),
+              let cmdID = UUID(uuidString: cmdIDStr),
+              let familyID = rec.string(CKFieldName.familyID),
+              let targetTypeStr = rec.string(CKFieldName.targetType),
+              let actionJSON = rec.string(CKFieldName.actionJSON),
+              let actionData = actionJSON.data(using: .utf8),
+              let action = try? JSONDecoder().decode(CommandAction.self, from: actionData),
+              let issuedBy = rec.string(CKFieldName.issuedBy),
+              let issuedAt = rec.date(CKFieldName.issuedAt),
+              let statusRaw = rec.string(CKFieldName.status),
+              let status = CommandStatus(rawValue: statusRaw)
+        else { return nil }
+
+        let target: CommandTarget
+        let targetID = rec.string(CKFieldName.targetID)
+        switch targetTypeStr {
+        case "device":
+            guard let tid = targetID else { return nil }
+            target = .device(DeviceID(rawValue: tid))
+        case "child":
+            guard let tid = targetID else { return nil }
+            target = .child(ChildProfileID(rawValue: tid))
+        case "all":
+            target = .allDevices
+        default:
+            return nil
+        }
+
+        return RemoteCommand(
+            id: cmdID,
+            familyID: FamilyID(rawValue: familyID),
+            target: target,
+            action: action,
+            issuedBy: issuedBy,
+            issuedAt: issuedAt,
+            expiresAt: rec.date(CKFieldName.expiresAt),
+            status: status,
+            signatureBase64: rec.string(CKFieldName.signatureBase64)
         )
     }
 
