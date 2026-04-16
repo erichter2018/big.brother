@@ -171,6 +171,15 @@ public enum AppGroupKeys {
     /// specific command landed.
     public static let lastCommandID = "fr.bigbrother.lastCommandID"
 
+    /// CommandID of the last command for which shields were VERIFIED applied
+    /// (post-write shieldDiagnostic passed, or Monitor confirmed). Pairs with
+    /// `lastShieldAppliedForCmdAt`. Lets harness/parent measure the gap
+    /// between command-ack and shield-actually-enforced.
+    public static let lastShieldAppliedForCmdID = "fr.bigbrother.lastShieldAppliedForCmdID"
+
+    /// Timestamp (epoch seconds) paired with `lastShieldAppliedForCmdID`.
+    public static let lastShieldAppliedForCmdAt = "fr.bigbrother.lastShieldAppliedForCmdAt"
+
     // MARK: - Reconcile signals
 
     /// Epoch seconds written by the main app when it wants the monitor

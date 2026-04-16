@@ -1183,6 +1183,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             let verifyEnforcement = enforcement
             let verifySnapshotStore = snapshotStore
             let committedVersion = snapshot.effectivePolicy.policyVersion
+            let verifyCmdID = commandID.uuidString
             Task.detached {
                 try? await Task.sleep(for: .seconds(1))
                 guard let currentSnap = verifySnapshotStore.loadCurrentSnapshot(),
@@ -1206,8 +1207,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     let retryDiag = verifyEnforcement?.shieldDiagnostic()
                     let retryOK = (retryDiag?.shieldsActive == true || retryDiag?.categoryActive == true) == shouldBeShielded
                     NSLog("[CommandProcessor] Retry result: \(retryOK ? "OK" : "STILL FAILED")")
+                    if retryOK { Self.recordShieldsAppliedForCmd(verifyCmdID) }
                 } else {
                     NSLog("[CommandProcessor] Post-write verify OK")
+                    Self.recordShieldsAppliedForCmd(verifyCmdID)
                 }
             }
 
@@ -1226,6 +1229,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             // recovers during the wait. Retries re-read the current snapshot
             // so we never stomp a newer command with this task's stale one.
             let maxAttempts = 20
+            let monitorCmdID = commandID.uuidString
             Task.detached {
                 let defaults = UserDefaults.appGroup
                 var confirmed = false
@@ -1235,6 +1239,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     if confirmedAt >= triggerTime {
                         NSLog("[CommandProcessor] Monitor confirmed enforcement after \(attempt)s")
                         confirmed = true
+                        Self.recordShieldsAppliedForCmd(monitorCmdID)
                         break
                     }
                     // Exit the loop early if a newer snapshot superseded ours —
@@ -2219,6 +2224,25 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
     private static func tokenFingerprint(for data: Data) -> String {
         TokenFingerprint.fingerprint(for: data)
+    }
+
+    /// Record that shields have been verified applied for a specific commandID.
+    /// Writes both the ID and the timestamp to AppGroup so the next heartbeat
+    /// carries them to the parent. Safe to call multiple times; overwriting
+    /// with the same cmdID is a no-op. A newer cmdID will win; an older one
+    /// should not overwrite a newer one — we guard with a simple freshness
+    /// check against the current `lastCommandID` (if THIS cmdID isn't the
+    /// current one, a newer command landed between our apply and our verify,
+    /// and that newer command's verify path owns the write).
+    private static func recordShieldsAppliedForCmd(_ cmdID: String) {
+        let defaults = UserDefaults.appGroup
+        let currentLatest = defaults?.string(forKey: AppGroupKeys.lastCommandID)
+        if let currentLatest, currentLatest != cmdID {
+            // A newer command already landed. Its verify path owns the write.
+            return
+        }
+        defaults?.set(cmdID, forKey: AppGroupKeys.lastShieldAppliedForCmdID)
+        defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastShieldAppliedForCmdAt)
     }
 
     // MARK: - App Review (Mode 2)

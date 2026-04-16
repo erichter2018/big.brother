@@ -378,6 +378,8 @@ enum CKRecordConversion {
         record[CKFieldName.hbActiveScheduleWindow] = hb.activeScheduleWindowName
         record[CKFieldName.hbLastCommandProcessedAt] = hb.lastCommandProcessedAt.map { $0 as NSDate }
         record[CKFieldName.hbLastCommandID] = hb.lastCommandID
+        record[CKFieldName.hbShieldsAppliedForCmdID] = hb.lastShieldAppliedForCmdID
+        record[CKFieldName.hbShieldsAppliedForCmdAt] = hb.lastShieldAppliedForCmdAt.map { $0 as NSDate }
         record[CKFieldName.hbMonitorLastActiveAt] = hb.monitorLastActiveAt.map { $0 as NSDate }
         record[CKFieldName.hbVPNDetected] = hb.vpnDetected.map { NSNumber(value: $0) }
         record[CKFieldName.hbTimeZoneID] = hb.timeZoneIdentifier
@@ -484,6 +486,8 @@ enum CKRecordConversion {
             activeScheduleWindowName: record[CKFieldName.hbActiveScheduleWindow] as? String,
             lastCommandProcessedAt: record[CKFieldName.hbLastCommandProcessedAt] as? Date,
             lastCommandID: record[CKFieldName.hbLastCommandID] as? String,
+            lastShieldAppliedForCmdID: record[CKFieldName.hbShieldsAppliedForCmdID] as? String,
+            lastShieldAppliedForCmdAt: record[CKFieldName.hbShieldsAppliedForCmdAt] as? Date,
             monitorLastActiveAt: record[CKFieldName.hbMonitorLastActiveAt] as? Date,
             vpnDetected: (record[CKFieldName.hbVPNDetected] as? Int64).map { $0 != 0 },
             internetBlocked: (record[CKFieldName.hbInternetBlocked] as? Int64).map { $0 != 0 },
@@ -595,6 +599,8 @@ enum CKRecordConversion {
             activeScheduleWindowName: rec.string(CKFieldName.hbActiveScheduleWindow),
             lastCommandProcessedAt: rec.date(CKFieldName.hbLastCommandProcessedAt),
             lastCommandID: rec.string(CKFieldName.hbLastCommandID),
+            lastShieldAppliedForCmdID: rec.string(CKFieldName.hbShieldsAppliedForCmdID),
+            lastShieldAppliedForCmdAt: rec.date(CKFieldName.hbShieldsAppliedForCmdAt),
             monitorLastActiveAt: rec.date(CKFieldName.hbMonitorLastActiveAt),
             vpnDetected: rec.bool(CKFieldName.hbVPNDetected),
             internetBlocked: rec.bool(CKFieldName.hbInternetBlocked),

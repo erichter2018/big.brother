@@ -397,6 +397,8 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             activeScheduleWindowName: Self.activeScheduleWindowName(from: storage),
             lastCommandProcessedAt: Self.lastCommandProcessedAt(from: storage),
             lastCommandID: Self.lastCommandID(from: storage),
+            lastShieldAppliedForCmdID: Self.lastShieldAppliedForCmdID(from: storage),
+            lastShieldAppliedForCmdAt: Self.lastShieldAppliedForCmdAt(from: storage),
             monitorLastActiveAt: Self.monitorLastActiveAt(),
             vpnDetected: VPNDetector.isVPNActive(),
             internetBlocked: UserDefaults.appGroup?
@@ -1060,6 +1062,17 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     private static func lastCommandID(from storage: any SharedStorageProtocol) -> String? {
         let defaults = UserDefaults.appGroup ?? .standard
         return defaults.string(forKey: AppGroupKeys.lastCommandID)
+    }
+
+    private static func lastShieldAppliedForCmdID(from storage: any SharedStorageProtocol) -> String? {
+        let defaults = UserDefaults.appGroup ?? .standard
+        return defaults.string(forKey: AppGroupKeys.lastShieldAppliedForCmdID)
+    }
+
+    private static func lastShieldAppliedForCmdAt(from storage: any SharedStorageProtocol) -> Date? {
+        let defaults = UserDefaults.appGroup ?? .standard
+        let ts = defaults.double(forKey: AppGroupKeys.lastShieldAppliedForCmdAt)
+        return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
     }
 
     private static func monitorLastActiveAt() -> Date? {

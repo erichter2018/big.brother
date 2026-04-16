@@ -2909,6 +2909,23 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    /// Record that shields have been verified applied for a specific commandID.
+    /// Mirrors CommandProcessorImpl.recordShieldsAppliedForCmd — writes both
+    /// the ID and the timestamp to AppGroup so the next heartbeat carries them
+    /// to the parent. Guards against stomping a newer command's already-
+    /// recorded verification: if the current lastCommandID differs from ours,
+    /// another command landed between our apply and our verify, and its own
+    /// verify path owns the write.
+    private static func recordShieldsAppliedForCmd(_ cmdID: String) {
+        let defaults = UserDefaults.appGroup
+        let currentLatest = defaults?.string(forKey: AppGroupKeys.lastCommandID)
+        if let currentLatest, currentLatest != cmdID {
+            return
+        }
+        defaults?.set(cmdID, forKey: AppGroupKeys.lastShieldAppliedForCmdID)
+        defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastShieldAppliedForCmdAt)
+    }
+
     private static func markCommandAppliedAsync(db: CKDatabase, recordName: String) {
         Task.detached {
             do {
@@ -3372,15 +3389,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         )
         try? await UNUserNotificationCenter.current().add(notifRequest)
 
-        // Signal Monitor to re-apply ManagedSettings from the snapshot we wrote.
-        signalMonitorToReconcile()
+        // Signal Monitor to re-apply ManagedSettings from the snapshot we
+        // wrote. 5s delay (vs the 60s default) so the Monitor wakes for the
+        // next-minute boundary, keeping shield-apply latency in the 5-30s
+        // range. The Monitor itself stamps `lastShieldAppliedForCmdID` on
+        // success (see `stampEnforcementConfirmed` in the Monitor extension),
+        // so there's no tunnel-side polling/watcher — that was removed when
+        // the Monitor became the authoritative writer.
+        scheduleEnforcementRefreshActivity(source: "tunnelCmd.\(actionType)", delaySeconds: 5)
+        triggerBackgroundURLSessionWake()
 
-        // Fire an immediate heartbeat so the parent sees the confirmed mode
-        // change within seconds. Without this, a tunnel-processed command
-        // waits for the next periodic heartbeat (5 min) or the
-        // monitorConfirmation path (10–90 s) to surface as applied. The
-        // `force: true` bypasses the 120 s dedup gate — we specifically want
-        // this write to land even if the main app just heartbeated.
+        // Fire an immediate heartbeat so the parent sees the command-ack
+        // within seconds. The subsequent Monitor-confirm heartbeat (triggered
+        // from `monitorNeedsHeartbeat` on the tunnel's 1s fast-path) carries
+        // the shield-confirm.
         Task { await sendHeartbeatFromTunnel(reason: "modeCommandApplied", force: true) }
     }
 
@@ -3939,6 +3961,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         if let lastCmdID = defaults?.string(forKey: AppGroupKeys.lastCommandID), !lastCmdID.isEmpty {
             record["hbLastCmdID"] = lastCmdID
+        }
+
+        // Shield-apply confirmation — the gap between lastCmdAt and
+        // hbShldCmdAt is what the kid perceives as shields lagging behind
+        // the command.
+        let shieldCmdAt = defaults?.double(forKey: AppGroupKeys.lastShieldAppliedForCmdAt) ?? 0
+        if shieldCmdAt > 0 {
+            record["hbShldCmdAt"] = Date(timeIntervalSince1970: shieldCmdAt) as NSDate
+        }
+        if let shieldCmdID = defaults?.string(forKey: AppGroupKeys.lastShieldAppliedForCmdID), !shieldCmdID.isEmpty {
+            record["hbShldCmdID"] = shieldCmdID
         }
 
         // Null out fields the tunnel can't provide — prevents stale main-app values

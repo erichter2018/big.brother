@@ -38,7 +38,7 @@ public enum AppConstants {
 
     /// Manual build number — bump each time you deploy new code during development.
     /// Both parent and child read this constant; matching numbers = same code.
-    public static let appBuildNumber = 622
+    public static let appBuildNumber = 628
 
     // MARK: - Enrollment
 
@@ -145,6 +145,15 @@ public enum AppConstants {
     /// collapses the poll wait to zero; when it doesn't, the 1s timer still
     /// acts as the reliable backbone.
     public static let darwinNotifTunnelPokeCommands = "fr.bigbrother.tunnel.pokeCommands"
+
+    /// Posted by the VPN tunnel after it applies a mode command. The main
+    /// app observes this and — if alive — immediately runs
+    /// `enforcement.apply()` + shield verify, writing `lastShieldAppliedForCmd*`
+    /// within a second. When the main app is suspended the observer doesn't
+    /// fire; the bg URLSession wake / Monitor DeviceActivity paths cover
+    /// that case. This notification is the fast path for the common case
+    /// of the kid actively using the phone.
+    public static let darwinNotifAppApplyShieldsNow = "fr.bigbrother.app.applyShieldsNow"
 
     // MARK: - Snapshot History
 

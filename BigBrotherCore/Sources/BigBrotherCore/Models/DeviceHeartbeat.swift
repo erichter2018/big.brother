@@ -93,6 +93,16 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
     /// command landed around that time. Proves we're not measuring a coincidence.
     public let lastCommandID: String?
 
+    /// CommandID whose shield state has been verified applied (post-write
+    /// shieldDiagnostic passed OR Monitor confirmed). Pairs with
+    /// `lastShieldAppliedForCmdAt`. The gap between `lastCommandProcessedAt`
+    /// and `lastShieldAppliedForCmdAt` is the shield-apply latency — what the
+    /// kid actually sees on the home screen lagging behind the command.
+    public let lastShieldAppliedForCmdID: String?
+
+    /// When `lastShieldAppliedForCmdID` was confirmed applied.
+    public let lastShieldAppliedForCmdAt: Date?
+
     /// When the Monitor extension last fired (reconciliation, schedule transition).
     /// Used by parent to detect force-close: if this is recent but heartbeat is stale,
     /// the device is alive but the main app was force-closed.
@@ -254,6 +264,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         activeScheduleWindowName: String? = nil,
         lastCommandProcessedAt: Date? = nil,
         lastCommandID: String? = nil,
+        lastShieldAppliedForCmdID: String? = nil,
+        lastShieldAppliedForCmdAt: Date? = nil,
         monitorLastActiveAt: Date? = nil,
         vpnDetected: Bool? = nil,
         internetBlocked: Bool? = nil,
@@ -334,6 +346,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         self.activeScheduleWindowName = activeScheduleWindowName
         self.lastCommandProcessedAt = lastCommandProcessedAt
         self.lastCommandID = lastCommandID
+        self.lastShieldAppliedForCmdID = lastShieldAppliedForCmdID
+        self.lastShieldAppliedForCmdAt = lastShieldAppliedForCmdAt
         self.monitorLastActiveAt = monitorLastActiveAt
         self.vpnDetected = vpnDetected
         self.internetBlocked = internetBlocked
@@ -402,6 +416,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         case activeScheduleWindowName
         case lastCommandProcessedAt
         case lastCommandID
+        case lastShieldAppliedForCmdID
+        case lastShieldAppliedForCmdAt
         case monitorLastActiveAt
         case vpnDetected, internetBlocked, internetBlockedReason, dnsBlockedDomainCount, appUsageMinutes
         case dnsFilteringEnabled, dnsFilteringAutoReenableAt
@@ -464,6 +480,8 @@ public struct DeviceHeartbeat: Codable, Sendable, Equatable {
         activeScheduleWindowName = try container.decodeIfPresent(String.self, forKey: .activeScheduleWindowName)
         lastCommandProcessedAt = try container.decodeIfPresent(Date.self, forKey: .lastCommandProcessedAt)
         lastCommandID = try container.decodeIfPresent(String.self, forKey: .lastCommandID)
+        lastShieldAppliedForCmdID = try container.decodeIfPresent(String.self, forKey: .lastShieldAppliedForCmdID)
+        lastShieldAppliedForCmdAt = try container.decodeIfPresent(Date.self, forKey: .lastShieldAppliedForCmdAt)
         monitorLastActiveAt = try container.decodeIfPresent(Date.self, forKey: .monitorLastActiveAt)
         vpnDetected = try container.decodeIfPresent(Bool.self, forKey: .vpnDetected)
         internetBlocked = try container.decodeIfPresent(Bool.self, forKey: .internetBlocked)

@@ -50,6 +50,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Prefix used for timed lock (lockUntil) — auto-return to schedule.
     private let lockUntilPrefix = "bigbrother.lockuntil."
 
+    /// Called whenever the Monitor has finished applying enforcement for the
+    /// current snapshot. Stamps both the generic "Monitor ran" timestamp and
+    /// the command-tied shield-verify fields so the parent sees — on the
+    /// very next heartbeat — that shields are now in the expected state for
+    /// `lastCommandID`. This is the authoritative confirmation: the Monitor
+    /// is the only process that can both verify ManagedSettings state and
+    /// survive the main app being suspended.
+    private func stampEnforcementConfirmed() {
+        let defaults = UserDefaults.appGroup
+        let now = Date().timeIntervalSince1970
+        defaults?.set(now, forKey: "monitorEnforcementConfirmedAt")
+        if let cmdID = defaults?.string(forKey: AppGroupKeys.lastCommandID), !cmdID.isEmpty {
+            defaults?.set(cmdID, forKey: AppGroupKeys.lastShieldAppliedForCmdID)
+            defaults?.set(now, forKey: AppGroupKeys.lastShieldAppliedForCmdAt)
+        }
+    }
+
     /// One-time migration: clear legacy named stores (base, schedule, tempUnlock)
     /// so stale shields from the old multi-store layout don't linger.
     private func migrateLegacyStoresIfNeeded() {
@@ -109,8 +126,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
             updateSharedState(mode: resolution.mode)
             // Confirm enforcement applied via UserDefaults — main app polls this.
-            UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
+            stampEnforcementConfirmed()
             UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: "monitorNeedsHeartbeat")
             logEvent(.policyReconciled, details: "Monitor enforcement refresh: \(resolution.mode.rawValue) (\(resolution.reason))")
@@ -203,8 +219,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 applyShieldingToAllStores(mode: resolution.mode, policy: policy)
             }
             updateSharedState(mode: resolution.mode)
-            UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
+            stampEnforcementConfirmed()
             return
         }
 
@@ -224,8 +239,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
             updateSharedState(mode: resolution.mode)
             // Confirm enforcement applied via UserDefaults — main app polls this.
-            UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
+            stampEnforcementConfirmed()
             logEvent(.policyReconciled, details: "On-demand enforcement: \(resolution.mode.rawValue) (\(resolution.reason))")
             // Signal tunnel to send a confirmation heartbeat — Monitor can't make network calls.
             // Parent sees the confirmed mode within 30s (tunnel's next liveness tick).
@@ -1332,7 +1346,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 isTemporaryUnlock: resolution.isTemporary,
                 temporaryUnlockExpiresAt: resolution.expiresAt
             )
-            reconcileDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorEnforcementConfirmedAt")
+            stampEnforcementConfirmed()
             logEvent(.policyReconciled, details: "Reconciliation: no drift (\(resolution.reason))")
             return
         }

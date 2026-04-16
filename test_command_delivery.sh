@@ -391,6 +391,7 @@ hb_field() {
 
 POLL_ELAPSED_MS=0
 POLL_APPLY_MS=0        # push_time_ms → hbLastCmdAt (true delivery latency)
+POLL_SHIELD_MS=0       # hbLastCmdAt → hbShldCmdAt (shield-apply lag)
 POLL_HB_LAG_MS=0       # hbLastCmdAt → heartbeat timestamp (upload lag)
 
 # Poll until the device's heartbeat reports that OUR specific commandID was
@@ -428,15 +429,21 @@ poll_for_cmd_applied() {
         local hb_json
         hb_json=$(fetch_heartbeat)
 
-        local current_mode last_cmd_id last_cmd_at hb_ts hb_source
+        local current_mode last_cmd_id last_cmd_at hb_ts hb_source shld_cmd_id shld_cmd_at
         current_mode=$(hb_field "$hb_json" '.records[0].fields.currentMode.value')
         last_cmd_id=$(hb_field "$hb_json" '.records[0].fields.hbLastCmdID.value')
         last_cmd_at=$(hb_field "$hb_json" '.records[0].fields.hbLastCmdAt.value')
         hb_ts=$(hb_field "$hb_json" '.records[0].fields.timestamp.value')
         hb_source=$(hb_field "$hb_json" '.records[0].fields.hbSource.value')
+        shld_cmd_id=$(hb_field "$hb_json" '.records[0].fields.hbShldCmdID.value')
+        shld_cmd_at=$(hb_field "$hb_json" '.records[0].fields.hbShldCmdAt.value')
 
-        if [ "$last_cmd_id" = "$expected_cmd_id" ]; then
-            # Export source so run_transition can display which path handled it.
+        # Require BOTH: command ack AND shield-apply confirmation for our
+        # specific cmd_id. hbShldCmdID is written only after post-write verify
+        # OR Monitor-confirm path succeeds — so matching it proves shields are
+        # in the expected state for this command, not just "some command
+        # was processed recently".
+        if [ "$last_cmd_id" = "$expected_cmd_id" ] && [ "$shld_cmd_id" = "$expected_cmd_id" ]; then
             POLL_SOURCE="$hb_source"
             local end_ms
             end_ms=$(now_ms)
@@ -445,6 +452,9 @@ poll_for_cmd_applied() {
                 POLL_APPLY_MS=$((last_cmd_at - push_ms))
                 if [ -n "$hb_ts" ] && [ "$hb_ts" -gt 0 ] 2>/dev/null; then
                     POLL_HB_LAG_MS=$((hb_ts - last_cmd_at))
+                fi
+                if [ -n "$shld_cmd_at" ] && [ "$shld_cmd_at" -gt 0 ] 2>/dev/null; then
+                    POLL_SHIELD_MS=$((shld_cmd_at - last_cmd_at))
                 fi
             fi
             # Warn (non-fatal) if mode on heartbeat doesn't match target.
@@ -486,6 +496,7 @@ append_result() {
 
 ALL_LATENCIES=()  # total push → heartbeat-observable
 ALL_APPLY_MS=()   # push → hbLastCmdAt (true command-apply latency)
+ALL_SHIELD_MS=()  # hbLastCmdAt → hbShldCmdAt (shield-apply lag)
 ALL_HB_LAG_MS=()  # hbLastCmdAt → heartbeat.timestamp (upload+index lag)
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -523,8 +534,9 @@ run_transition() {
         if [ "$POLL_APPLY_MS" -gt 0 ] 2>/dev/null; then
             pretty_apply=$(fmt_elapsed "$POLL_APPLY_MS")
             pretty_hb=$(fmt_elapsed "$POLL_HB_LAG_MS")
+            pretty_shield=$(fmt_elapsed "$POLL_SHIELD_MS")
             local src_tag="${POLL_SOURCE:-?}"
-            log_ok "[$step/$total] $target_mode confirmed via=$src_tag | total=$pretty_total apply=$pretty_apply hb-lag=$pretty_hb (cmd=$cmd_id)"
+            log_ok "[$step/$total] $target_mode confirmed via=$src_tag | total=$pretty_total apply=$pretty_apply shield=$pretty_shield hb-lag=$pretty_hb (cmd=$cmd_id)"
         else
             log_ok "[$step/$total] $target_mode confirmed in $pretty_total (cmd=$cmd_id — apply time unavailable, likely older build)"
         fi
@@ -533,6 +545,7 @@ run_transition() {
         if [ "$POLL_APPLY_MS" -gt 0 ] 2>/dev/null; then
             ALL_APPLY_MS+=("$POLL_APPLY_MS")
             ALL_HB_LAG_MS+=("$POLL_HB_LAG_MS")
+            ALL_SHIELD_MS+=("$POLL_SHIELD_MS")
         fi
         PASS_COUNT=$((PASS_COUNT + 1))
         return 0
@@ -706,8 +719,12 @@ main() {
         echo ""
 
         if [ ${#ALL_APPLY_MS[@]} -gt 0 ]; then
-            printf "${BOLD}Apply latency (push → device applied, from hbLastCmdAt):${RESET}\n"
+            printf "${BOLD}Apply latency (push → device-side command ack):${RESET}\n"
             compute_stats "${ALL_APPLY_MS[@]}"
+            echo ""
+
+            printf "${BOLD}Shield latency (command ack → shields verified applied):${RESET}\n"
+            compute_stats "${ALL_SHIELD_MS[@]}"
             echo ""
 
             printf "${BOLD}Heartbeat lag (apply → heartbeat uploaded):${RESET}\n"

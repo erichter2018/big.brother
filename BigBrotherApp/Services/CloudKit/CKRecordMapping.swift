@@ -152,6 +152,8 @@ enum CKFieldName {
     static let hbActiveScheduleWindow = "hbActiveScheduleWindow"
     static let hbLastCommandProcessedAt = "hbLastCmdAt"
     static let hbLastCommandID = "hbLastCmdID"
+    static let hbShieldsAppliedForCmdID = "hbShldCmdID"
+    static let hbShieldsAppliedForCmdAt = "hbShldCmdAt"
     static let hbMonitorLastActiveAt = "hbMonitorActiveAt"
 
     // BBHeartbeat (location)
