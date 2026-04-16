@@ -2173,18 +2173,48 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         return nil
     }
 
-    private func removePendingAppReviewsLocally(fingerprint: String) {
-        if let data = storage.readRawData(forKey: "pending_review_local.json"),
-           var pending = try? JSONDecoder().decode([PendingAppReview].self, from: data) {
-            var changed = false
-            for i in pending.indices where pending[i].appFingerprint == fingerprint {
-                pending[i].syncStatus = .resolved
-                changed = true
-            }
-            if changed, let encoded = try? JSONEncoder().encode(pending) {
-                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
-            }
+    /// Remove any locally-staged PendingAppReview records that refer to the
+    /// same app as the just-resolved review. Matches by bundleID / name /
+    /// fingerprint via `AppIdentityMatcher`, so a parent approval also clears
+    /// stale local entries that share an identity under a different
+    /// fingerprint (post token-rotation, or a second picker flow that staged
+    /// the same app before the parent's decision arrived). Entries are
+    /// REMOVED, not merely marked resolved: the earlier mark-only path left
+    /// stale rows that the picker's fingerprint dedup would happily match,
+    /// causing new picks to silently skip review.
+    ///
+    /// Callers pass the fingerprint from the `reviewApp` command. If the
+    /// pending file contains an entry with that fingerprint, its
+    /// bundleID/appName are used to widen the match so any sibling stale
+    /// entries (same app, different fingerprint) are also cleaned up.
+    private func removePendingAppReviewsLocally(
+        fingerprint: String,
+        bundleID: String? = nil,
+        appName: String? = nil
+    ) {
+        guard let data = storage.readRawData(forKey: "pending_review_local.json"),
+              var pending = try? JSONDecoder().decode([PendingAppReview].self, from: data) else {
+            return
         }
+        // Enrich the match target with any bundleID/name we can recover from
+        // the pending file itself. Callers often only have the fingerprint.
+        // Device scope comes from the anchor too: everything in the local
+        // pending file was written by THIS device, so the fingerprint match
+        // should only fire within that device's scope (the matcher enforces
+        // this when both sides supply a deviceID).
+        let anchor = pending.first(where: { $0.appFingerprint == fingerprint })
+        let target = AppIdentityMatcher.Candidate(
+            bundleID: bundleID ?? anchor?.bundleID,
+            fingerprint: fingerprint,
+            appName: appName ?? anchor?.appName ?? "",
+            deviceID: anchor?.deviceID
+        )
+        let before = pending.count
+        pending.removeAll { AppIdentityMatcher.same($0.identityCandidate, target) }
+        guard pending.count != before, let encoded = try? JSONEncoder().encode(pending) else {
+            return
+        }
+        try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
     }
 
     private func reviewDispositionLabel(_ disposition: AppDisposition) -> String {

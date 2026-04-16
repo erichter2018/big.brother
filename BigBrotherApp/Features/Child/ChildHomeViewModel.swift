@@ -97,15 +97,17 @@ final class ChildHomeViewModel {
         let (live, approved, superseded) = partitionReviews(reviews)
 
         if !approved.isEmpty || !superseded.isEmpty {
-            // Mark resolved reviews instead of removing them — the sync
-            // loops filter on syncStatus != .resolved, so marking prevents
-            // re-upload to CK while keeping the entry for local bookkeeping.
-            var all = reviews
+            // REMOVE resolved reviews from the local file (was: marked
+            // `.resolved` and kept). The ShieldConfiguration and ShieldAction
+            // extensions read this file without filtering on syncStatus, so
+            // stale resolved rows caused icons to keep showing the "Sent to
+            // parent for review" shield after the parent had already decided.
+            // Removing the row is the safe path: the `syncResolvedPendingReviews`
+            // sync filter (!= .resolved) now sees zero resolved rows and
+            // uploads nothing stale.
             let resolvedIDs = Set((approved + superseded).map(\.id))
-            for i in all.indices where resolvedIDs.contains(all[i].id) {
-                all[i].syncStatus = .resolved
-            }
-            if let encoded = try? JSONEncoder().encode(all) {
+            let kept = reviews.filter { !resolvedIDs.contains($0.id) }
+            if let encoded = try? JSONEncoder().encode(kept) {
                 try? appState.storage.writeRawData(encoded, forKey: "pending_review_local.json")
             }
             applyResolvedReviewsLocally(approved)

@@ -593,16 +593,19 @@ final class AppState {
         bundleID: String?,
         fingerprint: String?
     ) -> Bool {
-        let normalizedBundleID = Self.normalizeBundleID(bundleID)
-        if let normalizedBundleID,
-           Self.normalizeBundleID(config.bundleID) == normalizedBundleID {
-            return true
-        }
-        if let fingerprint, config.appFingerprint == fingerprint {
-            return true
-        }
-        return Self.isUsefulManagedAppName(appName) &&
-            Self.normalizeAppName(config.appName) == Self.normalizeAppName(appName)
+        // Route through the shared matcher so parent-filter, child-auto-approve
+        // and local cleanup stay byte-for-byte consistent. Caller-supplied
+        // deviceID scope is unknown at this entry point — matcher still holds
+        // (bundleID > fingerprint > name); fingerprint match in an unknown
+        // scope is accepted because no cross-device scope info is available.
+        AppIdentityMatcher.same(
+            AppIdentityMatcher.Candidate(
+                bundleID: bundleID,
+                fingerprint: fingerprint,
+                appName: appName
+            ),
+            config.identityCandidate
+        )
     }
 
     private func matchesTimeLimitConfig(_ config: TimeLimitConfig, limit: AppTimeLimit) -> Bool {
@@ -663,16 +666,7 @@ final class AppState {
         _ review: PendingAppReview,
         matches config: TimeLimitConfig
     ) -> Bool {
-        if let reviewBundleID = normalizeBundleID(review.bundleID),
-           normalizeBundleID(config.bundleID) == reviewBundleID {
-            return true
-        }
-        if config.appFingerprint == review.appFingerprint {
-            return true
-        }
-        return isUsefulManagedAppName(review.appName) &&
-            isUsefulManagedAppName(config.appName) &&
-            normalizeAppName(review.appName) == normalizeAppName(config.appName)
+        AppIdentityMatcher.same(review.identityCandidate, config.identityCandidate)
     }
 
     nonisolated private static func pendingReview(

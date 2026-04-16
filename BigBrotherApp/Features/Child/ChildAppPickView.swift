@@ -303,8 +303,18 @@ struct ChildAppPickView: View {
                 guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
                 return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
             }()
-            let existingFingerprints = Set(pending.filter { $0.syncStatus != .resolved }.map(\.appFingerprint))
-            let dedupedReviews = newReviews.filter { !existingFingerprints.contains($0.appFingerprint) }
+            // Dedupe the new reviews against any still-unresolved local entries
+            // using the shared identity matcher (bundleID > fingerprint > name).
+            // Previously this checked fingerprint only, which failed whenever a
+            // token rotated or when a different picker flow had already staged
+            // the same app with a different fingerprint — both led to duplicate
+            // local rows the ShieldConfiguration and later cleanup would trip on.
+            let livePending = pending.filter { $0.syncStatus != .resolved }
+            let dedupedReviews = newReviews.filter { candidate in
+                !livePending.contains { existing in
+                    AppIdentityMatcher.same(existing.identityCandidate, candidate.identityCandidate)
+                }
+            }
             pending.append(contentsOf: dedupedReviews)
             if let encoded = try? JSONEncoder().encode(pending) {
                 try? storage.writeRawData(encoded, forKey: "pending_review_local.json")

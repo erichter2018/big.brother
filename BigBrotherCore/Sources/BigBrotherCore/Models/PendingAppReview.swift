@@ -31,8 +31,15 @@ public struct PendingAppReview: Codable, Sendable, Identifiable, Equatable {
         case resolved
     }
 
-    /// Raw ApplicationToken data (base64). Stored so the parent's command
-    /// can reference the exact token without relying on fingerprint matching.
+    /// Raw ApplicationToken bytes (base64). **Device-local only.**
+    ///
+    /// ApplicationToken is opaque Data whose bytes differ across devices and
+    /// even across JSONEncoder invocations on the same device. Storing it on
+    /// the CK record lets the ORIGINATING device recover its exact token if
+    /// it loses the fingerprint→token mapping locally; it is NEVER valid to
+    /// decode this on a different device and apply it there. Cross-device
+    /// matching is handled by `AppIdentityMatcher` (bundleID > fingerprint
+    /// same-device > useful name) — never by token bytes.
     public var tokenDataBase64: String?
 
     public init(

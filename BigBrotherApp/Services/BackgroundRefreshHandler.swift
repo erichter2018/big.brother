@@ -314,17 +314,10 @@ enum BackgroundRefreshHandler {
         configs: [TimeLimitConfig]
     ) -> Bool {
         configs.contains { config in
-            if let reviewBundleID = normalizeBundleID(review.bundleID),
-               normalizeBundleID(config.bundleID) == reviewBundleID {
-                return config.isActive || config.updatedAt >= review.updatedAt
+            guard AppIdentityMatcher.same(review.identityCandidate, config.identityCandidate) else {
+                return false
             }
-            if config.appFingerprint == review.appFingerprint {
-                return config.isActive || config.updatedAt >= review.updatedAt
-            }
-            return isUsefulAppName(review.appName) &&
-                isUsefulAppName(config.appName) &&
-                normalizeAppName(review.appName) == normalizeAppName(config.appName) &&
-                (config.isActive || config.updatedAt >= review.updatedAt)
+            return config.isActive || config.updatedAt >= review.updatedAt
         }
     }
 

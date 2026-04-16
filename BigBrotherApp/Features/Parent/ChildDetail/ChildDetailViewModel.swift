@@ -1846,16 +1846,9 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     private static func review(_ review: PendingAppReview, matches config: TimeLimitConfig) -> Bool {
-        if let reviewBundleID = normalizeBundleID(review.bundleID),
-           normalizeBundleID(config.bundleID) == reviewBundleID {
-            return true
-        }
-        if config.appFingerprint == review.appFingerprint {
-            return true
-        }
-        return isUsefulAppName(review.appName) &&
-            isUsefulAppName(config.appName) &&
-            appNamesMatch(review.appName, config.appName)
+        // Centralized matcher. Cross-device-safe: bundleID > fingerprint
+        // (same-device only, gated on deviceID scope) > useful-app-name.
+        AppIdentityMatcher.same(review.identityCandidate, config.identityCandidate)
     }
 
     private static func review(_ review: PendingAppReview, isSupersededBy config: TimeLimitConfig) -> Bool {
@@ -1864,17 +1857,11 @@ final class ChildDetailViewModel: CommandSendable {
     }
 
     private static func reviewsMatch(_ lhs: PendingAppReview, _ rhs: PendingAppReview) -> Bool {
-        if let lhsBundleID = normalizeBundleID(lhs.bundleID),
-           let rhsBundleID = normalizeBundleID(rhs.bundleID),
-           lhsBundleID == rhsBundleID {
-            return true
-        }
-        if lhs.appFingerprint == rhs.appFingerprint {
-            return true
-        }
-        return isUsefulAppName(lhs.appName) &&
-            isUsefulAppName(rhs.appName) &&
-            appNamesMatch(lhs.appName, rhs.appName)
+        // Same matcher the review-vs-config path uses. Two reviews from the
+        // same device with matching fingerprints are the same app (re-request
+        // race); two reviews from different devices match on bundleID or
+        // useful name but NOT on fingerprint (tokens are device-local).
+        AppIdentityMatcher.same(lhs.identityCandidate, rhs.identityCandidate)
     }
 
     private func matchingTimeLimitConfig(for review: PendingAppReview) -> TimeLimitConfig? {
