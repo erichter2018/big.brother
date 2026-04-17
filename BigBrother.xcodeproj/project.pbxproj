@@ -143,6 +143,7 @@
 		B2C3E6FCA5D6DB5AAB9CB0BE /* TimerIntegrationConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7C70AFE0EFE8DF653DDC9C7 /* TimerIntegrationConfig.swift */; };
 		B575082471492F2440037E4F /* ChildHomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 015EB5816D3D8D3395FF5305 /* ChildHomeViewModel.swift */; };
 		B69521F0712ADB1DA5733417 /* Combine.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BE6A2F740EEDD95FD5798333 /* Combine.framework */; };
+		B6D1E23568FE5E9FE451FCA7 /* StartupWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 263B840758031CF5A049C2A8 /* StartupWatchdog.swift */; };
 		B9838E01CECE052E3B4A4C5A /* ScheduleManagerImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FE6A9ED79F5E082D597223 /* ScheduleManagerImpl.swift */; };
 		BA0CD64CE80B3BC86F80D0D7 /* CloudKitServiceImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33D8321C9F9209BE46A858C1 /* CloudKitServiceImpl.swift */; };
 		BAA54D7A8A572826EBD6154E /* BigBrotherShieldExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F85AF48051FD61F7CC41174 /* BigBrotherShieldExtension.swift */; };
@@ -307,6 +308,7 @@
 		21D9F4B16AB65B9226B9D66C /* ParentDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParentDashboardView.swift; sourceTree = "<group>"; };
 		25278626B1E7D32CA00C882C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		25B72B0369A8D42F28572244 /* ActivityFeedSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityFeedSection.swift; sourceTree = "<group>"; };
+		263B840758031CF5A049C2A8 /* StartupWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupWatchdog.swift; sourceTree = "<group>"; };
 		29D040A84EC024E85953B1DE /* AddChildView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddChildView.swift; sourceTree = "<group>"; };
 		2A6038FA70DCFA9E944B73C2 /* ModeChangeNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModeChangeNotifier.swift; sourceTree = "<group>"; };
 		2CDBCF4A69298132F5217DDB /* AlwaysAllowedSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlwaysAllowedSetupView.swift; sourceTree = "<group>"; };
@@ -577,6 +579,7 @@
 				18652D93CEE63E93A2ED1C86 /* AppState.swift */,
 				B3540B7DED0E46E1B9F57BD1 /* BigBrotherApp.swift */,
 				5074D042431F7060EE5C975B /* RootRouter.swift */,
+				263B840758031CF5A049C2A8 /* StartupWatchdog.swift */,
 				44A5D070114A411ACC63368E /* TaskTimeout.swift */,
 			);
 			path = App;
@@ -1574,6 +1577,7 @@
 				9FE0EF564B075BF6D530523E /* ShieldApplicationsTestView.swift in Sources */,
 				9F3DD4FC7301AD0211A106EC /* SkeletonChildCard.swift in Sources */,
 				8C512B4254BD37D6C7ABA736 /* SpeedLimitService.swift in Sources */,
+				B6D1E23568FE5E9FE451FCA7 /* StartupWatchdog.swift in Sources */,
 				D06E6E48A64E8DFE8EE2DA3E /* StatusBadge.swift in Sources */,
 				DA0B63BA5B483C05D83FDF3D /* SubscriptionGate.swift in Sources */,
 				FAA881071556B88FDF911394 /* SubscriptionManager.swift in Sources */,

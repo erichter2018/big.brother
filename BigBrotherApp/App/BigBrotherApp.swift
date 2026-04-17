@@ -4,31 +4,6 @@ import UserNotifications
 import BigBrotherCore
 import FirebaseCore
 
-// MARK: - Launch Diagnostics (inline to avoid cross-file resolution issues)
-
-/// Writes breadcrumb messages to Documents/launch_log.txt.
-/// Used to diagnose launch crashes that only occur without the debugger attached.
-private enum _LaunchLog {
-    static let url: URL? = FileManager.default
-        .urls(for: .documentDirectory, in: .userDomainMask).first?
-        .appendingPathComponent("launch_log.txt")
-
-    static func start() {
-        guard let url else { return }
-        try? "=== Launch \(Date()) ===\n".write(to: url, atomically: true, encoding: .utf8)
-    }
-
-    static func log(_ msg: String) {
-        guard let url else { return }
-        let line = "[\(Date())] \(msg)\n"
-        if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile()
-            h.write(Data(line.utf8))
-            h.closeFile()
-        }
-    }
-}
-
 // MARK: - App Entry Point
 
 /// Main app entry point.
@@ -48,17 +23,19 @@ struct BigBrotherApp: App {
     @State private var appState: AppState
 
     init() {
-        _LaunchLog.start()
-        _LaunchLog.log("App struct init")
-        // Configure Firebase only if GoogleService-Info.plist is present.
+        StartupWatchdog.start(build: AppConstants.appBuildNumber)
+        StartupWatchdog.log("App struct init")
         if Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist") != nil {
+            StartupWatchdog.checkpoint("FirebaseApp.configure")
             FirebaseApp.configure()
-            _LaunchLog.log("Firebase configured")
+            StartupWatchdog.complete("FirebaseApp.configure")
         } else {
-            _LaunchLog.log("Firebase: GoogleService-Info.plist not found, skipping")
+            StartupWatchdog.log("Firebase: GoogleService-Info.plist not found, skipping")
         }
+        StartupWatchdog.checkpoint("AppState.init")
         self._appState = State(initialValue: MainActor.assumeIsolated { AppState() })
-        _LaunchLog.log("AppState created, role=\(self._appState.wrappedValue.deviceRole)")
+        StartupWatchdog.complete("AppState.init")
+        StartupWatchdog.log("AppState created, role=\(self._appState.wrappedValue.deviceRole)")
     }
 
     var body: some Scene {
@@ -71,7 +48,7 @@ struct BigBrotherApp: App {
     }
 
     private func setupOnLaunch() async {
-        _LaunchLog.log("setupOnLaunch started")
+        StartupWatchdog.log("setupOnLaunch started")
 
         // Clear badge and stale launch-needed notifications on launch.
         try? await UNUserNotificationCenter.current().setBadgeCount(0)
@@ -82,7 +59,7 @@ struct BigBrotherApp: App {
 
         // Skip heavy setup for unconfigured devices — services aren't needed during onboarding.
         guard appState.deviceRole != .unconfigured else {
-            _LaunchLog.log("Unconfigured device — skipping setup")
+            StartupWatchdog.log("Unconfigured device — skipping setup")
             return
         }
 
@@ -111,14 +88,14 @@ struct BigBrotherApp: App {
         }
 
         // Configure all services (creates ManagedSettingsStore, CloudKit, etc.).
-        _LaunchLog.log("Calling configureServices (role=\(appState.deviceRole))")
+        StartupWatchdog.log("Calling configureServices (role=\(appState.deviceRole))")
         appState.configureServices()
-        _LaunchLog.log("configureServices complete")
+        StartupWatchdog.log("configureServices complete")
 
         // Restore enforcement state (child devices). This is synchronous and fast.
-        _LaunchLog.log("performRestoration starting")
+        StartupWatchdog.log("performRestoration starting")
         appState.performRestoration()
-        _LaunchLog.log("performRestoration complete")
+        StartupWatchdog.log("performRestoration complete")
         appState.handleMainAppResponsive(reapplyEnforcement: false)
 
         // Safety net: re-apply enforcement after a short delay.
@@ -128,7 +105,7 @@ struct BigBrotherApp: App {
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(3))
                 appState.performRestoration()
-                _LaunchLog.log("Delayed re-restoration complete")
+                StartupWatchdog.log("Delayed re-restoration complete")
             }
         }
 
@@ -156,31 +133,31 @@ struct BigBrotherApp: App {
                 // ALL other auto-prompts (notifications, location, FC auth) check
                 // this flag and suppress themselves until the fixer takes over.
                 permDefaults?.set(true, forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
-                _LaunchLog.log("Child: needs guided setup (FC auth=\(fcAuthStatus?.rawValue ?? "nil")) — will auto-show PermissionFixerView")
+                StartupWatchdog.log("Child: needs guided setup (FC auth=\(fcAuthStatus?.rawValue ?? "nil")) — will auto-show PermissionFixerView")
             } else if needsGuidedSetup && alreadyCompletedOnce {
-                _LaunchLog.log("Child: FC auth=\(fcAuthStatus?.rawValue ?? "nil") but permissionFixerCompletedOnce — not re-arming (user can open fixer manually if needed)")
+                StartupWatchdog.log("Child: FC auth=\(fcAuthStatus?.rawValue ?? "nil") but permissionFixerCompletedOnce — not re-arming (user can open fixer manually if needed)")
             } else {
-                _LaunchLog.log("Child: FC auth OK — no guided setup needed")
+                StartupWatchdog.log("Child: FC auth OK — no guided setup needed")
             }
         }
 
         // --- Background work (CloudKit, sync) — no UI presentation ---
         Task.detached {
-            _LaunchLog.log("Task.detached started")
+            StartupWatchdog.log("Task.detached started")
 
             // Bootstrap CloudKit schema (creates record types in Development environment).
             let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
-            _LaunchLog.log("CloudKit schema bootstrap starting")
+            StartupWatchdog.log("CloudKit schema bootstrap starting")
             await CloudKitSchemaBootstrap.bootstrapIfNeeded(database: db)
-            _LaunchLog.log("CloudKit schema bootstrap done")
+            StartupWatchdog.log("CloudKit schema bootstrap done")
 
             // Give CloudKit a moment to propagate newly created record types.
             try? await Task.sleep(for: .seconds(2))
 
             // Validate CloudKit environment.
-            _LaunchLog.log("Checking CloudKit account status")
+            StartupWatchdog.log("Checking CloudKit account status")
             let cloudKitStatus = await CloudKitEnvironment.checkAccountStatus()
-            _LaunchLog.log("CloudKit status: \(cloudKitStatus)")
+            StartupWatchdog.log("CloudKit status: \(cloudKitStatus)")
             if cloudKitStatus != .available {
                 await MainActor.run {
                     appState.cloudKitStatusMessage = CloudKitEnvironment.statusDescription(cloudKitStatus)
@@ -189,7 +166,7 @@ struct BigBrotherApp: App {
 
             // Set up CloudKit subscriptions and sync.
             let role = await MainActor.run { appState.deviceRole }
-            _LaunchLog.log("Setting up for role: \(role)")
+            StartupWatchdog.log("Setting up for role: \(role)")
             switch role {
             case .child:
                 let (enrollment, childCloudKit) = await MainActor.run {
@@ -211,22 +188,22 @@ struct BigBrotherApp: App {
                 await MainActor.run { appDelegate.scheduleHeartbeatRefresh() }
 
             case .parent:
-                _LaunchLog.log("Parent: setting up subscriptions")
+                StartupWatchdog.log("Parent: setting up subscriptions")
                 let (familyID, parentCloudKit) = await MainActor.run {
                     (appState.parentState?.familyID, appState.cloudKit)
                 }
                 if let familyID {
-                    _LaunchLog.log("Parent: familyID=\(familyID)")
+                    StartupWatchdog.log("Parent: familyID=\(familyID)")
                     await Self.setupSubscriptionsWithRetry(
                         cloudKit: parentCloudKit,
                         familyID: familyID,
                         deviceID: nil
                     )
-                    _LaunchLog.log("Parent: subscriptions done")
+                    StartupWatchdog.log("Parent: subscriptions done")
                 }
-                _LaunchLog.log("Parent: refreshing dashboard")
+                StartupWatchdog.log("Parent: refreshing dashboard")
                 try? await appState.refreshDashboard()
-                _LaunchLog.log("Parent: dashboard refreshed")
+                StartupWatchdog.log("Parent: dashboard refreshed")
 
                 // Start monitoring child device heartbeats for offline alerts.
                 await MainActor.run {
@@ -234,7 +211,7 @@ struct BigBrotherApp: App {
                     appState.deviceMonitor = monitor
                     monitor.startMonitoring()
                     appState.startUnlockRequestPolling()
-                    _LaunchLog.log("Parent: DeviceMonitor + unlock request polling started")
+                    StartupWatchdog.log("Parent: DeviceMonitor + unlock request polling started")
 
                     // Initialize AllowanceTracker timer integration if enabled.
                     appState.initializeTimerServiceIfNeeded()
@@ -247,13 +224,13 @@ struct BigBrotherApp: App {
                         cloudKit: ck,
                         familyID: familyID
                     )
-                    _LaunchLog.log("Parent: CloudKit cleanup done")
+                    StartupWatchdog.log("Parent: CloudKit cleanup done")
                 }
 
             case .unconfigured:
                 break
             }
-            _LaunchLog.log("Background setup complete")
+            StartupWatchdog.log("Background setup complete")
         }
     }
 
@@ -269,11 +246,11 @@ struct BigBrotherApp: App {
             do {
                 try await cloudKit?.setupSubscriptions(familyID: familyID, deviceID: deviceID)
                 NSLog("[BigBrother] CK subscriptions setup OK (attempt \(attempt))")
-                _LaunchLog.log("Subscriptions setup succeeded (attempt \(attempt))")
+                StartupWatchdog.log("Subscriptions setup succeeded (attempt \(attempt))")
                 return
             } catch {
                 NSLog("[BigBrother] CK subscriptions setup FAILED (attempt \(attempt)/\(maxAttempts)): \(error)")
-                _LaunchLog.log("Subscriptions setup failed (attempt \(attempt)/\(maxAttempts)): \(error)")
+                StartupWatchdog.log("Subscriptions setup failed (attempt \(attempt)/\(maxAttempts)): \(error)")
                 if attempt < maxAttempts {
                     try? await Task.sleep(for: .seconds(Double(attempt) * 2))
                 }
