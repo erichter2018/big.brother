@@ -27,22 +27,20 @@ import Foundation
 ///   ```
 @Sendable
 func withDeadline(_ seconds: Double, _ operation: @escaping @Sendable () async -> Void) async {
+    let callStart = CFAbsoluteTimeGetCurrent()
+    StartupWatchdog.log(String(format: "withDeadline(%.1fs) entered", seconds))
     await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-        let state = DeadlineState(continuation: cont)
-        // Strong `state` captures keep the one-shot alive until both tasks
-        // finish. Weak capture would deallocate state between the closure
-        // returning and the tasks firing, leaking the continuation and
-        // hanging the caller. The tasks drop their reference when they
-        // complete, and state's continuation is already resumed by then.
+        let state = DeadlineState(continuation: cont, callStart: callStart)
         let worker = Task.detached {
             await operation()
-            state.resumeIfNeeded()
+            state.resumeIfNeeded(source: "worker")
         }
         Task.detached {
             try? await Task.sleep(for: .seconds(seconds))
-            state.resumeIfNeeded(cancel: worker)
+            state.resumeIfNeeded(source: "sleep", cancel: worker)
         }
     }
+    StartupWatchdog.log(String(format: "withDeadline exited (total %.2fs)", CFAbsoluteTimeGetCurrent() - callStart))
 }
 
 /// Thread-safe one-shot continuation resumer. Used by `withDeadline`.
@@ -50,22 +48,25 @@ private final class DeadlineState: @unchecked Sendable {
     private let lock = NSLock()
     private var resumed = false
     private let continuation: CheckedContinuation<Void, Never>
+    private let callStart: CFAbsoluteTime
 
-    init(continuation: CheckedContinuation<Void, Never>) {
+    init(continuation: CheckedContinuation<Void, Never>, callStart: CFAbsoluteTime) {
         self.continuation = continuation
+        self.callStart = callStart
     }
 
-    /// Resume the continuation at most once. If this is the first call,
-    /// resume; subsequent calls are no-ops. If `cancel` is non-nil and
-    /// this call wins the race, cancel that task (best-effort — the task
-    /// may be wedged and ignore cancellation).
-    func resumeIfNeeded(cancel: Task<Void, Never>? = nil) {
+    func resumeIfNeeded(source: String, cancel: Task<Void, Never>? = nil) {
+        let elapsed = CFAbsoluteTimeGetCurrent() - callStart
         lock.lock()
         let shouldResume = !resumed
         resumed = true
         lock.unlock()
-        guard shouldResume else { return }
-        cancel?.cancel()
-        continuation.resume()
+        if shouldResume {
+            StartupWatchdog.log(String(format: "withDeadline resume by %@ at %.2fs", source, elapsed))
+            cancel?.cancel()
+            continuation.resume()
+        } else {
+            StartupWatchdog.log(String(format: "withDeadline %@ late at %.2fs (no-op)", source, elapsed))
+        }
     }
 }
