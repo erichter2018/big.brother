@@ -44,7 +44,11 @@ struct KidDiagnosticsView: View {
                     separator
                     networkBlock
                     separator
+                    dnsStatsBlock
+                    separator
                     heartbeatBlock
+                    separator
+                    heartbeatHistoryBlock
                     separator
                     permissionsBlock
                     separator
@@ -261,6 +265,59 @@ struct KidDiagnosticsView: View {
     }
 
     @ViewBuilder
+    private var dnsStatsBlock: some View {
+        let defaults = UserDefaults.appGroup
+        let total = defaults?.integer(forKey: AppGroupKeys.dnsActivityTotalQueries) ?? 0
+        let date = defaults?.string(forKey: AppGroupKeys.dnsActivityDate) ?? "?"
+        let hits = decodeDNSDomainHits().sorted { $0.count > $1.count }
+        let top = Array(hits.prefix(8))
+        Text("DNS today (\(date)): \(total) queries  domains:\(hits.count)")
+        if top.isEmpty {
+            Text("  (no domains tracked — tunnel may not be receiving DNS)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.orange)
+        } else {
+            ForEach(top.indices, id: \.self) { i in
+                let h = top[i]
+                let flag = h.flagged ? " [\(h.category ?? "flagged")]" : ""
+                Text("  \(h.count)× \(h.domain)\(flag)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func decodeDNSDomainHits() -> [DomainHit] {
+        guard let data = UserDefaults.appGroup?.data(forKey: AppGroupKeys.dnsActivityDomains) else { return [] }
+        return (try? JSONDecoder().decode([DomainHit].self, from: data)) ?? []
+    }
+
+    @ViewBuilder
+    private var heartbeatHistoryBlock: some View {
+        let ring = decodeHeartbeatRing()
+        if ring.isEmpty {
+            Text("HB history: (none yet — first HB pending)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+        } else {
+            Text("HB history (last \(ring.count)):")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+            ForEach(ring.indices, id: \.self) { i in
+                let e = ring[i]
+                let d = Date(timeIntervalSince1970: e.epoch)
+                Text("  #\(e.seq)  \(Self.hmsFormatter.string(from: d)) (\(compactAge(e.epoch)) ago)  \(e.mode)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func decodeHeartbeatRing() -> [HeartbeatRingEntry] {
+        guard let data = UserDefaults.appGroup?.data(forKey: AppGroupKeys.recentHeartbeats) else { return [] }
+        return (try? JSONDecoder().decode([HeartbeatRingEntry].self, from: data)) ?? []
+    }
+
+    @ViewBuilder
     private var heartbeatBlock: some View {
         let defaults = UserDefaults.appGroup
         let lastHBSentAt = defaults?.double(forKey: AppGroupKeys.lastHeartbeatSentAt) ?? 0
@@ -352,9 +409,12 @@ struct KidDiagnosticsView: View {
         let sh = defaults?.integer(forKey: AppGroupKeys.shieldBuildNumber) ?? 0
         let sha = defaults?.integer(forKey: AppGroupKeys.shieldActionBuildNumber) ?? 0
         let tun = defaults?.integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0
-        let mismatch = (mon != 0 && mon != app) || (tun != 0 && tun != app) || (sh != 0 && sh != app)
-        Text("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)")
-            .foregroundStyle(mismatch ? .orange : .primary)
+        // sh/sha stay at 0 until the extension first runs — that's normal on
+        // a quiet device. Only flag MISMATCH when the extension HAS run
+        // (value != 0) and disagrees with the app build.
+        let mismatch = (mon != 0 && mon != app) || (tun != 0 && tun != app) || (sh != 0 && sh != app) || (sha != 0 && sha != app)
+        Text("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)\(mismatch ? "  ⚠️ MISMATCH" : "")")
+            .foregroundStyle(mismatch ? Color.orange : Color.primary)
     }
 
     @ViewBuilder
@@ -774,11 +834,34 @@ struct KidDiagnosticsView: View {
         }
         lines.append("")
 
+        // DNS stats (tunnel DNSProxy)
+        let totalQueries = defaults?.integer(forKey: AppGroupKeys.dnsActivityTotalQueries) ?? 0
+        let dnsDate = defaults?.string(forKey: AppGroupKeys.dnsActivityDate) ?? "?"
+        let hits = decodeDNSDomainHits().sorted { $0.count > $1.count }
+        lines.append("DNS today (\(dnsDate)): \(totalQueries) queries, \(hits.count) unique domains")
+        if hits.isEmpty {
+            lines.append("  (!) no domains tracked — tunnel DNS proxy may not be receiving traffic")
+        } else {
+            for h in hits.prefix(10) {
+                let flag = h.flagged ? " [\(h.category ?? "flagged")]" : ""
+                lines.append("  \(h.count)× \(h.domain)\(flag)")
+            }
+        }
+        lines.append("")
+
         // Heartbeat / liveness
         lines.append("HB sent: \(absAge(defaults?.double(forKey: AppGroupKeys.lastHeartbeatSentAt) ?? 0))")
         lines.append("ALIVE  main:\(compactAge(defaults?.double(forKey: AppGroupKeys.mainAppLastActiveAt) ?? 0))"
                      + "  mon:\(compactAge(defaults?.double(forKey: AppGroupKeys.monitorLastActiveAt) ?? 0))"
                      + "  tun:\(compactAge(defaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0))")
+        let ring = decodeHeartbeatRing()
+        if !ring.isEmpty {
+            lines.append("HB history (last \(ring.count)):")
+            for e in ring {
+                let d = Date(timeIntervalSince1970: e.epoch)
+                lines.append("  #\(e.seq)  \(Self.hmsFormatter.string(from: d)) (\(compactAge(e.epoch)) ago)  \(e.mode)")
+            }
+        }
         lines.append("")
 
         // Permissions
@@ -826,7 +909,8 @@ struct KidDiagnosticsView: View {
         let sh = defaults?.integer(forKey: AppGroupKeys.shieldBuildNumber) ?? 0
         let sha = defaults?.integer(forKey: AppGroupKeys.shieldActionBuildNumber) ?? 0
         let tun = defaults?.integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0
-        lines.append("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)")
+        let mismatch = (mon != 0 && mon != app) || (tun != 0 && tun != app) || (sh != 0 && sh != app) || (sha != 0 && sha != app)
+        lines.append("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)\(mismatch ? "  ⚠️ MISMATCH" : "")")
         lines.append("")
 
         // Device restrictions

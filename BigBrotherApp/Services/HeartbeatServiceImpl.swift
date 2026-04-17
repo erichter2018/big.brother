@@ -516,6 +516,12 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastHeartbeatSentAt)
 
+            // Append to heartbeat ring buffer (last 5) so the kid-side
+            // Diagnostics screen can show a flow history without needing
+            // CloudKit round-trips. Persisted in App Group so any writer
+            // can read it.
+            Self.appendHeartbeatRing(mode: heartbeat.currentMode.rawValue, seq: seqCounter)
+
             // Update device record with current OS version + model if changed.
             await updateDeviceRecordIfNeeded(enrollment: enrollment)
 
@@ -754,6 +760,27 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
     private static var currentOSVersion: String { DeviceInfo.osVersion }
     private static var currentModelIdentifier: String { DeviceInfo.modelIdentifier }
+
+    /// Append a heartbeat entry to the `recentHeartbeats` ring buffer in
+    /// App Group. Keeps the newest 5 entries. Called after a successful
+    /// send so the kid-side Diagnostics view can show heartbeat flow
+    /// without a CloudKit round-trip.
+    private static func appendHeartbeatRing(mode: String, seq: Int64) {
+        let defaults = UserDefaults.appGroup
+        var entries: [HeartbeatRingEntry] = {
+            guard let data = defaults?.data(forKey: AppGroupKeys.recentHeartbeats) else { return [] }
+            return (try? JSONDecoder().decode([HeartbeatRingEntry].self, from: data)) ?? []
+        }()
+        entries.append(HeartbeatRingEntry(
+            epoch: Date().timeIntervalSince1970,
+            mode: mode,
+            seq: seq
+        ))
+        if entries.count > 5 { entries = Array(entries.suffix(5)) }
+        if let data = try? JSONEncoder().encode(entries) {
+            defaults?.set(data, forKey: AppGroupKeys.recentHeartbeats)
+        }
+    }
 
     private static func cloudKitAccountStatus() async -> String {
         do {

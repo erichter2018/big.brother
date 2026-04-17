@@ -263,6 +263,12 @@ public enum AppGroupKeys {
     /// Used by the tunnel to coordinate "skip if main app sent one recently."
     public static let lastHeartbeatSentAt = "lastHeartbeatSentAt"
 
+    /// JSON-encoded `[HeartbeatRingEntry]` — the last 5 heartbeats sent by the
+    /// main app. Stored as a ring buffer so the kid's diagnostic screen can
+    /// show "is heartbeat actually flowing?" without round-tripping CloudKit.
+    /// Each entry carries `epoch` (send time) + `mode` + `seq`.
+    public static let recentHeartbeats = "recentHeartbeats"
+
     /// True if the monitor should immediately trigger a heartbeat flush.
     public static let monitorNeedsHeartbeat = "monitorNeedsHeartbeat"
 
