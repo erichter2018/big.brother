@@ -1049,10 +1049,15 @@ final class ChildHomeViewModel {
             return
         }
 
+        // Use clock-manipulation-aware helpers: if the kid advances the
+        // device date forward in Settings, isInPenaltyPhase stays true and
+        // the foreground timer won't promote them into the free window
+        // early. The helpers fall back to raw wall-clock when uptime data
+        // is missing (e.g., after a reboot).
         let currentPhase: TimedPhase
-        if now < info.unlockAt {
+        if info.isInPenaltyPhase(at: now) {
             currentPhase = .penalty
-        } else if now < info.lockAt {
+        } else if info.isInFreePhase(at: now) {
             currentPhase = .unlock
         } else {
             currentPhase = .none

@@ -2525,6 +2525,57 @@ final class AppState {
         }
     }
 
+    /// Pause the running penalty countdown for a child — preserves banked
+    /// seconds (what the kid still owes) but clears the live endTime so the
+    /// kid's screen stops ticking down.
+    ///
+    /// Called automatically whenever a parent issues `setMode`, on the
+    /// premise that a manual mode takeover should freeze any running
+    /// countdown. Distinct from `clearPenaltyTimer` which WIPES owed time.
+    ///
+    /// Safe to call when no timer is running — it returns early if there's
+    /// nothing to pause.
+    func pauseChildPenaltyTimer(childProfileID: ChildProfileID) async {
+        let firebaseMapping: (TimerIntegrationService, String, String)? = {
+            guard let service = timerService else { return nil }
+            let config = TimerIntegrationConfig.load()
+            guard let mapping = config.kidMappings.first(where: { $0.childProfileID == childProfileID }),
+                  let familyID = config.firebaseFamilyID else { return nil }
+            return (service, familyID, mapping.firestoreKidID)
+        }()
+
+        if let (service, familyID, kidID) = firebaseMapping {
+            // Firebase path: service.stopTimer preserves banked seconds.
+            await service.stopTimer(familyID: familyID, kidID: kidID)
+            return
+        }
+
+        // CloudKit-native: compute remaining from endTime (if running) or
+        // current penaltySeconds (already banked, nothing to do).
+        guard let device = childDevices.first(where: { $0.childProfileID == childProfileID }) else { return }
+        let now = Date()
+        let remaining: Int
+        if let endTime = device.penaltyTimerEndTime, endTime > now {
+            remaining = Int(endTime.timeIntervalSince(now))
+        } else {
+            // Not actively counting; leave banked seconds alone.
+            return
+        }
+
+        let devices = childDevices.filter { $0.childProfileID == childProfileID }
+        for dev in devices {
+            if let idx = childDevices.firstIndex(where: { $0.id == dev.id }) {
+                childDevices[idx].penaltySeconds = remaining
+                childDevices[idx].penaltyTimerEndTime = nil
+            }
+        }
+        lastRelayedPenalty[childProfileID] = (remaining, nil)
+        try? await sendCommand(
+            target: .child(childProfileID),
+            action: .setPenaltyTimer(seconds: remaining, endTime: nil)
+        )
+    }
+
     /// Fetch recent events and post local notifications for new unlock requests.
     private func checkForUnlockRequestNotifications(familyID: FamilyID) {
         guard let cloudKit else { return }
@@ -2698,14 +2749,32 @@ final class AppState {
         switch action {
         case .setMode:
             // Clear schedule for the targeted child(ren).
+            // Also pause (but don't wipe) any running penalty countdown — a
+            // manual mode takeover should freeze the timer so the kid
+            // doesn't keep ticking it down while locked/unlocked by the
+            // parent explicitly. Banked seconds are preserved; next time
+            // the parent starts the timer, the kid owes the remainder.
+            let pausedChildIDs: [ChildProfileID]
             switch target {
-            case .child(let cid): scheduleActiveChildren.remove(cid)
+            case .child(let cid):
+                scheduleActiveChildren.remove(cid)
+                pausedChildIDs = [cid]
             case .device(let did):
                 if let cid = childDevices.first(where: { $0.id == did })?.childProfileID {
                     scheduleActiveChildren.remove(cid)
+                    pausedChildIDs = [cid]
+                } else {
+                    pausedChildIDs = []
                 }
             case .allDevices:
                 scheduleActiveChildren.removeAll()
+                pausedChildIDs = orderedChildProfiles.map { $0.id }
+            }
+            // Fire penalty pauses in parallel; don't block the caller on them.
+            // Each sends its own setPenaltyTimer command — correctness
+            // doesn't depend on the mode command landing first.
+            for childID in pausedChildIDs {
+                Task { [weak self] in await self?.pauseChildPenaltyTimer(childProfileID: childID) }
             }
         case .returnToSchedule:
             switch target {
@@ -3392,28 +3461,60 @@ final class AppState {
     /// calling thread for 60+ seconds when deviceactivityd is wedged
     /// (observed 2026-04-17). Task.detached keeps the UI responsive.
     func applyTimedUnlockStart() {
+        guard !timedUnlockStartInFlight else { return }
         guard let info = storage.readTimedUnlockInfo() else { return }
+        // Clock-manipulation guard: if uptime vs wall-clock reveals the
+        // kid advanced the device date forward to sneak out of penalty,
+        // isInFreePhase returns false and we refuse to promote.
+        guard info.isInFreePhase(at: Date()) else { return }
         let remainingFreeTime = Int(info.lockAt.timeIntervalSinceNow)
         guard remainingFreeTime > 0 else { return }
         guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
         ) else { return }
+        timedUnlockStartInFlight = true
+        // Cancel the timed-unlock DA activity before converting to a temp
+        // unlock. Without this, its own intervalDidEnd at `lockAt` would
+        // later fire and race with the temp-unlock's own expiry schedule,
+        // applying a re-lock potentially over a newer parent state.
+        let staleActivityName = info.activityName
+        let capturedCommandID = info.commandID
+        let capturedStorage = storage
         Task.detached(priority: .userInitiated) { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let center = DeviceActivityCenter()
+                center.stopMonitoring([DeviceActivityName(rawValue: staleActivityName)])
+            }
+            // Re-read inside the detached task: a newer parent command
+            // (setMode/lockUntil) arriving in this window clears the
+            // TimedUnlockInfo. Promoting to temp unlock after that would
+            // override the parent's choice — bail instead.
+            guard let latest = capturedStorage.readTimedUnlockInfo(),
+                  latest.commandID == capturedCommandID,
+                  latest.isInFreePhase(at: Date()) else {
+                await MainActor.run { self?.timedUnlockStartInFlight = false }
+                return
+            }
             do {
                 try cmdProcessor.applyTemporaryUnlockDirect(
                     durationSeconds: remainingFreeTime,
                     enrollment: enrollment
                 )
                 await MainActor.run {
+                    self?.timedUnlockStartInFlight = false
                     self?.refreshLocalState()
                     ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: remainingFreeTime)
                 }
             } catch {
                 NSLog("[BigBrother] Timed unlock start failed: \(error.localizedDescription)")
+                await MainActor.run { self?.timedUnlockStartInFlight = false }
             }
         }
     }
+
+    /// In-flight guard for `applyTimedUnlockStart`. See `applyTimedUnlockEnd`.
+    private var timedUnlockStartInFlight = false
 
     /// Ensure device is locked during the penalty phase of a timed unlock.
     /// Called as a safety net from BGTask if the device somehow unlocked.
@@ -3431,7 +3532,9 @@ final class AppState {
             guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
             let capturedStorage = storage
             Task.detached(priority: .userInitiated) { [weak self] in
-                try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+                // Preserve .timedUnlock authority — we're explicitly enforcing
+                // the penalty phase, not switching to a parent-manual mode.
+                try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment, controlAuthority: .timedUnlock)
                 if let info = savedInfo {
                     try? capturedStorage.writeTimedUnlockInfo(info)
                 }
@@ -3441,32 +3544,72 @@ final class AppState {
     }
 
     /// Free time window ended — re-lock the device.
-    /// applyModeDirect is off-main (synchronous ManagedSettings/DeviceActivity XPC).
+    ///
+    /// Uses `ModeStackResolver` as ground truth for the post-unlock mode:
+    /// clear the timed/temp state FIRST, then ask the resolver what mode
+    /// the device should be in. This makes the handler defer to parent
+    /// overrides (manual `setMode`), schedule-driven mode, or the
+    /// snapshot's base mode — no more falling back to `.restricted` and
+    /// downgrading a parent's `.locked` choice during a cancellation race.
+    ///
+    /// Dedupe guard (`timedUnlockEndInFlight`): Monitor, BGTask, and the
+    /// foreground 1s timer can all fire applyTimedUnlockEnd on the same
+    /// expiry. Without dedup we'd dispatch three parallel
+    /// `Task.detached`s that each run synchronous ManagedSettings /
+    /// DeviceActivity XPC — needless churn and a real risk of the three
+    /// of them clearing state out from under each other mid-compute.
+    /// applyModeDirect is off-main (synchronous XPC).
     func applyTimedUnlockEnd() {
-        let timedPreviousMode = storage.readTimedUnlockInfo()?.previousMode
-        let tempPreviousMode = storage.readTemporaryUnlockState()?.previousMode
-        let previousMode = timedPreviousMode ?? tempPreviousMode ?? .restricted
+        guard !timedUnlockEndInFlight else { return }
+        timedUnlockEndInFlight = true
+
         try? storage.clearTimedUnlockInfo()
         try? storage.clearTemporaryUnlockState()
-        guard enforcement != nil else { return }
-        let defaults = UserDefaults.appGroup ?? .standard
-        let isScheduleDriven = defaults.object(forKey: AppGroupKeys.scheduleDrivenMode) == nil
-            || defaults.bool(forKey: AppGroupKeys.scheduleDrivenMode)
-        let mode: LockMode
-        if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
-            mode = profile.resolvedMode(at: Date())
-        } else {
-            mode = previousMode
+
+        guard enforcement != nil else {
+            timedUnlockEndInFlight = false
+            return
         }
+
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
-        ) else { return }
-        guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
+        ) else {
+            timedUnlockEndInFlight = false
+            return
+        }
+        guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else {
+            timedUnlockEndInFlight = false
+            return
+        }
         let capturedEnforcement = enforcement
         let capturedStorage = storage
         Task.detached(priority: .userInitiated) { [weak self] in
+            // Re-resolve inside the detached task: a newer parent command
+            // (setMode, temporaryUnlock) may have arrived after the
+            // @MainActor portion captured state. Using the latest
+            // resolution avoids the "stale fallback overwrites newer
+            // parent choice" race flagged in the Codex round-2 audit.
+            let resolution = ModeStackResolver.resolve(storage: capturedStorage)
+            let mode = resolution.mode
+
+            // TOCTOU guard: if the snapshot already reflects this mode AND
+            // authority (because a parent command committed between our
+            // MainActor entry and here), don't call applyModeDirect — that
+            // would bump generation and could overwrite a newer parent
+            // commit whose resolution happens to agree with ours only in
+            // mode. If the committed snapshot disagrees with our
+            // resolution, it means the resolver's view of timed-unlock
+            // being "over" hasn't been persisted yet, so do apply.
+            let current = capturedStorage.readPolicySnapshot()?.effectivePolicy
+            if current?.resolvedMode == mode && current?.controlAuthority == resolution.controlAuthority {
+                await MainActor.run {
+                    self?.timedUnlockEndInFlight = false
+                    self?.refreshLocalState()
+                }
+                return
+            }
             do {
-                try cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+                try cmdProcessor.applyModeDirect(mode, enrollment: enrollment, controlAuthority: resolution.controlAuthority)
 
                 if mode != .unlocked, let enforcement = capturedEnforcement {
                     let diag = enforcement.shieldDiagnostic()
@@ -3476,23 +3619,24 @@ final class AppState {
                             message: "Shield re-apply failed after unlock expiry (app path) — retrying in 2s"
                         ))
                         try? await Task.sleep(for: .seconds(2))
-                        try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+                        try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment, controlAuthority: resolution.controlAuthority)
                     }
                 }
 
-                // Refresh UI and emit mode-change notification on both paths
-                // (first-try success OR retry). Previously the retry branch
-                // returned early and skipped these, leaving the UI stale
-                // until the next 10s enforcement verify ran.
                 await MainActor.run {
+                    self?.timedUnlockEndInFlight = false
                     self?.refreshLocalState()
                     ModeChangeNotifier.notify(newMode: mode)
                 }
             } catch {
                 NSLog("[BigBrother] Timed unlock end failed: \(error.localizedDescription)")
+                await MainActor.run { self?.timedUnlockEndInFlight = false }
             }
         }
     }
+
+    /// In-flight guard for `applyTimedUnlockEnd`. See that function's doc.
+    private var timedUnlockEndInFlight = false
 
     // MARK: - Schedule Transition Enforcement
 

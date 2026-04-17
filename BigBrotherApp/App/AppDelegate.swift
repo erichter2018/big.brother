@@ -553,14 +553,18 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
 
         // Re-read timed info (applyTimedUnlockEnd may have cleared it above).
+        // Uses the clock-manipulation-aware phase helpers so a kid who moves
+        // the device date forward in Settings doesn't sneak out of penalty
+        // via the BGTask safety net (the foreground 1s timer went through
+        // the helpers already — this is the back-compat gap).
         if let timedInfo = appState.storage.readTimedUnlockInfo() {
-            if now < timedInfo.unlockAt {
+            if timedInfo.isInPenaltyPhase(at: now) {
                 // Still in penalty phase — ensure device is locked.
                 appState.enforcePenaltyPhaseLock()
-            } else if now >= timedInfo.unlockAt && now < timedInfo.lockAt {
+            } else if timedInfo.isInFreePhase(at: now) {
                 // Should be in free phase — ensure device is unlocked.
                 appState.applyTimedUnlockStart()
-            } else if now >= timedInfo.lockAt {
+            } else {
                 // Past lock time — re-lock.
                 appState.applyTimedUnlockEnd()
             }
@@ -574,10 +578,74 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     // MARK: - Re-lock BGProcessingTask
 
+    /// Serial queue gating all mutations of `pendingRelockDeadlines`.
+    /// UserDefaults is thread-safe for single reads and writes but NOT for
+    /// read-modify-write patterns. BGTask handlers and CommandProcessor
+    /// (called from push-notification queues) can both call
+    /// `scheduleRelockTask` / `rescheduleRelockTaskAfterFire` concurrently;
+    /// without this serial gate they'd race and silently drop deadlines.
+    private static let relockDeadlineQueue = DispatchQueue(label: "fr.bigbrother.relockDeadlines")
+
     /// Schedule a BGProcessingTask to fire at the given date.
-    /// Called when a temporary or timed unlock is created.
+    /// Called when a temporary or timed unlock is created, and also by
+    /// schedule transitions.
+    ///
+    /// iOS permits only ONE pending task per identifier — `submit()` REPLACES
+    /// any existing one. A naive implementation (pre-b668) had every caller
+    /// clobbering the previous deadline. We now keep a sorted list of
+    /// pending deadlines in App Group and submit the BGTask for the
+    /// EARLIEST one. When the task fires, the handler processes all
+    /// deadlines at/before `now` and reschedules for the next future one.
+    ///
     /// Static so it can be called from CommandProcessor/AppState without a reference to AppDelegate.
     static func scheduleRelockTask(at date: Date) {
+        let earliest: Date? = relockDeadlineQueue.sync {
+            addRelockDeadlineLocked(date)
+            return earliestPendingRelockDeadlineLocked()
+        }
+        guard let earliest else { return }
+        submitRelockBGTask(earliestBeginDate: earliest)
+    }
+
+    /// Called by the BGTask handler after it has processed due deadlines.
+    /// Drops every deadline at/before `now` from the pending list and
+    /// re-submits the BGTask for the next future deadline (if any).
+    static func rescheduleRelockTaskAfterFire(now: Date = Date()) {
+        let next: Date? = relockDeadlineQueue.sync {
+            let defaults = UserDefaults.appGroup
+            var deadlines = (defaults?.array(forKey: AppGroupKeys.pendingRelockDeadlines) as? [TimeInterval]) ?? []
+            let nowEpoch = now.timeIntervalSince1970
+            deadlines.removeAll { $0 <= nowEpoch }
+            deadlines = Array(Set(deadlines)).sorted()
+            defaults?.set(deadlines, forKey: AppGroupKeys.pendingRelockDeadlines)
+            return deadlines.first.map { Date(timeIntervalSince1970: $0) }
+        }
+        if let next {
+            submitRelockBGTask(earliestBeginDate: next)
+        }
+    }
+
+    /// Append a deadline to the pending list. Must be called on relockDeadlineQueue.
+    private static func addRelockDeadlineLocked(_ date: Date) {
+        let defaults = UserDefaults.appGroup
+        var deadlines = (defaults?.array(forKey: AppGroupKeys.pendingRelockDeadlines) as? [TimeInterval]) ?? []
+        deadlines.append(date.timeIntervalSince1970)
+        deadlines = Array(Set(deadlines)).sorted()
+        // Drop any deadlines already in the past — they'll be processed by
+        // the normal `checkAndRelockExpiredUnlocks` on next foreground or
+        // enforcement verify tick, no need to schedule a BGTask for them.
+        let nowEpoch = Date().timeIntervalSince1970
+        deadlines.removeAll { $0 <= nowEpoch }
+        defaults?.set(deadlines, forKey: AppGroupKeys.pendingRelockDeadlines)
+    }
+
+    /// Must be called on relockDeadlineQueue.
+    private static func earliestPendingRelockDeadlineLocked() -> Date? {
+        let deadlines = (UserDefaults.appGroup?.array(forKey: AppGroupKeys.pendingRelockDeadlines) as? [TimeInterval]) ?? []
+        return deadlines.sorted().first.map { Date(timeIntervalSince1970: $0) }
+    }
+
+    private static func submitRelockBGTask(earliestBeginDate date: Date) {
         let request = BGProcessingTaskRequest(identifier: AppConstants.bgTaskRelock)
         request.earliestBeginDate = date
         request.requiresNetworkConnectivity = false
@@ -586,23 +654,20 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            // Log in all builds — failed BGTask = reduced safety net for re-lock.
             let storage = AppGroupStorage()
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "BGTask re-lock schedule FAILED — DeviceActivity schedule is primary safety net",
                 details: "Target: \(date) — \(error.localizedDescription)"
             ))
-            // Schedule a local notification at expiry as a last-resort wakeup.
-            // When the user taps it, the app launches and the 60s enforcement loop catches it.
             let content = UNMutableNotificationContent()
             content.title = "Big Brother"
             content.body = "Checking enforcement status..."
             content.sound = nil
             let interval = max(1, date.timeIntervalSinceNow)
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
-            let request = UNNotificationRequest(identifier: "relock-fallback", content: content, trigger: trigger)
-            UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+            let notifRequest = UNNotificationRequest(identifier: "relock-fallback", content: content, trigger: trigger)
+            UNUserNotificationCenter.current().add(notifRequest, withCompletionHandler: nil)
         }
     }
 
@@ -620,6 +685,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         let workTask = Task { @MainActor in
             appState.handleMainAppResponsive(reapplyEnforcement: true)
             self.checkAndRelockExpiredUnlocks(appState: appState)
+
+            // Prune processed deadlines from the pending list and
+            // resubmit the BGTask for the next future deadline (if any).
+            // Keeps the "single identifier, many deadlines" queue flowing.
+            AppDelegate.rescheduleRelockTaskAfterFire()
 
             // Also process commands, send heartbeat, and sync events
             // since we're awake anyway.

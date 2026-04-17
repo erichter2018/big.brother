@@ -724,6 +724,20 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// just the timed unlock bit. If resolver says we should still be
     /// locked, respect that and leave shields up.
     private func handleTimedUnlockStart(_ activity: DeviceActivityName) {
+        // Guard: only fire if the stored info still anchors this activity.
+        // When info is nil, a newer command (temp unlock, setMode, etc.)
+        // cleared state — blindly flipping shields here would clobber its
+        // committed snapshot. Treat as stale no-op.
+        let storedActivityName = storage.readTimedUnlockInfo()?.activityName
+        guard storedActivityName == activity.rawValue else {
+            let detail = storedActivityName.map { "stored=\($0)" } ?? "no stored info"
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Timed unlock intervalDidStart fired stale (\(activity.rawValue)); \(detail) — ignoring"
+            ))
+            return
+        }
+
         let resolution = ModeStackResolver.resolve(storage: storage)
         if resolution.mode != .unlocked {
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -743,26 +757,51 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         sendModeNotification(title: "Penalty Complete", body: "All apps are now accessible.")
     }
 
-    /// Timed unlock window ended — re-lock the device using saved previousMode.
-    /// Falls back to schedule or .restricted if previousMode not available.
+    /// Timed unlock window ended — re-lock the device.
+    ///
+    /// Ground truth is `ModeStackResolver`: clear the timed-unlock state
+    /// FIRST, then ask the resolver what the post-unlock mode should be.
+    /// The resolver consults (in order): temp-unlock, timed-unlock,
+    /// lockUntil, manual parent-set mode from the snapshot, then schedule,
+    /// then snapshot default. That means a parent who sent `setMode(.locked)`
+    /// mid-timed-unlock keeps `.locked` through expiry — the old bug where
+    /// this handler fell back to `.restricted` and downgraded the parent's
+    /// choice is gone.
+    ///
+    /// `authority` is derived from the resolver's resolution instead of
+    /// hard-coded `.schedule` — a child who was in a manual mode before
+    /// the timed unlock should return to manual, not flip schedule-driven.
     private func handleTimedUnlockEnd(_ activity: DeviceActivityName) {
-        let timedInfo = storage.readTimedUnlockInfo()
-
-        let mode: LockMode
-        if AppConstants.isScheduleDriven(), let profile = storage.readActiveScheduleProfile() {
-            mode = profile.resolvedMode(at: Date())
-        } else if let saved = timedInfo?.previousMode {
-            mode = saved
-        } else {
-            mode = .restricted
+        // Guard: only process our own activity AND only if info still
+        // anchors this fire. When `readTimedUnlockInfo()` is nil, a newer
+        // command (temp unlock, setMode, returnToSchedule) already cleared
+        // state and committed the correct snapshot — touching temp-unlock
+        // or snapshot here would undo their work. Treat as stale no-op.
+        let storedActivityName = storage.readTimedUnlockInfo()?.activityName
+        guard storedActivityName == activity.rawValue else {
+            let detail = storedActivityName.map { "stored=\($0)" } ?? "no stored info"
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Timed unlock intervalDidEnd fired stale (\(activity.rawValue)); \(detail) — ignoring"
+            ))
+            return
         }
+
+        // Clear timed-unlock state FIRST so ModeStackResolver falls through
+        // cleanly to whatever the true post-expiry mode is.
+        try? storage.clearTimedUnlockInfo()
+        try? storage.clearTemporaryUnlockState()
+
+        let resolution = ModeStackResolver.resolve(storage: storage)
+        let mode = resolution.mode
+        let authority = resolution.controlAuthority
 
         // Update PolicySnapshot so all processes see the correct post-unlock mode.
         if let existingSnapshot = storage.readPolicySnapshot() {
             let existingPolicy = existingSnapshot.effectivePolicy
             let correctedPolicy = EffectivePolicy(
                 resolvedMode: mode,
-                controlAuthority: .schedule,
+                controlAuthority: authority,
                 isTemporaryUnlock: false,
                 temporaryUnlockExpiresAt: nil,
                 shieldedCategoriesData: existingPolicy.shieldedCategoriesData,
@@ -773,7 +812,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             )
             let correctedSnapshot = PolicySnapshot(
                 source: .temporaryUnlockExpired,
-                trigger: "Monitor: timed unlock ended, reverted to \(mode.rawValue)",
+                trigger: "Monitor: timed unlock ended, resolver → \(mode.rawValue) (\(resolution.reason))",
                 effectivePolicy: correctedPolicy
             )
             _ = try? storage.commitCorrectedSnapshot(correctedSnapshot)
@@ -786,13 +825,11 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             applyShieldingToAllStores(mode: mode, policy: policy)
         }
         updateSharedState(mode: mode)
-        try? storage.clearTimedUnlockInfo()
-        try? storage.clearTemporaryUnlockState()
         if mode != .unlocked {
             UserDefaults.appGroup?
                 .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastNaturalRelockAt)
         }
-        logEvent(.scheduleEnded, details: "Timed unlock ended, mode \(mode.rawValue)")
+        logEvent(.scheduleEnded, details: "Timed unlock ended → \(mode.rawValue) (\(resolution.reason))")
         sendModeNotification(title: "Free Time Ended", body: mode == .unlocked ? "Unlocked window — all apps accessible." : "Device locked — \(mode.displayName) mode active.")
     }
 
@@ -803,6 +840,30 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// If schedule-driven, use the schedule's current resolved mode.
     private func handleTempUnlockExpired(_ activity: DeviceActivityName) {
         let unlockState = storage.readTemporaryUnlockState()
+        // Guard stale fires: a prior temporaryUnlock whose DA activity was
+        // never cancelled (we avoid the cancel-then-register race) can
+        // still fire intervalDidEnd while a NEWER temporaryUnlock is
+        // active. Only proceed if the firing activity belongs to the
+        // currently stored unlock (commandID or unlockID encoded in
+        // rawValue). When unlockState is nil, treat as stale.
+        if let state = unlockState {
+            let expectedFromCommand = state.commandID.map { "bigbrother.tempunlock.\($0.uuidString)" }
+            let expectedFromUnlock = "bigbrother.tempunlock.\(state.unlockID.uuidString)"
+            let firing = activity.rawValue
+            if firing != expectedFromUnlock && firing != expectedFromCommand {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Temp unlock intervalDidEnd fired stale (\(firing)); current state id=\(state.unlockID.uuidString) — ignoring"
+                ))
+                return
+            }
+        } else {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Temp unlock intervalDidEnd fired stale (\(activity.rawValue)); no stored state — ignoring"
+            ))
+            return
+        }
         let previousMode = unlockState?.previousMode ?? .restricted
 
         let mode: LockMode

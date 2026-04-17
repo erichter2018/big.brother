@@ -610,9 +610,14 @@ final class ParentDashboardViewModel: CommandSendable {
         isCommandError = false
         commandFeedback = "📡 Pinging all devices…"
         try? await appState.sendCommand(target: .allDevices, action: .requestHeartbeat)
-        try? await appState.refreshDashboard()
+        // Send confirmation fires as soon as the command is uploaded to CK —
+        // NOT after the dashboard refresh, which used to block this for 5-30s
+        // while it fetched profiles/devices/heartbeats/schedule profiles in
+        // sequence. Dashboard refresh is fire-and-forget; heartbeat cards
+        // update naturally via @Observable as new heartbeats land.
         commandFeedback = "✓ Ping sent — devices confirm in 10–30s"
         autoDismissFeedback()
+        Task { try? await appState.refreshDashboard() }
     }
 
     /// Put a child back on their schedule (clear overrides).

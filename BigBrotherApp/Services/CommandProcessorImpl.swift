@@ -1325,6 +1325,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
 
         // Clear any existing timed unlock / lockUntil to prevent conflicts.
+        // NOTE (b669): we intentionally do NOT cancelNonScheduleActivities()
+        // here. Doing so races with registerTempUnlockExpirySchedule below
+        // (both operate on DeviceActivityCenter concurrently and can cancel
+        // the freshly-registered temp unlock activity). Instead the Monitor's
+        // handleTimedUnlockEnd guards stale fires by requiring the stored
+        // activityName to match — so a stranded timed-unlock DA activity
+        // firing here becomes a no-op.
         try? storage.clearTimedUnlockInfo()
         clearLockUntilState()
 
@@ -1468,9 +1475,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         )
     }
 
-    /// Apply a mode change directly (no command needed).
-    func applyModeDirect(_ mode: LockMode, enrollment: ChildEnrollmentState) throws {
-        try applyMode(mode, enrollment: enrollment, commandID: UUID())
+    /// Apply a mode change directly (no command needed). The default
+    /// `controlAuthority` is `.parentManual` to match the pre-b669 behavior,
+    /// but callers reacting to natural state transitions (e.g. timed unlock
+    /// expiry) MUST pass through the resolver's controlAuthority so the
+    /// resulting snapshot doesn't permanently hijack schedule-driven mode.
+    func applyModeDirect(_ mode: LockMode, enrollment: ChildEnrollmentState, controlAuthority: ControlAuthority = .parentManual) throws {
+        try applyMode(mode, enrollment: enrollment, commandID: UUID(), controlAuthority: controlAuthority)
     }
 
     // MARK: - Self Unlock (child-initiated)
@@ -1570,7 +1581,16 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         commandID: UUID
     ) throws {
         // Clear all competing state — timedUnlock overrides everything.
+        // NOTE (b669): we intentionally do NOT cancelNonScheduleActivities()
+        // here. That call is async-dispatched and races with the subsequent
+        // synchronous center.startMonitoring below — the bg queue can wake
+        // up AFTER the new activity is registered and kill it. Stale DA
+        // activities from prior commands are made safe by the Monitor's
+        // activityName-match guard (see handleTimedUnlockStart/End): a
+        // fire whose activityName doesn't match stored TimedUnlockInfo
+        // (or fires when the info has been cleared) is treated as a no-op.
         try? storage.clearTemporaryUnlockState()
+        try? storage.clearTimedUnlockInfo()
         clearLockUntilState()
 
         // Account for delivery delay.
@@ -1595,15 +1615,60 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             if !suppressModeNotifications { ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: unlockDuration) }
         } else if adjustedPenalty >= adjustedTotal {
             // Penalty exceeds or equals total window — no free time at all.
-            // Device must be actively locked for the entire duration.
-            // Penalty timer (Firebase) ticks independently and will decrease
-            // by adjustedTotal over the window duration.
-            // Actively enforce locked mode in case the device is in an ambiguous
-            // state (e.g., temp unlock was active before this command).
-            let currentMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
-            let lockedMode: LockMode = currentMode == .unlocked ? .restricted : currentMode
+            // Device must be actively locked for the entire duration, then
+            // return to schedule/parentManual/snapshot mode.
+            //
+            // b669 (addresses Gemini audit finding): we now register a DA
+            // schedule + BGTask for the window end so that when the total
+            // elapses the Monitor's handleTimedUnlockEnd fires and resolver
+            // picks the right post-expiry mode. Without this the device
+            // stays locked indefinitely until another parent command arrives.
+            let now = Date()
+            let lockEndAt = now.addingTimeInterval(Double(adjustedTotal))
+
+            let priorMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
+            // unlockAt == lockAt so isInFreePhase is always false — we are
+            // fully in penalty for the entire window.
+            let info = TimedUnlockInfo(
+                commandID: commandID,
+                activityName: "bigbrother.timedunlock.\(commandID.uuidString)",
+                unlockAt: lockEndAt,
+                lockAt: lockEndAt,
+                previousMode: priorMode
+            )
+            try storage.writeTimedUnlockInfo(info)
+
+            // DA schedule registration has two known limits:
+            //   * intervalStart == intervalEnd throws `.invalidSchedule`
+            //     (happens if adjustedTotal is an exact multiple of 86400s)
+            //   * repeats:false + H/M/S components only fires on the FIRST
+            //     matching wall-clock — so any duration > 24h would fire
+            //     prematurely on the first day. We skip DA registration in
+            //     those cases and rely on the BGTask as the only safety net.
+            let safeDurationForDA = adjustedTotal > 0 && adjustedTotal < 86400
+            if safeDurationForDA {
+                let cal = Calendar.current
+                let startComps = cal.dateComponents([.hour, .minute, .second], from: now)
+                let endComps = cal.dateComponents([.hour, .minute, .second], from: lockEndAt)
+                let activityName = DeviceActivityName(rawValue: info.activityName)
+                let schedule = DeviceActivitySchedule(
+                    intervalStart: startComps,
+                    intervalEnd: endComps,
+                    repeats: false
+                )
+                let center = DeviceActivityCenter()
+                try? center.startMonitoring(activityName, during: schedule)
+            } else {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "Timed unlock (penalty>=total): \(adjustedTotal)s ≥24h, skipping DA schedule — BGTask is sole safety net"
+                ))
+            }
+            AppDelegate.scheduleRelockTask(at: lockEndAt)
+
+            let lockedMode: LockMode = priorMode == .unlocked ? .restricted : priorMode
             try applyMode(lockedMode, enrollment: enrollment, commandID: commandID, controlAuthority: .timedUnlock)
-            eventLogger.log(.commandApplied, details: "Timed unlock: penalty \(ModeChangeNotifier.formatDuration(adjustedPenalty)) >= total \(ModeChangeNotifier.formatDuration(adjustedTotal)), no free time — device locked")
+            eventLogger.log(.commandApplied, details: "Timed unlock: penalty \(ModeChangeNotifier.formatDuration(adjustedPenalty)) >= total \(ModeChangeNotifier.formatDuration(adjustedTotal)), no free time — device locked, re-lock at \(lockEndAt)")
             if !suppressModeNotifications { ModeChangeNotifier.notifyPenaltyStarted(penaltySeconds: adjustedTotal, unlockSeconds: 0) }
         } else {
             // Penalty < total — lock during penalty, then unlock for remainder.
@@ -1612,19 +1677,34 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             let lockAt = now.addingTimeInterval(Double(adjustedTotal))
             let cal = Calendar.current
 
-            // Use ONLY hour/minute/second — date components cause registration failures on iOS 17+.
-            let startComps = cal.dateComponents([.hour, .minute, .second], from: unlockAt)
-            let endComps = cal.dateComponents([.hour, .minute, .second], from: lockAt)
-
             let activityName = DeviceActivityName(rawValue: "bigbrother.timedunlock.\(commandID.uuidString)")
-            let schedule = DeviceActivitySchedule(
-                intervalStart: startComps,
-                intervalEnd: endComps,
-                repeats: false
-            )
 
-            let center = DeviceActivityCenter()
-            try center.startMonitoring(activityName, during: schedule)
+            // DA schedule constraints (see penalty>=total branch):
+            //   * intervalStart == intervalEnd throws
+            //   * H/M/S components + repeats:false fire on first wall-clock
+            //     match — spans > 24h fire early.
+            // For penalty<total both durations must be < 24h for DA to be
+            // reliable. If either is ≥24h we skip DA and rely on BGTask.
+            let penaltyUnder24h = adjustedPenalty > 0 && adjustedPenalty < 86400
+            let totalUnder24h = adjustedTotal > 0 && adjustedTotal < 86400
+            let safeDurationForDA = penaltyUnder24h && totalUnder24h
+
+            if safeDurationForDA {
+                let startComps = cal.dateComponents([.hour, .minute, .second], from: unlockAt)
+                let endComps = cal.dateComponents([.hour, .minute, .second], from: lockAt)
+                let schedule = DeviceActivitySchedule(
+                    intervalStart: startComps,
+                    intervalEnd: endComps,
+                    repeats: false
+                )
+                let center = DeviceActivityCenter()
+                try center.startMonitoring(activityName, during: schedule)
+            } else {
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "Timed unlock: penalty=\(adjustedPenalty)s total=\(adjustedTotal)s ≥24h, skipping DA — BGTask is sole safety net"
+                ))
+            }
 
             // Store timed unlock info so the monitor extension knows to unlock/lock.
             let priorMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
@@ -1637,18 +1717,24 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             )
             try storage.writeTimedUnlockInfo(info)
 
-            // Schedule BGProcessingTasks as safety nets for both phase transitions.
-            AppDelegate.scheduleRelockTask(at: unlockAt)  // penalty → unlock
-            AppDelegate.scheduleRelockTask(at: lockAt)    // unlock → re-lock
+            // Schedule BGProcessingTasks as safety nets for BOTH phase
+            // transitions. AppDelegate.scheduleRelockTask coalesces these
+            // into a single pending BGTask at the EARLIEST deadline and
+            // reschedules for the next one after each fires — iOS only
+            // permits one pending task per identifier, and a naive
+            // submit-replace pattern (pre-b668) silently dropped the
+            // penalty→unlock safety net.
+            AppDelegate.scheduleRelockTask(at: unlockAt)
+            AppDelegate.scheduleRelockTask(at: lockAt)
 
             // Explicitly enforce locked mode during penalty phase.
             // The device may have been in an ambiguous state; ensure shields are active.
-            // NOTE: applyMode() clears timedUnlockInfo, so we must re-write it after.
             let currentMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
             let lockedMode = currentMode == .unlocked ? .restricted : currentMode
             try applyMode(lockedMode, enrollment: enrollment, commandID: commandID, controlAuthority: .timedUnlock)
-            // Re-write timed unlock info because applyMode() clears it.
-            try storage.writeTimedUnlockInfo(info)
+            // applyMode does NOT clear timedUnlockInfo (verified 2026-04-17).
+            // The previous re-write here was a stale safety net; harmless
+            // but misleading.
 
             let penaltyStr = ModeChangeNotifier.formatDuration(adjustedPenalty)
             let unlockStr = ModeChangeNotifier.formatDuration(adjustedTotal - adjustedPenalty)

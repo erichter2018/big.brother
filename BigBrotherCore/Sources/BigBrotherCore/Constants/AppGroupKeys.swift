@@ -263,6 +263,15 @@ public enum AppGroupKeys {
     /// Used by the tunnel to coordinate "skip if main app sent one recently."
     public static let lastHeartbeatSentAt = "lastHeartbeatSentAt"
 
+    /// `[TimeInterval]` of pending relock deadlines. The
+    /// `fr.bigbrother.app.relock` BGTask identifier is globally unique — only
+    /// one can be pending at a time — so multiple callers with different
+    /// expiry times can't all have their own BGTask. Instead, `scheduleRelockTask`
+    /// appends to this array and submits the BGTask at the EARLIEST pending
+    /// time. When the task fires, the handler processes all deadlines at/before
+    /// `now` and reschedules for the next future deadline (if any).
+    public static let pendingRelockDeadlines = "pendingRelockDeadlines"
+
     /// JSON-encoded `[HeartbeatRingEntry]` — the last 5 heartbeats sent by the
     /// main app. Stored as a ring buffer so the kid's diagnostic screen can
     /// show "is heartbeat actually flowing?" without round-tripping CloudKit.

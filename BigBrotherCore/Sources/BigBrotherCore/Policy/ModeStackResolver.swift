@@ -91,8 +91,11 @@ public enum ModeStackResolver {
 
         // 2. Active timed unlock (penalty + unlock phases)?
         // READ-ONLY: same principle as temp unlock — never delete from ModeStackResolver.
+        // Phase checks use isInPenaltyPhase / isInFreePhase which cross-check
+        // monotonic uptime against wall clock — defends against the child
+        // moving the device clock forward in Settings to skip the penalty.
         if let timed = storage.readTimedUnlockInfo() {
-            if now < timed.unlockAt {
+            if timed.isInPenaltyPhase(at: now) {
                 // Penalty phase — device MUST be locked regardless of previousMode.
                 return Resolution(
                     mode: .restricted,
@@ -101,7 +104,7 @@ public enum ModeStackResolver {
                     expiresAt: timed.unlockAt,
                     reason: "Timed unlock penalty phase, unlocks at \(shortTime(timed.unlockAt))"
                 )
-            } else if now < timed.lockAt {
+            } else if timed.isInFreePhase(at: now) {
                 // Unlock phase — device is free
                 return Resolution(
                     mode: .unlocked,

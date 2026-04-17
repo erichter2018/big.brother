@@ -293,6 +293,17 @@ struct AppLaunchRestorer {
             return
         }
 
+        // Don't override an active timed unlock in either phase. The
+        // timed-unlock lifecycle (penalty → free → re-lock) has its own
+        // DA-schedule + BGTask + resolver coverage; launch restoration
+        // must defer to it. Without this guard, an app cold-launch during
+        // penalty could clobber timed state back to schedule mode and
+        // effectively cancel the parent's timed-unlock command.
+        if let timed = storage.readTimedUnlockInfo(),
+           timed.isInPenaltyPhase(at: now) || timed.isInFreePhase(at: now) {
+            return
+        }
+
         guard scheduleMode != currentMode else { return }
 
         // Build a corrected snapshot with the schedule-resolved mode
