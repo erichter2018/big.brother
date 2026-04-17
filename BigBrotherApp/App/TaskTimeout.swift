@@ -35,8 +35,16 @@ func withDeadline(_ seconds: Double, _ operation: @escaping @Sendable () async -
             await operation()
             state.resumeIfNeeded(source: "worker")
         }
-        Task.detached {
-            try? await Task.sleep(for: .seconds(seconds))
+        // Deadline on GCD timer — NOT Task.sleep. Task.sleep's post-wake
+        // handler runs on Swift's cooperative thread pool, which has only
+        // a handful of threads. When the worker saturates the pool with
+        // CloudKit awaits (fetchChildProfiles + many parallel fetches),
+        // the sleep-task's wake-up handler can wait minutes for a thread
+        // slot — defeating the whole point of a deadline. Observed on
+        // parent phone b657: requested 30s deadline, actually fired at
+        // 132s because cooperative pool was starved.
+        // GCD's asyncAfter uses its own timer pool and is unaffected.
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + seconds) {
             state.resumeIfNeeded(source: "sleep", cancel: worker)
         }
     }
