@@ -409,11 +409,16 @@ struct KidDiagnosticsView: View {
         let sh = defaults?.integer(forKey: AppGroupKeys.shieldBuildNumber) ?? 0
         let sha = defaults?.integer(forKey: AppGroupKeys.shieldActionBuildNumber) ?? 0
         let tun = defaults?.integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0
-        // sh/sha stay at 0 until the extension first runs — that's normal on
-        // a quiet device. Only flag MISMATCH when the extension HAS run
-        // (value != 0) and disagrees with the app build.
-        let mismatch = (mon != 0 && mon != app) || (tun != 0 && tun != app) || (sh != 0 && sh != app) || (sha != 0 && sha != app)
-        Text("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)\(mismatch ? "  ⚠️ MISMATCH" : "")")
+        // Only flag MISMATCH on the always-running extensions (monitor,
+        // tunnel). Shield + ShieldAction are event-driven: their recorded
+        // build stays at "last time I was invoked" until the kid next
+        // triggers a shield render or shield action. A stale recorded
+        // number does NOT mean a stale binary — extensions ship inside
+        // the app bundle and update in lockstep.
+        let mismatch = (mon != 0 && mon != app) || (tun != 0 && tun != app)
+        let shNote = (sh != 0 && sh != app) ? " (stale — ok)" : ""
+        let shaNote = (sha != 0 && sha != app) ? " (stale — ok)" : ""
+        Text("BLD  app:\(app) mon:\(mon) sh:\(sh)\(shNote) sha:\(sha)\(shaNote) tun:\(tun)\(mismatch ? "  ⚠️ MISMATCH" : "")")
             .foregroundStyle(mismatch ? Color.orange : Color.primary)
     }
 
@@ -909,8 +914,12 @@ struct KidDiagnosticsView: View {
         let sh = defaults?.integer(forKey: AppGroupKeys.shieldBuildNumber) ?? 0
         let sha = defaults?.integer(forKey: AppGroupKeys.shieldActionBuildNumber) ?? 0
         let tun = defaults?.integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0
-        let mismatch = (mon != 0 && mon != app) || (tun != 0 && tun != app) || (sh != 0 && sh != app) || (sha != 0 && sha != app)
-        lines.append("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)\(mismatch ? "  ⚠️ MISMATCH" : "")")
+        // Only monitor + tunnel mismatches are real; sh/sha are event-driven
+        // and their recorded number goes stale until next invocation.
+        let mismatch = (mon != 0 && mon != app) || (tun != 0 && tun != app)
+        let shNote = (sh != 0 && sh != app) ? " (stale — ok)" : ""
+        let shaNote = (sha != 0 && sha != app) ? " (stale — ok)" : ""
+        lines.append("BLD  app:\(app) mon:\(mon) sh:\(sh)\(shNote) sha:\(sha)\(shaNote) tun:\(tun)\(mismatch ? "  ⚠️ MISMATCH" : "")")
         lines.append("")
 
         // Device restrictions
