@@ -56,6 +56,18 @@ struct KidDiagnosticsView: View {
                     separator
                     buildsBlock
                     separator
+                    restrictionsBlock
+                    separator
+                    scheduleWindowsBlock
+                    separator
+                    timeLimitsBlock
+                    separator
+                    systemBlock
+                    separator
+                    eventLogBlock
+                    separator
+                    diagEntriesBlock
+                    separator
                     idsBlock
                 }
                 .font(.system(size: 12, weight: .regular, design: .monospaced))
@@ -199,7 +211,11 @@ struct KidDiagnosticsView: View {
     @ViewBuilder
     private var networkBlock: some View {
         let defaults = UserDefaults.appGroup
-        let netConnected = appState.networkMonitor.isConnected
+        let netMon = appState.networkMonitor
+        let netConnected = netMon.isConnected
+        let iface = netMon.interfaceKind
+        let hotspotHint = netMon.isExpensive ? "/expensive(cell/hotspot)" : ""
+        let lowDataHint = netMon.isConstrained ? "/lowData" : ""
         let vpn = appState.vpnManager?.connectionStatus.rawValue ?? -1
         let vpnStr = vpnStatusString(vpn)
         let tunnelLast = defaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0
@@ -210,7 +226,8 @@ struct KidDiagnosticsView: View {
         let dnsJson = defaults?.string(forKey: AppGroupKeys.dnsFilteringStateJSON) ?? ""
         let buildMismatch = defaults?.bool(forKey: AppGroupKeys.buildMismatchDNSBlock) == true
 
-        Text("NET: \(netConnected ? "online" : "OFFLINE")  VPN: \(vpnStr)")
+        Text("NET: \(netConnected ? "online" : "OFFLINE") via \(iface)\(hotspotHint)\(lowDataHint)")
+        Text("VPN: \(vpnStr)")
         Text("TUN: last \(absAge(tunnelLast))  MAIN: last \(absAge(mainAliveLast))")
 
         if internetBlockUntil > now.timeIntervalSince1970 {
@@ -343,6 +360,179 @@ struct KidDiagnosticsView: View {
         let mismatch = (mon != 0 && mon != app) || (tun != 0 && tun != app) || (sh != 0 && sh != app)
         Text("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)")
             .foregroundStyle(mismatch ? .orange : .primary)
+    }
+
+    @ViewBuilder
+    private var restrictionsBlock: some View {
+        let r = appState.storage.readDeviceRestrictions() ?? DeviceRestrictions()
+        Text("RESTRICT  denyWebRestricted:\(boolStr(r.denyWebWhenRestricted))  denyAppRemoval:\(boolStr(r.denyAppRemoval))")
+        Text("          denyExplicit:\(boolStr(r.denyExplicitContent))  lockAccts:\(boolStr(r.lockAccounts))  autoDT:\(boolStr(r.requireAutomaticDateAndTime))")
+    }
+
+    @ViewBuilder
+    private var scheduleWindowsBlock: some View {
+        if let sched = appState.storage.readActiveScheduleProfile() {
+            Text("SCHED \"\(sched.name)\"  lockedMode:\(sched.lockedMode.rawValue)")
+            if sched.unlockedWindows.isEmpty && sched.lockedWindows.isEmpty {
+                Text("  (no windows)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            } else {
+                if !sched.unlockedWindows.isEmpty {
+                    Text("  unlocked:")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    ForEach(sched.unlockedWindows.indices, id: \.self) { i in
+                        Text("    \(windowDescription(sched.unlockedWindows[i]))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !sched.lockedWindows.isEmpty {
+                    Text("  locked:")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    ForEach(sched.lockedWindows.indices, id: \.self) { i in
+                        Text("    \(windowDescription(sched.lockedWindows[i]))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } else {
+            Text("SCHED: (no active profile)")
+        }
+    }
+
+    @ViewBuilder
+    private var timeLimitsBlock: some View {
+        let limits = appState.storage.readAppTimeLimits()
+        let exhausted = appState.storage.readTimeLimitExhaustedApps()
+        let exhaustedFPs = Set(exhausted.map(\.fingerprint))
+        if limits.isEmpty {
+            Text("LIMITS: (none)")
+        } else {
+            Text("LIMITS (\(limits.count)):")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+            ForEach(limits.indices, id: \.self) { i in
+                let l = limits[i]
+                let exhaustedMark = exhaustedFPs.contains(l.fingerprint) ? " [EXHAUSTED]" : ""
+                Text("  \(l.appName.prefix(28)): \(l.dailyLimitMinutes)m/day\(exhaustedMark)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var eventLogBlock: some View {
+        let events = Array(appState.storage.readPendingEventLogs().suffix(10))
+        if events.isEmpty {
+            Text("EVENTS: (queue empty)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+        } else {
+            Text("EVENTS pending upload (last \(events.count)):")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+            ForEach(events.indices, id: \.self) { i in
+                Text("  \(Self.hmsFormatter.string(from: events[i].timestamp)) \(events[i].eventType.rawValue) — \(String((events[i].details ?? "").prefix(60)))")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    private func windowDescription(_ w: ActiveWindow) -> String {
+        let days = w.daysOfWeek.sorted().map { dayAbbrev($0.rawValue) }.joined(separator: "")
+        let start = String(format: "%02d:%02d", w.startTime.hour, w.startTime.minute)
+        let end = String(format: "%02d:%02d", w.endTime.hour, w.endTime.minute)
+        return "\(days) \(start)-\(end)"
+    }
+
+    private func dayAbbrev(_ d: Int) -> String {
+        switch d {
+        case 1: return "Su"
+        case 2: return "M"
+        case 3: return "Tu"
+        case 4: return "W"
+        case 5: return "Th"
+        case 6: return "F"
+        case 7: return "Sa"
+        default: return "?"
+        }
+    }
+
+    private func boolStr(_ b: Bool) -> String { b ? "yes" : "no" }
+
+    @ViewBuilder
+    private var systemBlock: some View {
+        Text("SYS  bat:\(batteryDescription())  lowPower:\(ProcessInfo.processInfo.isLowPowerModeEnabled ? "yes" : "no")  thermal:\(thermalDescription())")
+        Text("     free:\(freeDiskDescription())")
+    }
+
+    private func batteryDescription() -> String {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let level = UIDevice.current.batteryLevel
+        guard level >= 0 else { return "?" }
+        let pct = Int(level * 100)
+        let state: String = {
+            switch UIDevice.current.batteryState {
+            case .charging: return "chg"
+            case .full: return "full"
+            case .unplugged: return "unplug"
+            case .unknown: return "?"
+            @unknown default: return "?"
+            }
+        }()
+        return "\(pct)% \(state)"
+    }
+
+    private func thermalDescription() -> String {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "SERIOUS"
+        case .critical: return "CRITICAL"
+        @unknown default: return "?"
+        }
+    }
+
+    private func freeDiskDescription() -> String {
+        guard let bytes = freeDiskBytes() else { return "?" }
+        return String(format: "%.1f GB", Double(bytes) / 1_073_741_824)
+    }
+
+    @ViewBuilder
+    private var diagEntriesBlock: some View {
+        let entries = Array(appState.storage.readDiagnosticEntries(category: nil).suffix(20))
+        if entries.isEmpty {
+            Text("DIAG: (no recent entries)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+        } else {
+            Text("DIAG (last \(entries.count)):")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+            ForEach(entries.indices, id: \.self) { i in
+                Text("• \(Self.hmsFormatter.string(from: entries[i].timestamp)) [\(entries[i].category.rawValue)] \(String(entries[i].message.prefix(80)))")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+        }
+    }
+
+    private static let hmsFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    private func freeDiskBytes() -> Int64? {
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+        guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+              let bytes = values.volumeAvailableCapacityForImportantUsage else { return nil }
+        return bytes
     }
 
     @ViewBuilder
@@ -543,7 +733,11 @@ struct KidDiagnosticsView: View {
         lines.append("")
 
         // Network / Internet
-        lines.append("NET: \(appState.networkMonitor.isConnected ? "online" : "OFFLINE")")
+        let nm = appState.networkMonitor
+        let netLine = "NET: \(nm.isConnected ? "online" : "OFFLINE") via \(nm.interfaceKind)"
+            + (nm.isExpensive ? " (expensive/cell/hotspot)" : "")
+            + (nm.isConstrained ? " (lowData)" : "")
+        lines.append(netLine)
         let vpnRaw = appState.vpnManager?.connectionStatus.rawValue ?? -1
         lines.append("VPN: \(vpnStatusString(vpnRaw))")
         lines.append("TUN last alive: \(absAge(defaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0))")
@@ -625,6 +819,92 @@ struct KidDiagnosticsView: View {
         let tun = defaults?.integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0
         lines.append("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)")
         lines.append("")
+
+        // Device restrictions
+        let r = appState.storage.readDeviceRestrictions() ?? DeviceRestrictions()
+        lines.append("RESTRICT denyWebRestricted:\(boolStr(r.denyWebWhenRestricted)) denyAppRemoval:\(boolStr(r.denyAppRemoval)) denyExplicit:\(boolStr(r.denyExplicitContent)) lockAccts:\(boolStr(r.lockAccounts)) autoDT:\(boolStr(r.requireAutomaticDateAndTime))")
+        lines.append("")
+
+        // Schedule windows
+        if let sched = appState.storage.readActiveScheduleProfile() {
+            lines.append("SCHED \"\(sched.name)\" lockedMode:\(sched.lockedMode.rawValue)")
+            if !sched.unlockedWindows.isEmpty {
+                lines.append("  unlocked windows:")
+                for w in sched.unlockedWindows {
+                    lines.append("    " + windowDescription(w))
+                }
+            }
+            if !sched.lockedWindows.isEmpty {
+                lines.append("  locked windows:")
+                for w in sched.lockedWindows {
+                    lines.append("    " + windowDescription(w))
+                }
+            }
+        } else {
+            lines.append("SCHED: (no active profile)")
+        }
+        lines.append("")
+
+        // Time limits
+        let allLimits = appState.storage.readAppTimeLimits()
+        let exhaustedApps = appState.storage.readTimeLimitExhaustedApps()
+        let exhaustedFPs = Set(exhaustedApps.map(\.fingerprint))
+        if allLimits.isEmpty {
+            lines.append("LIMITS: (none)")
+        } else {
+            lines.append("LIMITS (\(allLimits.count)):")
+            for l in allLimits {
+                let mark = exhaustedFPs.contains(l.fingerprint) ? " [EXHAUSTED]" : ""
+                lines.append("  \(l.appName): \(l.dailyLimitMinutes)m/day\(mark)")
+            }
+        }
+        lines.append("")
+
+        // System
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let bat = UIDevice.current.batteryLevel
+        let batPct = bat < 0 ? "?" : "\(Int(bat * 100))%"
+        let batState: String = {
+            switch UIDevice.current.batteryState {
+            case .charging: return "chg"
+            case .full: return "full"
+            case .unplugged: return "unplug"
+            default: return "?"
+            }
+        }()
+        let thermal: String = {
+            switch ProcessInfo.processInfo.thermalState {
+            case .nominal: return "nominal"
+            case .fair: return "fair"
+            case .serious: return "SERIOUS"
+            case .critical: return "CRITICAL"
+            @unknown default: return "?"
+            }
+        }()
+        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled ? "yes" : "no"
+        let freeGB = freeDiskBytes().map { String(format: "%.1f GB", Double($0) / 1_073_741_824) } ?? "?"
+        lines.append("SYS bat:\(batPct) \(batState)  lowPower:\(lowPower)  thermal:\(thermal)  free:\(freeGB)")
+        lines.append("")
+
+        // Event log (last 10 pending)
+        let events = Array(appState.storage.readPendingEventLogs().suffix(10))
+        if !events.isEmpty {
+            lines.append("EVENTS pending upload (last \(events.count)):")
+            for e in events {
+                lines.append("  \(Self.hmsFormatter.string(from: e.timestamp)) \(e.eventType.rawValue) — \((e.details ?? "").prefix(80))")
+            }
+            lines.append("")
+        }
+
+        // Recent diagnostic entries
+        let recent = Array(appState.storage.readDiagnosticEntries(category: nil).suffix(20))
+        if !recent.isEmpty {
+            lines.append("DIAG (last \(recent.count)):")
+            for entry in recent {
+                lines.append("  \(Self.hmsFormatter.string(from: entry.timestamp)) [\(entry.category.rawValue)] \(entry.message.prefix(100))")
+            }
+            lines.append("")
+        }
 
         // IDs
         lines.append("FAM:\(enroll?.familyID.rawValue ?? "?")")
