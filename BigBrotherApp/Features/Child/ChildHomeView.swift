@@ -29,6 +29,7 @@ struct ChildHomeView: View {
     @State private var pinUnlockViewModel: LocalParentUnlockViewModel?
     @State private var showSOSConfirmation = false
     @State private var showAppVerification = false
+    @State private var showDiagnostics = false
     @State private var showPermissionFixer = false
     @State private var showWelcome = false
     @State private var launchGracePeriod = true
@@ -112,10 +113,22 @@ struct ChildHomeView: View {
 
                     Spacer(minLength: 40)
 
-                    // PIN Unlock button
-                    if viewModel.isPINConfigured {
-                        HStack {
-                            Spacer()
+                    // Diagnostics + PIN Unlock row — small, unobtrusive.
+                    // Kid taps Diagnostics when reporting a problem to parent;
+                    // the view is a single dense screen designed to screenshot.
+                    HStack {
+                        Button {
+                            showDiagnostics = true
+                        } label: {
+                            Label("Diagnostics", systemImage: "stethoscope")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.4))
+                        }
+                        .accessibilityLabel("Show diagnostics for parent")
+
+                        Spacer()
+
+                        if viewModel.isPINConfigured {
                             Button {
                                 pinUnlockViewModel = LocalParentUnlockViewModel(appState: viewModel.appState)
                                 showPINUnlock = true
@@ -166,6 +179,9 @@ struct ChildHomeView: View {
         }
         .sheet(isPresented: $showPermissionFixer) {
             PermissionFixerView(appState: viewModel.appState)
+        }
+        .sheet(isPresented: $showDiagnostics) {
+            KidDiagnosticsView(appState: viewModel.appState)
         }
         .fullScreenCover(isPresented: $showWelcome) {
             WelcomeView {

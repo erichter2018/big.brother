@@ -43,6 +43,7 @@
 		2A7333B38AD4A92D3676A910 /* ActivityFeedViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B95B2F5C9CFDAFB5A63907B0 /* ActivityFeedViewModel.swift */; };
 		2C07273E33EED3CF492EC083 /* LocalParentUnlockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B2932282E5C1291793D282 /* LocalParentUnlockViewModel.swift */; };
 		2C2DC3DFB2D37A7069EE7A84 /* DNSProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D41227A54F0B86A1736CFC5 /* DNSProxy.swift */; };
+		2CD3B3399AB92602A0932367 /* KidDiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C1AA7AA834688FA54CCE100 /* KidDiagnosticsView.swift */; };
 		2F5598AE6A7EB8E626433A89 /* ParentTestCommandReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1969CF6680008C6077CD1DAE /* ParentTestCommandReceiver.swift */; };
 		2FAFBBB2E116F22FE3F34104 /* ScheduleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7425110E1AD24BCA7B6F62EE /* ScheduleManager.swift */; };
 		3052250EB127B85C0D3C219F /* HeartbeatProfileListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBE922CC1D119DC068B1B419 /* HeartbeatProfileListView.swift */; };
@@ -365,6 +366,7 @@
 		773C468E734D5EDF5913F67B /* CommandSendable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSendable.swift; sourceTree = "<group>"; };
 		792778475B47D7B9A5347B7E /* ScheduleEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleEditorViewModel.swift; sourceTree = "<group>"; };
 		7B798B36FE0FAEB8B606C217 /* BigBrotherMonitorExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherMonitorExtension.swift; sourceTree = "<group>"; };
+		7C1AA7AA834688FA54CCE100 /* KidDiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KidDiagnosticsView.swift; sourceTree = "<group>"; };
 		7EC09EF49E97410562D4FF70 /* PermissionFixerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionFixerView.swift; sourceTree = "<group>"; };
 		7F85AF48051FD61F7CC41174 /* BigBrotherShieldExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BigBrotherShieldExtension.swift; sourceTree = "<group>"; };
 		80835F4F3592BD8FA99A77D4 /* UnlockRequestPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnlockRequestPickerView.swift; sourceTree = "<group>"; };
@@ -797,6 +799,7 @@
 				ECC8AE34732E820D470DACBD /* ChildHomeView.swift */,
 				015EB5816D3D8D3395FF5305 /* ChildHomeViewModel.swift */,
 				F2FC549E1F2A94442E2ADC0D /* ChildSingleAppPickSheet.swift */,
+				7C1AA7AA834688FA54CCE100 /* KidDiagnosticsView.swift */,
 				A3B2932282E5C1291793D282 /* LocalParentUnlockViewModel.swift */,
 				D9D1291EB600DF958D8E04FF /* LocalUnlockView.swift */,
 				B7D78A40DA38C5873164B394 /* NameMyAppsView.swift */,
@@ -1521,6 +1524,7 @@
 				D63FA80AC2135A444637CD7E /* InsightsModels.swift in Sources */,
 				BDF57CCF089834D095F39F7D /* InsightsView.swift in Sources */,
 				1BAE60F19C6DC8BA80494E88 /* InsightsViewModel.swift in Sources */,
+				2CD3B3399AB92602A0932367 /* KidDiagnosticsView.swift in Sources */,
 				39F9BF1B90A12B64B76E7B27 /* LiveLocationManager.swift in Sources */,
 				644ABEABCBD6CE8D958B9F13 /* LoadingStateView.swift in Sources */,
 				2C07273E33EED3CF492EC083 /* LocalParentUnlockViewModel.swift in Sources */,
