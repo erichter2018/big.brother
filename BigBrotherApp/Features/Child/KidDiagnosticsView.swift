@@ -30,8 +30,8 @@ struct KidDiagnosticsView: View {
     @State private var motionAuthString = "?"
     @State private var notifAuthString = "?"
     @State private var showCopiedToast = false
+    @State private var childName: String?
 
-    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let locationManager = CLLocationManager()
 
     var body: some View {
@@ -92,13 +92,40 @@ struct KidDiagnosticsView: View {
                         .padding(.top, 8)
                 }
             }
-            .onReceive(timer) { now = $0 }
-            .onAppear {
+            .task {
+                // Tick `now` every second so on-screen ages stay current.
+                // A Task loop is used instead of Combine's Timer.publish
+                // because Timer.publish on a View struct's `let` property
+                // was observed to stop firing after ~30s, leaving ages
+                // displayed as negative (timestamps written after the last
+                // tick looked "in the future"). `.task` is bound to view
+                // lifecycle and cancels cleanly on dismiss.
                 refreshAuthStrings()
+                await fetchChildNameIfNeeded()
+                while !Task.isCancelled {
+                    now = Date()
+                    refreshAuthStrings()
+                    try? await Task.sleep(for: .seconds(1))
+                }
             }
-            .onReceive(timer) { _ in
-                refreshAuthStrings()
-            }
+        }
+    }
+
+    /// Fetch the kid's ChildProfile.name from CloudKit once per view
+    /// presentation. Cached in App Group so future launches see it
+    /// immediately without needing the network.
+    private func fetchChildNameIfNeeded() async {
+        let defaults = UserDefaults.appGroup
+        if let cached = defaults?.string(forKey: "cachedChildName"), !cached.isEmpty {
+            childName = cached
+            return
+        }
+        guard let enroll = appState.enrollmentState,
+              let cloudKit = appState.cloudKit else { return }
+        if let profiles = try? await cloudKit.fetchChildProfiles(familyID: enroll.familyID),
+           let profile = profiles.first(where: { $0.id == enroll.childProfileID }) {
+            childName = profile.name
+            defaults?.set(profile.name, forKey: "cachedChildName")
         }
     }
 
@@ -106,7 +133,9 @@ struct KidDiagnosticsView: View {
 
     @ViewBuilder
     private var headerBlock: some View {
-        Text(cachedDeviceDisplayName() ?? "device")
+        let name = childName ?? "(kid name loading…)"
+        let dev = cachedDeviceDisplayName() ?? UIDevice.current.model
+        Text("\(name) — \(dev)")
             .font(.system(size: 14, weight: .bold, design: .monospaced))
         Text("\(UIDevice.current.model) (\(hardwareIdentifier())) iOS \(UIDevice.current.systemVersion)")
         Text(Self.dateStampFormatter.string(from: now))
@@ -422,14 +451,14 @@ struct KidDiagnosticsView: View {
     private func absAge(_ epochSeconds: TimeInterval) -> String {
         guard epochSeconds > 0 else { return "never" }
         let d = Date(timeIntervalSince1970: epochSeconds)
-        let delta = now.timeIntervalSince(d)
+        let delta = max(0, now.timeIntervalSince(d))
         return "\(timeStr(d)) (\(compactDelta(delta)) ago)"
     }
 
     /// Compact age string like "3s" or "42m" or "2h15m" — for inline use.
     private func compactAge(_ epochSeconds: TimeInterval) -> String {
         guard epochSeconds > 0 else { return "never" }
-        let delta = now.timeIntervalSince(Date(timeIntervalSince1970: epochSeconds))
+        let delta = max(0, now.timeIntervalSince(Date(timeIntervalSince1970: epochSeconds)))
         return compactDelta(delta)
     }
 
@@ -440,7 +469,7 @@ struct KidDiagnosticsView: View {
     }
 
     private func compactDelta(_ seconds: TimeInterval) -> String {
-        let s = Int(seconds)
+        let s = max(0, Int(seconds))
         if s < 60 { return "\(s)s" }
         if s < 3600 { return "\(s/60)m" }
         if s < 86400 {
@@ -474,7 +503,9 @@ struct KidDiagnosticsView: View {
 
         // Header
         lines.append("— BigBrother Diagnostics —")
-        lines.append(cachedDeviceDisplayName() ?? "device")
+        let name = childName ?? (UserDefaults.appGroup?.string(forKey: "cachedChildName") ?? "(kid)")
+        let dev = cachedDeviceDisplayName() ?? UIDevice.current.model
+        lines.append("\(name) — \(dev)")
         lines.append("\(UIDevice.current.model) (\(hardwareIdentifier())) iOS \(UIDevice.current.systemVersion)")
         lines.append(Self.dateStampFormatter.string(from: now))
         lines.append("")
