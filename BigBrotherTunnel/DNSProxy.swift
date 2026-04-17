@@ -558,6 +558,25 @@ final class DNSProxy {
         reconnectUpstream()
     }
 
+    /// Same as `checkWaitingStuck` but reports whether a reconnect was
+    /// triggered. Used by `healthCheck()` so callers can distinguish
+    /// "was always fine" from "I just self-repaired from a wedge" — the
+    /// latter is still a visible outage signal that should count toward
+    /// the tunnel's recovery ladder.
+    @discardableResult
+    private func checkWaitingStuckReporting() -> Bool {
+        upstreamStateLock.lock()
+        let enteredAt = waitingEnteredAt
+        upstreamStateLock.unlock()
+        guard let enteredAt,
+              Date().timeIntervalSince(enteredAt) > waitingStuckThreshold else {
+            return false
+        }
+        NSLog("[DNSProxy] Upstream stuck in .waiting for \(Int(Date().timeIntervalSince(enteredAt)))s — forcing reconnect")
+        reconnectUpstream()
+        return true
+    }
+
     /// Start a fresh read loop chain, superseding any previous one.
     /// Called after `reapplyNetworkSettings` completes so the new packet
     /// flow has an active reader — but without leaving the old chain
@@ -587,8 +606,14 @@ final class DNSProxy {
         }
         // Connection stuck in .waiting past the threshold — force a rebuild
         // rather than continuing to queue sends against a path iOS can't
-        // establish.
-        checkWaitingStuck()
+        // establish. If we had to reconnect, return false so the caller's
+        // recovery counter still ticks — a forced reconnect means the
+        // kid's DNS had been wedged for `waitingStuckThreshold`+ seconds
+        // regardless of whether the repair succeeded.
+        let repaired = checkWaitingStuckReporting()
+        if repaired {
+            return false
+        }
         // Check for query blackhole: many pending queries = responses not arriving
         pendingLock.lock()
         let count = pending.count

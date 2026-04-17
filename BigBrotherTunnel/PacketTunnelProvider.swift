@@ -40,13 +40,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         return ts > 0 ? Date(timeIntervalSince1970: ts) : Date()
     }()
 
-    /// Whether the main app is considered alive. Seeded from App Group timestamp.
-    private lazy var mainAppAlive: Bool = {
+    /// Lock for the handful of Bool flags that are both written from the
+    /// liveness-timer queue and read from packet-flow / IPC / command /
+    /// heartbeat paths. Unsynchronized cross-thread Bool access is UB in
+    /// Swift — codex's audit on b631 flagged `mainAppAlive`,
+    /// `networkSettingsNeedRetry`, and a few others as flap-critical
+    /// fields that could torn-read during a network transition.
+    private let stateFlagsLock = NSLock()
+
+    private var _mainAppAlive: Bool = {
         let ts = UserDefaults.appGroup?
             .double(forKey: AppGroupKeys.mainAppLastActiveAt) ?? 0
-        // If app was active within the last 10 minutes, assume alive
         return ts > 0 && (Date().timeIntervalSince1970 - ts) < AppConstants.appDeathThresholdSeconds
     }()
+
+    /// Whether the main app is considered alive. Seeded from App Group
+    /// timestamp on first read (done in the stored initializer above).
+    /// Reads/writes go through `stateFlagsLock` so simultaneous liveness-tick
+    /// evaluation and IPC-ping handlers can't race.
+    private var mainAppAlive: Bool {
+        get { stateFlagsLock.lock(); defer { stateFlagsLock.unlock() }; return _mainAppAlive }
+        set { stateFlagsLock.lock(); _mainAppAlive = newValue; stateFlagsLock.unlock() }
+    }
 
     /// Prevent duplicate heartbeats — only send from tunnel when main app is dead.
     private var tunnelOwnsHeartbeat = false
@@ -92,7 +107,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var tunnelStartedAt: Date = Date()
 
     /// Set when `setTunnelNetworkSettings` fails — retried on the next liveness tick.
-    private var networkSettingsNeedRetry = false
+    /// Reads from the liveness timer; writes from the `setTunnelNetworkSettings`
+    /// completion (NE framework queue), the watchdog timer, and the
+    /// reapplyNetworkSettings retry path. Accesses go through `stateFlagsLock`.
+    private var _networkSettingsNeedRetry = false
+    private var networkSettingsNeedRetry: Bool {
+        get { stateFlagsLock.lock(); defer { stateFlagsLock.unlock() }; return _networkSettingsNeedRetry }
+        set { stateFlagsLock.lock(); _networkSettingsNeedRetry = newValue; stateFlagsLock.unlock() }
+    }
 
     /// Backoff counter for persistent CloudKit heartbeat permission failures.
     /// Prevents spamming delete-recreate on every heartbeat interval.
@@ -4454,23 +4476,27 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.dnsProxy?.reconnectUpstream()
             NSLog("[Tunnel] Network changed — reconnected upstream DNS (instant)")
 
-            // Schedule a health check after the network settles.
-            // Only do the expensive full re-plumb if DNS is actually broken.
+            // b631 audit finding: the prior code gated the full re-plumb on
+            // `dnsProxy.healthCheck() == false`, but a healthy DNS upstream
+            // doesn't imply the packet flow is healthy. NEPacketTunnelFlow
+            // stays bound to whatever interface was live when
+            // setTunnelNetworkSettings last succeeded — if that interface is
+            // now dead (wifi→cell, hotspot swap), queries never reach the
+            // DNS proxy even though the proxy's own NWConnection migrated
+            // fine. Always force a re-plumb after a real interface-signature
+            // change, debounced 3 s to absorb flap bursts. The cost is one
+            // extra setTunnelNetworkSettings per transition (~1-3 s of
+            // tunnel blip); the benefit is no silent flow wedge.
             let capturedSignature = signature
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let healthy = self.dnsProxy?.healthCheck() ?? false
-                if !healthy {
-                    NSLog("[Tunnel] DNS health failed after network change — full re-plumb")
-                    try? self.storage.appendDiagnosticEntry(DiagnosticEntry(
-                        category: .command,
-                        message: "Network path transition — re-plumbing tunnel",
-                        details: "DNS unhealthy after interface change to \(capturedSignature)"
-                    ))
-                    self.reapplyNetworkSettings(force: true)
-                } else {
-                    NSLog("[Tunnel] DNS healthy after network change — skipping re-plumb")
-                }
+                NSLog("[Tunnel] Network change settled (\(capturedSignature)) — forcing re-plumb to rebind packet flow")
+                try? self.storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .command,
+                    message: "Network path transition — re-plumbing tunnel",
+                    details: "Interface signature changed to \(capturedSignature); forcing re-bind"
+                ))
+                self.reapplyNetworkSettings(force: true)
             }
             pathDebounceWork = work
             (pathMonitorQueue ?? DispatchQueue.global()).asyncAfter(
