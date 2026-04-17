@@ -61,7 +61,7 @@ struct InsightsView: View {
         }
         .navigationTitle("Insights")
         .refreshable {
-            await viewModel.load()
+            await withDeadline(30) { await viewModel.load() }
         }
         .task {
             await viewModel.load()

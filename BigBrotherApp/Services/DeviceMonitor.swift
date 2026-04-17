@@ -291,7 +291,7 @@ final class DeviceMonitor {
     private func requestNotificationPermission() {
         // Suppress during onboarding — PermissionFixerView handles notifications.
         let defaults = UserDefaults.appGroup
-        if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true { return }
+        if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true { return }
         Task {
             do {
                 let granted = try await UNUserNotificationCenter.current()

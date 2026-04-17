@@ -66,7 +66,7 @@ struct ScheduleTemplateListView: View {
             }
         }
         .refreshable {
-            await viewModel.refresh()
+            await withDeadline(30) { await viewModel.refresh() }
         }
         .sheet(item: $editingProfile) { profile in
             NavigationStack {

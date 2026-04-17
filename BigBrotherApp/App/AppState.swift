@@ -18,6 +18,33 @@ import BigBrotherCore
 @MainActor
 final class AppState {
 
+    // MARK: - DeviceActivity Serial Queue
+    //
+    // Serialized queue for ALL DeviceActivity schedule registration work
+    // (registerTimeLimitEvents + future registration helpers). Two reasons:
+    //   1. `DeviceActivityCenter` methods are synchronous XPC to
+    //      `deviceactivityd` — off-main is required to avoid freezing the UI
+    //      when the daemon is wedged.
+    //   2. Registration is order-sensitive: `registerTimeLimitEvents` begins
+    //      by clearing all existing `bigbrother.timelimit.*` activities. If
+    //      two updates race on a concurrent queue, an older snapshot can land
+    //      after a newer one and wipe the newer registrations. A serial queue
+    //      guarantees last-dispatched == last-applied, and we re-read the
+    //      latest limits from storage inside the block so the "last writer"
+    //      always sees the freshest state.
+    private static let deviceActivityQueue = DispatchQueue(
+        label: "fr.bigbrother.deviceActivity",
+        qos: .userInitiated
+    )
+
+    // MARK: - Schedule Transition Guard
+    //
+    // Set while an `enforceScheduleTransition` apply is in flight. The
+    // function is called from a 1-second timer; without this guard a slow
+    // `applyModeDirect` (wedged daemon) lets every subsequent tick queue
+    // another Task.detached, thrashing the daemon and wasting CPU.
+    private var scheduleTransitionInFlight = false
+
     // MARK: - Role & Identity
 
     /// This device's role, read from Keychain on init.
@@ -863,7 +890,17 @@ final class AppState {
         try? storage.writeAppTimeLimits(localLimits)
         try? storage.writeTimeLimitExhaustedApps(exhausted)
         if familyControlsAvailable {
-            ScheduleRegistrar.registerTimeLimitEvents(limits: localLimits)
+            // Serialized off-main registration. See `deviceActivityQueue`
+            // class comment above for the two reasons (XPC is blocking, and
+            // registerTimeLimitEvents wipes existing activities first → a
+            // stale snapshot landing after a fresh one would wipe the fresh
+            // state on a concurrent queue). Re-read limits from storage
+            // INSIDE the block so whoever runs last sees the newest data.
+            let capturedStorage = storage
+            Self.deviceActivityQueue.async {
+                let latestLimits = capturedStorage.readAppTimeLimits()
+                ScheduleRegistrar.registerTimeLimitEvents(limits: latestLimits)
+            }
         }
         if shouldReapplyEnforcement,
            let snapshot = storage.readPolicySnapshot(),
@@ -1000,7 +1037,17 @@ final class AppState {
         try? storage.writeAppTimeLimits(localLimits)
         try? storage.writeTimeLimitExhaustedApps(exhausted)
         if familyControlsAvailable {
-            ScheduleRegistrar.registerTimeLimitEvents(limits: localLimits)
+            // Serialized off-main registration. See `deviceActivityQueue`
+            // class comment above for the two reasons (XPC is blocking, and
+            // registerTimeLimitEvents wipes existing activities first → a
+            // stale snapshot landing after a fresh one would wipe the fresh
+            // state on a concurrent queue). Re-read limits from storage
+            // INSIDE the block so whoever runs last sees the newest data.
+            let capturedStorage = storage
+            Self.deviceActivityQueue.async {
+                let latestLimits = capturedStorage.readAppTimeLimits()
+                ScheduleRegistrar.registerTimeLimitEvents(limits: latestLimits)
+            }
         }
         if shouldReapplyEnforcement,
            let snapshot = storage.readPolicySnapshot(),
@@ -1056,11 +1103,11 @@ final class AppState {
             // Write FC auth status to App Group so the tunnel diagnostic can report it.
             let authStatus = impl.authorizationStatus
             UserDefaults.appGroup?
-                .set(authStatus.rawValue, forKey: "familyControlsAuthStatus")
+                .set(authStatus.rawValue, forKey: AppGroupKeys.familyControlsAuthStatus)
 
             fcManager.observeAuthorizationChanges { [weak self] newStatus in
                 UserDefaults.appGroup?
-                    .set(newStatus.rawValue, forKey: "familyControlsAuthStatus")
+                    .set(newStatus.rawValue, forKey: AppGroupKeys.familyControlsAuthStatus)
                 Task { @MainActor [weak self] in
                     self?.handleAuthorizationChange(newStatus)
                 }
@@ -1150,11 +1197,11 @@ final class AppState {
             ensureVPNInstalled(vpn)
 
             cmdProcessor.onLocationModeChanged = { [weak locService] mode in
-                guard UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") != true else { return }
+                guard UserDefaults.appGroup?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) != true else { return }
                 locService?.setMode(mode)
             }
             cmdProcessor.onRequestLocation = { [weak locService] in
-                guard UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") != true else { return }
+                guard UserDefaults.appGroup?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) != true else { return }
                 Task { let _ = await locService?.requestCurrentLocation() }
             }
             cmdProcessor.onSyncNamedPlaces = { [weak self, weak locService] in
@@ -1197,7 +1244,7 @@ final class AppState {
                 }
             }
             cmdProcessor.onRequestPermissions = { [weak self, weak locService] in
-                guard UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") != true else { return }
+                guard UserDefaults.appGroup?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) != true else { return }
                 Task { @MainActor in
                     try? await self?.enforcement?.requestAuthorization()
                     if locService?.mode == .off {
@@ -1227,8 +1274,8 @@ final class AppState {
                 if key.hasPrefix("homeLatitude."), let lat = value as? Double {
                     let suffix = String(key.dropFirst("homeLatitude.".count))
                     if let lon = UserDefaults.standard.object(forKey: "homeLongitude.\(suffix)") as? Double {
-                        debugDefaults?.set(lat, forKey: "homeLatitude")
-                        debugDefaults?.set(lon, forKey: "homeLongitude")
+                        debugDefaults?.set(lat, forKey: AppGroupKeys.homeLatitude)
+                        debugDefaults?.set(lon, forKey: AppGroupKeys.homeLongitude)
                         break // Use first found
                     }
                 }
@@ -1380,7 +1427,7 @@ final class AppState {
     /// the app, which hides legitimate pending requests until the parent acts.
     private func syncResolvedPendingReviews() async {
         guard let cloudKit else { return }
-        guard let data = storage.readRawData(forKey: "pending_review_local.json"),
+        guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
               let localReviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
               !localReviews.isEmpty else { return }
 
@@ -1535,7 +1582,7 @@ final class AppState {
         // Ping tunnel immediately on launch — clears DNS blackhole ASAP.
         vpnManager?.sendPing()
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.mainAppLastActiveAt)
 
         // One-time migration: denyWebWhenRestricted used to default to true, which was wrong.
         // Reset it to false on all existing devices so web isn't blocked unless the parent
@@ -1670,7 +1717,7 @@ final class AppState {
         // restarts with new code but the app process may be resumed stale).
         // Force exit so iOS relaunches with the new binary.
         let tunnelBuild = UserDefaults.appGroup?
-            .integer(forKey: "tunnelBuildNumber") ?? 0
+            .integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0
         if tunnelBuild > AppConstants.appBuildNumber {
             exit(0)
         }
@@ -1679,8 +1726,8 @@ final class AppState {
         // DNS blackhole the instant the kid opens the app, not 30+ seconds later.
         vpnManager?.sendPing()
         let fgDefaults = UserDefaults.appGroup
-        fgDefaults?.set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
-        fgDefaults?.set(Date().timeIntervalSince1970, forKey: "mainAppLastForegroundAt")
+        fgDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.mainAppLastActiveAt)
+        fgDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.mainAppLastForegroundAt)
 
         Task {
             defer {
@@ -1699,7 +1746,7 @@ final class AppState {
             // We still process incoming commands + sync schedule + send heartbeat
             // so the parent dashboard gets fresh data.
             let syncDefaults = UserDefaults.appGroup
-            let fixerActive = syncDefaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true
+            let fixerActive = syncDefaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true
 
             // CRITICAL PATH: process commands immediately — this is what the
             // parent is waiting for. processIncomingCommands handles its own
@@ -1787,15 +1834,15 @@ final class AppState {
     /// reconciliation cycle.
     func handleMainAppResponsive(reapplyEnforcement: Bool) {
         let defaults = UserDefaults.appGroup
-        if let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken"),
+        if let requestToken = defaults?.string(forKey: AppGroupKeys.extensionHeartbeatRequestToken),
            !requestToken.isEmpty {
-            defaults?.set(requestToken, forKey: "extensionHeartbeatAcknowledgedToken")
-            defaults?.set(Date().timeIntervalSince1970, forKey: "extensionHeartbeatAcknowledgedAt")
+            defaults?.set(requestToken, forKey: AppGroupKeys.extensionHeartbeatAcknowledgedToken)
+            defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.extensionHeartbeatAcknowledgedAt)
         }
-        let hadFailSafe = defaults?.bool(forKey: "forceCloseWebBlocked") == true
+        let hadFailSafe = defaults?.bool(forKey: AppGroupKeys.forceCloseWebBlocked) == true
         if hadFailSafe {
-            defaults?.removeObject(forKey: "forceCloseWebBlocked")
-            defaults?.removeObject(forKey: "forceCloseLastNagAt")
+            defaults?.removeObject(forKey: AppGroupKeys.forceCloseWebBlocked)
+            defaults?.removeObject(forKey: AppGroupKeys.forceCloseLastNagAt)
         }
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["force-close-nag"])
 
@@ -1837,7 +1884,7 @@ final class AppState {
             // handle the install in its step — don't fire the VPN system dialog
             // out of order.
             let defaults = UserDefaults.appGroup
-            if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+            if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
                 #if DEBUG
                 print("[BigBrother] VPN install deferred — PermissionFixerView will handle it")
                 #endif
@@ -1959,16 +2006,16 @@ final class AppState {
         // We still update the allPermissionsGranted flags so services know
         // the auth state has changed.
         let fixerActiveDefaults = UserDefaults.appGroup
-        let fixerActive = fixerActiveDefaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true
+        let fixerActive = fixerActiveDefaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true
         if fixerActive {
             if newStatus == .denied || newStatus == .notDetermined {
                 eventLogger.log(.familyControlsAuthChanged, details: "Authorization changed during guided setup")
-                fixerActiveDefaults?.set(false, forKey: "allPermissionsGranted")
-                fixerActiveDefaults?.set(false, forKey: "enforcementPermissionsOK")
+                fixerActiveDefaults?.set(false, forKey: AppGroupKeys.allPermissionsGranted)
+                fixerActiveDefaults?.set(false, forKey: AppGroupKeys.enforcementPermissionsOK)
             } else if newStatus == .authorized {
                 eventLogger.log(.authorizationRestored, details: "Authorization granted during guided setup")
-                fixerActiveDefaults?.set(true, forKey: "allPermissionsGranted")
-                fixerActiveDefaults?.set(true, forKey: "enforcementPermissionsOK")
+                fixerActiveDefaults?.set(true, forKey: AppGroupKeys.allPermissionsGranted)
+                fixerActiveDefaults?.set(true, forKey: AppGroupKeys.enforcementPermissionsOK)
                 // Update diagnostic write only — no enforcement.apply() here.
                 NSLog("[BigBrother] handleAuthorizationChange: FC authorized during guided setup — deferring enforcement to post-fixer")
             }
@@ -1984,8 +2031,8 @@ final class AppState {
             eventLogger.log(.authorizationLost, details: "FamilyControls authorization revoked — shields may be down")
             // Signal tunnel to block internet immediately
             let permDefaults = UserDefaults.appGroup
-            permDefaults?.set(false, forKey: "allPermissionsGranted")
-            permDefaults?.set(false, forKey: "enforcementPermissionsOK")
+            permDefaults?.set(false, forKey: AppGroupKeys.allPermissionsGranted)
+            permDefaults?.set(false, forKey: AppGroupKeys.enforcementPermissionsOK)
             // Force heartbeat so parent sees revocation immediately
             Task { try? await heartbeatService?.sendNow(force: true) }
 
@@ -2035,8 +2082,8 @@ final class AppState {
             eventLogger.log(.authorizationRestored, details: "Authorization restored")
             // Signal tunnel to unblock internet
             let permDefaults = UserDefaults.appGroup
-            permDefaults?.set(true, forKey: "allPermissionsGranted")
-            permDefaults?.set(true, forKey: "enforcementPermissionsOK")
+            permDefaults?.set(true, forKey: AppGroupKeys.allPermissionsGranted)
+            permDefaults?.set(true, forKey: AppGroupKeys.enforcementPermissionsOK)
 
             // Force heartbeat so parent sees restoration immediately
             Task { try? await heartbeatService?.sendNow(force: true) }
@@ -3214,7 +3261,7 @@ final class AppState {
 
         // Skip if a command was just processed (within 10s).
         let cmdDefaults = UserDefaults.appGroup
-        let lastCommandAt = cmdDefaults?.double(forKey: "fr.bigbrother.lastCommandProcessedAt") ?? 0
+        let lastCommandAt = cmdDefaults?.double(forKey: AppGroupKeys.lastCommandProcessedAt) ?? 0
         if Date().timeIntervalSince1970 - lastCommandAt < 10 { return }
 
         // Skip if enforcement was recently applied — XPC reads from
@@ -3315,7 +3362,7 @@ final class AppState {
 
             // Write mainAppLastActiveAt so tunnel knows we're alive and fixing things
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.mainAppLastActiveAt)
 
             // Force heartbeat so parent sees corrected state immediately
             Task {
@@ -3338,6 +3385,12 @@ final class AppState {
     // MARK: - Self Unlock
 
     /// Penalty phase ended — unlock the device for the free time window.
+    ///
+    /// The unlock work runs off-main: applyTemporaryUnlockDirect →
+    /// applyTemporaryUnlock → registerTempUnlockExpirySchedule synchronously
+    /// calls DeviceActivityCenter.startMonitoring, which can block the
+    /// calling thread for 60+ seconds when deviceactivityd is wedged
+    /// (observed 2026-04-17). Task.detached keeps the UI responsive.
     func applyTimedUnlockStart() {
         guard let info = storage.readTimedUnlockInfo() else { return }
         let remainingFreeTime = Int(info.lockAt.timeIntervalSinceNow)
@@ -3346,49 +3399,50 @@ final class AppState {
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
         ) else { return }
-        do {
-            try cmdProcessor.applyTemporaryUnlockDirect(
-                durationSeconds: remainingFreeTime,
-                enrollment: enrollment
-            )
-            refreshLocalState()
-            ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: remainingFreeTime)
-        } catch {
-            #if DEBUG
-            print("[BigBrother] Timed unlock start failed: \(error)")
-            #endif
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                try cmdProcessor.applyTemporaryUnlockDirect(
+                    durationSeconds: remainingFreeTime,
+                    enrollment: enrollment
+                )
+                await MainActor.run {
+                    self?.refreshLocalState()
+                    ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: remainingFreeTime)
+                }
+            } catch {
+                NSLog("[BigBrother] Timed unlock start failed: \(error.localizedDescription)")
+            }
         }
     }
 
     /// Ensure device is locked during the penalty phase of a timed unlock.
     /// Called as a safety net from BGTask if the device somehow unlocked.
+    /// applyModeDirect is off-main — it runs synchronous ManagedSettings /
+    /// DeviceActivity XPC which can freeze main if the daemons are wedged.
     func enforcePenaltyPhaseLock() {
         guard enforcement != nil else { return }
         guard let snapshot = storage.readPolicySnapshot() else { return }
         if snapshot.effectivePolicy.resolvedMode == .unlocked {
-            // Device is unlocked but should be locked during penalty — re-apply.
-            // Save timed unlock info before applyModeDirect clears it.
             let savedInfo = storage.readTimedUnlockInfo()
             let mode: LockMode = storage.readActiveScheduleProfile()?.lockedMode ?? .restricted
             guard let enrollment = try? keychain.get(
                 ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
             ) else { return }
             guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
-            try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
-            // Re-write timed unlock info since applyModeDirect clears it.
-            if let info = savedInfo {
-                try? storage.writeTimedUnlockInfo(info)
+            let capturedStorage = storage
+            Task.detached(priority: .userInitiated) { [weak self] in
+                try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+                if let info = savedInfo {
+                    try? capturedStorage.writeTimedUnlockInfo(info)
+                }
+                await MainActor.run { self?.refreshLocalState() }
             }
-            refreshLocalState()
         }
     }
 
     /// Free time window ended — re-lock the device.
+    /// applyModeDirect is off-main (synchronous ManagedSettings/DeviceActivity XPC).
     func applyTimedUnlockEnd() {
-        // Read previous mode BEFORE clearing state.
-        // Prefer TimedUnlockInfo.previousMode (set when the timed unlock was created)
-        // over TemporaryUnlockState.previousMode (which may be stale if a schedule
-        // transition overwrote it while the free phase was active).
         let timedPreviousMode = storage.readTimedUnlockInfo()?.previousMode
         let tempPreviousMode = storage.readTemporaryUnlockState()?.previousMode
         let previousMode = timedPreviousMode ?? tempPreviousMode ?? .restricted
@@ -3396,8 +3450,8 @@ final class AppState {
         try? storage.clearTemporaryUnlockState()
         guard enforcement != nil else { return }
         let defaults = UserDefaults.appGroup ?? .standard
-        let isScheduleDriven = defaults.object(forKey: "scheduleDrivenMode") == nil
-            || defaults.bool(forKey: "scheduleDrivenMode")
+        let isScheduleDriven = defaults.object(forKey: AppGroupKeys.scheduleDrivenMode) == nil
+            || defaults.bool(forKey: AppGroupKeys.scheduleDrivenMode)
         let mode: LockMode
         if isScheduleDriven, let profile = storage.readActiveScheduleProfile() {
             mode = profile.resolvedMode(at: Date())
@@ -3408,32 +3462,35 @@ final class AppState {
             ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
         ) else { return }
         guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
-        do {
-            try cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
+        let capturedEnforcement = enforcement
+        let capturedStorage = storage
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                try cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
 
-            // Verify shields applied — .child auth can silently reject writes
-            // after temp unlock expiry. Retry with delay if needed.
-            if mode != .unlocked, let enforcement {
-                let diag = enforcement.shieldDiagnostic()
-                if !diag.shieldsActive && !diag.categoryActive {
-                    try? storage.appendDiagnosticEntry(DiagnosticEntry(
-                        category: .enforcement,
-                        message: "Shield re-apply failed after unlock expiry (app path) — retrying in 2s"
-                    ))
-                    // Retry after delay — dispatched to avoid blocking main thread.
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                if mode != .unlocked, let enforcement = capturedEnforcement {
+                    let diag = enforcement.shieldDiagnostic()
+                    if !diag.shieldsActive && !diag.categoryActive {
+                        try? capturedStorage.appendDiagnosticEntry(DiagnosticEntry(
+                            category: .enforcement,
+                            message: "Shield re-apply failed after unlock expiry (app path) — retrying in 2s"
+                        ))
+                        try? await Task.sleep(for: .seconds(2))
                         try? cmdProcessor.applyModeDirect(mode, enrollment: enrollment)
                     }
-                    return // Don't check retry result synchronously
                 }
-            }
 
-            refreshLocalState()
-            ModeChangeNotifier.notify(newMode: mode)
-        } catch {
-            #if DEBUG
-            print("[BigBrother] Timed unlock end failed: \(error)")
-            #endif
+                // Refresh UI and emit mode-change notification on both paths
+                // (first-try success OR retry). Previously the retry branch
+                // returned early and skipped these, leaving the UI stale
+                // until the next 10s enforcement verify ran.
+                await MainActor.run {
+                    self?.refreshLocalState()
+                    ModeChangeNotifier.notify(newMode: mode)
+                }
+            } catch {
+                NSLog("[BigBrother] Timed unlock end failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -3451,7 +3508,7 @@ final class AppState {
         // Don't override manual mode commands (parent sent setMode directly).
         // scheduleDrivenMode is set to false by setMode and true by returnToSchedule.
         let defaults = UserDefaults.appGroup ?? .standard
-        if defaults.object(forKey: "scheduleDrivenMode") != nil && !defaults.bool(forKey: "scheduleDrivenMode") {
+        if defaults.object(forKey: AppGroupKeys.scheduleDrivenMode) != nil && !defaults.bool(forKey: AppGroupKeys.scheduleDrivenMode) {
             return
         }
 
@@ -3464,12 +3521,24 @@ final class AppState {
                 ChildEnrollmentState.self, forKey: StorageKeys.enrollmentState
             ) else { return }
             guard let cmdProcessor = commandProcessor as? CommandProcessorImpl else { return }
-            try? cmdProcessor.applyModeDirect(expectedMode, enrollment: enrollment)
-            refreshLocalState()
-            eventLogger?.log(.policyReconciled, details: "Timer safety net: applied \(expectedMode.rawValue) from schedule")
-            #if DEBUG
-            print("[BigBrother] Schedule safety net: applied \(expectedMode.rawValue)")
-            #endif
+            // Dedup: the 1-second timer calls this function every tick. If a
+            // previous apply is still running (slow daemon, wedged XPC), skip
+            // this tick. Without the guard, every tick queues another
+            // Task.detached and the daemon gets thrashed with parallel
+            // applies that all want the same mode.
+            guard !scheduleTransitionInFlight else { return }
+            scheduleTransitionInFlight = true
+            // Off-main: applyModeDirect runs synchronous ManagedSettings /
+            // DeviceActivity XPC which can freeze main when daemons are wedged.
+            let capturedLogger = eventLogger
+            Task.detached(priority: .userInitiated) { [weak self] in
+                defer {
+                    Task { @MainActor in self?.scheduleTransitionInFlight = false }
+                }
+                try? cmdProcessor.applyModeDirect(expectedMode, enrollment: enrollment)
+                await MainActor.run { self?.refreshLocalState() }
+                capturedLogger?.log(.policyReconciled, details: "Timer safety net: applied \(expectedMode.rawValue) from schedule")
+            }
         }
     }
 

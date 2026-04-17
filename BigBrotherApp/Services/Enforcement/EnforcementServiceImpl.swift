@@ -61,11 +61,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     /// would override the new single-store enforcement.
     private func migrateLegacyStoresIfNeeded() {
         let defaults = UserDefaults.appGroup
-        guard defaults?.bool(forKey: "migratedToSingleStore") != true else { return }
+        guard defaults?.bool(forKey: AppGroupKeys.migratedToSingleStore) != true else { return }
         for name in AppConstants.legacyStoreNames {
             ManagedSettingsStore(named: .init(name)).clearAllSettings()
         }
-        defaults?.set(true, forKey: "migratedToSingleStore")
+        defaults?.set(true, forKey: AppGroupKeys.migratedToSingleStore)
         NSLog("[Enforcement] Migrated: cleared legacy stores (base, schedule, tempUnlock)")
     }
     private let storage: any SharedStorageProtocol
@@ -127,8 +127,8 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             // Healthy: state matches policy. Don't touch the daemon.
             // Just refresh the audit flag so the next heartbeat sees fresh.
             let shieldDefaults = UserDefaults.appGroup
-            shieldDefaults?.set(isShielded, forKey: "shieldsActiveAtLastHeartbeat")
-            shieldDefaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
+            shieldDefaults?.set(isShielded, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat)
+            shieldDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt)
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "Foreground rescue SKIPPED — healthy",
@@ -152,11 +152,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         let postDiag = shieldDiagnostic()
         let postIsShielded = postDiag.shieldsActive || postDiag.categoryActive
         let shieldDefaults = UserDefaults.appGroup
-        shieldDefaults?.set(postIsShielded, forKey: "shieldsActiveAtLastHeartbeat")
-        shieldDefaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
+        shieldDefaults?.set(postIsShielded, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat)
+        shieldDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt)
         let audit = "app.rescue|\(policy.resolvedMode.rawValue)|\(postIsShielded ? "UP" : "DOWN")|\(postDiag.appCount)apps|\(Int(Date().timeIntervalSince1970))"
-        shieldDefaults?.set(audit, forKey: "lastShieldAudit")
-        shieldDefaults?.set("rescue", forKey: "lastShieldChangeReason")
+        shieldDefaults?.set(audit, forKey: AppGroupKeys.lastShieldAudit)
+        shieldDefaults?.set("rescue", forKey: AppGroupKeys.lastShieldChangeReason)
 
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
@@ -196,7 +196,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // at the end of this method.
         let applyStartedAt = Date()
         let applyDefaults = UserDefaults.appGroup
-        applyDefaults?.set(applyStartedAt.timeIntervalSince1970, forKey: "enforcementApplyStartedAt")
+        applyDefaults?.set(applyStartedAt.timeIntervalSince1970, forKey: AppGroupKeys.enforcementApplyStartedAt)
 
         migrateLegacyStoresIfNeeded()
 
@@ -205,12 +205,12 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         NSLog("[Enforcement] authStatus=\(authStatus) — XPC warmup (no sleep)")
 
         let defaults = UserDefaults.appGroup
-        defaults?.set("apply", forKey: "lastShieldChangeReason")
-        defaults?.set(Date().timeIntervalSince1970, forKey: "mainAppEnforcementAt")
+        defaults?.set("apply", forKey: AppGroupKeys.lastShieldChangeReason)
+        defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.mainAppEnforcementAt)
         defer {
             // Written unconditionally at return — covers both the temp-unlock
             // early return and the regular end-of-method path.
-            applyDefaults?.set(Date().timeIntervalSince1970, forKey: "enforcementApplyFinishedAt")
+            applyDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.enforcementApplyFinishedAt)
         }
 
         applyRestrictions(policy.deviceRestrictions)
@@ -254,12 +254,12 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // Companion timestamp lets the tunnel distinguish fresh Monitor/app writes
         // from stale flags during a mode transition.
         let shieldDefaults = UserDefaults.appGroup
-        shieldDefaults?.set(isShielded, forKey: "shieldsActiveAtLastHeartbeat")
-        shieldDefaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
+        shieldDefaults?.set(isShielded, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat)
+        shieldDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt)
 
         // Shield audit fingerprint — tracks WHO applied shields and WHY.
         let audit = "app|\(policy.resolvedMode.rawValue)|\(isShielded ? "UP" : "DOWN")|\(diagResult.appCount)apps|\(Int(Date().timeIntervalSince1970))"
-        shieldDefaults?.set(audit, forKey: "lastShieldAudit")
+        shieldDefaults?.set(audit, forKey: AppGroupKeys.lastShieldAudit)
 
         // Update shield config for the shield extension UI.
         let config = ShieldConfig(
@@ -308,9 +308,9 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         if expectedShielded == diag.shieldsActive && !modeInconsistent {
             // Verification passed — clear any degraded flag from a previous episode.
             let degradedDefaults = UserDefaults.appGroup
-            if degradedDefaults?.bool(forKey: "fcAuthDegraded") == true {
-                degradedDefaults?.removeObject(forKey: "fcAuthDegraded")
-                degradedDefaults?.removeObject(forKey: "fcAuthDegradedAt")
+            if degradedDefaults?.bool(forKey: AppGroupKeys.fcAuthDegraded) == true {
+                degradedDefaults?.removeObject(forKey: AppGroupKeys.fcAuthDegraded)
+                degradedDefaults?.removeObject(forKey: AppGroupKeys.fcAuthDegradedAt)
                 degradedDefaults?.removeObject(forKey: "fcAuthDegradedNotificationSent")
                 NSLog("[Enforcement] FC auth recovered — ManagedSettings writes working again")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -369,7 +369,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             // Net result: shields go DOWN. Instead, flag the Monitor to handle it.
             let appInForeground: Bool = {
                 let defaults = UserDefaults.appGroup
-                let lastForegroundAt = defaults?.double(forKey: "mainAppLastForegroundAt") ?? 0
+                let lastForegroundAt = defaults?.double(forKey: AppGroupKeys.mainAppLastForegroundAt) ?? 0
                 // Consider "foreground" if the app was active within the last 5 seconds
                 return Date().timeIntervalSince1970 - lastForegroundAt < 5
             }()
@@ -483,8 +483,8 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                     } else {
                         NSLog("[Enforcement] FC_AUTH_DEGRADED — deep rescue failed. Needs Screen Time toggle.")
                         let degradedDefaults = UserDefaults.appGroup
-                        degradedDefaults?.set(true, forKey: "fcAuthDegraded")
-                        degradedDefaults?.set(Date().timeIntervalSince1970, forKey: "fcAuthDegradedAt")
+                        degradedDefaults?.set(true, forKey: AppGroupKeys.fcAuthDegraded)
+                        degradedDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.fcAuthDegradedAt)
 
                         // Only notify parent once per degradation episode
                         if degradedDefaults?.bool(forKey: "fcAuthDegradedNotificationSent") != true {
@@ -673,7 +673,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // shielding is intended. Clear the wide-open sentinel so shieldDiagnostic
         // recognizes the resulting category shield as functionally active.
         UserDefaults.appGroup?
-            .set(false, forKey: "shieldStoreWideOpen")
+            .set(false, forKey: AppGroupKeys.shieldStoreWideOpen)
 
         var allowedTokens = allowExemptions ? collectAllowedTokens() : Set<ApplicationToken>()
         let pickerTokens = loadPickerTokens()
@@ -921,7 +921,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // .all(except: allTokens) sentinel as "shields active" — it's a daemon
         // pacifier, nothing is functionally blocked.
         UserDefaults.appGroup?
-            .set(true, forKey: "shieldStoreWideOpen")
+            .set(true, forKey: AppGroupKeys.shieldStoreWideOpen)
 
         // Clear DNS blocklists
         try? storage.writeEnforcementBlockedDomains([])
@@ -1009,11 +1009,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                     // Mark the ghost shield flag — this is the same condition
                     // ShieldConfiguration detects from the kid's perspective.
                     let defaults = UserDefaults.appGroup
-                    defaults?.set(true, forKey: "ghostShieldsDetected")
-                    defaults?.set(Date().timeIntervalSince1970, forKey: "ghostShieldsDetectedAt")
-                    defaults?.set("legacy store '\(name)' wedged after clearAllSettings", forKey: "ghostShieldsDetectedReason")
-                    let count = (defaults?.integer(forKey: "ghostShieldsDetectedCount") ?? 0) + 1
-                    defaults?.set(count, forKey: "ghostShieldsDetectedCount")
+                    defaults?.set(true, forKey: AppGroupKeys.ghostShieldsDetected)
+                    defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.ghostShieldsDetectedAt)
+                    defaults?.set("legacy store '\(name)' wedged after clearAllSettings", forKey: AppGroupKeys.ghostShieldsDetectedReason)
+                    let count = (defaults?.integer(forKey: AppGroupKeys.ghostShieldsDetectedCount) ?? 0) + 1
+                    defaults?.set(count, forKey: AppGroupKeys.ghostShieldsDetectedCount)
                 }
             }
         }
@@ -1226,7 +1226,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         Self.applyLock.lock()
         defer { Self.applyLock.unlock() }
         UserDefaults.appGroup?
-            .set("clearAll", forKey: "lastShieldChangeReason")
+            .set("clearAll", forKey: AppGroupKeys.lastShieldChangeReason)
         clearAllShieldStores()
         recordShieldedAppCount(0)
         enforcementStore.clearAllSettings()
@@ -1239,7 +1239,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         Self.applyLock.lock()
         defer { Self.applyLock.unlock() }
         UserDefaults.appGroup?
-            .set("tempUnlockClear", forKey: "lastShieldChangeReason")
+            .set("tempUnlockClear", forKey: AppGroupKeys.lastShieldChangeReason)
         enforcementStore.clearAllSettings()
         // Re-apply device-level restrictions (denyAppRemoval, lockAccounts, etc.)
         // that must persist even after clearing temp unlock shields.
@@ -1250,7 +1250,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         Self.applyLock.lock()
         defer { Self.applyLock.unlock() }
         UserDefaults.appGroup?
-            .set("vpnDenied", forKey: "lastShieldChangeReason")
+            .set("vpnDenied", forKey: AppGroupKeys.lastShieldChangeReason)
         applyRestrictions()
         applyShield(allowExemptions: false)
     }
@@ -1261,14 +1261,14 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
     /// doesn't reliably return the tokens that were written to it.
     private func recordShieldedAppCount(_ count: Int) {
         UserDefaults.appGroup?
-            .set(count, forKey: "shieldedAppCount")
+            .set(count, forKey: AppGroupKeys.shieldedAppCount)
     }
 
     func shieldDiagnostic() -> ShieldDiagnostic {
         let enfCat = enforcementStore.shield.applicationCategories
 
         let appCount = UserDefaults.appGroup?
-            .integer(forKey: "shieldedAppCount") ?? 0
+            .integer(forKey: AppGroupKeys.shieldedAppCount) ?? 0
         let webBlocking = enforcementStore.shield.webDomainCategories != nil
         // Track whether the wide-open snapshot wrote the .all(except: allTokens)
         // pattern. When that flag is set, applicationCategories being non-nil
@@ -1279,7 +1279,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // where the user has allowed every picker-selected app). Without this,
         // verification falsely loops on legitimately-correct state.
         let isWideOpen = UserDefaults.appGroup?
-            .bool(forKey: "shieldStoreWideOpen") ?? false
+            .bool(forKey: AppGroupKeys.shieldStoreWideOpen) ?? false
         let categoryActive = enfCat != nil && !isWideOpen
         let shieldsActive = appCount > 0 || webBlocking || categoryActive
 
@@ -1396,15 +1396,12 @@ func scheduleEnforcementRefreshActivity(
     intervalMinutes: Int = 16,
     writeWakeFlag: Bool = true
 ) {
-    let center = DeviceActivityCenter()
-
-    // Sweep stale enforcementRefresh activities so we don't bump into iOS's
-    // ~20 activity cap on repeated parent commands.
-    for activity in center.activities
-    where activity.rawValue.hasPrefix("bigbrother.enforcementRefresh.") {
-        center.stopMonitoring([activity])
-    }
-
+    // All DeviceActivityCenter methods are synchronous XPC to
+    // `deviceactivityd`. On a wedged daemon (observed 2026-04-17) those
+    // calls can block for 60+ seconds. This function is called from
+    // @MainActor paths via applyMode → triggerMonitorEnforcementRefresh,
+    // so freezing main was possible. Dispatching the sweep + register off
+    // the caller's thread closes that freeze window.
     let now = Date()
     let fireAt = now.addingTimeInterval(delaySeconds)
     let endAt = fireAt.addingTimeInterval(TimeInterval(intervalMinutes * 60))
@@ -1429,18 +1426,27 @@ func scheduleEnforcementRefreshActivity(
     // sees the freshly written flag and re-applies enforcement again.
     if writeWakeFlag {
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.needsEnforcementRefresh)
     }
 
-    do {
-        try center.startMonitoring(activityName, during: schedule)
-        NSLog("[EnforcementRefresh] \(source): registered \(activityName.rawValue), fires ~\(Int(delaySeconds))s from now")
-    } catch {
-        NSLog("[EnforcementRefresh] \(source): FAILED to register \(activityName.rawValue): \(error.localizedDescription)")
-        try? AppGroupStorage().appendDiagnosticEntry(DiagnosticEntry(
-            category: .enforcement,
-            message: "EnforcementRefresh schedule failed",
-            details: "source=\(source) error=\(error.localizedDescription)"
-        ))
+    DispatchQueue.global(qos: .userInitiated).async {
+        let center = DeviceActivityCenter()
+        // Sweep stale enforcementRefresh activities so we don't bump into
+        // iOS's ~20 activity cap on repeated parent commands.
+        for activity in center.activities
+        where activity.rawValue.hasPrefix("bigbrother.enforcementRefresh.") {
+            center.stopMonitoring([activity])
+        }
+        do {
+            try center.startMonitoring(activityName, during: schedule)
+            NSLog("[EnforcementRefresh] \(source): registered \(activityName.rawValue), fires ~\(Int(delaySeconds))s from now")
+        } catch {
+            NSLog("[EnforcementRefresh] \(source): FAILED to register \(activityName.rawValue): \(error.localizedDescription)")
+            try? AppGroupStorage().appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "EnforcementRefresh schedule failed",
+                details: "source=\(source) error=\(error.localizedDescription)"
+            ))
+        }
     }
 }

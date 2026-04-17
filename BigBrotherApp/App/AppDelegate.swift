@@ -73,7 +73,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         NSLog("[BigBrother] APNs token registered: \(tokenString.prefix(16))...")
         // Write to App Group so diagnostic can report push status
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "apnsTokenRegisteredAt")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.apnsTokenRegisteredAt)
     }
 
     func application(
@@ -82,7 +82,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     ) {
         NSLog("[BigBrother] APNs registration FAILED: \(error.localizedDescription)")
         UserDefaults.appGroup?
-            .set("failed: \(error.localizedDescription)", forKey: "apnsTokenError")
+            .set("failed: \(error.localizedDescription)", forKey: AppGroupKeys.apnsTokenError)
     }
 
     func application(
@@ -92,7 +92,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     ) {
         NSLog("[BigBrother] PUSH RECEIVED: didReceiveRemoteNotification")
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "lastPushReceivedAt")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastPushReceivedAt)
 
         // Poke the VPN tunnel to poll for commands NOW, rather than waiting
         // for its 1-second cadence. Darwin notifications are delivered
@@ -190,8 +190,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // signal because iCloud Screen Time sync can preserve it across reinstalls.
         let installTokenKey = "fr.bigbrother.installToken"
         if UserDefaults.standard.string(forKey: installTokenKey) == nil {
-            defaults?.removeObject(forKey: "permissionFixerCompletedOnce")
-            defaults?.set(true, forKey: "showPermissionFixerOnNextLaunch")
+            defaults?.removeObject(forKey: AppGroupKeys.permissionFixerCompletedOnce)
+            defaults?.set(true, forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
             UserDefaults.standard.set(UUID().uuidString, forKey: installTokenKey)
             NSLog("[BigBrother] AppDelegate: fresh install/reinstall detected — forced showPermissionFixerOnNextLaunch, cleared permissionFixerCompletedOnce")
             return
@@ -200,10 +200,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // Not a fresh install. Respect the user's previous fixer completion — cold-start
         // FC daemon can briefly report .notDetermined even when auth is actually approved,
         // and we don't want to keep re-showing the "All Set" sheet on every foreground.
-        if defaults?.bool(forKey: "permissionFixerCompletedOnce") == true { return }
+        if defaults?.bool(forKey: AppGroupKeys.permissionFixerCompletedOnce) == true { return }
         let fcStatus = AuthorizationCenter.shared.authorizationStatus
         if fcStatus != .approved {
-            defaults?.set(true, forKey: "showPermissionFixerOnNextLaunch")
+            defaults?.set(true, forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
             NSLog("[BigBrother] AppDelegate: FC auth=\(fcStatus.rawValue) — setting guided setup flag to suppress prompts")
         }
     }
@@ -238,7 +238,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // trigger the deep-rescue recovery path which fires Screen Time
         // prompts ahead of the stepwise fixer flow.
         let defaults = UserDefaults.appGroup
-        if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+        if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
             NSLog("[BigBrother] restoreEnforcementIfNeeded: guided setup active — deferring to PermissionFixerView")
             return
         }
@@ -261,7 +261,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // Force essential mode if permissions are missing.
         let effectiveMode: LockMode
         let permDefaults = UserDefaults.appGroup
-        if permDefaults?.bool(forKey: "allPermissionsGranted") == false && resolution.mode != .locked {
+        if permDefaults?.bool(forKey: AppGroupKeys.allPermissionsGranted) == false && resolution.mode != .locked {
             effectiveMode = .locked
         } else {
             effectiveMode = resolution.mode
@@ -305,7 +305,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             // UIApplication.applicationState that this is a foreground launch,
             // so setting the timestamp is accurate.
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "mainAppLastForegroundAt")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.mainAppLastForegroundAt)
 
             let fcManager = FamilyControlsManagerImpl(storage: storage)
             let enforcement = EnforcementServiceImpl(storage: storage, fcManager: fcManager)
@@ -335,7 +335,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             // performRestoration() call. The apply happens asynchronously; the
             // UI comes up immediately.
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "appDelegateRestorationAt")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.appDelegateRestorationAt)
             let capturedEnforcement = enforcement
             let capturedPolicy = policy
             let capturedMode = effectiveMode
@@ -354,7 +354,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             }
 
             UserDefaults.appGroup?
-                .set("backgroundRestore", forKey: "lastShieldChangeReason")
+                .set("backgroundRestore", forKey: AppGroupKeys.lastShieldChangeReason)
         } // end isLikelyForeground
 
         // Re-register reconciliation schedules so the Monitor extension keeps firing
@@ -362,8 +362,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         reregisterReconciliationSchedule()
 
         // If we were dead and the tunnel flagged us, grab location immediately.
-        if let diedAt = defaults?.double(forKey: "appDiedNeedLocationAt"), diedAt > 0 {
-            defaults?.removeObject(forKey: "appDiedNeedLocationAt")
+        if let diedAt = defaults?.double(forKey: AppGroupKeys.appDiedNeedLocationAt), diedAt > 0 {
+            defaults?.removeObject(forKey: AppGroupKeys.appDiedNeedLocationAt)
             // CLLocationManager is already running from startContinuousTracking.
             // Just request an immediate fix + heartbeat.
             CLLocationManager().requestLocation()
@@ -798,7 +798,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     private static func didProcessCommands(since date: Date) -> Bool {
         let defaults = UserDefaults.appGroup ?? .standard
-        let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
+        let timestamp = defaults.double(forKey: AppGroupKeys.lastCommandProcessedAt)
         guard timestamp > 0 else { return false }
         return Date(timeIntervalSince1970: timestamp) >= date
     }

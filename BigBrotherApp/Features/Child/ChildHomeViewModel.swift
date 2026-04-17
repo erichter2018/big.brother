@@ -88,7 +88,7 @@ final class ChildHomeViewModel {
     }
 
     func refreshPendingReviews() {
-        guard let data = appState.storage.readRawData(forKey: "pending_review_local.json"),
+        guard let data = appState.storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
               let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data) else {
             pendingReviews = []
             return
@@ -108,7 +108,7 @@ final class ChildHomeViewModel {
             let resolvedIDs = Set((approved + superseded).map(\.id))
             let kept = reviews.filter { !resolvedIDs.contains($0.id) }
             if let encoded = try? JSONEncoder().encode(kept) {
-                try? appState.storage.writeRawData(encoded, forKey: "pending_review_local.json")
+                try? appState.storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
             }
             applyResolvedReviewsLocally(approved)
             Task { await deleteResolvedReviews(approved + superseded) }
@@ -242,32 +242,21 @@ final class ChildHomeViewModel {
             return
         }
 
-        // Parent has already decided on this app AND said "keep blocked"
-        // (config exists but isActive == false). Don't let the kid re-submit
-        // a pending review — that's the loop that spams the parent with
-        // repeated requests for an already-denied app. Show a brief message
-        // and bail. If the parent changes their mind later they can toggle
-        // the config to active; the kid doesn't need to re-ask.
-        if let config = matchingConfig, !config.isActive {
-            appState.childConfirmationMessage = "\(config.appName) is blocked by your parent."
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(5))
-                if self?.appState.childConfirmationMessage == "\(config.appName) is blocked by your parent." {
-                    self?.appState.childConfirmationMessage = nil
-                }
-            }
-            return
-        }
+        // A previously-rejected config (isActive == false) is NOT a permanent
+        // block — the kid can always re-submit. The parent's reject is a
+        // one-time "no for now"; letting the kid ask again respects them
+        // being able to explain themselves or try later. Fall through to the
+        // normal pending-review creation path below.
 
         // Replace any stale pending review for the same token fingerprint with the
         // new request. The current token bytes win.
         var existingPending: [PendingAppReview] = {
-            guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
+            guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON) else { return [] }
             return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
         }()
         existingPending.removeAll { $0.appFingerprint == fingerprint }
         if let encoded = try? JSONEncoder().encode(existingPending) {
-            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+            try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
         }
 
         // Keep the token in the managed picker selection so enforcement can
@@ -315,12 +304,12 @@ final class ChildHomeViewModel {
         }
 
         var pending: [PendingAppReview] = {
-            guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
+            guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON) else { return [] }
             return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
         }()
         pending.append(review)
         if let encoded = try? JSONEncoder().encode(pending) {
-            try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+            try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
         }
 
         refreshPendingReviews()
@@ -378,7 +367,7 @@ final class ChildHomeViewModel {
     /// When the internet block expires (from VPN DNS blackhole). Nil if not blocked.
     var internetBlockedUntil: Date? {
         let defaults = UserDefaults.appGroup
-        guard let timestamp = defaults?.double(forKey: "internetBlockedUntil"), timestamp > 0 else { return nil }
+        guard let timestamp = defaults?.double(forKey: AppGroupKeys.internetBlockedUntil), timestamp > 0 else { return nil }
         let date = Date(timeIntervalSince1970: timestamp)
         return date > now ? date : nil
     }
@@ -386,13 +375,13 @@ final class ChildHomeViewModel {
     /// Whether the VPN tunnel is actively blocking internet (any reason).
     var isTunnelInternetBlocked: Bool {
         let defaults = UserDefaults.appGroup
-        return defaults?.bool(forKey: "tunnelInternetBlocked") == true
+        return defaults?.bool(forKey: AppGroupKeys.tunnelInternetBlocked) == true
     }
 
     /// Human-readable reason the tunnel is blocking internet, if any.
     var tunnelInternetBlockedReason: String? {
         let defaults = UserDefaults.appGroup
-        guard let reason = defaults?.string(forKey: "tunnelInternetBlockedReason"),
+        guard let reason = defaults?.string(forKey: AppGroupKeys.tunnelInternetBlockedReason),
               !reason.isEmpty else { return nil }
         return reason
     }
@@ -400,7 +389,7 @@ final class ChildHomeViewModel {
     /// Whether enforcement is currently being restored (app just came alive).
     var isRestoringEnforcement: Bool {
         let defaults = UserDefaults.appGroup
-        let lastActive = defaults?.double(forKey: "mainAppLastActiveAt") ?? 0
+        let lastActive = defaults?.double(forKey: AppGroupKeys.mainAppLastActiveAt) ?? 0
         let age = Date().timeIntervalSince1970 - lastActive
         // If app was inactive for >60s and just came back, we're restoring
         return age > 0 && age < 30
@@ -580,7 +569,7 @@ final class ChildHomeViewModel {
         // If we have a persisted auth type (in either defaults store), we were
         // previously authorized — don't show the permissions button for a transient delay.
         let appGroupType = UserDefaults.appGroup?
-            .string(forKey: "fr.bigbrother.authorizationType")
+            .string(forKey: AppGroupKeys.authorizationType)
         let standardType = UserDefaults.standard.string(forKey: "fr.bigbrother.authorizationType")
         if appGroupType == "child" || appGroupType == "individual"
             || standardType == "child" || standardType == "individual" {
@@ -729,10 +718,10 @@ final class ChildHomeViewModel {
     /// Read UserDefaults keys that ShieldConfiguration writes, to verify extension → app IPC.
     private func probeShieldConfigDefaults() {
         let defaults = UserDefaults(suiteName: "group.fr.bigbrother.shared")
-        let appName = defaults?.string(forKey: "lastShielded.appName") ?? "nil"
-        let bundleID = defaults?.string(forKey: "lastShielded.bundleID") ?? "nil"
-        let tokenBase64 = defaults?.string(forKey: "lastShielded.tokenBase64")
-        let timestamp = defaults?.double(forKey: "lastShielded.timestamp") ?? 0
+        let appName = defaults?.string(forKey: AppGroupKeys.lastShieldedAppName) ?? "nil"
+        let bundleID = defaults?.string(forKey: AppGroupKeys.lastShieldedBundleID) ?? "nil"
+        let tokenBase64 = defaults?.string(forKey: AppGroupKeys.lastShieldedTokenBase64)
+        let timestamp = defaults?.double(forKey: AppGroupKeys.lastShieldedTimestamp) ?? 0
 
         let age = timestamp > 0 ? String(format: "%.0fs ago", Date().timeIntervalSince1970 - timestamp) : "no timestamp"
         let tokenSnippet = tokenBase64.map { String($0.prefix(12)) + "..." } ?? "nil"
@@ -814,10 +803,10 @@ final class ChildHomeViewModel {
 
         // 2. Reset the UserDefaults keys for shield cache
         let defaults = UserDefaults.appGroup
-        defaults?.removeObject(forKey: "lastShielded.appName")
-        defaults?.removeObject(forKey: "lastShielded.bundleID")
-        defaults?.removeObject(forKey: "lastShielded.tokenBase64")
-        defaults?.removeObject(forKey: "lastShielded.timestamp")
+        defaults?.removeObject(forKey: AppGroupKeys.lastShieldedAppName)
+        defaults?.removeObject(forKey: AppGroupKeys.lastShieldedBundleID)
+        defaults?.removeObject(forKey: AppGroupKeys.lastShieldedTokenBase64)
+        defaults?.removeObject(forKey: AppGroupKeys.lastShieldedTimestamp)
         defaults?.synchronize()
 
         // 3. Prune old events — keep only last 10 unlock requests
@@ -928,7 +917,7 @@ final class ChildHomeViewModel {
     }
 
     func refreshScheduleDriving() {
-        isScheduleDriving = UserDefaults.appGroup?.bool(forKey: "scheduleDrivenMode") ?? true
+        isScheduleDriving = UserDefaults.appGroup?.bool(forKey: AppGroupKeys.scheduleDrivenMode) ?? true
         if let locService = appState.locationService {
             cachedLocationAuthStatus = locService.authorizationStatus
         }
@@ -959,9 +948,9 @@ final class ChildHomeViewModel {
         // cause the Monitor to force-lock the device.
         let defaults = UserDefaults.appGroup
         let isOK = !hasPermissionIssues
-        defaults?.set(isOK, forKey: "allPermissionsGranted")
+        defaults?.set(isOK, forKey: AppGroupKeys.allPermissionsGranted)
         let enforcementOK = !needsReauthorization
-        defaults?.set(enforcementOK, forKey: "enforcementPermissionsOK")
+        defaults?.set(enforcementOK, forKey: AppGroupKeys.enforcementPermissionsOK)
 
         // Write per-permission snapshot for parent visibility via heartbeat
         var permStatus: [String: Bool] = [:]
@@ -973,7 +962,7 @@ final class ChildHomeViewModel {
         }
         permStatus["notifications"] = notificationsAuthorized
         if let data = try? JSONEncoder().encode(permStatus) {
-            defaults?.set(String(data: data, encoding: .utf8), forKey: "permissionSnapshot")
+            defaults?.set(String(data: data, encoding: .utf8), forKey: AppGroupKeys.permissionSnapshot)
         }
 
         // Only log authorizationLost for FamilyControls — that's actual tampering.

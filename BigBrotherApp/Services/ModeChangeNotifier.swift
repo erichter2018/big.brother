@@ -18,7 +18,7 @@ enum ModeChangeNotifier {
 
     static func requestPermission() {
         let defaults = UserDefaults.appGroup
-        if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true { return }
+        if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true { return }
         Task {
             _ = try? await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound, .badge])

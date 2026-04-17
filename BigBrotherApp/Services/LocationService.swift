@@ -176,7 +176,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
 
         // Restore persisted mode, defaulting to .continuous on child devices.
         let defaults = UserDefaults.appGroup
-        if let raw = defaults?.string(forKey: "locationTrackingMode"),
+        if let raw = defaults?.string(forKey: AppGroupKeys.locationTrackingMode),
            let saved = LocationTrackingMode(rawValue: raw) {
             setMode(saved)
         } else {
@@ -227,7 +227,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     func setMode(_ newMode: LocationTrackingMode) {
         mode = newMode
         UserDefaults.appGroup?
-            .set(newMode.rawValue, forKey: "locationTrackingMode")
+            .set(newMode.rawValue, forKey: AppGroupKeys.locationTrackingMode)
 
         switch newMode {
         case .off:
@@ -253,7 +253,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     }
 
     private func requestAlwaysAuthIfNeeded() {
-        if UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+        if UserDefaults.appGroup?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
             return
         }
         let status = locationManager.authorizationStatus
@@ -266,7 +266,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     }
 
     private func startContinuousTracking() {
-        if UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+        if UserDefaults.appGroup?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
             return
         }
         let status = locationManager.authorizationStatus
@@ -310,7 +310,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
             #endif
             return
         }
-        if UserDefaults.appGroup?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+        if UserDefaults.appGroup?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
             return
         }
         motionMonitoringActive = true
@@ -616,8 +616,8 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
     /// Registers a geofence around the home location if coordinates are stored in App Group defaults.
     private func registerHomeGeofenceIfConfigured() {
         let defaults = UserDefaults.appGroup
-        guard let lat = defaults?.object(forKey: "homeLatitude") as? Double,
-              let lon = defaults?.object(forKey: "homeLongitude") as? Double else {
+        guard let lat = defaults?.object(forKey: AppGroupKeys.homeLatitude) as? Double,
+              let lon = defaults?.object(forKey: AppGroupKeys.homeLongitude) as? Double else {
             logDiag("No home coordinates configured — skipping geofence")
             return
         }
@@ -877,7 +877,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         // Persist places for lookup on entry/exit
         if let data = try? JSONEncoder().encode(places) {
             UserDefaults.appGroup?
-                .set(data, forKey: "namedPlaces")
+                .set(data, forKey: AppGroupKeys.namedPlaces)
         }
         #if DEBUG
         print("[LocationService] Registering \(min(places.count, 19)) named place geofences via CLMonitor")
@@ -889,7 +889,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate, @unchecked Sen
         guard regionID.hasPrefix(Self.namedPlacePrefix) else { return nil }
         let idStr = String(regionID.dropFirst(Self.namedPlacePrefix.count))
         guard let data = UserDefaults.appGroup?
-            .data(forKey: "namedPlaces"),
+            .data(forKey: AppGroupKeys.namedPlaces),
               let places = try? JSONDecoder().decode([NamedPlace].self, from: data) else { return nil }
         return places.first { $0.id.uuidString == idStr }
     }

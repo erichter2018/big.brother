@@ -26,6 +26,7 @@
 		12A992FB6A2BFCE74B6527E3 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8C3939798BF967B152FD03DA /* WidgetKit.framework */; };
 		1388286ED65D3E8B317600D7 /* ScheduleFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = CED1645C78764A9692A27103 /* ScheduleFormatting.swift */; };
 		16144B9C887CE205EC6470FE /* SafetyEventNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6805362753E5A5ACC38AE02 /* SafetyEventNotificationService.swift */; };
+		1832F2665A8C6C1D84DB8E8C /* TaskTimeout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44A5D070114A411ACC63368E /* TaskTimeout.swift */; };
 		18977F8842041230F38E679B /* OnlineActivitySection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */; };
 		18E1CE741E8B697EDA04B8E9 /* SyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B177EFF146758126614A476D /* SyncCoordinator.swift */; };
 		193B12163F589A2778F742D8 /* ChildDetailSectionOrder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D6F28C469F306643A072853 /* ChildDetailSectionOrder.swift */; };
@@ -328,6 +329,7 @@
 		430C6D0168B773C0C8A82CEE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		439E2595BA6673DD7180F128 /* EnrollmentPermissionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentPermissionsView.swift; sourceTree = "<group>"; };
 		43F3500E4FB4AA6AC1848155 /* AvatarImageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarImageCache.swift; sourceTree = "<group>"; };
+		44A5D070114A411ACC63368E /* TaskTimeout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskTimeout.swift; sourceTree = "<group>"; };
 		4584CB0570246B4E67123861 /* BigBrotherCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BigBrotherCore; path = BigBrotherCore; sourceTree = SOURCE_ROOT; };
 		48249F6BA483A02C1511EE96 /* HeartbeatService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeartbeatService.swift; sourceTree = "<group>"; };
 		4833A3196E6024880CCF1A39 /* CloudKitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitService.swift; sourceTree = "<group>"; };
@@ -575,6 +577,7 @@
 				18652D93CEE63E93A2ED1C86 /* AppState.swift */,
 				B3540B7DED0E46E1B9F57BD1 /* BigBrotherApp.swift */,
 				5074D042431F7060EE5C975B /* RootRouter.swift */,
+				44A5D070114A411ACC63368E /* TaskTimeout.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -1576,6 +1579,7 @@
 				FAA881071556B88FDF911394 /* SubscriptionManager.swift in Sources */,
 				18E1CE741E8B697EDA04B8E9 /* SyncCoordinator.swift in Sources */,
 				997213C1D484F1F0BBE2D0E0 /* SyncCoordinatorImpl.swift in Sources */,
+				1832F2665A8C6C1D84DB8E8C /* TaskTimeout.swift in Sources */,
 				DA1B103BD0946CB1D5826811 /* TemporaryUnlockCard.swift in Sources */,
 				1BE2F05891CDB5384CD712EF /* TestCommandReceiver.swift in Sources */,
 				8A0E3B390E351F78F50E2026 /* TimeLimitSetupView.swift in Sources */,

@@ -174,7 +174,7 @@ struct ParentDashboardView: View {
             Text("This immediately locks every child's device and cuts their internet for 1 hour. Use Unpause to release early.")
         }
         .refreshable {
-            await viewModel.loadDashboard()
+            await withDeadline(30) { await viewModel.loadDashboard() }
         }
         .task {
             await viewModel.loadDashboard()

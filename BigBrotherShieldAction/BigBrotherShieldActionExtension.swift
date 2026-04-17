@@ -10,7 +10,7 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
     override func handle(action: ShieldAction, for application: ApplicationToken, completionHandler: @escaping (ShieldActionResponse) -> Void) {
         // Write build number so parent can verify extension version
         UserDefaults.appGroup?
-            .set(AppConstants.appBuildNumber, forKey: "shieldActionBuildNumber")
+            .set(AppConstants.appBuildNumber, forKey: AppGroupKeys.shieldActionBuildNumber)
         handleAction(action: action, token: application, completionHandler: completionHandler)
     }
 
@@ -124,17 +124,17 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
 
         // Signal Monitor to re-apply enforcement.
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "needsEnforcementRefresh")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.needsEnforcementRefresh)
 
         // Update local pending review with resolved name for CloudKit sync.
-        if let data = storage.readRawData(forKey: "pending_review_local.json"),
+        if let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
            var pendingReviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
            let reviewIdx = pendingReviews.firstIndex(where: { $0.appFingerprint == fp }) {
             pendingReviews[reviewIdx].appName = realName
             pendingReviews[reviewIdx].nameResolved = true
             pendingReviews[reviewIdx].updatedAt = Date()
             if let encoded = try? JSONEncoder().encode(pendingReviews) {
-                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+                try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
             }
         }
 
@@ -185,7 +185,7 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
 
         let fp = TokenFingerprint.fingerprint(for: tokenData)
 
-        guard let data = storage.readRawData(forKey: "pending_review_local.json"),
+        guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
               var reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data) else {
             diag(storage, "PendingReview: no local file or decode failed")
             return
@@ -202,10 +202,10 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
             reviews[idx].updatedAt = Date()
 
             if let encoded = try? JSONEncoder().encode(reviews) {
-                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+                try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
             }
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.pendingReviewNeedsSync)
             diag(storage, "Resolved pending review (fp match): \(identity.name) fp=\(fp.prefix(8)) src=\(identity.source)")
             return
         }
@@ -220,10 +220,10 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
             reviews[idx].updatedAt = Date()
 
             if let encoded = try? JSONEncoder().encode(reviews) {
-                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+                try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
             }
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.pendingReviewNeedsSync)
             diag(storage, "Resolved pending review (fallback): \(identity.name) src=\(identity.source)")
         }
     }

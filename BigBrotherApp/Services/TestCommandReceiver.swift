@@ -89,7 +89,7 @@ enum TestCommandReceiver {
             message: "TestCommandReceiver: installed \(TestNotification.allCases.count) Darwin observers"
         ))
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "testCommandReceiverInstalledAt")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.testCommandReceiverInstalledAt)
     }
 }
 

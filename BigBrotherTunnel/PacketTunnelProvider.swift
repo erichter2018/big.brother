@@ -2191,12 +2191,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Phase 1: Immediate window (first 120 seconds after unblock)
             if age < 120 {
                 let windowSightings = sightings.filter { $0.at > watch.unblockedAt }
-                let appNames = Set(windowSightings.map(\.appName))
                 let domains = Set(windowSightings.map(\.domain))
                 watches[i].immediateDomains = Array(domains)
 
-                // If we see a cataloged app in the immediate window, verify
-                if let detected = appNames.first {
+                // Require a DOMINANT app to trigger detection: at least 3 hits
+                // AND more than half of cataloged sightings. iOS DNSProxy sees
+                // every app's DNS queries, so a single facebook.com hit from a
+                // legitimate app's share/login SDK would otherwise mislabel as
+                // "deception" (observed with Google Earth on Juliet's iPad,
+                // 2026-04-17). Phase 2's ongoing-monitoring branch already
+                // used the >= 3 threshold — now Phase 1 matches.
+                let appCounts = Dictionary(grouping: windowSightings, by: \.appName)
+                    .mapValues(\.count)
+                let total = windowSightings.count
+                let dominant = appCounts
+                    .filter { $0.value >= 3 && $0.value * 2 > total }
+                    .max { $0.value < $1.value }
+
+                if let (detected, hits) = dominant {
                     let childName = watch.childGivenName.lowercased().trimmingCharacters(in: .whitespaces)
                     let detectedLower = detected.lowercased()
                     let isMatch = childName.contains(detectedLower) || detectedLower.contains(childName)
@@ -2208,8 +2220,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     changed = true
 
                     if !isMatch {
-                        NSLog("[Tunnel] DNS DECEPTION: child said '\(watch.childGivenName)' but DNS shows '\(detected)'")
-                        // Create event for parent
+                        NSLog("[Tunnel] DNS DECEPTION: child said '\(watch.childGivenName)' but DNS shows '\(detected)' (\(hits)/\(total) hits)")
                         Task { await self.reportDeception(watch: watches[i], detectedName: detected) }
                     } else {
                         NSLog("[Tunnel] DNS verified: '\(watch.childGivenName)' matches '\(detected)'")

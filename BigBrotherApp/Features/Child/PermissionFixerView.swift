@@ -189,11 +189,11 @@ struct PermissionFixerView: View {
 
     private func completeOnboarding() {
         let defaults = UserDefaults.appGroup
-        defaults?.removeObject(forKey: "showPermissionFixerOnNextLaunch")
+        defaults?.removeObject(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
 
         let allGranted = permissionsToFix.isEmpty
         if allGranted {
-            defaults?.set(true, forKey: "permissionFixerCompletedOnce")
+            defaults?.set(true, forKey: AppGroupKeys.permissionFixerCompletedOnce)
         }
 
         let enforcement = appState.enforcement

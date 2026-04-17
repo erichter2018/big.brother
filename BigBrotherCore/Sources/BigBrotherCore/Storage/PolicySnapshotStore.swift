@@ -91,7 +91,7 @@ public final class PolicySnapshotStore: @unchecked Sendable {
             // Derive scheduleDrivenMode from the snapshot's control authority.
             // This keeps the UserDefaults flag consistent without producers writing it directly.
             UserDefaults.appGroup?
-                .set(snapshot.effectivePolicy.effectiveAuthority == .schedule, forKey: "scheduleDrivenMode")
+                .set(snapshot.effectivePolicy.effectiveAuthority == .schedule, forKey: AppGroupKeys.scheduleDrivenMode)
 
             // Record transition
             if let current {

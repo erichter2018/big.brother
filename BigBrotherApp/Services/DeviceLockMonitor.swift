@@ -31,7 +31,7 @@ final class DeviceLockMonitor {
         ) { [weak self] _ in
             self?.isDeviceLocked = true
             self?.onLockStateChanged?(true)
-            defaults?.set(true, forKey: "isDeviceLocked")
+            defaults?.set(true, forKey: AppGroupKeys.isDeviceLocked)
             defaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
         }
 
@@ -41,14 +41,14 @@ final class DeviceLockMonitor {
         ) { [weak self] _ in
             self?.isDeviceLocked = false
             self?.onLockStateChanged?(false)
-            defaults?.set(false, forKey: "isDeviceLocked")
+            defaults?.set(false, forKey: AppGroupKeys.isDeviceLocked)
             defaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
         }
 
         observers = [willResign, didBecome]
 
         isDeviceLocked = !UIApplication.shared.isProtectedDataAvailable
-        defaults?.set(isDeviceLocked, forKey: "isDeviceLocked")
+        defaults?.set(isDeviceLocked, forKey: AppGroupKeys.isDeviceLocked)
         defaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
     }
 

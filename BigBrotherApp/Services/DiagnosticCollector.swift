@@ -65,15 +65,15 @@ enum DiagnosticCollector {
         }
 
         // Home geofence
-        if let lat = defaults?.object(forKey: "homeLatitude") as? Double,
-           let lon = defaults?.object(forKey: "homeLongitude") as? Double {
+        if let lat = defaults?.object(forKey: AppGroupKeys.homeLatitude) as? Double,
+           let lon = defaults?.object(forKey: AppGroupKeys.homeLongitude) as? Double {
             flags["homeGeofence"] = "\(lat),\(lon)"
         } else {
             flags["homeGeofence"] = "not set"
         }
 
         // Named places count
-        if let data = defaults?.data(forKey: "namedPlaces"),
+        if let data = defaults?.data(forKey: AppGroupKeys.namedPlaces),
            let places = try? JSONDecoder().decode([NamedPlace].self, from: data) {
             flags["namedPlacesCount"] = "\(places.count)"
         }
@@ -237,7 +237,7 @@ enum DiagnosticCollector {
 
         // === TUNNEL LIVENESS ===
         flags["mainAppAlive"] = defaults?.bool(forKey: "mainAppAlive") == true ? "true" : "false"
-        let tunnelBuild = defaults?.integer(forKey: "tunnelBuildNumber") ?? 0
+        let tunnelBuild = defaults?.integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0
         if tunnelBuild > 0 {
             flags["tunnelBuildNumber"] = "b\(tunnelBuild)"
             if tunnelBuild != AppConstants.appBuildNumber {
@@ -316,14 +316,14 @@ enum DiagnosticCollector {
             vpnTunnelStatus: vpnStatus,
             familyControlsAuth: {
                 let status = authStatus?.rawValue ?? "unknown"
-                let authType = UserDefaults.appGroup?.string(forKey: "fr.bigbrother.authorizationType") ?? "unknown"
+                let authType = UserDefaults.appGroup?.string(forKey: AppGroupKeys.authorizationType) ?? "unknown"
                 return "\(status) (\(authType))"
             }(),
             currentMode: snapshot?.effectivePolicy.resolvedMode.rawValue ?? "unknown",
             shieldsActive: shieldDiag?.shieldsActive ?? false,
             shieldedAppCount: shieldDiag?.appCount ?? 0,
             shieldCategoryActive: shieldDiag?.categoryActive ?? false,
-            lastShieldChangeReason: defaults?.string(forKey: "lastShieldChangeReason"),
+            lastShieldChangeReason: defaults?.string(forKey: AppGroupKeys.lastShieldChangeReason),
             flags: flags,
             recentLogs: recentLogs
         )

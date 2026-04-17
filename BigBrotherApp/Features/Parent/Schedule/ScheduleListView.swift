@@ -72,7 +72,7 @@ struct ScheduleListView: View {
                 }
             }
         }
-        .refreshable { await loadSchedules() }
+        .refreshable { await withDeadline(30) { await loadSchedules() } }
         .task { await loadSchedules() }
     }
 

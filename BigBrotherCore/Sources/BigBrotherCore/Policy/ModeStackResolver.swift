@@ -118,11 +118,11 @@ public enum ModeStackResolver {
         // READ-ONLY: resolve() must never write to UserDefaults. Multiple processes
         // call this concurrently. Cleanup is done by cleanupExpiredLockUntil().
         let defaults = UserDefaults.appGroup
-        if let _ = defaults?.string(forKey: "lockUntilPreviousMode") {
-            if let expiryInterval = defaults?.object(forKey: "lockUntilExpiresAt") as? Double {
+        if let _ = defaults?.string(forKey: AppGroupKeys.lockUntilPreviousMode) {
+            if let expiryInterval = defaults?.object(forKey: AppGroupKeys.lockUntilExpiresAt) as? Double {
                 let expiresAt = Date(timeIntervalSince1970: expiryInterval)
                 if expiresAt > now {
-                    let lockUntilMode = defaults?.string(forKey: "lockUntilPreviousMode") ?? "restricted"
+                    let lockUntilMode = defaults?.string(forKey: AppGroupKeys.lockUntilPreviousMode) ?? "restricted"
                     return Resolution(
                         mode: .restricted,
                         controlAuthority: .lockUntil,
@@ -135,7 +135,7 @@ public enum ModeStackResolver {
             } else {
                 // Legacy: no expiry stored. Treat as 24h failsafe without writing.
                 let failsafeExpiry = now.addingTimeInterval(AppConstants.defaultCommandExpirySeconds)
-                let lockUntilMode = defaults?.string(forKey: "lockUntilPreviousMode") ?? "restricted"
+                let lockUntilMode = defaults?.string(forKey: AppGroupKeys.lockUntilPreviousMode) ?? "restricted"
                 return Resolution(
                     mode: .restricted,
                     controlAuthority: .lockUntil,
@@ -221,12 +221,12 @@ public enum ModeStackResolver {
     /// Call ONLY from the main app's command processor — not from extensions.
     public static func cleanupExpiredLockUntil(now: Date = Date()) {
         let defaults = UserDefaults.appGroup
-        guard defaults?.string(forKey: "lockUntilPreviousMode") != nil else { return }
-        if let expiryInterval = defaults?.object(forKey: "lockUntilExpiresAt") as? Double {
+        guard defaults?.string(forKey: AppGroupKeys.lockUntilPreviousMode) != nil else { return }
+        if let expiryInterval = defaults?.object(forKey: AppGroupKeys.lockUntilExpiresAt) as? Double {
             let expiresAt = Date(timeIntervalSince1970: expiryInterval)
             if expiresAt <= now {
-                defaults?.removeObject(forKey: "lockUntilPreviousMode")
-                defaults?.removeObject(forKey: "lockUntilExpiresAt")
+                defaults?.removeObject(forKey: AppGroupKeys.lockUntilPreviousMode)
+                defaults?.removeObject(forKey: AppGroupKeys.lockUntilExpiresAt)
             }
         }
     }

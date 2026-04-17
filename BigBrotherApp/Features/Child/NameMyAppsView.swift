@@ -186,9 +186,9 @@ struct NameMyAppsView: View {
 
         // Also update UserDefaults so extensions see it.
         let defaults = UserDefaults.appGroup
-        var nameMap = defaults?.dictionary(forKey: "tokenToAppName") as? [String: String] ?? [:]
+        var nameMap = defaults?.dictionary(forKey: AppGroupKeys.tokenToAppName) as? [String: String] ?? [:]
         nameMap[base64] = trimmed
-        defaults?.set(nameMap, forKey: "tokenToAppName")
+        defaults?.set(nameMap, forKey: AppGroupKeys.tokenToAppName)
 
         savedCount += 1
         advance()

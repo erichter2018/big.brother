@@ -154,12 +154,12 @@ struct ChildAppPickView: View {
                 updated.updatedAt = Date()
                 // Update local file
                 let storage = AppGroupStorage()
-                if let data = storage.readRawData(forKey: "pending_review_local.json"),
+                if let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
                    var locals = try? JSONDecoder().decode([PendingAppReview].self, from: data),
                    let idx = locals.firstIndex(where: { $0.id == review.id }) {
                     locals[idx] = updated
                     if let encoded = try? JSONEncoder().encode(locals) {
-                        try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+                        try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
                     }
                 }
                 // Push updated review to CloudKit
@@ -255,15 +255,8 @@ struct ChildAppPickView: View {
                 continue
             }
 
-            // Parent already decided "keep blocked" on this app. Skip review
-            // creation — same reasoning as ChildHomeViewModel: don't let a
-            // bulk re-pick loop spam the parent with requests for an app
-            // the parent has explicitly denied.
-            if let config = matchingConfig, !config.isActive {
-                skipped += 1
-                storage.cacheAppName(name, forTokenKey: tokenKey)
-                continue
-            }
+            // Previously-rejected configs (isActive == false) fall through —
+            // rejections aren't permanent blocks; the kid can re-submit.
 
             let review = PendingAppReview(
                 familyID: enrollment.familyID,
@@ -300,7 +293,7 @@ struct ChildAppPickView: View {
         // Save reviews locally for ShieldConfiguration name resolution
         if !newReviews.isEmpty {
             var pending: [PendingAppReview] = {
-                guard let data = storage.readRawData(forKey: "pending_review_local.json") else { return [] }
+                guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON) else { return [] }
                 return (try? JSONDecoder().decode([PendingAppReview].self, from: data)) ?? []
             }()
             // Dedupe the new reviews against any still-unresolved local entries
@@ -317,11 +310,11 @@ struct ChildAppPickView: View {
             }
             pending.append(contentsOf: dedupedReviews)
             if let encoded = try? JSONEncoder().encode(pending) {
-                try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+                try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
             }
             // Also signal tunnel for redundant sync
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "pendingReviewNeedsSync")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.pendingReviewNeedsSync)
         }
 
         // Re-apply enforcement — new tokens will appear in shield.applications

@@ -1219,8 +1219,8 @@ struct LocationMapView: View {
         }
         // Fallback: try App Group defaults (child side stores as homeLatitude)
         let defaults = UserDefaults.appGroup
-        if let lat = defaults?.object(forKey: "homeLatitude") as? Double,
-           let lon = defaults?.object(forKey: "homeLongitude") as? Double {
+        if let lat = defaults?.object(forKey: AppGroupKeys.homeLatitude) as? Double,
+           let lon = defaults?.object(forKey: AppGroupKeys.homeLongitude) as? Double {
             return CLLocation(latitude: lat, longitude: lon)
         }
         // Last resort: scan all UserDefaults keys for any homeLatitude.*

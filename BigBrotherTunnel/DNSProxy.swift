@@ -1213,7 +1213,7 @@ final class DNSProxy {
         let now = Date()
         if now >= safeSearchExpiry {
             let r = storage.readDeviceRestrictions()?.denyExplicitContent == true
-            let t = UserDefaults.appGroup?.bool(forKey: "safeSearchEnabled") ?? false
+            let t = UserDefaults.appGroup?.bool(forKey: AppGroupKeys.safeSearchEnabled) ?? false
             safeSearchOn = r || t
             safeSearchExpiry = now.addingTimeInterval(5)
         }
@@ -1396,14 +1396,14 @@ final class DNSProxy {
             if isNew {
                 knownApps.insert(appName)
                 let defaults = UserDefaults.appGroup
-                defaults?.set(Array(knownApps), forKey: "knownAppDomains")
+                defaults?.set(Array(knownApps), forKey: AppGroupKeys.knownAppDomains)
                 // Fresh-read newAppDetections right before the append to
                 // shrink the cross-process race against the main app's
                 // flushNewAppDetections (which reads then removes the key).
-                var p = defaults?.stringArray(forKey: "newAppDetections") ?? []
+                var p = defaults?.stringArray(forKey: AppGroupKeys.newAppDetections) ?? []
                 if !p.contains(appName) {
                     p.append(appName)
-                    defaults?.set(p, forKey: "newAppDetections")
+                    defaults?.set(p, forKey: AppGroupKeys.newAppDetections)
                 }
                 NSLog("[DNSProxy] New app: \(appName)")
             }
@@ -1525,7 +1525,7 @@ final class DNSProxy {
 
         let usage = DNSAppUsage(dateString: appUsageDateString, apps: appMinutes)
         if let data = try? JSONEncoder().encode(usage) {
-            try? storage.writeRawData(data, forKey: "dnsAppUsage")
+            try? storage.writeRawData(data, forKey: AppGroupKeys.dnsAppUsage)
         }
     }
 
@@ -1533,7 +1533,7 @@ final class DNSProxy {
     /// b457: also takes appUsageLock for consistency even though this runs at
     /// start() before bgQueue has work queued.
     private func restoreAppUsageFromAppGroup() {
-        guard let data = storage.readRawData(forKey: "dnsAppUsage"),
+        guard let data = storage.readRawData(forKey: AppGroupKeys.dnsAppUsage),
               let saved = try? JSONDecoder().decode(DNSAppUsage.self, from: data) else { return }
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
         let today = fmt.string(from: Date())
@@ -1567,10 +1567,10 @@ final class DNSProxy {
         statsLock.unlock()
         guard !domains.isEmpty else { return }
         let defaults = UserDefaults.appGroup
-        if let data = try? JSONEncoder().encode(domains) { defaults?.set(data, forKey: "dnsActivityDomains") }
-        defaults?.set(total, forKey: "dnsActivityTotalQueries")
+        if let data = try? JSONEncoder().encode(domains) { defaults?.set(data, forKey: AppGroupKeys.dnsActivityDomains) }
+        defaults?.set(total, forKey: AppGroupKeys.dnsActivityTotalQueries)
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
-        defaults?.set(fmt.string(from: Date()), forKey: "dnsActivityDate")
+        defaults?.set(fmt.string(from: Date()), forKey: AppGroupKeys.dnsActivityDate)
         defaults?.set(Date().timeIntervalSince1970, forKey: "dnsActivityUpdatedAt")
         flushAppUsageToAppGroup()
     }
@@ -1578,29 +1578,29 @@ final class DNSProxy {
     private func restoreFromAppGroup() {
         let defaults = UserDefaults.appGroup
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
-        guard defaults?.string(forKey: "dnsActivityDate") == fmt.string(from: Date()),
-              let data = defaults?.data(forKey: "dnsActivityDomains"),
+        guard defaults?.string(forKey: AppGroupKeys.dnsActivityDate) == fmt.string(from: Date()),
+              let data = defaults?.data(forKey: AppGroupKeys.dnsActivityDomains),
               let saved = try? JSONDecoder().decode([DomainHit].self, from: data) else { return }
         statsLock.lock()
         for hit in saved {
             if let e = domainCounts[hit.domain] { if hit.count > e.count { domainCounts[hit.domain] = hit } }
             else { domainCounts[hit.domain] = hit }
         }
-        totalQueries = max(totalQueries, defaults?.integer(forKey: "dnsActivityTotalQueries") ?? 0)
+        totalQueries = max(totalQueries, defaults?.integer(forKey: AppGroupKeys.dnsActivityTotalQueries) ?? 0)
         statsLock.unlock()
         restoreAppUsageFromAppGroup()
     }
 
     private func restoreKnownApps() {
         knownAppsLock.lock()
-        knownApps = Set(UserDefaults.appGroup?.stringArray(forKey: "knownAppDomains") ?? [])
+        knownApps = Set(UserDefaults.appGroup?.stringArray(forKey: AppGroupKeys.knownAppDomains) ?? [])
         knownAppsLock.unlock()
     }
 
     func resetDaily() {
         statsLock.lock(); domainCounts.removeAll(); totalQueries = 0; statsLock.unlock()
         let d = UserDefaults.appGroup
-        d?.removeObject(forKey: "dnsActivityDomains"); d?.set(0, forKey: "dnsActivityTotalQueries")
+        d?.removeObject(forKey: AppGroupKeys.dnsActivityDomains); d?.set(0, forKey: AppGroupKeys.dnsActivityTotalQueries)
         // Reset per-app time tracking — b457: synchronized with the bgQueue
         // writer. Without this the UB was a real crash waiting to happen on
         // day rollover when a query arrived at the same instant.
@@ -1609,7 +1609,7 @@ final class DNSProxy {
         appMinutes.removeAll()
         appUsageDateString = ""
         appUsageLock.unlock()
-        try? storage.writeRawData(nil, forKey: "dnsAppUsage")
+        try? storage.writeRawData(nil, forKey: AppGroupKeys.dnsAppUsage)
     }
 
     func cleanupStalePendingQueries() {

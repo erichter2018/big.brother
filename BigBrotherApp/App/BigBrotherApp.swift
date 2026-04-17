@@ -102,12 +102,12 @@ struct BigBrotherApp: App {
         // Record that the main app launched with this build number.
         // The Monitor extension checks this to prompt re-launch after updates.
         let launchDefaults = UserDefaults.appGroup
-        launchDefaults?.set(AppConstants.appBuildNumber, forKey: "mainAppLastLaunchedBuild")
+        launchDefaults?.set(AppConstants.appBuildNumber, forKey: AppGroupKeys.mainAppLastLaunchedBuild)
 
         // Clear build-mismatch DNS block if the Monitor set it (update is now complete).
-        if launchDefaults?.bool(forKey: "buildMismatchDNSBlock") == true {
-            launchDefaults?.removeObject(forKey: "buildMismatchDNSBlock")
-            launchDefaults?.removeObject(forKey: "internetBlockedUntil")
+        if launchDefaults?.bool(forKey: AppGroupKeys.buildMismatchDNSBlock) == true {
+            launchDefaults?.removeObject(forKey: AppGroupKeys.buildMismatchDNSBlock)
+            launchDefaults?.removeObject(forKey: AppGroupKeys.internetBlockedUntil)
         }
 
         // Configure all services (creates ManagedSettingsStore, CloudKit, etc.).
@@ -147,7 +147,7 @@ struct BigBrotherApp: App {
             // a cold-start FC daemon briefly reporting .notDetermined would
             // re-arm the guided setup flag even though the user already
             // completed the fixer — pop the sheet up unnecessarily.
-            let alreadyCompletedOnce = permDefaults?.bool(forKey: "permissionFixerCompletedOnce") == true
+            let alreadyCompletedOnce = permDefaults?.bool(forKey: AppGroupKeys.permissionFixerCompletedOnce) == true
             let fcAuthStatus = appState.enforcement?.authorizationStatus
             let needsGuidedSetup = fcAuthStatus != .authorized
 
@@ -155,7 +155,7 @@ struct BigBrotherApp: App {
                 // Set a flag the ChildHomeView reads to auto-show the fixer.
                 // ALL other auto-prompts (notifications, location, FC auth) check
                 // this flag and suppress themselves until the fixer takes over.
-                permDefaults?.set(true, forKey: "showPermissionFixerOnNextLaunch")
+                permDefaults?.set(true, forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
                 _LaunchLog.log("Child: needs guided setup (FC auth=\(fcAuthStatus?.rawValue ?? "nil")) — will auto-show PermissionFixerView")
             } else if needsGuidedSetup && alreadyCompletedOnce {
                 _LaunchLog.log("Child: FC auth=\(fcAuthStatus?.rawValue ?? "nil") but permissionFixerCompletedOnce — not re-arming (user can open fixer manually if needed)")

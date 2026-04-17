@@ -38,7 +38,7 @@ public enum AppConstants {
 
     /// Manual build number — bump each time you deploy new code during development.
     /// Both parent and child read this constant; matching numbers = same code.
-    public static let appBuildNumber = 632
+    public static let appBuildNumber = 653
 
     // MARK: - Enrollment
 
@@ -167,7 +167,7 @@ public enum AppConstants {
     public static func isScheduleDriven(defaults: UserDefaults? = UserDefaults(suiteName: appGroupIdentifier)) -> Bool {
         // If the key was never set, default to schedule-driven.
         guard let defaults else { return true }
-        return defaults.object(forKey: "scheduleDrivenMode") == nil
-            || defaults.bool(forKey: "scheduleDrivenMode")
+        return defaults.object(forKey: AppGroupKeys.scheduleDrivenMode) == nil
+            || defaults.bool(forKey: AppGroupKeys.scheduleDrivenMode)
     }
 }

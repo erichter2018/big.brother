@@ -60,7 +60,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     private func stampEnforcementConfirmed() {
         let defaults = UserDefaults.appGroup
         let now = Date().timeIntervalSince1970
-        defaults?.set(now, forKey: "monitorEnforcementConfirmedAt")
+        defaults?.set(now, forKey: AppGroupKeys.monitorEnforcementConfirmedAt)
         if let cmdID = defaults?.string(forKey: AppGroupKeys.lastCommandID), !cmdID.isEmpty {
             defaults?.set(cmdID, forKey: AppGroupKeys.lastShieldAppliedForCmdID)
             defaults?.set(now, forKey: AppGroupKeys.lastShieldAppliedForCmdAt)
@@ -71,19 +71,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// so stale shields from the old multi-store layout don't linger.
     private func migrateLegacyStoresIfNeeded() {
         let defaults = UserDefaults.appGroup
-        guard defaults?.bool(forKey: "migratedToSingleStore") != true else { return }
+        guard defaults?.bool(forKey: AppGroupKeys.migratedToSingleStore) != true else { return }
         for name in AppConstants.legacyStoreNames {
             ManagedSettingsStore(named: .init(name)).clearAllSettings()
         }
-        defaults?.set(true, forKey: "migratedToSingleStore")
+        defaults?.set(true, forKey: AppGroupKeys.migratedToSingleStore)
         NSLog("[Monitor] Migrated: cleared legacy stores")
     }
 
     override func intervalDidStart(for activity: DeviceActivityName) {
         // Record that the Monitor is alive (used by parent to detect force-close).
         let monitorDefaults = UserDefaults.appGroup
-        monitorDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
-        monitorDefaults?.set(AppConstants.appBuildNumber, forKey: "monitorBuildNumber")
+        monitorDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorLastActiveAt)
+        monitorDefaults?.set(AppConstants.appBuildNumber, forKey: AppGroupKeys.monitorBuildNumber)
 
         // Migrate legacy multi-store layout to single enforcement store.
         migrateLegacyStoresIfNeeded()
@@ -128,7 +128,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             // Confirm enforcement applied via UserDefaults — main app polls this.
             stampEnforcementConfirmed()
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "monitorNeedsHeartbeat")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorNeedsHeartbeat)
             logEvent(.policyReconciled, details: "Monitor enforcement refresh: \(resolution.mode.rawValue) (\(resolution.reason))")
             // Clean up one-shot trigger activity
             DeviceActivityCenter().stopMonitoring([activity])
@@ -200,7 +200,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
     override func intervalDidEnd(for activity: DeviceActivityName) {
         let monitorDefaults = UserDefaults.appGroup
-        monitorDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+        monitorDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorLastActiveAt)
 
         // R9 fix: self-heal reconciliation registrations on every callback.
         ensureReconciliationRegistered()
@@ -244,7 +244,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             // Signal tunnel to send a confirmation heartbeat — Monitor can't make network calls.
             // Parent sees the confirmed mode within 30s (tunnel's next liveness tick).
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "monitorNeedsHeartbeat")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorNeedsHeartbeat)
             reregisterReconciliationQuarter(activity)
             return
         }
@@ -306,7 +306,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     override func intervalWillEndWarning(for activity: DeviceActivityName) {
         checkEnforcementRefreshSignal()
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorLastActiveAt)
 
         // Reconciliation quarter warning — 3 hours before end = mid-quarter enforcement check.
         if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
@@ -374,7 +374,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if defaults?.string(forKey: "screenTimeDate") != today {
             defaults?.set(today, forKey: "screenTimeDate")
             defaults?.set(0, forKey: "screenTimeAccumulatedSeconds")
-            defaults?.set(0, forKey: "screenTimeMinutes")
+            defaults?.set(0, forKey: AppGroupKeys.screenTimeMinutes)
         }
         if defaults?.string(forKey: "monitorMilestoneDate") != today {
             defaults?.set(today, forKey: "monitorMilestoneDate")
@@ -431,27 +431,27 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             // milestone (e.g. early in the day before the first callback).
             if newSeconds > existingSeconds {
                 defaults?.set(newSeconds, forKey: "screenTimeAccumulatedSeconds")
-                defaults?.set(minutes, forKey: "screenTimeMinutes")
+                defaults?.set(minutes, forKey: AppGroupKeys.screenTimeMinutes)
                 defaults?.set("deviceActivity", forKey: "screenTimeSource")
             }
         } else {
             defaults?.set(today, forKey: "screenTimeDate")
             defaults?.set(newSeconds, forKey: "screenTimeAccumulatedSeconds")
-            defaults?.set(minutes, forKey: "screenTimeMinutes")
+            defaults?.set(minutes, forKey: AppGroupKeys.screenTimeMinutes)
             defaults?.set("deviceActivity", forKey: "screenTimeSource")
         }
 
         // Record Monitor activity timestamp.
         let monitorDefaults = UserDefaults.appGroup
-        monitorDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+        monitorDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorLastActiveAt)
 
         // Piggyback enforcement reconciliation on usage tracking callbacks.
         // These fire every ~5 minutes of active device use — exactly when enforcement matters most.
         // Throttle to once per 60 seconds to avoid excessive work.
-        let lastReconcile = monitorDefaults?.double(forKey: "monitorLastReconcileAt") ?? 0
+        let lastReconcile = monitorDefaults?.double(forKey: AppGroupKeys.monitorLastReconcileAt) ?? 0
         let now = Date().timeIntervalSince1970
         if now - lastReconcile > 60 {
-            monitorDefaults?.set(now, forKey: "monitorLastReconcileAt")
+            monitorDefaults?.set(now, forKey: AppGroupKeys.monitorLastReconcileAt)
             reconcile()
         }
     }
@@ -471,7 +471,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         UserDefaults.appGroup?
-            .set("freeWindowStart", forKey: "lastShieldChangeReason")
+            .set("freeWindowStart", forKey: AppGroupKeys.lastShieldChangeReason)
 
         // Temporary unlock or timed unlock active — don't override with schedule.
         if hasActiveTemporaryMode() { return }
@@ -547,7 +547,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         UserDefaults.appGroup?
-            .set("freeWindowEnd", forKey: "lastShieldChangeReason")
+            .set("freeWindowEnd", forKey: AppGroupKeys.lastShieldChangeReason)
 
         // Temporary unlock or timed unlock active — don't override with schedule.
         if hasActiveTemporaryMode() { return }
@@ -587,7 +587,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
         if mode != .unlocked {
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastNaturalRelockAt)
         }
 
         logEvent(.scheduleEnded, details: "Unlocked window ended, mode \(mode.rawValue) (\(resolution.reason))")
@@ -618,7 +618,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         if !AppConstants.isScheduleDriven() { return }
 
         UserDefaults.appGroup?
-            .set("essentialStart", forKey: "lastShieldChangeReason")
+            .set("essentialStart", forKey: AppGroupKeys.lastShieldChangeReason)
 
         // lockedDown is parent-enforced maximum restriction — schedule must never weaken it.
         if storage.readPolicySnapshot()?.effectivePolicy.resolvedMode == .lockedDown { return }
@@ -669,7 +669,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         UserDefaults.appGroup?
-            .set("essentialEnd", forKey: "lastShieldChangeReason")
+            .set("essentialEnd", forKey: AppGroupKeys.lastShieldChangeReason)
 
         // Temporary unlock or timed unlock active — don't override with schedule.
         if hasActiveTemporaryMode() { return }
@@ -790,7 +790,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         try? storage.clearTemporaryUnlockState()
         if mode != .unlocked {
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastNaturalRelockAt)
         }
         logEvent(.scheduleEnded, details: "Timed unlock ended, mode \(mode.rawValue)")
         sendModeNotification(title: "Free Time Ended", body: mode == .unlocked ? "Unlocked window — all apps accessible." : "Device locked — \(mode.displayName) mode active.")
@@ -870,10 +870,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
                 logEvent(.enforcementDegraded, details: "Shield re-apply FAILED \(retryDelays.count)x after temp unlock expiry — scheduling fallback")
                 // Write confirmed-down flag so tunnel can DNS-block immediately.
                 // Companion timestamp marks this as fresh authoritative evidence.
-                defaults?.set(false, forKey: "shieldsActiveAtLastHeartbeat")
-                defaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
+                defaults?.set(false, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat)
+                defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt)
                 // Set refresh flag so the next Monitor callback retries immediately
-                defaults?.set(true, forKey: "needsEnforcementRefresh")
+                defaults?.set(true, forKey: AppGroupKeys.needsEnforcementRefresh)
             }
         }
 
@@ -883,7 +883,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         try? storage.clearTimedUnlockInfo()
         // Record when the device naturally re-locked so force-close detection
         // gives extra grace time (the app may be suspended from a game).
-        defaults?.set(Date().timeIntervalSince1970, forKey: "lastNaturalRelockAt")
+        defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastNaturalRelockAt)
         logEvent(.temporaryUnlockExpired, details: "Temp unlock expired, locked to \(mode.rawValue)")
         sendModeNotification(title: "Free Time Ended", body: "Device locked — \(mode.displayName) mode active.")
     }
@@ -923,8 +923,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Clean up saved state first so ModeStackResolver doesn't see
         // stale lockUntil bits when we call it below.
-        defaults?.removeObject(forKey: "lockUntilPreviousMode")
-        defaults?.removeObject(forKey: "lockUntilExpiresAt")
+        defaults?.removeObject(forKey: AppGroupKeys.lockUntilPreviousMode)
+        defaults?.removeObject(forKey: AppGroupKeys.lockUntilExpiresAt)
         defaults?.removeObject(forKey: "lockUntilCommandID")
 
         let resolution = ModeStackResolver.resolve(storage: storage)
@@ -1065,7 +1065,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         logEvent(.timeLimitExhausted, details: "\(limit.appName): \(limit.dailyLimitMinutes) min limit reached")
 
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorLastActiveAt)
     }
 
     /// Daily reset: a time limit schedule restarted (midnight). Clear exhausted status
@@ -1088,7 +1088,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         applyShieldingToAllStores(mode: policy?.resolvedMode ?? .restricted, policy: policy)
 
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorLastActiveAt)
     }
 
     /// Update the DNS blocklist with domains of all currently-exhausted apps.
@@ -1168,23 +1168,23 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// It sets this flag so the Monitor re-applies on its next callback (any callback).
     private func checkEnforcementRefreshSignal() {
         let defaults = UserDefaults.appGroup
-        guard let signalTime = defaults?.double(forKey: "needsEnforcementRefresh"),
+        guard let signalTime = defaults?.double(forKey: AppGroupKeys.needsEnforcementRefresh),
               signalTime > 0 else { return }
 
         // Only act on recent signals (within 5 minutes)
         let age = Date().timeIntervalSince1970 - signalTime
         guard age < 300 else {
-            defaults?.removeObject(forKey: "needsEnforcementRefresh")
+            defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
             return
         }
 
         // Clear the flag FIRST to prevent re-entrancy
-        defaults?.removeObject(forKey: "needsEnforcementRefresh")
+        defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
 
         // Process pending token removals from the tunnel (tunnel can't import ManagedSettings).
-        let pendingRemovals = defaults?.stringArray(forKey: "pendingTokenRemovals") ?? []
+        let pendingRemovals = defaults?.stringArray(forKey: AppGroupKeys.pendingTokenRemovals) ?? []
         if !pendingRemovals.isEmpty {
-            defaults?.removeObject(forKey: "pendingTokenRemovals")
+            defaults?.removeObject(forKey: AppGroupKeys.pendingTokenRemovals)
             if let data = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
                var allowed = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: data) {
                 let beforeCount = allowed.count
@@ -1238,7 +1238,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let activityName = DeviceActivityName(rawValue: "bigbrother.enforcementHeartbeat")
 
         let defaults = UserDefaults.appGroup
-        let currentScreenMinutes = defaults?.integer(forKey: "screenTimeMinutes") ?? 0
+        let currentScreenMinutes = defaults?.integer(forKey: AppGroupKeys.screenTimeMinutes) ?? 0
 
         let nextThresholdSeconds = (currentScreenMinutes * 60) + 30
         let thresholdHours = nextThresholdSeconds / 3600
@@ -1273,15 +1273,15 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Also cleans up expired temporary state as a side effect.
     private func reconcile() {
         let reconcileDefaults = UserDefaults.appGroup
-        reconcileDefaults?.set("reconcile", forKey: "lastShieldChangeReason")
+        reconcileDefaults?.set("reconcile", forKey: AppGroupKeys.lastShieldChangeReason)
         // Update Monitor heartbeat so the tunnel knows we're alive.
         // Without this, the tunnel's 1-hour "Monitor dead" threshold triggers
         // false emergency blackhole activation during quiet periods.
-        reconcileDefaults?.set(Date().timeIntervalSince1970, forKey: "monitorLastActiveAt")
+        reconcileDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.monitorLastActiveAt)
 
         // Check VPN tunnel health — if the child deleted the VPN profile,
         // DNS enforcement stops silently. Log it so it appears in heartbeat/diagnostics.
-        let tunnelLastActive = reconcileDefaults?.double(forKey: "tunnelLastActiveAt") ?? 0
+        let tunnelLastActive = reconcileDefaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0
         if tunnelLastActive > 0 {
             let tunnelAge = Date().timeIntervalSince1970 - tunnelLastActive
             if tunnelAge > 600 { // Tunnel dead for 10+ minutes
@@ -1453,7 +1453,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Use enforcement-critical flag (FC + location only), NOT allPermissionsGranted
         // which includes non-critical permissions (motion, VPN, notifications).
         // Missing notifications should NOT cause the device to be force-locked.
-        let enforcementPermsMissing = defaults?.object(forKey: "enforcementPermissionsOK") as? Bool == false
+        let enforcementPermsMissing = defaults?.object(forKey: AppGroupKeys.enforcementPermissionsOK) as? Bool == false
         if fcRevoked || (enforcementPermsMissing && snapshot?.authorizationHealth == nil) {
             let policy = snapshot?.effectivePolicy
             applyShieldingToAllStores(mode: .locked, policy: policy)
@@ -1492,7 +1492,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // reintroducing the relock-failure race that applyWideOpenShields
         // existed to avoid in the first place. Keeping the flag in sync
         // across processes closes that cross-process divergence.
-        defaults?.set(true, forKey: "shieldStoreWideOpen")
+        defaults?.set(true, forKey: AppGroupKeys.shieldStoreWideOpen)
 
         // Clear DNS blocklists
         try? storage.writeEnforcementBlockedDomains([])
@@ -1574,14 +1574,14 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // falsely report "no shields active" even after we've populated the
         // store with real category shields. Matches the main app's own
         // applyShield which also clears this flag on entry.
-        defaults?.set(false, forKey: "shieldStoreWideOpen")
+        defaults?.set(false, forKey: AppGroupKeys.shieldStoreWideOpen)
 
         // Force essential mode only if FamilyControls authorization is missing.
         // The enforcementPermissionsOK flag is now FC-only (post-b444 fix).
         // Location/motion/VPN/notifications are NOT enforcement-critical and
         // must NOT cause restricted-mode commands to silently promote to locked.
         let effectiveMode: LockMode
-        if defaults?.object(forKey: "enforcementPermissionsOK") as? Bool == false && mode != .locked {
+        if defaults?.object(forKey: AppGroupKeys.enforcementPermissionsOK) as? Bool == false && mode != .locked {
             effectiveMode = .locked
         } else {
             effectiveMode = mode
@@ -1862,8 +1862,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// Last mode we notified about — prevents repeated notifications for the same mode.
     /// Persisted in App Group so it survives Monitor process restarts.
     private var lastNotifiedMode: String? {
-        get { UserDefaults.appGroup?.string(forKey: "monitorLastNotifiedMode") }
-        set { UserDefaults.appGroup?.set(newValue, forKey: "monitorLastNotifiedMode") }
+        get { UserDefaults.appGroup?.string(forKey: AppGroupKeys.monitorLastNotifiedMode) }
+        set { UserDefaults.appGroup?.set(newValue, forKey: AppGroupKeys.monitorLastNotifiedMode) }
     }
 
     private func sendModeNotification(title: String, body: String) {
@@ -1879,8 +1879,8 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// The main app checks this every 30 seconds and sends a forced heartbeat if set.
     private func requestHeartbeat() {
         let defaults = UserDefaults.appGroup
-        let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
-        let ackToken = defaults?.string(forKey: "extensionHeartbeatAcknowledgedToken")
+        let requestToken = defaults?.string(forKey: AppGroupKeys.extensionHeartbeatRequestToken)
+        let ackToken = defaults?.string(forKey: AppGroupKeys.extensionHeartbeatAcknowledgedToken)
 
         // Don't issue a new request if one is already outstanding and unacked.
         if let requestToken, !requestToken.isEmpty, ackToken != requestToken {
@@ -1890,13 +1890,13 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Debounce: don't issue a new request within 60 seconds of the last one.
         // This prevents the race where Monitor sets a new token before the app
         // finishes acking the old one, which looks like force-close.
-        let lastRequestAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt") ?? 0
+        let lastRequestAt = defaults?.double(forKey: AppGroupKeys.extensionHeartbeatRequestedAt) ?? 0
         if lastRequestAt > 0 && Date().timeIntervalSince1970 - lastRequestAt < 60 {
             return
         }
 
-        defaults?.set(UUID().uuidString, forKey: "extensionHeartbeatRequestToken")
-        defaults?.set(Date().timeIntervalSince1970, forKey: "extensionHeartbeatRequestedAt")
+        defaults?.set(UUID().uuidString, forKey: AppGroupKeys.extensionHeartbeatRequestToken)
+        defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.extensionHeartbeatRequestedAt)
     }
 
     /// Write a corrected PolicySnapshot so the main app, tunnel, and heartbeat
@@ -1988,19 +1988,19 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Monitor" from "stale flag during a transition" and suppress false
         // "shields down" alerts while Monitor is still applying the new mode.
         let auditDefaults = UserDefaults.appGroup
-        auditDefaults?.set(mode != .unlocked, forKey: "shieldsActiveAtLastHeartbeat")
-        auditDefaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
+        auditDefaults?.set(mode != .unlocked, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat)
+        auditDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt)
 
         // Shield audit fingerprint — tracks that the Monitor applied shields and WHY.
         let auditSource: String
-        if let reason = auditDefaults?.string(forKey: "lastShieldChangeReason") {
+        if let reason = auditDefaults?.string(forKey: AppGroupKeys.lastShieldChangeReason) {
             auditSource = "monitor.\(reason)"
         } else {
             auditSource = "monitor"
         }
         let tokenCount = mode == .unlocked ? 0 : collectAllowedTokens().count
         let audit = "\(auditSource)|\(mode.rawValue)|\(mode != .unlocked ? "UP" : "DOWN")|\(tokenCount)tokens|\(Int(Date().timeIntervalSince1970))"
-        auditDefaults?.set(audit, forKey: "lastShieldAudit")
+        auditDefaults?.set(audit, forKey: AppGroupKeys.lastShieldAudit)
         requestHeartbeat()
     }
 
@@ -2021,7 +2021,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // After an update, the ack token still matches the request token (from the
         // old binary), so the normal flag-based detection fails. Treat this as
         // equivalent to force-close once heartbeats are stale.
-        let mainAppBuild = defaults?.integer(forKey: "mainAppLastLaunchedBuild") ?? 0
+        let mainAppBuild = defaults?.integer(forKey: AppGroupKeys.mainAppLastLaunchedBuild) ?? 0
         let buildMismatch = mainAppBuild > 0 && mainAppBuild < AppConstants.appBuildNumber
 
         // Signal 1: Check if the extension heartbeat request flag is stale.
@@ -2029,9 +2029,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // If the outstanding request ages past one reconciliation cycle, the
         // process is no longer servicing extension liveness checks.
         let flagIsStale: Bool
-        let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
-        let ackToken = defaults?.string(forKey: "extensionHeartbeatAcknowledgedToken")
-        let requestedAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt") ?? 0
+        let requestToken = defaults?.string(forKey: AppGroupKeys.extensionHeartbeatRequestToken)
+        let ackToken = defaults?.string(forKey: AppGroupKeys.extensionHeartbeatAcknowledgedToken)
+        let requestedAt = defaults?.double(forKey: AppGroupKeys.extensionHeartbeatRequestedAt) ?? 0
         if let requestToken, !requestToken.isEmpty, requestToken != ackToken, requestedAt > 0 {
             let flagAge = Date().timeIntervalSince1970 - requestedAt
             flagIsStale = flagAge > AppConstants.forceCloseFlagStaleness
@@ -2041,7 +2041,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         // Signal 2: Check heartbeat staleness.
-        let lastHeartbeatAt = defaults?.double(forKey: "lastHeartbeatSentAt") ?? 0
+        let lastHeartbeatAt = defaults?.double(forKey: AppGroupKeys.lastHeartbeatSentAt) ?? 0
         guard lastHeartbeatAt > 0 else {
             // No heartbeat ever sent — app may not have finished initial setup.
             return false
@@ -2081,10 +2081,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
 
         let defaults = UserDefaults.appGroup
-        if defaults?.bool(forKey: "forceCloseWebBlocked") == true {
+        if defaults?.bool(forKey: AppGroupKeys.forceCloseWebBlocked) == true {
             // But clear the latch if a temp unlock started AFTER the latch was set
             if let tempState = storage.readTemporaryUnlockState(), tempState.expiresAt > Date() {
-                defaults?.removeObject(forKey: "forceCloseWebBlocked")
+                defaults?.removeObject(forKey: AppGroupKeys.forceCloseWebBlocked)
                 return false
             }
             return true
@@ -2101,11 +2101,11 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     /// is true (unlocked window blocked). Silent when the device is already locked down.
     private func sendForceCloseEnforcement(nagNotification: Bool) {
         let defaults = UserDefaults.appGroup
-        defaults?.set("appClosed", forKey: "lastShieldChangeReason")
+        defaults?.set("appClosed", forKey: AppGroupKeys.lastShieldChangeReason)
 
         // Apply essential-only mode on all stores — no exemptions.
-        if defaults?.bool(forKey: "forceCloseWebBlocked") != true {
-            defaults?.set(true, forKey: "forceCloseWebBlocked")
+        if defaults?.bool(forKey: AppGroupKeys.forceCloseWebBlocked) != true {
+            defaults?.set(true, forKey: AppGroupKeys.forceCloseWebBlocked)
             let policy = storage.readPolicySnapshot()?.effectivePolicy
             applyShieldingToAllStores(mode: .locked, policy: policy)
         }
@@ -2114,10 +2114,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         guard nagNotification else { return }
 
         // Throttle notification: don't nag more than once per hour.
-        let lastNagAt = defaults?.double(forKey: "forceCloseLastNagAt") ?? 0
+        let lastNagAt = defaults?.double(forKey: AppGroupKeys.forceCloseLastNagAt) ?? 0
         let nagAge = Date().timeIntervalSince1970 - lastNagAt
         guard nagAge > 3600 else { return }  // 1 hour
-        defaults?.set(Date().timeIntervalSince1970, forKey: "forceCloseLastNagAt")
+        defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.forceCloseLastNagAt)
 
         let content = UNMutableNotificationContent()
         content.title = "Free Time Blocked"
@@ -2162,16 +2162,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
     ///      clears the in-memory reason if the flag is gone.
     private func checkAppLaunchNeeded() {
         let defaults = UserDefaults.appGroup
-        let mainAppBuild = defaults?.integer(forKey: "mainAppLastLaunchedBuild") ?? 0
+        let mainAppBuild = defaults?.integer(forKey: AppGroupKeys.mainAppLastLaunchedBuild) ?? 0
         let extensionBuild = AppConstants.appBuildNumber
 
         // Main app has launched with this build — clear any build-mismatch DNS block.
         guard mainAppBuild < extensionBuild else {
             // Mismatch resolved — remove the DNS block flag if we set it.
-            if defaults?.bool(forKey: "buildMismatchDNSBlock") == true {
-                defaults?.removeObject(forKey: "buildMismatchDNSBlock")
-                defaults?.removeObject(forKey: "internetBlockedUntil")
-                defaults?.removeObject(forKey: "monitorBuildMismatchFirstSeenAt")
+            if defaults?.bool(forKey: AppGroupKeys.buildMismatchDNSBlock) == true {
+                defaults?.removeObject(forKey: AppGroupKeys.buildMismatchDNSBlock)
+                defaults?.removeObject(forKey: AppGroupKeys.internetBlockedUntil)
+                defaults?.removeObject(forKey: AppGroupKeys.monitorBuildMismatchFirstSeenAt)
             }
             return
         }
@@ -2181,9 +2181,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Use the monitor's own first-seen timestamp so we can reset it
         // when the mismatch clears.
         let now = Date().timeIntervalSince1970
-        let firstSeen = defaults?.double(forKey: "monitorBuildMismatchFirstSeenAt") ?? 0
+        let firstSeen = defaults?.double(forKey: AppGroupKeys.monitorBuildMismatchFirstSeenAt) ?? 0
         if firstSeen <= 0 {
-            defaults?.set(now, forKey: "monitorBuildMismatchFirstSeenAt")
+            defaults?.set(now, forKey: AppGroupKeys.monitorBuildMismatchFirstSeenAt)
             logEvent(.policyReconciled, details: "Post-update mismatch first-seen (main=\(mainAppBuild) ext=\(extensionBuild)) — starting 10 min grace")
             return
         }
@@ -2201,7 +2201,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Apply essential-only mode immediately — the app isn't running so we
         // can't trust the full enforcement pipeline.
-        defaults?.set("appClosed", forKey: "lastShieldChangeReason")
+        defaults?.set("appClosed", forKey: AppGroupKeys.lastShieldChangeReason)
         let policy = storage.readPolicySnapshot()?.effectivePolicy
         applyShieldingToAllStores(mode: .locked, policy: policy)
         updateSharedState(mode: .locked)
@@ -2211,10 +2211,10 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // checks this flag every 30 seconds. 2 h TTL (was 24 h) so even
         // if every clearance path fails, the kid gets internet back within
         // a school period instead of an entire day.
-        if defaults?.bool(forKey: "buildMismatchDNSBlock") != true {
-            defaults?.set(true, forKey: "buildMismatchDNSBlock")
+        if defaults?.bool(forKey: AppGroupKeys.buildMismatchDNSBlock) != true {
+            defaults?.set(true, forKey: AppGroupKeys.buildMismatchDNSBlock)
             let blockUntil = Date().addingTimeInterval(2 * 3600).timeIntervalSince1970
-            defaults?.set(blockUntil, forKey: "internetBlockedUntil")
+            defaults?.set(blockUntil, forKey: AppGroupKeys.internetBlockedUntil)
         }
 
         logEvent(.policyReconciled, details: "Post-update essential mode + DNS block (main app build \(mainAppBuild) < extension build \(extensionBuild))")

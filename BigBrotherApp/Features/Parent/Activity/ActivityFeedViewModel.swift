@@ -121,10 +121,10 @@ final class ActivityFeedViewModel {
               let familyID = appState.parentState?.familyID else { return }
 
         let since = Date().addingTimeInterval(-7 * 86400)
+        let profiles = appState.childProfiles
+        let devices = appState.childDevices
         do {
             let rawEvents = try await cloudKit.fetchEventLogs(familyID: familyID, since: since, types: Self.visibleTypes)
-            let profiles = appState.childProfiles
-            let devices = appState.childDevices
 
             let filtered = rawEvents
                 .filter { selectedChildID == nil || deviceBelongsToChild($0.deviceID, childID: selectedChildID!, devices: devices) }
@@ -177,9 +177,12 @@ final class ActivityFeedViewModel {
                 events: rawEvents
             )
         } catch {
-            #if DEBUG
-            print("[Activity] Failed to load events: \(error.localizedDescription)")
-            #endif
+            NSLog("[Activity] fetchEventLogs failed: \(error.localizedDescription) — building summary from heartbeat/DNS only")
+            // Don't leave the Report tab blank on CK failure — heartbeat and
+            // DNS snapshots are cached locally and still produce a meaningful
+            // weekly summary (screen time, top apps, unlock counts). Events
+            // drive the safety/unlock counters, which will just read as 0.
+            weeklySummary = await computeWeeklySummary(events: [], profiles: sortedChildProfiles, devices: devices)
         }
     }
 
@@ -213,7 +216,10 @@ final class ActivityFeedViewModel {
 
     // MARK: - Weekly Summary
 
-    /// Fetch and merge DNS snapshots for a child across all devices for the last 7 days.
+    /// Fetch and merge DNS snapshots for a child across all devices for the
+    /// last 7 days. All CK record fetches run in parallel — previously this
+    /// was a serial N×7 waterfall which took ~30-60s on a slow cloudd and
+    /// left the Activity Report tab stuck on "No Data" waiting for it.
     private func fetchWeekDNSSnapshot(for childID: ChildProfileID, devices: [ChildDevice]) async -> DomainActivitySnapshot? {
         guard appState.cloudKit != nil else { return nil }
         let childDevices = devices.filter { $0.childProfileID == childID }
@@ -223,36 +229,54 @@ final class ActivityFeedViewModel {
         dateFmt.dateFormat = "yyyy-MM-dd"
         let dates = (0..<7).compactMap { Calendar.current.date(byAdding: .day, value: -$0, to: Date()) }.map { dateFmt.string(from: $0) }
 
-        var allHits: [String: DomainHit] = [:]
-        var totalQueries = 0
+        let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
 
-        for device in childDevices {
-            for dateStr in dates {
-                let recordName = "BBDNSActivity_\(device.id.rawValue)_\(dateStr)"
-                do {
-                    let db = CKContainer(identifier: AppConstants.cloudKitContainerIdentifier).publicCloudDatabase
-                    let record = try await db.record(for: CKRecord.ID(recordName: recordName))
-                    guard let json = record["domainsJSON"] as? String,
-                          let data = json.data(using: .utf8),
-                          let hits = try? JSONDecoder().decode([DomainHit].self, from: data) else { continue }
-                    let recTotal = (record["totalQueries"] as? Int64).map { Int($0) } ?? hits.reduce(0) { $0 + $1.count }
-                    totalQueries += recTotal
-                    for hit in hits {
-                        if var existing = allHits[hit.domain] {
-                            existing.count += hit.count
-                            if let sc = hit.slotCounts {
-                                var merged = existing.slotCounts ?? [:]
-                                for (s, c) in sc { merged[s, default: 0] += c }
-                                existing.slotCounts = merged
-                            }
-                            if hit.flagged { existing.flagged = true; existing.category = hit.category }
-                            allHits[hit.domain] = existing
-                        } else {
-                            allHits[hit.domain] = hit
+        struct FetchResult: Sendable {
+            let hits: [DomainHit]
+            let total: Int
+        }
+
+        let results = await withTaskGroup(of: FetchResult?.self) { group -> [FetchResult] in
+            for device in childDevices {
+                for dateStr in dates {
+                    let recordName = "BBDNSActivity_\(device.id.rawValue)_\(dateStr)"
+                    group.addTask {
+                        do {
+                            let record = try await db.record(for: CKRecord.ID(recordName: recordName))
+                            guard let json = record["domainsJSON"] as? String,
+                                  let data = json.data(using: .utf8),
+                                  let hits = try? JSONDecoder().decode([DomainHit].self, from: data) else { return nil }
+                            let recTotal = (record["totalQueries"] as? Int64).map { Int($0) } ?? hits.reduce(0) { $0 + $1.count }
+                            return FetchResult(hits: hits, total: recTotal)
+                        } catch {
+                            return nil // Record may not exist for this date
                         }
                     }
-                } catch {
-                    continue // Record may not exist for this date
+                }
+            }
+            var collected: [FetchResult] = []
+            for await value in group {
+                if let value { collected.append(value) }
+            }
+            return collected
+        }
+
+        var allHits: [String: DomainHit] = [:]
+        var totalQueries = 0
+        for result in results {
+            totalQueries += result.total
+            for hit in result.hits {
+                if var existing = allHits[hit.domain] {
+                    existing.count += hit.count
+                    if let sc = hit.slotCounts {
+                        var merged = existing.slotCounts ?? [:]
+                        for (s, c) in sc { merged[s, default: 0] += c }
+                        existing.slotCounts = merged
+                    }
+                    if hit.flagged { existing.flagged = true; existing.category = hit.category }
+                    allHits[hit.domain] = existing
+                } else {
+                    allHits[hit.domain] = hit
                 }
             }
         }

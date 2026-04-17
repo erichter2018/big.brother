@@ -65,7 +65,7 @@ final class DrivingMonitor: @unchecked Sendable {
 
     private var settings: DrivingSettings {
         guard let data = UserDefaults.appGroup?
-            .data(forKey: "drivingSettings"),
+            .data(forKey: AppGroupKeys.drivingSettings),
               let s = try? JSONDecoder().decode(DrivingSettings.self, from: data)
         else { return .default }
         return s

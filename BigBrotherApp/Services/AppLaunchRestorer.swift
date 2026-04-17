@@ -43,7 +43,7 @@ struct AppLaunchRestorer {
         // would trigger the deep-rescue recovery path (verification fails →
         // recovery → probe → rescue → Step 4 AuthorizationCenter prompt),
         // firing Screen Time prompts ahead of the stepwise fixer flow.
-        if defaults?.bool(forKey: "showPermissionFixerOnNextLaunch") == true {
+        if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
             NSLog("[AppLaunchRestorer] Skipping — guided setup active, PermissionFixerView will handle enforcement after permissions are granted")
             return
         }
@@ -57,7 +57,7 @@ struct AppLaunchRestorer {
         // concurrent writers). This skip still allows the safety-net 3s delayed
         // re-restoration to run fully (by which point AppDelegate's timestamp
         // will be > 2s old).
-        let appDelegateRestoreAt = defaults?.double(forKey: "appDelegateRestorationAt") ?? 0
+        let appDelegateRestoreAt = defaults?.double(forKey: AppGroupKeys.appDelegateRestorationAt) ?? 0
         let appDelegateRanRecently = appDelegateRestoreAt > 0 &&
             Date().timeIntervalSince1970 - appDelegateRestoreAt < 2.0
         if appDelegateRanRecently {
@@ -72,7 +72,7 @@ struct AppLaunchRestorer {
         enforcement.resetThrottle()
 
         UserDefaults.appGroup?
-            .set("launchRestore", forKey: "lastShieldChangeReason")
+            .set("launchRestore", forKey: AppGroupKeys.lastShieldChangeReason)
 
         guard let enrollment = try? keychain.get(
             ChildEnrollmentState.self,
@@ -275,11 +275,11 @@ struct AppLaunchRestorer {
     private func reconcileScheduleState() {
         guard let profile = storage.readActiveScheduleProfile() else { return }
         UserDefaults.appGroup?
-            .set("launchRestore", forKey: "lastShieldChangeReason")
+            .set("launchRestore", forKey: AppGroupKeys.lastShieldChangeReason)
 
         // Don't override manual mode commands (parent sent setMode directly).
         let defaults = UserDefaults.appGroup ?? .standard
-        if defaults.object(forKey: "scheduleDrivenMode") != nil && !defaults.bool(forKey: "scheduleDrivenMode") {
+        if defaults.object(forKey: AppGroupKeys.scheduleDrivenMode) != nil && !defaults.bool(forKey: AppGroupKeys.scheduleDrivenMode) {
             return
         }
 

@@ -1179,23 +1179,20 @@ final class ChildDetailViewModel: CommandSendable {
 
     func refresh() async {
         refreshDayScopedStateIfNeeded()
-        // Dashboard populates devices/heartbeats which loadWeeklyScreenTime +
-        // loadOnlineActivity both read from — block on it first.
-        try? await appState.refreshDashboard()
-
-        // The remaining four loads are independent — run them in parallel.
-        // Sequential waterfall was costing 30-60s; parallel is the longest single
-        // fetch (usually <5s).
-        async let events: Void = loadEvents()
-        async let weekly: Void = loadWeeklyScreenTime()
-        async let online: Void = loadOnlineActivity()
-        async let limits: Void = loadTimeLimits()
-        _ = await (events, weekly, online, limits)
-
-        // loadPendingAppReviews uses timeLimitConfigs for blocked/active filtering,
-        // so it must run AFTER loadTimeLimits returned. Fast now — heavy cleanup
-        // work is dispatched to a detached Task inside.
-        await loadPendingAppReviews()
+        // 30-second deadline. Without it, one hung CloudKit call leaves the
+        // pull-to-refresh spinner spinning forever. Timed-out work keeps
+        // running in the background and will eventually complete; the
+        // deadline only releases the user's spinner.
+        await withDeadline(30) { [weak self] in
+            guard let self else { return }
+            try? await self.appState.refreshDashboard()
+            async let events: Void = self.loadEvents()
+            async let weekly: Void = self.loadWeeklyScreenTime()
+            async let online: Void = self.loadOnlineActivity()
+            async let limits: Void = self.loadTimeLimits()
+            _ = await (events, weekly, online, limits)
+            await self.loadPendingAppReviews()
+        }
     }
 
     // MARK: - App Time Limits

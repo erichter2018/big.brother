@@ -16,14 +16,14 @@ struct AppNamingPromptView: View {
     /// Pre-populate from the cached shield info if we got a useful name.
     private var cachedAppName: String? {
         let defaults = UserDefaults.appGroup
-        guard let name = defaults?.string(forKey: "lastShielded.appName"),
+        guard let name = defaults?.string(forKey: AppGroupKeys.lastShieldedAppName),
               isUsefulName(name) else { return nil }
         return name
     }
 
     private var cachedTokenBase64: String? {
         let defaults = UserDefaults.appGroup
-        return defaults?.string(forKey: "lastShielded.tokenBase64")
+        return defaults?.string(forKey: AppGroupKeys.lastShieldedTokenBase64)
     }
 
     var body: some View {
@@ -91,9 +91,9 @@ struct AppNamingPromptView: View {
 
             // Also update the UserDefaults name map so extensions see it.
             let defaults = UserDefaults.appGroup
-            var nameMap = defaults?.dictionary(forKey: "tokenToAppName") as? [String: String] ?? [:]
+            var nameMap = defaults?.dictionary(forKey: AppGroupKeys.tokenToAppName) as? [String: String] ?? [:]
             nameMap[tokenBase64] = trimmedName
-            defaults?.set(nameMap, forKey: "tokenToAppName")
+            defaults?.set(nameMap, forKey: AppGroupKeys.tokenToAppName)
         }
 
         let requestID = UUID()

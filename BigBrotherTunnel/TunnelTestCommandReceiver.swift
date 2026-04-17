@@ -117,7 +117,7 @@ enum TunnelTestCommandReceiver {
             message: "TunnelTestCommandReceiver: installed \(TestNotification.allCases.count) Darwin observers"
         ))
         UserDefaults.appGroup?
-            .set(Date().timeIntervalSince1970, forKey: "tunnelTestCommandReceiverInstalledAt")
+            .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.tunnelTestCommandReceiverInstalledAt)
     }
 }
 

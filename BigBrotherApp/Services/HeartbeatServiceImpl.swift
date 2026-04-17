@@ -117,7 +117,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     private func runExtensionCheckTick() async {
         // Write liveness timestamp for the VPN tunnel to read.
         let liveDefaults = UserDefaults.appGroup
-        liveDefaults?.set(Date().timeIntervalSince1970, forKey: "mainAppLastActiveAt")
+        liveDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.mainAppLastActiveAt)
         // Refresh lock state timestamp so tunnel knows the value is fresh.
         liveDefaults?.set(Date().timeIntervalSince1970, forKey: "isDeviceLockedAt")
 
@@ -147,15 +147,15 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     /// Returns true only for recent requests (< 5 min) to trigger a forced heartbeat send.
     private func acknowledgeExtensionHeartbeatRequest() -> Bool {
         let defaults = UserDefaults.appGroup
-        let requestToken = defaults?.string(forKey: "extensionHeartbeatRequestToken")
+        let requestToken = defaults?.string(forKey: AppGroupKeys.extensionHeartbeatRequestToken)
         guard let requestToken, !requestToken.isEmpty else { return false }
 
-        let ackToken = defaults?.string(forKey: "extensionHeartbeatAcknowledgedToken")
-        let requestedAt = defaults?.double(forKey: "extensionHeartbeatRequestedAt") ?? 0
+        let ackToken = defaults?.string(forKey: AppGroupKeys.extensionHeartbeatAcknowledgedToken)
+        let requestedAt = defaults?.double(forKey: AppGroupKeys.extensionHeartbeatRequestedAt) ?? 0
         let justAcknowledged = ackToken != requestToken
         if justAcknowledged {
-            defaults?.set(requestToken, forKey: "extensionHeartbeatAcknowledgedToken")
-            defaults?.set(Date().timeIntervalSince1970, forKey: "extensionHeartbeatAcknowledgedAt")
+            defaults?.set(requestToken, forKey: AppGroupKeys.extensionHeartbeatAcknowledgedToken)
+            defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.extensionHeartbeatAcknowledgedAt)
             onLivenessConfirmed?()
         }
 
@@ -324,8 +324,8 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         // "shields down" reports during mode transitions.
         if let shieldsActive {
             let shieldDefaults = UserDefaults.appGroup
-            shieldDefaults?.set(shieldsActive, forKey: "shieldsActiveAtLastHeartbeat")
-            shieldDefaults?.set(Date().timeIntervalSince1970, forKey: "shieldsActiveAtLastHeartbeatAt")
+            shieldDefaults?.set(shieldsActive, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat)
+            shieldDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.shieldsActiveAtLastHeartbeatAt)
         }
 
         // Schedule diagnostic — report what the child's LOCAL schedule says right now.
@@ -356,7 +356,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
         // Last shield change reason
         let lastShieldChangeReason = UserDefaults.appGroup?
-            .string(forKey: "lastShieldChangeReason")
+            .string(forKey: AppGroupKeys.lastShieldChangeReason)
         let exhaustedAppState = Self.currentExhaustedAppState(from: storage)
 
         let heartbeat = DeviceHeartbeat(
@@ -365,9 +365,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             currentMode: currentMode,
             policyVersion: policyVersion,
             familyControlsAuthorized: enforcement?.authorizationStatus == .authorized,
-            familyControlsAuthType: UserDefaults.appGroup?.string(forKey: "fr.bigbrother.authorizationType"),
-            childAuthFailReason: UserDefaults.appGroup?.string(forKey: "fr.bigbrother.childAuthFailReason"),
-            permissionDetails: UserDefaults.appGroup?.string(forKey: "permissionSnapshot"),
+            familyControlsAuthType: UserDefaults.appGroup?.string(forKey: AppGroupKeys.authorizationType),
+            childAuthFailReason: UserDefaults.appGroup?.string(forKey: AppGroupKeys.childAuthFailReason),
+            permissionDetails: UserDefaults.appGroup?.string(forKey: AppGroupKeys.permissionSnapshot),
             batteryLevel: Self.batteryLevel,
             isCharging: Self.isCharging,
             appBlockingConfigured: blockingConfig?.isConfigured,
@@ -402,10 +402,10 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             monitorLastActiveAt: Self.monitorLastActiveAt(),
             vpnDetected: VPNDetector.isVPNActive(),
             internetBlocked: UserDefaults.appGroup?
-                .bool(forKey: "tunnelInternetBlocked") == true ? true : nil,
+                .bool(forKey: AppGroupKeys.tunnelInternetBlocked) == true ? true : nil,
             internetBlockedReason: {
                 let r = UserDefaults.appGroup?
-                    .string(forKey: "tunnelInternetBlockedReason")
+                    .string(forKey: AppGroupKeys.tunnelInternetBlockedReason)
                 return (r?.isEmpty == false) ? r : nil
             }(),
             dnsBlockedDomainCount: {
@@ -441,7 +441,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             timeZoneIdentifier: TimeZone.current.identifier,
             timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(),
             screenTimeMinutes: Self.currentScreenTimeMinutes(from: storage),
-            screenUnlockCount: UserDefaults.appGroup?.integer(forKey: "screenUnlockCount"),
+            screenUnlockCount: UserDefaults.appGroup?.integer(forKey: AppGroupKeys.screenUnlockCount),
             hasSigningKeys: Self.hasSigningKeys(keychain: keychain),
             jailbreakDetected: JailbreakDetector.isJailbroken(),
             jailbreakReason: JailbreakDetector.detectedReason(),
@@ -465,18 +465,18 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             locationAccuracy: loc?.horizontalAccuracy,
             locationAuthorization: locationService?.authorizationStatusString,
             monitorBuildNumber: {
-                let b = UserDefaults.appGroup?.integer(forKey: "monitorBuildNumber") ?? 0
+                let b = UserDefaults.appGroup?.integer(forKey: AppGroupKeys.monitorBuildNumber) ?? 0
                 return b > 0 ? b : nil
             }(),
             shieldBuildNumber: {
-                let b = UserDefaults.appGroup?.integer(forKey: "shieldBuildNumber") ?? 0
+                let b = UserDefaults.appGroup?.integer(forKey: AppGroupKeys.shieldBuildNumber) ?? 0
                 return b > 0 ? b : nil
             }(),
             shieldActionBuildNumber: {
-                let b = UserDefaults.appGroup?.integer(forKey: "shieldActionBuildNumber") ?? 0
+                let b = UserDefaults.appGroup?.integer(forKey: AppGroupKeys.shieldActionBuildNumber) ?? 0
                 return b > 0 ? b : nil
             }(),
-            fcAuthDegraded: UserDefaults.appGroup?.bool(forKey: "fcAuthDegraded") == true ? true : nil,
+            fcAuthDegraded: UserDefaults.appGroup?.bool(forKey: AppGroupKeys.fcAuthDegraded) == true ? true : nil,
             ghostShieldsDetected: {
                 // Ghost shield = OS shielded an app our policy said should be allowed.
                 // Detected by ShieldConfiguration extension; written to App Group with
@@ -489,7 +489,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                 // would produce negative age which is < 86400 and would keep
                 // the flag true indefinitely.
                 let defaults = UserDefaults.appGroup
-                let lastSeen = defaults?.double(forKey: "ghostShieldsDetectedAt") ?? 0
+                let lastSeen = defaults?.double(forKey: AppGroupKeys.ghostShieldsDetectedAt) ?? 0
                 guard lastSeen > 0 else { return nil }
                 let age = Date().timeIntervalSince1970 - lastSeen
                 return (age >= 0 && age < 86400) ? true : nil
@@ -514,7 +514,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             // between a truly force-closed app and one merely suspended by iOS.
             lastSendAt = Date()
             UserDefaults.appGroup?
-                .set(Date().timeIntervalSince1970, forKey: "lastHeartbeatSentAt")
+                .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastHeartbeatSentAt)
 
             // Update device record with current OS version + model if changed.
             await updateDeviceRecordIfNeeded(enrollment: enrollment)
@@ -661,7 +661,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     /// but logging sparingly keeps the activity feed cleaner too.
     private func flushNewAppDetections() {
         let defaults = UserDefaults.appGroup
-        guard let pending = defaults?.stringArray(forKey: "newAppDetections"),
+        guard let pending = defaults?.stringArray(forKey: AppGroupKeys.newAppDetections),
               !pending.isEmpty else { return }
 
         // Snapshot what we're about to process; anything the tunnel
@@ -670,7 +670,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         let uniqueNames = Set(processing).sorted()
 
         // Load the per-app flush-dedup map: appName → last-logged-epoch.
-        var logged = (defaults?.dictionary(forKey: "newAppLastLoggedAt") as? [String: Double]) ?? [:]
+        var logged = (defaults?.dictionary(forKey: AppGroupKeys.newAppLastLoggedAt) as? [String: Double]) ?? [:]
         let now = Date().timeIntervalSince1970
         let logWindow: TimeInterval = 6 * 3600
         // Expire stale entries.
@@ -693,17 +693,17 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         if logged.count > 500 {
             logged = Dictionary(uniqueKeysWithValues: logged.sorted { $0.value > $1.value }.prefix(500).map { ($0.key, $0.value) })
         }
-        defaults?.set(logged, forKey: "newAppLastLoggedAt")
+        defaults?.set(logged, forKey: AppGroupKeys.newAppLastLoggedAt)
 
         // Compare-and-swap: re-read the pending list (it may have grown
         // while we were processing) and write back only the entries we
         // didn't process. Subtractive overwrite preserves late appends.
-        let afterFlush = (defaults?.stringArray(forKey: "newAppDetections") ?? [])
+        let afterFlush = (defaults?.stringArray(forKey: AppGroupKeys.newAppDetections) ?? [])
             .filter { !processing.contains($0) }
         if afterFlush.isEmpty {
-            defaults?.removeObject(forKey: "newAppDetections")
+            defaults?.removeObject(forKey: AppGroupKeys.newAppDetections)
         } else {
-            defaults?.set(afterFlush, forKey: "newAppDetections")
+            defaults?.set(afterFlush, forKey: AppGroupKeys.newAppDetections)
         }
 
         #if DEBUG
@@ -885,16 +885,16 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         // Component builds
         let builds = DiagnosticSnapshot.ComponentBuilds(
             app: AppConstants.appBuildNumber,
-            tunnel: defaults?.integer(forKey: "tunnelBuildNumber") ?? 0,
-            monitor: defaults?.integer(forKey: "monitorBuildNumber") ?? 0,
-            shield: defaults?.integer(forKey: "shieldBuildNumber") ?? 0,
-            shieldAction: defaults?.integer(forKey: "shieldActionBuildNumber") ?? 0
+            tunnel: defaults?.integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0,
+            monitor: defaults?.integer(forKey: AppGroupKeys.monitorBuildNumber) ?? 0,
+            shield: defaults?.integer(forKey: AppGroupKeys.shieldBuildNumber) ?? 0,
+            shieldAction: defaults?.integer(forKey: AppGroupKeys.shieldActionBuildNumber) ?? 0
         )
 
         // Monitor / tunnel age
-        let monitorAt = defaults?.double(forKey: "monitorLastActiveAt") ?? 0
+        let monitorAt = defaults?.double(forKey: AppGroupKeys.monitorLastActiveAt) ?? 0
         let monitorAge = monitorAt > 0 ? Int(now.timeIntervalSince1970 - monitorAt) : nil
-        let tunnelAt = defaults?.double(forKey: "tunnelLastActiveAt") ?? 0
+        let tunnelAt = defaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0
         let tunnelAge = tunnelAt > 0 ? Int(now.timeIntervalSince1970 - tunnelAt) : nil
 
         // Schedule info
@@ -955,11 +955,11 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
         // Push delivery diagnostics — critical for debugging slow command delivery.
         let nowEpoch = Date().timeIntervalSince1970
         let lastPushAge: Int? = {
-            let ts = defaults?.double(forKey: "lastPushReceivedAt") ?? 0
+            let ts = defaults?.double(forKey: AppGroupKeys.lastPushReceivedAt) ?? 0
             return ts > 0 ? Int(nowEpoch - ts) : nil
         }()
         let apnsTokenAge: Int? = {
-            let ts = defaults?.double(forKey: "apnsTokenRegisteredAt") ?? 0
+            let ts = defaults?.double(forKey: AppGroupKeys.apnsTokenRegisteredAt) ?? 0
             return ts > 0 ? Int(nowEpoch - ts) : nil
         }()
 
@@ -971,15 +971,15 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             expiresAt: resolution.expiresAt,
             shieldsUp: shields,
             shieldsExpected: expected,
-            shieldedAppCount: defaults?.integer(forKey: "shieldedAppCount") ?? 0,
+            shieldedAppCount: defaults?.integer(forKey: AppGroupKeys.shieldedAppCount) ?? 0,
             categoryShieldActive: shields && expected,
             webBlocked: webBlockingActive ?? false,
-            shieldReason: defaults?.string(forKey: "lastShieldChangeReason"),
-            shieldAudit: defaults?.string(forKey: "lastShieldAudit"),
+            shieldReason: defaults?.string(forKey: AppGroupKeys.lastShieldChangeReason),
+            shieldAudit: defaults?.string(forKey: AppGroupKeys.lastShieldAudit),
             builds: builds,
             monitorAge: monitorAge,
             tunnelAge: tunnelAge,
-            tunnelConnected: defaults?.bool(forKey: "tunnelConnected"),
+            tunnelConnected: defaults?.bool(forKey: AppGroupKeys.tunnelConnected),
             lastPushAge: lastPushAge,
             apnsTokenAge: apnsTokenAge,
             scheduleName: profile?.name,
@@ -989,9 +989,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             tempUnlockOrigin: temp?.origin.rawValue,
             denyWebWhenRestricted: restrictions?.denyWebWhenRestricted,
             denyAppRemoval: denyAppRemovalActive ?? restrictions?.denyAppRemoval,
-            internetBlocked: defaults?.bool(forKey: "tunnelInternetBlocked") == true ? true : nil,
+            internetBlocked: defaults?.bool(forKey: AppGroupKeys.tunnelInternetBlocked) == true ? true : nil,
             internetBlockReason: {
-                let r = defaults?.string(forKey: "tunnelInternetBlockedReason")
+                let r = defaults?.string(forKey: AppGroupKeys.tunnelInternetBlockedReason)
                 return (r?.isEmpty == false) ? r : nil
             }(),
             dnsBlockedDomains: {
@@ -1002,11 +1002,11 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             transitions: recentTransitions,
             recentLogs: recentLogs,
             applyStartedAt: {
-                let ts = defaults?.double(forKey: "enforcementApplyStartedAt") ?? 0
+                let ts = defaults?.double(forKey: AppGroupKeys.enforcementApplyStartedAt) ?? 0
                 return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
             }(),
             applyFinishedAt: {
-                let ts = defaults?.double(forKey: "enforcementApplyFinishedAt") ?? 0
+                let ts = defaults?.double(forKey: AppGroupKeys.enforcementApplyFinishedAt) ?? 0
                 return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
             }(),
             tokenVerdicts: enforcement?.computeTokenVerdicts(for: resolution.mode) ?? [],
@@ -1077,7 +1077,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
     private static func monitorLastActiveAt() -> Date? {
         let defaults = UserDefaults.appGroup ?? .standard
-        let timestamp = defaults.double(forKey: "monitorLastActiveAt")
+        let timestamp = defaults.double(forKey: AppGroupKeys.monitorLastActiveAt)
         return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
     }
 
@@ -1111,7 +1111,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
 
         let today = SelfUnlockState.todayDateString()
         guard defaults.string(forKey: "screenTimeDate") == today else { return nil }
-        return defaults.integer(forKey: "screenTimeMinutes")
+        return defaults.integer(forKey: AppGroupKeys.screenTimeMinutes)
     }
 
     private static func currentExhaustedAppState(

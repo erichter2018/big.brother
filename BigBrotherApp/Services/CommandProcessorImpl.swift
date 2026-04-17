@@ -959,7 +959,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .setLocationMode(let mode):
                 UserDefaults.appGroup?
-                    .set(mode.rawValue, forKey: "locationTrackingMode")
+                    .set(mode.rawValue, forKey: AppGroupKeys.locationTrackingMode)
                 Task { @MainActor [weak self] in
                     self?.onLocationModeChanged?(mode)
                 }
@@ -982,8 +982,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .setHomeLocation(let latitude, let longitude):
                 let defaults = UserDefaults.appGroup
-                defaults?.set(latitude, forKey: "homeLatitude")
-                defaults?.set(longitude, forKey: "homeLongitude")
+                defaults?.set(latitude, forKey: AppGroupKeys.homeLatitude)
+                defaults?.set(longitude, forKey: AppGroupKeys.homeLongitude)
                 // Trigger LocationService to register the geofence immediately.
                 Task { @MainActor [weak self] in
                     self?.onRequestLocation?() // Reuses location callback to refresh
@@ -1001,7 +1001,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             case .setDrivingSettings(let settings):
                 if let data = try? JSONEncoder().encode(settings) {
                     UserDefaults.appGroup?
-                        .set(data, forKey: "drivingSettings")
+                        .set(data, forKey: AppGroupKeys.drivingSettings)
                 }
                 eventLogger.log(.commandApplied, details: "Driving settings updated: speed limit \(Int(settings.speedThresholdMPH)) mph")
                 return .applied
@@ -1015,7 +1015,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
             case .setSafeSearch(let enabled):
                 UserDefaults.appGroup?
-                    .set(enabled, forKey: "safeSearchEnabled")
+                    .set(enabled, forKey: AppGroupKeys.safeSearchEnabled)
                 // Restart the VPN tunnel to pick up the new DNS settings
                 Task { @MainActor [weak self] in
                     self?.onRestartVPNTunnel?()
@@ -1117,7 +1117,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         }
 
         UserDefaults.appGroup?
-            .set("command", forKey: "lastShieldChangeReason")
+            .set("command", forKey: AppGroupKeys.lastShieldChangeReason)
         let currentSnapshot = snapshotStore.loadCurrentSnapshot()
         let currentVersion = currentSnapshot?.effectivePolicy.policyVersion ?? 0
 
@@ -1235,7 +1235,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 var confirmed = false
                 for attempt in 1...maxAttempts {
                     try? await Task.sleep(for: .seconds(1))
-                    let confirmedAt = defaults?.double(forKey: "monitorEnforcementConfirmedAt") ?? 0
+                    let confirmedAt = defaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0
                     if confirmedAt >= triggerTime {
                         NSLog("[CommandProcessor] Monitor confirmed enforcement after \(attempt)s")
                         confirmed = true
@@ -1405,7 +1405,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             var confirmed = false
             for attempt in 1...10 {
                 try? await Task.sleep(for: .seconds(1))
-                let confirmedAt = defaults?.double(forKey: "monitorEnforcementConfirmedAt") ?? 0
+                let confirmedAt = defaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0
                 if confirmedAt >= triggerTime {
                     NSLog("[CommandProcessor] Monitor confirmed temp unlock enforcement after \(attempt)s")
                     confirmed = true
@@ -1697,33 +1697,36 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// The Monitor re-applies enforcement from its privileged context, then re-registers the quarter.
     private func triggerMonitorEnforcementRefresh() {
         // Schedule a near-future one-shot DeviceActivity that fires intervalDidStart
-        // in the Monitor extension, which applies enforcement from its privileged
-        // context. This replaces the old stopMonitoring/re-register-quarter trick
-        // which was silently a no-op on iOS 17+ (stopMonitoring doesn't fire
-        // intervalDidEnd; re-registering a schedule whose start is in the past
-        // doesn't fire intervalDidStart). See scheduleEnforcementRefreshActivity.
+        // in the Monitor extension. See scheduleEnforcementRefreshActivity.
+        //
+        // All synchronous DeviceActivity work is dispatched off-main because
+        // `DeviceActivityCenter.activities` and `startMonitoring(...)` are
+        // synchronous XPC calls to `deviceactivityd`. When that daemon is
+        // wedged (observed on Juliet's iPad 2026-04-17) they can block the
+        // calling thread for 60+ seconds. applyMode() is called from
+        // MainActor paths (enforceScheduleTransition, applyTimedUnlockEnd,
+        // etc.) so a synchronous call here would freeze the UI.
         scheduleEnforcementRefreshActivity(source: "cmdProc.trigger")
 
-        // Self-heal: make sure all 4 reconciliation quarters are registered so
-        // the natural 6-hour fallback keeps working. Registering an activity that
-        // already exists is a no-op.
-        let center = DeviceActivityCenter()
-        let existing = center.activities
-        let quarters: [(name: String, startHour: Int, endHour: Int)] = [
-            ("bigbrother.reconciliation.q0", 0, 5),
-            ("bigbrother.reconciliation.q1", 6, 11),
-            ("bigbrother.reconciliation.q2", 12, 17),
-            ("bigbrother.reconciliation.q3", 18, 23),
-        ]
-        for q in quarters {
-            let activityName = DeviceActivityName(rawValue: q.name)
-            if existing.contains(activityName) { continue }
-            let qSchedule = DeviceActivitySchedule(
-                intervalStart: DateComponents(hour: q.startHour, minute: 0),
-                intervalEnd: DateComponents(hour: q.endHour, minute: 59),
-                repeats: true
-            )
-            try? center.startMonitoring(activityName, during: qSchedule)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let center = DeviceActivityCenter()
+            let existing = center.activities
+            let quarters: [(name: String, startHour: Int, endHour: Int)] = [
+                ("bigbrother.reconciliation.q0", 0, 5),
+                ("bigbrother.reconciliation.q1", 6, 11),
+                ("bigbrother.reconciliation.q2", 12, 17),
+                ("bigbrother.reconciliation.q3", 18, 23),
+            ]
+            for q in quarters {
+                let activityName = DeviceActivityName(rawValue: q.name)
+                if existing.contains(activityName) { continue }
+                let qSchedule = DeviceActivitySchedule(
+                    intervalStart: DateComponents(hour: q.startHour, minute: 0),
+                    intervalEnd: DateComponents(hour: q.endHour, minute: 59),
+                    repeats: true
+                )
+                try? center.startMonitoring(activityName, during: qSchedule)
+            }
         }
     }
 
@@ -1731,17 +1734,21 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
     /// overrides the lockUntil (setMode, returnToSchedule, temporaryUnlock, timedUnlock).
     private func clearLockUntilState() {
         let defaults = UserDefaults.appGroup
-        defaults?.removeObject(forKey: "lockUntilPreviousMode")
-        defaults?.removeObject(forKey: "lockUntilExpiresAt")
+        defaults?.removeObject(forKey: AppGroupKeys.lockUntilPreviousMode)
+        defaults?.removeObject(forKey: AppGroupKeys.lockUntilExpiresAt)
     }
 
     /// Cancel all non-schedule DeviceActivity monitors (temp unlock, timed unlock, lock-until).
+    /// Dispatched off-main because `.activities` and `stopMonitoring` are
+    /// synchronous XPC to `deviceactivityd` — can hang when the daemon is wedged.
     private func cancelNonScheduleActivities() {
-        let center = DeviceActivityCenter()
-        let prefixes = ["bigbrother.tempunlock.", "bigbrother.timedunlock.", "bigbrother.lockuntil."]
-        for activity in center.activities {
-            if prefixes.contains(where: { activity.rawValue.hasPrefix($0) }) {
-                center.stopMonitoring([activity])
+        DispatchQueue.global(qos: .userInitiated).async {
+            let center = DeviceActivityCenter()
+            let prefixes = ["bigbrother.tempunlock.", "bigbrother.timedunlock.", "bigbrother.lockuntil."]
+            for activity in center.activities {
+                if prefixes.contains(where: { activity.rawValue.hasPrefix($0) }) {
+                    center.stopMonitoring([activity])
+                }
             }
         }
     }
@@ -1769,8 +1776,8 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Save prior mode and expiry for restoration + self-healing.
         let priorMode = snapshotStore.loadCurrentSnapshot()?.effectivePolicy.resolvedMode ?? .restricted
         let lockDefaults = UserDefaults.appGroup
-        lockDefaults?.set(priorMode.rawValue, forKey: "lockUntilPreviousMode")
-        lockDefaults?.set(date.timeIntervalSince1970, forKey: "lockUntilExpiresAt")
+        lockDefaults?.set(priorMode.rawValue, forKey: AppGroupKeys.lockUntilPreviousMode)
+        lockDefaults?.set(date.timeIntervalSince1970, forKey: AppGroupKeys.lockUntilExpiresAt)
         // Record the commandID of the CURRENT active lockUntil so the
         // Monitor's intervalDidEnd handler can distinguish a natural expiry
         // from a stopMonitoring() triggered by `cancelNonScheduleActivities()`
@@ -2142,10 +2149,10 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
 
         // Also store in UserDefaults for extension access
         let defaults = UserDefaults.appGroup
-        var nameMap = defaults?.dictionary(forKey: "tokenToAppName") as? [String: String] ?? [:]
+        var nameMap = defaults?.dictionary(forKey: AppGroupKeys.tokenToAppName) as? [String: String] ?? [:]
         // Store with fingerprint as key (extension can look up by fingerprint too)
         nameMap["fp:\(fingerprint)"] = name
-        defaults?.set(nameMap, forKey: "tokenToAppName")
+        defaults?.set(nameMap, forKey: AppGroupKeys.tokenToAppName)
 
         var harvestedNames = defaults?.dictionary(forKey: AppGroupKeys.harvestedAppNames) as? [String: String] ?? [:]
         harvestedNames[fingerprint] = name
@@ -2192,7 +2199,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         bundleID: String? = nil,
         appName: String? = nil
     ) {
-        guard let data = storage.readRawData(forKey: "pending_review_local.json"),
+        guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
               var pending = try? JSONDecoder().decode([PendingAppReview].self, from: data) else {
             return
         }
@@ -2214,7 +2221,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         guard pending.count != before, let encoded = try? JSONEncoder().encode(pending) else {
             return
         }
-        try? storage.writeRawData(encoded, forKey: "pending_review_local.json")
+        try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
     }
 
     private func reviewDispositionLabel(_ disposition: AppDisposition) -> String {
@@ -2459,7 +2466,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             let today = f.string(from: Date())
             // Check screen time milestones for approximate usage
             let defaults = UserDefaults.appGroup
-            let _ = defaults?.integer(forKey: "screenTimeMinutes") ?? 0
+            let _ = defaults?.integer(forKey: AppGroupKeys.screenTimeMinutes) ?? 0
             // If we can't determine exact per-app usage, check if the app was previously
             // in the exhausted list (re-adding after grant extra time).
             // Conservative: if we just set a limit, register events and let them fire naturally.
@@ -2539,9 +2546,9 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // Persist name + token for future re-add.
         if let removed {
             let defaults = UserDefaults.appGroup
-            var nameMap = (defaults?.dictionary(forKey: "harvestedAppNames") as? [String: String]) ?? [:]
+            var nameMap = (defaults?.dictionary(forKey: AppGroupKeys.harvestedAppNames) as? [String: String]) ?? [:]
             nameMap[removed.fingerprint] = removed.appName
-            defaults?.set(nameMap, forKey: "harvestedAppNames")
+            defaults?.set(nameMap, forKey: AppGroupKeys.harvestedAppNames)
             storage.cacheAppName(removed.appName, forTokenKey: removed.tokenData.base64EncodedString())
         }
 
@@ -2802,7 +2809,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         // pending review by name, recover the tokenData. This rescues apps that were
         // added via submitSingleApp before we started caching names there.
         if results.isEmpty,
-           let reviewData = storage.readRawData(forKey: "pending_review_local.json"),
+           let reviewData = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
            let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: reviewData) {
             let matchingFingerprints = Set(
                 reviews
@@ -2856,7 +2863,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         
         // Fallback: check shared defaults.
         let defaults = UserDefaults.appGroup
-        return defaults?.string(forKey: "lastShielded.bundleID")
+        return defaults?.string(forKey: AppGroupKeys.lastShieldedBundleID)
     }
 
     private func loadAllowedBundleIDs() -> Set<String> {

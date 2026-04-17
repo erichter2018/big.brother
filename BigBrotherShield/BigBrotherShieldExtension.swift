@@ -12,7 +12,7 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
 
     override func configuration(shielding application: Application) -> ShieldConfiguration {
         UserDefaults.appGroup?
-            .set(AppConstants.appBuildNumber, forKey: "shieldBuildNumber")
+            .set(AppConstants.appBuildNumber, forKey: AppGroupKeys.shieldBuildNumber)
         cacheAppIdentity(application: application)
         logShieldRender(application: application, viaCategory: false)
         detectGhostShield(application: application, viaCategory: false)
@@ -96,8 +96,8 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
         // Monitor extension's confirmation timestamp; either writer may have
         // recently changed the state.
         let defaults = UserDefaults.appGroup
-        let lastMainApplyAt = defaults?.double(forKey: "mainAppEnforcementAt") ?? 0
-        let lastMonitorConfirmAt = defaults?.double(forKey: "monitorEnforcementConfirmedAt") ?? 0
+        let lastMainApplyAt = defaults?.double(forKey: AppGroupKeys.mainAppEnforcementAt) ?? 0
+        let lastMonitorConfirmAt = defaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0
         let lastAnyApplyAt = max(lastMainApplyAt, lastMonitorConfirmAt)
         let now = Date().timeIntervalSince1970
         if now - lastAnyApplyAt < 30 { return }
@@ -122,14 +122,14 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
         if exhaustedToday { return }
 
         // Check pending reviews — same JSON file the pendingReviewShieldConfig reads.
-        if let prData = storage.readRawData(forKey: "pending_review_local.json"),
+        if let prData = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
            let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: prData),
            reviews.contains(where: { $0.appFingerprint == fp }) {
             return
         }
 
         // Force-close shield is global (applies to all apps regardless of token).
-        if defaults?.bool(forKey: "forceCloseWebBlocked") == true { return }
+        if defaults?.bool(forKey: AppGroupKeys.forceCloseWebBlocked) == true { return }
 
         // Decide if THIS app should be shielded according to our policy.
         let isAllowedByPolicy: Bool = {
@@ -168,20 +168,20 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
         if lastFP == fp && (now - lastFPAt) < 300 {
             // Still bump the "lastSeenAt" so the heartbeat reports it as fresh,
             // but don't increment the counter or log a new diagnostic.
-            defaults?.set(now, forKey: "ghostShieldsDetectedAt")
+            defaults?.set(now, forKey: AppGroupKeys.ghostShieldsDetectedAt)
             return
         }
 
         // Record the ghost shield evidence.
-        let count = (defaults?.integer(forKey: "ghostShieldsDetectedCount") ?? 0) + 1
-        defaults?.set(true, forKey: "ghostShieldsDetected")
-        defaults?.set(now, forKey: "ghostShieldsDetectedAt")
-        defaults?.set(count, forKey: "ghostShieldsDetectedCount")
+        let count = (defaults?.integer(forKey: AppGroupKeys.ghostShieldsDetectedCount) ?? 0) + 1
+        defaults?.set(true, forKey: AppGroupKeys.ghostShieldsDetected)
+        defaults?.set(now, forKey: AppGroupKeys.ghostShieldsDetectedAt)
+        defaults?.set(count, forKey: AppGroupKeys.ghostShieldsDetectedCount)
         defaults?.set(fp, forKey: "ghostShieldLastFingerprint")
         defaults?.set(now, forKey: "ghostShieldLastFingerprintAt")
         let appName = application.localizedDisplayName ?? application.bundleIdentifier ?? "unknown"
         let reason = "mode=\(mode.rawValue) tempUnlock=\(isTempUnlock) viaCategory=\(viaCategory) app=\(appName) fp=\(fp) count=\(count)"
-        defaults?.set(reason, forKey: "ghostShieldsDetectedReason")
+        defaults?.set(reason, forKey: AppGroupKeys.ghostShieldsDetectedReason)
     }
 
     /// Standard shield for blocked apps — clean, user-friendly.
@@ -259,7 +259,7 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
         let storage = AppGroupStorage()
 
         // Check local pending reviews (unresolved ones stay local until shield captures their name).
-        guard let data = storage.readRawData(forKey: "pending_review_local.json"),
+        guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
               let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
               reviews.contains(where: { $0.appFingerprint == fp }) else { return nil }
 
@@ -277,7 +277,7 @@ class BigBrotherShieldExtension: ShieldConfigurationDataSource {
     /// Custom shield config shown when web is blocked due to force-close.
     private var forceCloseShieldConfig: ShieldConfiguration? {
         let defaults = UserDefaults.appGroup
-        guard defaults?.bool(forKey: "forceCloseWebBlocked") == true else { return nil }
+        guard defaults?.bool(forKey: AppGroupKeys.forceCloseWebBlocked) == true else { return nil }
         return ShieldConfiguration(
             backgroundBlurStyle: .systemThickMaterial,
             title: ShieldConfiguration.Label(text: "Apps Paused", color: .orange),

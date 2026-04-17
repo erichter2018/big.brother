@@ -232,7 +232,7 @@ final class SyncCoordinatorImpl: SyncCoordinatorProtocol, @unchecked Sendable {
 
     private static func didProcessCommands(since date: Date) -> Bool {
         let defaults = UserDefaults.appGroup ?? .standard
-        let timestamp = defaults.double(forKey: "fr.bigbrother.lastCommandProcessedAt")
+        let timestamp = defaults.double(forKey: AppGroupKeys.lastCommandProcessedAt)
         guard timestamp > 0 else { return false }
         return Date(timeIntervalSince1970: timestamp) >= date
     }
