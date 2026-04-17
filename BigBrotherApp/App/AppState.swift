@@ -3532,11 +3532,11 @@ final class AppState {
             // DeviceActivity XPC which can freeze main when daemons are wedged.
             let capturedLogger = eventLogger
             Task.detached(priority: .userInitiated) { [weak self] in
-                defer {
-                    Task { @MainActor in self?.scheduleTransitionInFlight = false }
-                }
                 try? cmdProcessor.applyModeDirect(expectedMode, enrollment: enrollment)
-                await MainActor.run { self?.refreshLocalState() }
+                await MainActor.run {
+                    self?.scheduleTransitionInFlight = false
+                    self?.refreshLocalState()
+                }
                 capturedLogger?.log(.policyReconciled, details: "Timer safety net: applied \(expectedMode.rawValue) from schedule")
             }
         }

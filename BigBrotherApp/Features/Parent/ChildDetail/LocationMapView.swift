@@ -172,6 +172,25 @@ struct LocationMapView: View {
         return (0, breadcrumbs.count - 1)
     }
 
+    /// Decimated breadcrumb set for map rendering. Caps at `maxDots`
+    /// annotations because MapKit / VectorKit layout is O(n) per annotation
+    /// and a 500-crumb trip was observed blocking main for 77s during a
+    /// scene-lifecycle transition on the parent phone (SIGUSR1 backtrace
+    /// 2026-04-17). Every Nth sample preserves the path shape at a glance;
+    /// the trip polyline still renders every point, so the line itself is
+    /// faithful.
+    private var decimatedBreadcrumbs: [DeviceLocation] {
+        let range = scrubRange
+        let safeStart = min(range.start, max(breadcrumbs.count - 1, 0))
+        let safeEnd = min(range.end, max(breadcrumbs.count - 1, 0))
+        guard !breadcrumbs.isEmpty, safeStart <= safeEnd else { return [] }
+        let slice = Array(breadcrumbs[safeStart...safeEnd])
+        let maxDots = 200
+        guard slice.count > maxDots else { return slice }
+        let step = max(1, slice.count / maxDots)
+        return Swift.stride(from: 0, to: slice.count, by: step).map { slice[$0] }
+    }
+
     // MARK: - Computed: Scrubbed Position
 
     /// Smoothly interpolated scrub position along road routes.
@@ -1652,11 +1671,7 @@ struct LocationMapView: View {
                 }
 
                 if selectedTrip != nil {
-                    let dotRange = scrubRange
-                    let dotStart = min(dotRange.start, max(breadcrumbs.count - 1, 0))
-                    let dotEnd = min(dotRange.end, max(breadcrumbs.count - 1, 0))
-                    let visibleCrumbs = breadcrumbs.isEmpty ? [] : Array(breadcrumbs[dotStart...dotEnd])
-                    ForEach(visibleCrumbs) { crumb in
+                    ForEach(decimatedBreadcrumbs) { crumb in
                         Annotation("", coordinate: CLLocationCoordinate2D(latitude: crumb.latitude, longitude: crumb.longitude)) {
                             Circle()
                                 .fill(.blue.opacity(0.2))
