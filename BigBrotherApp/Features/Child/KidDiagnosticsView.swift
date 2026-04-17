@@ -211,11 +211,6 @@ struct KidDiagnosticsView: View {
     @ViewBuilder
     private var networkBlock: some View {
         let defaults = UserDefaults.appGroup
-        let netMon = appState.networkMonitor
-        let netConnected = netMon.isConnected
-        let iface = netMon.interfaceKind
-        let hotspotHint = netMon.isExpensive ? "/expensive(cell/hotspot)" : ""
-        let lowDataHint = netMon.isConstrained ? "/lowData" : ""
         let vpn = appState.vpnManager?.connectionStatus.rawValue ?? -1
         let vpnStr = vpnStatusString(vpn)
         let tunnelLast = defaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0
@@ -226,7 +221,7 @@ struct KidDiagnosticsView: View {
         let dnsJson = defaults?.string(forKey: AppGroupKeys.dnsFilteringStateJSON) ?? ""
         let buildMismatch = defaults?.bool(forKey: AppGroupKeys.buildMismatchDNSBlock) == true
 
-        Text("NET: \(netConnected ? "online" : "OFFLINE") via \(iface)\(hotspotHint)\(lowDataHint)")
+        Text("NET: \(networkLabel())")
         Text("VPN: \(vpnStr)")
         Text("TUN: last \(absAge(tunnelLast))  MAIN: last \(absAge(mainAliveLast))")
 
@@ -614,6 +609,24 @@ struct KidDiagnosticsView: View {
         }
     }
 
+    /// Clean network label with hotspot detection built in.
+    /// A wifi interface marked "expensive" is iOS's signal that the Wi-Fi
+    /// network is actually a Personal Hotspot being shared by another
+    /// Apple device — shows up as `wifi-hotspot`. Cellular + expensive is
+    /// redundant so we just say `cell`.
+    private func networkLabel() -> String {
+        let nm = appState.networkMonitor
+        guard nm.isConnected else { return "OFFLINE" }
+        var kind = nm.interfaceKind
+        if kind == "wifi" && nm.isExpensive {
+            kind = "wifi-hotspot"
+        }
+        var flags: [String] = []
+        if nm.isConstrained { flags.append("lowData") }
+        let flagStr = flags.isEmpty ? "" : " (\(flags.joined(separator: ",")))"
+        return "online via \(kind)\(flagStr)"
+    }
+
     private func vpnStatusString(_ raw: Int) -> String {
         switch raw {
         case 0: return "invalid"
@@ -733,11 +746,7 @@ struct KidDiagnosticsView: View {
         lines.append("")
 
         // Network / Internet
-        let nm = appState.networkMonitor
-        let netLine = "NET: \(nm.isConnected ? "online" : "OFFLINE") via \(nm.interfaceKind)"
-            + (nm.isExpensive ? " (expensive/cell/hotspot)" : "")
-            + (nm.isConstrained ? " (lowData)" : "")
-        lines.append(netLine)
+        lines.append("NET: \(networkLabel())")
         let vpnRaw = appState.vpnManager?.connectionStatus.rawValue ?? -1
         lines.append("VPN: \(vpnStatusString(vpnRaw))")
         lines.append("TUN last alive: \(absAge(defaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0))")
