@@ -29,6 +29,7 @@ struct KidDiagnosticsView: View {
     @State private var locAuthString = "?"
     @State private var motionAuthString = "?"
     @State private var notifAuthString = "?"
+    @State private var showCopiedToast = false
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let locationManager = CLLocationManager()
@@ -64,8 +65,31 @@ struct KidDiagnosticsView: View {
             .navigationTitle("Diagnostics")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        UIPasteboard.general.string = buildPlainTextDump()
+                        withAnimation { showCopiedToast = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            withAnimation { showCopiedToast = false }
+                        }
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
+                }
+            }
+            .overlay(alignment: .top) {
+                if showCopiedToast {
+                    Text("Copied — paste in a text to your parent")
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.thinMaterial)
+                        .clipShape(Capsule())
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .padding(.top, 8)
                 }
             }
             .onReceive(timer) { now = $0 }
@@ -436,5 +460,146 @@ struct KidDiagnosticsView: View {
     private func shortID(_ s: String) -> String {
         guard s.count > 12 else { return s }
         return "\(s.prefix(6))..\(s.suffix(4))"
+    }
+
+    // MARK: - Plain Text Dump (for clipboard / text message)
+
+    /// Builds a plain text version of every diagnostic section. Designed
+    /// to paste into a text message to the parent — human-readable but
+    /// still compact. Must cover the same ground as the on-screen view.
+    private func buildPlainTextDump() -> String {
+        var lines: [String] = []
+        let defaults = UserDefaults.appGroup
+        let enroll = appState.enrollmentState
+
+        // Header
+        lines.append("— BigBrother Diagnostics —")
+        lines.append(cachedDeviceDisplayName() ?? "device")
+        lines.append("\(UIDevice.current.model) (\(hardwareIdentifier())) iOS \(UIDevice.current.systemVersion)")
+        lines.append(Self.dateStampFormatter.string(from: now))
+        lines.append("")
+
+        // Mode
+        let mode = appState.currentEffectivePolicy?.resolvedMode.rawValue ?? "?"
+        let isTemp = appState.currentEffectivePolicy?.isTemporaryUnlock == true
+        let schedDriven = (defaults?.object(forKey: AppGroupKeys.scheduleDrivenMode) as? Bool).map { $0 ? "yes" : "no" } ?? "?"
+        lines.append("MODE: \(mode)  schedDriven:\(schedDriven)  isTempFlag:\(isTemp ? "yes" : "no")")
+        if let sched = appState.storage.readActiveScheduleProfile() {
+            let curMode = sched.resolvedMode(at: now).rawValue
+            let nextT = sched.nextTransitionTime(from: now)
+            let nextStr: String = {
+                guard let nextT else { return "-" }
+                let f = DateFormatter(); f.dateFormat = "EEE HH:mm"
+                return "\(f.string(from: nextT)) (\(futureAge(nextT)))"
+            }()
+            lines.append("SCH: \"\(sched.name)\" now:\(curMode) next:\(nextStr)")
+        } else {
+            lines.append("SCH: (none)")
+        }
+        if let tempExpiry = appState.storage.readTemporaryUnlockState()?.expiresAt {
+            lines.append("TMP: until \(timeStr(tempExpiry)) (\(futureAge(tempExpiry)))")
+        } else {
+            lines.append("TMP: off")
+        }
+        lines.append("TIMED: \(timedPhaseDescription(appState.storage.readTimedUnlockInfo()))")
+        let lockUntilTS = defaults?.double(forKey: AppGroupKeys.lockUntilExpiresAt) ?? 0
+        if lockUntilTS > 0 {
+            let d = Date(timeIntervalSince1970: lockUntilTS)
+            lines.append("LCK: until \(timeStr(d)) (\(futureAge(d)))")
+        } else {
+            lines.append("LCK: off")
+        }
+        lines.append("")
+
+        // Network / Internet
+        lines.append("NET: \(appState.networkMonitor.isConnected ? "online" : "OFFLINE")")
+        let vpnRaw = appState.vpnManager?.connectionStatus.rawValue ?? -1
+        lines.append("VPN: \(vpnStatusString(vpnRaw))")
+        lines.append("TUN last alive: \(absAge(defaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0))")
+        let inetUntil = defaults?.double(forKey: AppGroupKeys.internetBlockedUntil) ?? 0
+        let tunInetBlocked = defaults?.bool(forKey: AppGroupKeys.tunnelInternetBlocked) ?? false
+        let tunInetReason = defaults?.string(forKey: AppGroupKeys.tunnelInternetBlockedReason) ?? ""
+        if inetUntil > now.timeIntervalSince1970 {
+            let d = Date(timeIntervalSince1970: inetUntil)
+            lines.append("INET: BLOCKED until \(timeStr(d)) (\(futureAge(d)))")
+        } else if tunInetBlocked {
+            lines.append("INET: BLOCKED (tunnel)\(tunInetReason.isEmpty ? "" : " — \(tunInetReason)")")
+        } else {
+            lines.append("INET: allowed")
+        }
+        if defaults?.bool(forKey: AppGroupKeys.buildMismatchDNSBlock) == true {
+            lines.append("BLD MISMATCH: dns block active")
+        }
+        if let s = defaults?.string(forKey: AppGroupKeys.dnsFilteringStateJSON),
+           let data = s.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let reasons = obj["activeReasons"] as? [String] ?? []
+            lines.append("DNS: \(reasons.isEmpty ? "clean" : "blackhole: \(reasons.joined(separator: ","))")")
+        } else {
+            lines.append("DNS: -")
+        }
+        lines.append("")
+
+        // Heartbeat / liveness
+        lines.append("HB sent: \(absAge(defaults?.double(forKey: AppGroupKeys.lastHeartbeatSentAt) ?? 0))")
+        lines.append("ALIVE  main:\(compactAge(defaults?.double(forKey: AppGroupKeys.mainAppLastActiveAt) ?? 0))"
+                     + "  mon:\(compactAge(defaults?.double(forKey: AppGroupKeys.monitorLastActiveAt) ?? 0))"
+                     + "  tun:\(compactAge(defaults?.double(forKey: AppGroupKeys.tunnelLastActiveAt) ?? 0))")
+        lines.append("")
+
+        // Permissions
+        let allOK = defaults?.bool(forKey: AppGroupKeys.allPermissionsGranted) ?? false
+        lines.append("PERM: FC:\(fcAuthString) LOC:\(locAuthString) MOT:\(motionAuthString) NOTIF:\(notifAuthString) all:\(allOK ? "yes" : "NO")")
+        lines.append("")
+
+        // CK / APNs
+        let ckStatus = ckStatusString(defaults?.integer(forKey: "lastCKAccountStatus") ?? -1)
+        let apnsAt = defaults?.double(forKey: AppGroupKeys.apnsTokenRegisteredAt) ?? 0
+        let apnsErr = defaults?.string(forKey: AppGroupKeys.apnsTokenError) ?? ""
+        let lastPush = defaults?.double(forKey: AppGroupKeys.lastPushReceivedAt) ?? 0
+        lines.append("CK: \(ckStatus)  APNS reg: \(apnsAt > 0 ? absAge(apnsAt) : "NONE")")
+        if !apnsErr.isEmpty { lines.append("  apns err: \(apnsErr)") }
+        lines.append("PUSH last: \(absAge(lastPush))")
+        lines.append("")
+
+        // Apps
+        let limits = appState.storage.readAppTimeLimits()
+        let exhausted = appState.storage.readTimeLimitExhaustedApps()
+        let allowed = decodeAllowedTokenCount()
+        let shielded = defaults?.integer(forKey: AppGroupKeys.shieldedAppCount) ?? 0
+        let pending: Int = {
+            guard let data = appState.storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON) else { return 0 }
+            return (try? JSONDecoder().decode([PendingAppReview].self, from: data))?.count ?? 0
+        }()
+        lines.append("APPS allowed:\(allowed) limited:\(limits.count) exhausted:\(exhausted.count) shielded:\(shielded) pending:\(pending)")
+        lines.append("")
+
+        // Commands
+        let lastCmdAt = defaults?.double(forKey: AppGroupKeys.lastCommandProcessedAt) ?? 0
+        let lastCmdID = defaults?.string(forKey: AppGroupKeys.lastCommandID) ?? ""
+        let applyStart = defaults?.double(forKey: AppGroupKeys.enforcementApplyStartedAt) ?? 0
+        let applyEnd = defaults?.double(forKey: AppGroupKeys.enforcementApplyFinishedAt) ?? 0
+        let shieldReason = defaults?.string(forKey: AppGroupKeys.lastShieldChangeReason) ?? "-"
+        let shieldAudit = defaults?.string(forKey: AppGroupKeys.lastShieldAudit) ?? "-"
+        lines.append("CMD last: \(absAge(lastCmdAt))  id:\(lastCmdID.prefix(8))")
+        lines.append("APPLY start:\(absAge(applyStart))  end:\(absAge(applyEnd))")
+        lines.append("SHIELD: \(shieldReason) / \(shieldAudit)")
+        lines.append("")
+
+        // Builds
+        let app = AppConstants.appBuildNumber
+        let mon = defaults?.integer(forKey: AppGroupKeys.monitorBuildNumber) ?? 0
+        let sh = defaults?.integer(forKey: AppGroupKeys.shieldBuildNumber) ?? 0
+        let sha = defaults?.integer(forKey: AppGroupKeys.shieldActionBuildNumber) ?? 0
+        let tun = defaults?.integer(forKey: AppGroupKeys.tunnelBuildNumber) ?? 0
+        lines.append("BLD  app:\(app) mon:\(mon) sh:\(sh) sha:\(sha) tun:\(tun)")
+        lines.append("")
+
+        // IDs
+        lines.append("FAM:\(enroll?.familyID.rawValue ?? "?")")
+        lines.append("DEV:\(enroll?.deviceID.rawValue ?? "?")")
+        lines.append("PROF:\(enroll?.childProfileID.rawValue ?? "?")")
+
+        return lines.joined(separator: "\n")
     }
 }

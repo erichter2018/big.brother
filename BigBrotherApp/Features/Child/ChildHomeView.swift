@@ -113,22 +113,10 @@ struct ChildHomeView: View {
 
                     Spacer(minLength: 40)
 
-                    // Diagnostics + PIN Unlock row — small, unobtrusive.
-                    // Kid taps Diagnostics when reporting a problem to parent;
-                    // the view is a single dense screen designed to screenshot.
-                    HStack {
-                        Button {
-                            showDiagnostics = true
-                        } label: {
-                            Label("Diagnostics", systemImage: "stethoscope")
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.4))
-                        }
-                        .accessibilityLabel("Show diagnostics for parent")
-
-                        Spacer()
-
-                        if viewModel.isPINConfigured {
+                    // PIN Unlock button
+                    if viewModel.isPINConfigured {
+                        HStack {
+                            Spacer()
                             Button {
                                 pinUnlockViewModel = LocalParentUnlockViewModel(appState: viewModel.appState)
                                 showPINUnlock = true
@@ -150,9 +138,12 @@ struct ChildHomeView: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            sosButton
-                .padding(.leading, 16)
-                .padding(.top, 16)
+            HStack(spacing: 10) {
+                sosButton
+                diagnosticsButton
+            }
+            .padding(.leading, 16)
+            .padding(.top, 16)
         }
         .overlay(alignment: .bottomTrailing) {
             if !launchGracePeriod && viewModel.hasPermissionIssues {
@@ -324,6 +315,21 @@ struct ChildHomeView: View {
         } message: {
             Text("This will immediately alert your parents with your current location.")
         }
+    }
+
+    @ViewBuilder
+    private var diagnosticsButton: some View {
+        Button {
+            showDiagnostics = true
+        } label: {
+            Image(systemName: "stethoscope")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(Color.blue.opacity(0.8))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .accessibilityLabel("Show diagnostics for parent")
     }
 
     private func sendSOS() async {
