@@ -1179,20 +1179,28 @@ final class ChildDetailViewModel: CommandSendable {
 
     func refresh() async {
         refreshDayScopedStateIfNeeded()
-        // 30-second deadline. Without it, one hung CloudKit call leaves the
-        // pull-to-refresh spinner spinning forever. Timed-out work keeps
-        // running in the background and will eventually complete; the
-        // deadline only releases the user's spinner.
+        StartupWatchdog.log("ChildDetail.refresh start")
         await withDeadline(30) { [weak self] in
             guard let self else { return }
+            let t0 = CFAbsoluteTimeGetCurrent()
+            StartupWatchdog.log("ChildDetail.refresh: refreshDashboard()")
             try? await self.appState.refreshDashboard()
+            StartupWatchdog.log(String(format: "ChildDetail.refresh: refreshDashboard done (%.2fs)", CFAbsoluteTimeGetCurrent() - t0))
+
+            let t1 = CFAbsoluteTimeGetCurrent()
             async let events: Void = self.loadEvents()
             async let weekly: Void = self.loadWeeklyScreenTime()
             async let online: Void = self.loadOnlineActivity()
             async let limits: Void = self.loadTimeLimits()
             _ = await (events, weekly, online, limits)
+            StartupWatchdog.log(String(format: "ChildDetail.refresh: parallel fetches done (%.2fs)", CFAbsoluteTimeGetCurrent() - t1))
+
+            let t2 = CFAbsoluteTimeGetCurrent()
             await self.loadPendingAppReviews()
+            StartupWatchdog.log(String(format: "ChildDetail.refresh: pending reviews done (%.2fs)", CFAbsoluteTimeGetCurrent() - t2))
+            StartupWatchdog.log(String(format: "ChildDetail.refresh: TOTAL %.2fs", CFAbsoluteTimeGetCurrent() - t0))
         }
+        StartupWatchdog.log("ChildDetail.refresh returned")
     }
 
     // MARK: - App Time Limits
