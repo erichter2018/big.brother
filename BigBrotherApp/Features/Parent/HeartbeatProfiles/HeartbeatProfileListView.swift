@@ -66,7 +66,7 @@ struct HeartbeatProfileListView: View {
             }
         }
         .refreshable {
-            await withDeadline(30) { await viewModel.refresh() }
+            await withDeadline(3) { await viewModel.refresh() }
         }
         .sheet(item: $editingProfile) { profile in
             NavigationStack {

@@ -91,7 +91,7 @@ struct ActivityFeedView: View {
             viewModel.markAsViewed()
         }
         .refreshable {
-            await withDeadline(30) { await viewModel.loadEvents() }
+            await withDeadline(3) { await viewModel.loadEvents() }
         }
     }
 

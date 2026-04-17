@@ -1180,7 +1180,7 @@ final class ChildDetailViewModel: CommandSendable {
     func refresh() async {
         refreshDayScopedStateIfNeeded()
         StartupWatchdog.log("ChildDetail.refresh start")
-        await withDeadline(30) { [weak self] in
+        await withDeadline(3) { [weak self] in
             guard let self else { return }
             let t0 = CFAbsoluteTimeGetCurrent()
             StartupWatchdog.log("ChildDetail.refresh: refreshDashboard()")

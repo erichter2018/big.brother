@@ -22,9 +22,15 @@ import Foundation
 /// Usage:
 ///   ```
 ///   .refreshable {
-///       await withDeadline(30) { await viewModel.loadDashboard() }
+///       await withDeadline(3) { await viewModel.loadDashboard() }
 ///   }
 ///   ```
+///
+/// Pick a short deadline (1-3s). The pull-to-refresh spinner is just a
+/// gesture acknowledgement; once the deadline fires, the spinner goes
+/// away and the actual CloudKit work continues in the background. When
+/// the fetch completes, `@Observable` state updates drive the UI refresh
+/// without needing the spinner to stay visible.
 @Sendable
 func withDeadline(_ seconds: Double, _ operation: @escaping @Sendable () async -> Void) async {
     let callStart = CFAbsoluteTimeGetCurrent()

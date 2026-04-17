@@ -67,7 +67,7 @@ struct ScheduleOverviewView: View {
             await viewModel.refresh()
         }
         .refreshable {
-            await withDeadline(30) { await viewModel.refresh() }
+            await withDeadline(3) { await viewModel.refresh() }
         }
         .sheet(isPresented: $showingAssignSheet) {
             AssignScheduleSheet(viewModel: viewModel)

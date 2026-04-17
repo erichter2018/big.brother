@@ -86,7 +86,7 @@ struct ManageParentsView: View {
         .navigationTitle("Manage Parents")
         .navigationBarTitleDisplayMode(.inline)
         .task { await loadInvites() }
-        .refreshable { await withDeadline(30) { await loadInvites() } }
+        .refreshable { await withDeadline(3) { await loadInvites() } }
         .alert("Revoke Parent Access?", isPresented: .init(
             get: { revokeTarget != nil },
             set: { if !$0 { revokeTarget = nil } }

@@ -49,7 +49,7 @@ struct DeviceDetailView: View {
         }
         .navigationTitle(viewModel.device.displayName)
         .refreshable {
-            await withDeadline(30) { await viewModel.refresh() }
+            await withDeadline(3) { await viewModel.refresh() }
         }
         .alert("Remove Device", isPresented: $showDeleteConfirmation) {
             Button("Unenroll & Delete", role: .destructive) {
