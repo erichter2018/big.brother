@@ -168,11 +168,31 @@ final class DNSProxy {
     private var domainCounts: [String: DomainHit] = [:]
     private var totalQueries: Int = 0
     private let statsLock = NSLock()
-    var isDeviceLocked: Bool = false
+
+    /// Lock protecting `isDeviceLocked` + `isBlackholeMode`. These Bool flags
+    /// are written from the tunnel's liveness timer (`.global(qos:.userInitiated)`)
+    /// and path-monitor queue; they're read from the packet-flow thread on
+    /// every DNS query (`onPacket`, `receiveNextUpstream`). Raw cross-thread
+    /// Bool access is undefined behavior in Swift — can cause stale/torn
+    /// reads that let a query through (or block one) when the opposite
+    /// state was just committed, producing hard-to-diagnose kid internet
+    /// loss during network transitions.
+    private let flagsLock = NSLock()
+    private var _isDeviceLocked: Bool = false
+    private var _isBlackholeMode: Bool = false
+
+    var isDeviceLocked: Bool {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isDeviceLocked }
+        set { flagsLock.lock(); _isDeviceLocked = newValue; flagsLock.unlock() }
+    }
+
     /// When true, all DNS queries are REFUSED except Apple infrastructure domains
     /// (CloudKit, APNS, iCloud). This ensures the device stays reachable for commands
     /// even when internet is blackholed for enforcement.
-    var isBlackholeMode: Bool = false
+    var isBlackholeMode: Bool {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isBlackholeMode }
+        set { flagsLock.lock(); _isBlackholeMode = newValue; flagsLock.unlock() }
+    }
 
     private var resolvedModeCache: LockMode = .restricted
     private var resolvedModeCacheExpiry: Date = .distantPast

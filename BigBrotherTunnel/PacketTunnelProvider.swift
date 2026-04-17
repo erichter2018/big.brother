@@ -572,9 +572,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 NSLog("[Tunnel] (fast-path) retrying failed network settings application")
                 self.reapplyNetworkSettings()
             }
+            // Kid-DNS is the authoritative signal for the recovery ladder:
+            // REST command polls bypass the DNS proxy (URLSession direct
+            // from the tunnel) so their success/failure says nothing about
+            // whether Safari/kid-apps can resolve. Previously a REST success
+            // reset `consecutiveHealthFailures` on every tick, masking a
+            // stuck DNS wedge and keeping the ladder asleep. Now only DNS
+            // health drives the counter.
             if self.dnsProxy?.healthCheck() == false {
-                // healthCheck returns false if it had to reconnect (wedged upstream)
+                // healthCheck returns false if upstream is wedged.
                 self.recordNetworkHealthResult(success: false, reason: "dns_wedge")
+            } else {
+                self.recordNetworkHealthResult(success: true, reason: "dns_healthy")
             }
             // b457: screen-lock polling on the fast path. The emergency
             // blackhole counter uses `isDeviceLocked` to decide whether to
@@ -990,6 +999,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if resolution.mode == .lockedDown || shieldsConfirmedDown {
                 NSLog("[Tunnel] \(resolution.mode.rawValue) + app dead + shields \(shieldsConfirmedDown ? "CONFIRMED DOWN" : "lockedDown override") — activating DNS blackhole")
                 setBlockReason(.emergencyAppDead, active: true)
+                emergencyActivatedAt = Date()
             }
         }
 
@@ -1062,6 +1072,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Consecutive checks where emergency enforcement conditions are met.
     /// Requires multiple checks to avoid false positives from normal iOS process lifecycle.
     private var emergencyCheckCount: Int = 0
+
+    /// When `.emergencyAppDead` was last activated. Used to enforce an
+    /// absolute TTL (`emergencyAppDeadMaxTTL`) so the blackhole can never
+    /// linger indefinitely — if the main app is uninstalled or the Monitor
+    /// has died permanently, the clear signals never arrive and the kid
+    /// stays offline forever without a ceiling. After the TTL elapses we
+    /// drop the blackhole even without an affirmative recovery signal; any
+    /// real danger is caught again on the next check cycle (counter
+    /// re-ramps from 0).
+    private var emergencyActivatedAt: Date?
+    private let emergencyAppDeadMaxTTL: TimeInterval = 2 * 3600 // 2 hours
     /// Temporary DNS blackhole while ManagedSettings shields are being applied by Monitor.
     /// Set when tunnel processes a lock/restrict command. Cleared when Monitor confirms shields.
     struct PendingShieldConfirmation {
@@ -1141,15 +1162,35 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             Set(DNSBlockReason.allCases.filter(\.releaseOnAppAlive))
     }
 
-    /// Single source of truth for all DNS blackhole state.
-    private var activeBlockReasons: Set<DNSBlockReason> = []
+    /// Lock protecting `activeBlockReasons`. Mutations come from the 1s
+    /// liveness timer (`.global(qos: .userInitiated)`), the path monitor
+    /// queue, IPC ping callbacks, command apply paths, and startTunnel init.
+    /// Unsynchronized Set access across those threads is undefined behavior
+    /// in Swift and can crash the extension mid-transition — leaving the kid
+    /// with a half-torn-down network configuration and no internet.
+    private let blockReasonsLock = NSLock()
+    private var _activeBlockReasons: Set<DNSBlockReason> = []
+
+    /// Read a snapshot of the active block reasons under the lock. Callers
+    /// that only need "is anything active" should use `shouldBlackhole`.
+    private var activeBlockReasons: Set<DNSBlockReason> {
+        blockReasonsLock.lock()
+        defer { blockReasonsLock.unlock() }
+        return _activeBlockReasons
+    }
 
     /// Whether DNS should be blackholed (computed from activeBlockReasons).
-    private var shouldBlackhole: Bool { !activeBlockReasons.isEmpty }
+    private var shouldBlackhole: Bool {
+        blockReasonsLock.lock()
+        defer { blockReasonsLock.unlock() }
+        return !_activeBlockReasons.isEmpty
+    }
 
     /// Human-readable description of the highest-priority active block reason.
     private var blockReasonDescription: String? {
-        activeBlockReasons.min()?.humanDescription
+        blockReasonsLock.lock()
+        defer { blockReasonsLock.unlock() }
+        return _activeBlockReasons.min()?.humanDescription
     }
 
     /// Tracks the last state sent to setTunnelNetworkSettings to avoid redundant calls.
@@ -1157,13 +1198,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Add or remove a block reason. Only calls reapplyNetworkSettings() on actual change.
     private func setBlockReason(_ reason: DNSBlockReason, active: Bool) {
-        let before = shouldBlackhole
+        blockReasonsLock.lock()
+        let before = !_activeBlockReasons.isEmpty
         if active {
-            activeBlockReasons.insert(reason)
+            _activeBlockReasons.insert(reason)
         } else {
-            activeBlockReasons.remove(reason)
+            _activeBlockReasons.remove(reason)
         }
-        let after = shouldBlackhole
+        let after = !_activeBlockReasons.isEmpty
+        blockReasonsLock.unlock()
         if before != after {
             reapplyNetworkSettings()
         }
@@ -1173,10 +1216,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Batch-update multiple block reasons. Single reapply at the end.
     private func batchUpdateBlockReasons(add: Set<DNSBlockReason> = [], remove: Set<DNSBlockReason> = []) {
-        let before = shouldBlackhole
-        activeBlockReasons.formUnion(add)
-        activeBlockReasons.subtract(remove)
-        let after = shouldBlackhole
+        blockReasonsLock.lock()
+        let before = !_activeBlockReasons.isEmpty
+        _activeBlockReasons.formUnion(add)
+        _activeBlockReasons.subtract(remove)
+        let after = !_activeBlockReasons.isEmpty
+        blockReasonsLock.unlock()
         if before != after {
             reapplyNetworkSettings()
         }
@@ -1219,6 +1264,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         if releasing.contains(.emergencyAppDead) {
             emergencyCheckCount = 0
+            emergencyActivatedAt = nil
         }
         if releasing.contains(.parentCommand) {
             let defaults = UserDefaults.appGroup
@@ -1302,12 +1348,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // lockedDown, the app would keep the mode fresh. A very old
         // snapshot claiming lockedDown is more likely stale state than
         // an active parent directive.
+        // Accumulate seed reasons locally, then commit once under the lock.
+        // This runs at tunnel startup before any other thread can observe the
+        // state, but we still go through the same commit path so the
+        // invariant "all writes to `_activeBlockReasons` happen under
+        // `blockReasonsLock`" is maintained.
+        var seeded: Set<DNSBlockReason> = []
+
         if let extState = storage.readExtensionSharedState(), extState.currentMode == .lockedDown {
             let extAge = now - extState.writtenAt.timeIntervalSince1970
             if mainAppRecentlyActive && extAge > 7200 {
                 NSLog("[Tunnel] Seed: stale lockedDown extState (\(Int(extAge))s old) — NOT seeding blackhole, main app is active")
             } else {
-                activeBlockReasons.insert(.lockedDownMode)
+                seeded.insert(.lockedDownMode)
             }
         } else if let snap = storage.readPolicySnapshot(),
                   snap.effectivePolicy.resolvedMode == .lockedDown {
@@ -1315,7 +1368,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if mainAppRecentlyActive && snapAge > 7200 {
                 NSLog("[Tunnel] Seed: stale lockedDown snapshot (\(Int(snapAge))s old) — NOT seeding blackhole, main app is active")
             } else {
-                activeBlockReasons.insert(.lockedDownMode)
+                seeded.insert(.lockedDownMode)
             }
         }
 
@@ -1334,7 +1387,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 defaults?.removeObject(forKey: AppGroupKeys.internetBlockedUntil)
                 defaults?.removeObject(forKey: AppGroupKeys.buildMismatchDNSBlock)
             } else {
-                activeBlockReasons.insert(.parentCommand)
+                seeded.insert(.parentCommand)
             }
         }
 
@@ -1343,13 +1396,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if fcAuth == "denied" {
             let resolution = ModeStackResolver.resolve(storage: storage)
             if resolution.mode != .unlocked {
-                activeBlockReasons.insert(.permissionsRevoked)
+                seeded.insert(.permissionsRevoked)
             }
         }
 
-        lastAppliedBlackholeState = shouldBlackhole
-        if !activeBlockReasons.isEmpty {
-            NSLog("[Tunnel] Seeded block reasons: \(activeBlockReasons.map(\.rawValue).joined(separator: ", "))")
+        blockReasonsLock.lock()
+        _activeBlockReasons = seeded
+        let finalBlackhole = !_activeBlockReasons.isEmpty
+        blockReasonsLock.unlock()
+        lastAppliedBlackholeState = finalBlackhole
+        if !seeded.isEmpty {
+            NSLog("[Tunnel] Seeded block reasons: \(seeded.map(\.rawValue).joined(separator: ", "))")
         }
     }
 
@@ -1386,6 +1443,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let shieldsFlagAge = shieldsFlagAt > 0 ? Date().timeIntervalSince1970 - shieldsFlagAt : .infinity
             if shieldsUp && shieldsFlagAge < 600 {
                 NSLog("[Tunnel] Shields confirmed UP (flag age \(Int(shieldsFlagAge))s) — lifting emergency blackhole, backstop no longer needed")
+                deactivateEmergencyBlackhole()
+                return
+            }
+
+            // Absolute TTL safety net. If the emergency blackhole has been
+            // active for more than `emergencyAppDeadMaxTTL` with no
+            // affirmative recovery, drop it anyway — the kid should never
+            // be trapped offline indefinitely because a uninstall / Monitor
+            // death starved the recovery signals. Next emergency-check
+            // cycle will re-activate if conditions still warrant it.
+            if let activatedAt = emergencyActivatedAt,
+               Date().timeIntervalSince(activatedAt) > emergencyAppDeadMaxTTL {
+                NSLog("[Tunnel] Emergency blackhole TTL reached (\(Int(emergencyAppDeadMaxTTL))s) — releasing unconditionally; next check re-activates if still needed")
+                try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                    category: .enforcement,
+                    message: "Emergency blackhole auto-released at TTL",
+                    details: "Active for \(Int(Date().timeIntervalSince(activatedAt)))s without recovery signal"
+                ))
                 deactivateEmergencyBlackhole()
                 return
             }
@@ -1453,6 +1528,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func deactivateEmergencyBlackhole() {
         guard activeBlockReasons.contains(.emergencyAppDead) else { return }
         emergencyCheckCount = 0
+        emergencyActivatedAt = nil
         setBlockReason(.emergencyAppDead, active: false)
         Task { await sendHeartbeatFromTunnel(reason: "emergencyBlackholeCleared") }
         NSLog("[Tunnel] Emergency blackhole deactivated — normal enforcement resumed")
@@ -2815,7 +2891,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             commandPollFailureCount = 0
-            recordNetworkHealthResult(success: true, reason: "poll")
+            // REST poll success intentionally does NOT reset the DNS-based
+            // recovery ladder counter. REST bypasses DNSProxy — it says
+            // nothing about whether the kid's Safari can resolve. The
+            // DNS healthCheck path in startLivenessTimer is authoritative.
         } catch {
             NSLog("[Tunnel] Command poll failed: \(error.localizedDescription)")
             commandPollFailureCount += 1
@@ -2826,7 +2905,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 ))
                 commandPollFailureCount = 0
             }
-            recordNetworkHealthResult(success: false, reason: "poll: \(error.localizedDescription)")
+            // REST poll failure also does NOT feed the DNS recovery ladder.
+            // b500 decoupled heartbeat failures; extending the same principle:
+            // REST failures are usually a CloudKit backend issue, not a
+            // local DNS wedge. Keeping them separate avoids false
+            // escalations that restart the tunnel unnecessarily.
         }
 
         if processedByTunnel.count > 200 {
