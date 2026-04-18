@@ -88,6 +88,20 @@ final class ChildHomeViewModel {
     }
 
     func refreshPendingReviews() {
+        // Build the identity context ONCE per refresh. Previously each of 30
+        // reviews re-scanned the entire FamilyActivitySelection (600+ token
+        // encodes on the main actor per refresh) — gemini audit flagged this
+        // as an O(N*M) UI hang. Now one pass, then O(1) lookups.
+        let context = IdentityContext.build(appState: appState)
+
+        // Prune reviews whose app is already intact locally (allowedTokens or
+        // an existing AppTimeLimit). These pending entries can linger when a
+        // parent approves via a different path (reviewApp command landing
+        // before this refresh, a sibling's auto-approve path, etc.) — the
+        // "intact" check removes the gap between kid sees pending / parent
+        // already acted.
+        pruneAlreadyIntactReviews(context: context)
+
         guard let data = appState.storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
               let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data) else {
             pendingReviews = []
@@ -97,20 +111,49 @@ final class ChildHomeViewModel {
         let (live, approved, superseded) = partitionReviews(reviews)
 
         if !approved.isEmpty || !superseded.isEmpty {
-            // REMOVE resolved reviews from the local file (was: marked
-            // `.resolved` and kept). The ShieldConfiguration and ShieldAction
-            // extensions read this file without filtering on syncStatus, so
-            // stale resolved rows caused icons to keep showing the "Sent to
-            // parent for review" shield after the parent had already decided.
-            // Removing the row is the safe path: the `syncResolvedPendingReviews`
-            // sync filter (!= .resolved) now sees zero resolved rows and
-            // uploads nothing stale.
-            let resolvedIDs = Set((approved + superseded).map(\.id))
-            let kept = reviews.filter { !resolvedIDs.contains($0.id) }
-            if let encoded = try? JSONEncoder().encode(kept) {
+            // Apply FIRST, then mutate the local file based on per-review
+            // outcome. Three states:
+            //   applied  → remove from local file (done)
+            //   superseded → remove from local file (matched a non-active or
+            //                older config, will never come back)
+            //   approved-but-failed-to-apply → KEEP in local file but flip
+            //                syncStatus to .resolved so the tunnel's
+            //                syncResolvedPendingReviews skips it on re-upload.
+            //                Codex audit flagged the resurrection loop where
+            //                unresolved local reviews kept re-uploading to the
+            //                CK records we just deleted, bouncing the parent's
+            //                dashboard. The ShieldConfiguration reads the file
+            //                without filtering on syncStatus, so the kid's
+            //                shield still shows "pending review" and they can
+            //                re-tap to submit a fresh request.
+            let appliedIDs = applyResolvedReviewsLocally(approved, context: context)
+            let supersededIDs = Set(superseded.map(\.id))
+            let approvedIDs = Set(approved.map(\.id))
+            let failedToApplyIDs = approvedIDs.subtracting(appliedIDs)
+            let removeIDs = appliedIDs.union(supersededIDs)
+
+            var mutated = false
+            var rewritten = reviews
+            if !removeIDs.isEmpty {
+                rewritten.removeAll { removeIDs.contains($0.id) }
+                mutated = true
+            }
+            for i in rewritten.indices where failedToApplyIDs.contains(rewritten[i].id) {
+                if rewritten[i].syncStatus != .resolved {
+                    rewritten[i].syncStatus = .resolved
+                    mutated = true
+                }
+            }
+            if mutated, let encoded = try? JSONEncoder().encode(rewritten) {
                 try? appState.storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
             }
-            applyResolvedReviewsLocally(approved)
+
+            // Delete ALL approved+superseded from CloudKit — the parent's
+            // TimeLimitConfig is the authoritative "approved" signal, so the
+            // CK PendingAppReview records are stale regardless of whether the
+            // local apply just succeeded. The failed-to-apply entries are now
+            // marked .resolved locally (above), so the tunnel sync won't
+            // re-upload and resurrect them.
             Task { await deleteResolvedReviews(approved + superseded) }
         }
 
@@ -118,25 +161,268 @@ final class ChildHomeViewModel {
             .sorted { $0.createdAt > $1.createdAt }
     }
 
-    /// Apply the current active config to a resolved review's local token binding.
-    /// This is what makes sibling-device and token-rotation re-requests converge
-    /// without needing the parent to decide a second time.
-    private func applyResolvedReviewsLocally(_ resolved: [PendingAppReview]) {
+    /// Apply the current active config to each resolved review's local token
+    /// binding. Returns the IDs of reviews that actually applied so the caller
+    /// can leave unapplied ones in pending for a retry. Silently-dropped
+    /// reviews are now logged with the specific failure reason so we can debug
+    /// batch-approval drops from kid diagnostics instead of wondering which
+    /// half "took."
+    ///
+    /// When the local review's tokenData is missing or no longer decodes (iOS
+    /// rotates ApplicationToken bytes occasionally, and cross-device syncs
+    /// carry sibling-device tokens that don't resolve locally), we fall back
+    /// to the current FamilyActivitySelection + cached-name lookup to find a
+    /// fresh token with the same identity — same path the command processor
+    /// uses for direct reviewApp commands.
+    private func applyResolvedReviewsLocally(
+        _ resolved: [PendingAppReview],
+        context: IdentityContext
+    ) -> Set<UUID> {
+        var applied: Set<UUID> = []
         for review in resolved {
-            guard let b64 = review.tokenDataBase64,
-                  let tokenData = Data(base64Encoded: b64),
-                  let config = appState.matchingActiveTimeLimitConfig(
-                      appName: review.appName,
-                      bundleID: review.bundleID,
-                      fingerprint: review.appFingerprint,
-                      in: activeConfigs
-                  ) else { continue }
-            _ = appState.applyTimeLimitConfigLocally(
-                config,
-                tokenData: tokenData,
-                fallbackAppName: review.appName,
+            guard let config = appState.matchingActiveTimeLimitConfig(
+                appName: review.appName,
+                bundleID: review.bundleID,
+                fingerprint: review.appFingerprint,
+                in: activeConfigs
+            ) else {
+                BBLog("[pendingReview] skip apply fp=\(review.appFingerprint.prefix(8)) name=\(review.appName): no matching active TimeLimitConfig")
+                continue
+            }
+
+            let localTokenData = review.tokenDataBase64.flatMap { Data(base64Encoded: $0) }
+            let freshTokenData = context.lookupFreshToken(
+                fingerprint: review.appFingerprint,
+                appName: review.appName,
                 bundleID: review.bundleID
             )
+
+            // Apply ALL distinct candidates, not just the first that returns
+            // true — codex audit flagged the false-success path: a stale
+            // sibling-device or rotated token can decode, get inserted into
+            // allowedTokens, return true, and block the picker-fresh fallback.
+            // The correct-for-this-device token wins at shield-check time;
+            // any extra stale entries in allowedTokens are harmless bloat.
+            var candidates: [(label: String, data: Data)] = []
+            if let local = localTokenData {
+                candidates.append(("local", local))
+            }
+            if let fresh = freshTokenData, fresh != localTokenData {
+                candidates.append(("picker-fresh", fresh))
+            }
+
+            guard !candidates.isEmpty else {
+                BBLog("[pendingReview] skip apply fp=\(review.appFingerprint.prefix(8)) name=\(review.appName): no token (local=nil, picker=nil)")
+                continue
+            }
+
+            var appliedLabels: [String] = []
+            for candidate in candidates {
+                let ok = appState.applyTimeLimitConfigLocally(
+                    config,
+                    tokenData: candidate.data,
+                    fallbackAppName: review.appName,
+                    bundleID: review.bundleID
+                )
+                if ok { appliedLabels.append(candidate.label) }
+            }
+
+            if !appliedLabels.isEmpty {
+                applied.insert(review.id)
+                if appliedLabels.contains("picker-fresh") && appliedLabels.contains("local") == false {
+                    BBLog("[pendingReview] recovered via picker-fresh only fp=\(review.appFingerprint.prefix(8)) name=\(review.appName)")
+                }
+            } else {
+                BBLog("[pendingReview] skip apply fp=\(review.appFingerprint.prefix(8)) name=\(review.appName): all \(candidates.count) candidates failed")
+            }
+        }
+        return applied
+    }
+
+    /// Remove pending reviews whose app is already fully handled on the local
+    /// device — either in `allowedTokens` (allowAlways) or represented by an
+    /// existing `AppTimeLimit`. Happens when a reviewApp command landed before
+    /// this CK-pull refresh, or when a sibling auto-approve applied the config
+    /// via `applyTimeLimitConfigLocally` on a different entry point.
+    ///
+    /// Closes the "kid sees pending, parent already acted" gap: if the local
+    /// state shows the app is done, the pending card should not linger.
+    ///
+    /// **Strict identity only.** Uses `strictIdentityMatch` (bundleID bilateral
+    /// OR fingerprint bilateral, never name-only). Codex audit flagged that
+    /// the full AppIdentityMatcher.same could name-match against a misnamed
+    /// row — ShieldAction has a fallback that assigns the "oldest unresolved"
+    /// pending name to a freshly-shielded app, and `lookupFreshToken` uses
+    /// name. A name-only prune could delete a legitimately-pending review
+    /// that happens to share a normalized name with an already-allowed app.
+    private func pruneAlreadyIntactReviews(context: IdentityContext) {
+        let storage = appState.storage
+        guard let data = storage.readRawData(forKey: AppGroupKeys.pendingReviewLocalJSON),
+              let reviews = try? JSONDecoder().decode([PendingAppReview].self, from: data),
+              !reviews.isEmpty else {
+            return
+        }
+
+        let appLimits = storage.readAppTimeLimits()
+
+        var toRemove: [PendingAppReview] = []
+        var kept: [PendingAppReview] = []
+        for review in reviews {
+            let reviewCandidate = AppIdentityMatcher.Candidate(
+                bundleID: review.bundleID,
+                fingerprint: review.appFingerprint,
+                appName: review.appName,
+                deviceID: review.deviceID
+            )
+
+            let allowedMatch = context.allowedCandidates.contains { allowed in
+                Self.strictIdentityMatch(allowed, reviewCandidate)
+            }
+            if allowedMatch {
+                toRemove.append(review)
+                continue
+            }
+
+            if appLimits.contains(where: {
+                Self.strictIdentityMatch(
+                    AppIdentityMatcher.Candidate(
+                        bundleID: $0.bundleID,
+                        fingerprint: $0.fingerprint,
+                        appName: $0.appName
+                    ),
+                    reviewCandidate
+                )
+            }) {
+                toRemove.append(review)
+                continue
+            }
+
+            kept.append(review)
+        }
+
+        guard !toRemove.isEmpty else { return }
+
+        if let encoded = try? JSONEncoder().encode(kept) {
+            try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
+        }
+        for r in toRemove {
+            BBLog("[pendingReview] prune-intact fp=\(r.appFingerprint.prefix(8)) name=\(r.appName) (already allowed/limited locally)")
+        }
+        // Also clean up CK records for the pruned reviews so the parent
+        // dashboard doesn't keep showing them.
+        Task { await deleteResolvedReviews(toRemove) }
+    }
+
+    /// Strong identity match for prune decisions only. Either:
+    ///   - both sides have bundleIDs AND they match (authoritative), OR
+    ///   - both sides have fingerprints AND they match AND device scopes are
+    ///     compatible (via AppIdentityMatcher.same, which enforces that).
+    /// Rejects name-only matches — a misnamed pending entry should never
+    /// cause us to delete a legit CK record.
+    private static func strictIdentityMatch(
+        _ a: AppIdentityMatcher.Candidate,
+        _ b: AppIdentityMatcher.Candidate
+    ) -> Bool {
+        if let abid = AppIdentityMatcher.normalizeBundleID(a.bundleID),
+           let bbid = AppIdentityMatcher.normalizeBundleID(b.bundleID) {
+            return abid == bbid
+        }
+        if let afp = a.fingerprint, let bfp = b.fingerprint, afp == bfp {
+            // Fall through to AppIdentityMatcher.same for the device-scope
+            // compatibility check (fingerprints across sibling devices are
+            // collisions, not matches).
+            return AppIdentityMatcher.same(a, b)
+        }
+        return false
+    }
+
+    /// Pre-computed lookup tables for picker tokens and allowed tokens, built
+    /// once per refresh cycle. Replaces the O(N*M) per-review scans that
+    /// gemini flagged as a main-thread UI hang.
+    private struct IdentityContext {
+        let pickerByFingerprint: [String: Data]
+        let pickerByBundleID: [String: Data]
+        let pickerByName: [String: Data]
+        let allowedCandidates: [AppIdentityMatcher.Candidate]
+
+        static func build(appState: AppState) -> IdentityContext {
+            let storage = appState.storage
+            let encoder = JSONEncoder()
+            let nameCache = storage.readAllCachedAppNames()
+
+            var pickerByFingerprint: [String: Data] = [:]
+            var pickerByBundleID: [String: Data] = [:]
+            var pickerByName: [String: Data] = [:]
+            if let selData = storage.readRawData(forKey: StorageKeys.familyActivitySelection),
+               let selection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: selData) {
+                for token in selection.applicationTokens {
+                    guard let tokenData = try? encoder.encode(token) else { continue }
+                    let tokenKey = tokenData.base64EncodedString()
+                    let fp = TokenFingerprint.fingerprint(for: tokenData)
+                    pickerByFingerprint[fp] = tokenData
+                    if let bid = AppIdentityMatcher.normalizeBundleID(Application(token: token).bundleIdentifier) {
+                        // First write wins — picker may have multiple entries
+                        // with the same bundleID during token rotation; the
+                        // first one encountered is likely freshest.
+                        if pickerByBundleID[bid] == nil {
+                            pickerByBundleID[bid] = tokenData
+                        }
+                    }
+                    if let cached = nameCache[tokenKey],
+                       AppIdentityMatcher.isUsefulAppName(cached) {
+                        let normalized = AppIdentityMatcher.normalizeAppName(cached)
+                        if pickerByName[normalized] == nil {
+                            pickerByName[normalized] = tokenData
+                        }
+                    }
+                }
+            }
+
+            var allowedCandidates: [AppIdentityMatcher.Candidate] = []
+            if let ad = storage.readRawData(forKey: StorageKeys.allowedAppTokens),
+               let allowedTokens = try? JSONDecoder().decode(Set<ApplicationToken>.self, from: ad) {
+                for token in allowedTokens {
+                    guard let tokenData = try? encoder.encode(token) else { continue }
+                    let tokenKey = tokenData.base64EncodedString()
+                    let fp = TokenFingerprint.fingerprint(for: tokenData)
+                    let cached = nameCache[tokenKey]
+                    let useful = cached.flatMap {
+                        AppIdentityMatcher.isUsefulAppName($0) ? $0 : nil
+                    }
+                    allowedCandidates.append(AppIdentityMatcher.Candidate(
+                        bundleID: Application(token: token).bundleIdentifier,
+                        fingerprint: fp,
+                        appName: useful ?? ""
+                    ))
+                }
+            }
+
+            return IdentityContext(
+                pickerByFingerprint: pickerByFingerprint,
+                pickerByBundleID: pickerByBundleID,
+                pickerByName: pickerByName,
+                allowedCandidates: allowedCandidates
+            )
+        }
+
+        /// Fresh-token lookup: fingerprint > bundleID > name. Returns the
+        /// picker-encoded tokenData so `applyTimeLimitConfigLocally` can
+        /// decode it against the CURRENT device's token set.
+        func lookupFreshToken(
+            fingerprint: String,
+            appName: String,
+            bundleID: String?
+        ) -> Data? {
+            if let data = pickerByFingerprint[fingerprint] { return data }
+            if let bid = AppIdentityMatcher.normalizeBundleID(bundleID),
+               let data = pickerByBundleID[bid] {
+                return data
+            }
+            if AppIdentityMatcher.isUsefulAppName(appName),
+               let data = pickerByName[AppIdentityMatcher.normalizeAppName(appName)] {
+                return data
+            }
+            return nil
         }
     }
 

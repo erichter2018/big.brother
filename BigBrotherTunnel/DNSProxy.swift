@@ -1434,41 +1434,38 @@ final class DNSProxy {
     private func recordDomain(_ fullDomain: String) {
         let root = DomainCategorizer.rootDomain(fullDomain)
         if DomainCategorizer.isNoise(fullDomain) { return }
-        guard !isDeviceLocked else { return }
 
-        // New app detection + per-app time tracking.
-        //
-        // b461: atomicize the (contains → insert → persist → append-to-pending)
-        // sequence under knownAppsLock. `recordDomain` already runs on the
-        // serial `bgQueue`, but `restoreKnownApps()` runs on the tunnel
-        // startup thread, and a future caller that isn't on bgQueue would
-        // race the check. Also, re-read the `newAppDetections` list with
-        // a fresh UserDefaults fetch right before writing — minimizes the
-        // lost-update window if the main-app heartbeat flush ran between
-        // our initial check and our write.
-        let appName = DomainCategorizer.appName(for: root)
-        if let appName {
-            knownAppsLock.lock()
-            let isNew = !knownApps.contains(appName)
-            if isNew {
-                knownApps.insert(appName)
-                let defaults = UserDefaults.appGroup
-                defaults?.set(Array(knownApps), forKey: AppGroupKeys.knownAppDomains)
-                // Fresh-read newAppDetections right before the append to
-                // shrink the cross-process race against the main app's
-                // flushNewAppDetections (which reads then removes the key).
-                var p = defaults?.stringArray(forKey: AppGroupKeys.newAppDetections) ?? []
-                if !p.contains(appName) {
-                    p.append(appName)
-                    defaults?.set(p, forKey: AppGroupKeys.newAppDetections)
+        // App-usage tracking (new-app detection + trackAppMinute) is gated on
+        // the device being unlocked — background-refresh / silent-push DNS
+        // shouldn't count as "use." The domain counter below always records
+        // regardless of lock state so the diagnostic is truthful even when
+        // the child's screen is off (previously the counter stayed at 0 all
+        // day for kids whose phones were locked most of the time).
+        if !isDeviceLocked {
+            // b461: atomicize the (contains → insert → persist → append-to-pending)
+            // sequence under knownAppsLock. Also re-read `newAppDetections` with
+            // a fresh UserDefaults fetch right before writing — minimizes the
+            // lost-update window if the main-app heartbeat flush ran between
+            // our initial check and our write.
+            let appName = DomainCategorizer.appName(for: root)
+            if let appName {
+                knownAppsLock.lock()
+                let isNew = !knownApps.contains(appName)
+                if isNew {
+                    knownApps.insert(appName)
+                    let defaults = UserDefaults.appGroup
+                    defaults?.set(Array(knownApps), forKey: AppGroupKeys.knownAppDomains)
+                    var p = defaults?.stringArray(forKey: AppGroupKeys.newAppDetections) ?? []
+                    if !p.contains(appName) {
+                        p.append(appName)
+                        defaults?.set(p, forKey: AppGroupKeys.newAppDetections)
+                    }
+                    BBLog("[DNSProxy] New app: \(appName)")
                 }
-                BBLog("[DNSProxy] New app: \(appName)")
+                knownAppsLock.unlock()
+                trackAppMinute(appName)
+                onAppDomainSeen?(appName, root, Date())
             }
-            knownAppsLock.unlock()
-        }
-        if let appName {
-            trackAppMinute(appName)
-            onAppDomainSeen?(appName, root, Date())
         }
 
         let display = DomainCategorizer.displayDomain(fullDomain)
@@ -1622,13 +1619,19 @@ final class DNSProxy {
         let domains = Array(domainCounts.values)
         let total = totalQueries
         statsLock.unlock()
-        guard !domains.isEmpty else { return }
         let defaults = UserDefaults.appGroup
-        if let data = try? JSONEncoder().encode(domains) { defaults?.set(data, forKey: AppGroupKeys.dnsActivityDomains) }
+        // Always stamp date + total + updatedAt (even when domains is empty) so
+        // the diagnostic reports the current day and `restoreFromAppGroup`'s
+        // date-match guard succeeds on tunnel restart. Previously an empty
+        // domain list short-circuited the whole flush, leaving the date key
+        // stale from a prior day and wiping the counter across restarts.
         defaults?.set(total, forKey: AppGroupKeys.dnsActivityTotalQueries)
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
         defaults?.set(fmt.string(from: Date()), forKey: AppGroupKeys.dnsActivityDate)
         defaults?.set(Date().timeIntervalSince1970, forKey: "dnsActivityUpdatedAt")
+        if let data = try? JSONEncoder().encode(domains) {
+            defaults?.set(data, forKey: AppGroupKeys.dnsActivityDomains)
+        }
         flushAppUsageToAppGroup()
     }
 

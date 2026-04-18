@@ -2486,6 +2486,7 @@ final class AppState {
     /// Only sends a command when the values actually change.
     private func relayTimerDataToCloudKit(_ timers: [String: TimerIntegrationService.KidTimerState]) {
         let config = TimerIntegrationConfig.load()
+        var mutated = false
 
         for mapping in config.kidMappings {
             guard let childID = mapping.childProfileID else { continue }
@@ -2514,6 +2515,7 @@ final class AppState {
                 if let idx = childDevices.firstIndex(where: { $0.id == device.id }) {
                     childDevices[idx].penaltySeconds = seconds
                     childDevices[idx].penaltyTimerEndTime = endTime
+                    mutated = true
                 }
             }
 
@@ -2525,6 +2527,11 @@ final class AppState {
                 )
             }
         }
+
+        // Persist updated timer state so the next launch's cache-seeded UI
+        // reflects the latest Firestore values instead of resurrecting the
+        // previous session's stale penalty/endTime on every cold start.
+        if mutated { persistDashboardCache() }
     }
 
     /// Pause the running penalty countdown for a child — preserves banked
@@ -2565,13 +2572,16 @@ final class AppState {
         }
 
         let devices = childDevices.filter { $0.childProfileID == childProfileID }
+        var mutated = false
         for dev in devices {
             if let idx = childDevices.firstIndex(where: { $0.id == dev.id }) {
                 childDevices[idx].penaltySeconds = remaining
                 childDevices[idx].penaltyTimerEndTime = nil
+                mutated = true
             }
         }
         lastRelayedPenalty[childProfileID] = (remaining, nil)
+        if mutated { persistDashboardCache() }
         try? await sendCommand(
             target: .child(childProfileID),
             action: .setPenaltyTimer(seconds: remaining, endTime: nil)

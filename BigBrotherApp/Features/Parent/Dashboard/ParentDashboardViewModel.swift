@@ -1401,12 +1401,15 @@ final class ParentDashboardViewModel: CommandSendable {
     /// Update penalty on all CloudKit device records for a child + send command.
     private func updatePenaltyOnDevices(child: ChildProfile, seconds: Int?, endTime: Date?) async {
         let devices = appState.childDevices.filter { $0.childProfileID == child.id }
+        var mutated = false
         for device in devices {
             if let idx = appState.childDevices.firstIndex(where: { $0.id == device.id }) {
                 appState.childDevices[idx].penaltySeconds = seconds
                 appState.childDevices[idx].penaltyTimerEndTime = endTime
+                mutated = true
             }
         }
+        if mutated { appState.persistDashboardCache() }
         await performCommand(
             .setPenaltyTimer(seconds: seconds, endTime: endTime),
             target: .child(child.id)
