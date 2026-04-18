@@ -35,7 +35,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.childProfile(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchChildProfiles REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchChildProfiles REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
             return try await query(CKRecordType.childProfile, predicate: predicate)
                 .compactMap(CKRecordConversion.childProfile)
@@ -62,7 +62,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.childDevice(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchDevices(family) REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchDevices(family) REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
             return try await query(CKRecordType.childDevice, predicate: predicate)
                 .compactMap(CKRecordConversion.childDevice)
@@ -77,7 +77,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.childDevice(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchDevices(child) REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchDevices(child) REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
             return try await query(CKRecordType.childDevice, predicate: predicate)
                 .compactMap(CKRecordConversion.childDevice)
@@ -143,7 +143,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
     func pushCommand(_ command: RemoteCommand) async throws {
         let record = CKRecordConversion.toCKRecord(command)
         try await saveUnbounded(record)
-        NSLog("[CloudKit] pushCommand succeeded: \(command.action.displayDescription)")
+        BBLog("[CloudKit] pushCommand succeeded: \(command.action.displayDescription)")
     }
 
     func fetchPendingModeCommands(familyID: FamilyID, target: CommandTarget) async throws -> [RemoteCommand] {
@@ -379,7 +379,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.deviceHeartbeat(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchLatestHeartbeats REST failed (\(error.localizedDescription)) — falling back to framework")
+            BBLog("[CloudKit] fetchLatestHeartbeats REST failed (\(error.localizedDescription)) — falling back to framework")
             let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
             return try await query(CKRecordType.heartbeat, predicate: predicate)
                 .compactMap(CKRecordConversion.deviceHeartbeat)
@@ -427,7 +427,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.eventLogEntry(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchEventLogs REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchEventLogs REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(
                 format: "%K == %@ AND %K >= %@",
                 CKFieldName.familyID, familyID.rawValue,
@@ -487,7 +487,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.schedule(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchSchedules(child) REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchSchedules(child) REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
             return try await query(CKRecordType.schedule, predicate: predicate)
                 .compactMap(CKRecordConversion.schedule)
@@ -502,7 +502,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.schedule(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchSchedules(family) REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchSchedules(family) REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
             return try await query(CKRecordType.schedule, predicate: predicate)
                 .compactMap(CKRecordConversion.schedule)
@@ -547,7 +547,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.scheduleProfile(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchScheduleProfiles REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchScheduleProfiles REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(format: "%K == %@", CKFieldName.familyID, familyID.rawValue)
             return try await query(CKRecordType.scheduleProfile, predicate: predicate)
                 .compactMap(CKRecordConversion.scheduleProfile)
@@ -584,7 +584,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             return records.compactMap(CKRecordConversion.deviceLocation(fromREST:))
                 .sorted { $0.timestamp < $1.timestamp }
         } catch {
-            NSLog("[CloudKit] fetchLocationBreadcrumbs REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchLocationBreadcrumbs REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(
                 format: "%K == %@ AND %K > %@",
                 CKFieldName.deviceID, deviceID.rawValue,
@@ -671,7 +671,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
             )
             return records.compactMap(CKRecordConversion.pendingAppReview(fromREST:))
         } catch {
-            NSLog("[CloudKit] fetchPendingAppReviews REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[CloudKit] fetchPendingAppReviews REST failed (\(error.localizedDescription)) — framework fallback")
             let predicate = NSPredicate(format: "%K == %@", CKFieldName.profileID, childProfileID.rawValue)
             return try await query(CKRecordType.pendingAppReview, predicate: predicate)
                 .compactMap(CKRecordConversion.pendingAppReview)
@@ -734,9 +734,9 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         let existing: [CKSubscription]
         do {
             existing = try await database.allSubscriptions()
-            NSLog("[BigBrother] CK subscriptions found: \(existing.map(\.subscriptionID))")
+            BBLog("[BigBrother] CK subscriptions found: \(existing.map(\.subscriptionID))")
         } catch {
-            NSLog("[BigBrother] CK allSubscriptions() FAILED: \(error.localizedDescription) — will re-create")
+            BBLog("[BigBrother] CK allSubscriptions() FAILED: \(error.localizedDescription) — will re-create")
             existing = []
         }
 
@@ -744,7 +744,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         let hasAllExpected = expectedIDs.isSubset(of: existingIDs)
 
         if hasAllExpected && !needsRebind {
-            NSLog("[BigBrother] CK subscriptions all present (\(expectedIDs)) — push should work")
+            BBLog("[BigBrother] CK subscriptions all present (\(expectedIDs)) — push should work")
             // Even if subscription exists, ensure APNs token is fresh
             await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
             return
@@ -753,10 +753,10 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         // Subscription(s) missing OR fresh install — nuke everything and re-create
         // so the new APNs token is bound to fresh subscriptions on the CK server.
         if needsRebind {
-            NSLog("[BigBrother] CK subscriptions FORCE REBIND: fresh install detected (token \(installToken?.prefix(8) ?? "nil") != \(lastBindToken?.prefix(8) ?? "nil")) — deleting + re-creating to refresh APNs binding")
+            BBLog("[BigBrother] CK subscriptions FORCE REBIND: fresh install detected (token \(installToken?.prefix(8) ?? "nil") != \(lastBindToken?.prefix(8) ?? "nil")) — deleting + re-creating to refresh APNs binding")
         } else {
             let missing = expectedIDs.subtracting(existingIDs)
-            NSLog("[BigBrother] CK subscriptions missing: \(missing) from \(existing.count) subs — deleting stale + re-registering")
+            BBLog("[BigBrother] CK subscriptions missing: \(missing) from \(existing.count) subs — deleting stale + re-registering")
         }
         await deleteAllSubscriptions()
         await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
@@ -924,11 +924,11 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 switch result {
                 case .success:
                     for subscription in subscriptionsToSave {
-                        NSLog("[BigBrother] CK subscription SAVED: \(subscription.subscriptionID)")
+                        BBLog("[BigBrother] CK subscription SAVED: \(subscription.subscriptionID)")
                     }
                     continuation.resume()
                 case .failure(let error):
-                    NSLog("[BigBrother] CK subscription SAVE FAILED: \(error.localizedDescription)")
+                    BBLog("[BigBrother] CK subscription SAVE FAILED: \(error.localizedDescription)")
                     continuation.resume(throwing: error)
                 }
             }
@@ -939,7 +939,7 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
         // another rebind unless the install token rotates again (next reinstall).
         if let installToken {
             UserDefaults.standard.set(installToken, forKey: bindMarkerKey)
-            NSLog("[BigBrother] CK subscription bind marker set to install token \(installToken.prefix(8))")
+            BBLog("[BigBrother] CK subscription bind marker set to install token \(installToken.prefix(8))")
         }
     }
 
@@ -959,17 +959,17 @@ final class CloudKitServiceImpl: CloudKitServiceProtocol, @unchecked Sendable {
                 op.modifySubscriptionsResultBlock = { result in
                     switch result {
                     case .success:
-                        NSLog("[BigBrother] Deleted \(idsToDelete.count) stale CK subscriptions before re-register")
+                        BBLog("[BigBrother] Deleted \(idsToDelete.count) stale CK subscriptions before re-register")
                         continuation.resume()
                     case .failure(let error):
-                        NSLog("[BigBrother] Failed to delete CK subscriptions: \(error.localizedDescription)")
+                        BBLog("[BigBrother] Failed to delete CK subscriptions: \(error.localizedDescription)")
                         continuation.resume(throwing: error)
                     }
                 }
                 self.database.add(op)
             }
         } catch {
-            NSLog("[BigBrother] Could not fetch existing CK subscriptions: \(error.localizedDescription)")
+            BBLog("[BigBrother] Could not fetch existing CK subscriptions: \(error.localizedDescription)")
         }
     }
 

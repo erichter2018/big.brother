@@ -110,7 +110,7 @@ enum TunnelTestCommandReceiver {
             )
         }
 
-        NSLog("[TunnelTestCommandReceiver] Installed \(TestNotification.allCases.count) Darwin observers (tunnel)")
+        BBLog("[TunnelTestCommandReceiver] Installed \(TestNotification.allCases.count) Darwin observers (tunnel)")
         let storage = AppGroupStorage()
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
@@ -143,7 +143,7 @@ final class TunnelTestCommandBox {
             return
         }
         guard let provider else {
-            NSLog("[TunnelTestCommandReceiver] \(name): no provider available")
+            BBLog("[TunnelTestCommandReceiver] \(name): no provider available")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "TunnelTestCommandReceiver RX \(name) — NO provider"
@@ -151,7 +151,7 @@ final class TunnelTestCommandBox {
             return
         }
 
-        NSLog("[TunnelTestCommandReceiver] Received \(name) → dispatching")
+        BBLog("[TunnelTestCommandReceiver] Received \(name) → dispatching")
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
             message: "TunnelTestCommandReceiver RX \(name)"

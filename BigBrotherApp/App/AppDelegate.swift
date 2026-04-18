@@ -70,7 +70,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
         let tokenString = deviceToken.map { String(format: "%02x", $0) }.joined()
-        NSLog("[BigBrother] APNs token registered: \(tokenString.prefix(16))...")
+        BBLog("[BigBrother] APNs token registered: \(tokenString.prefix(16))...")
         // Write to App Group so diagnostic can report push status
         UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.apnsTokenRegisteredAt)
@@ -80,7 +80,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
-        NSLog("[BigBrother] APNs registration FAILED: \(error.localizedDescription)")
+        BBLog("[BigBrother] APNs registration FAILED: \(error.localizedDescription)")
         UserDefaults.appGroup?
             .set("failed: \(error.localizedDescription)", forKey: AppGroupKeys.apnsTokenError)
     }
@@ -90,7 +90,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
-        NSLog("[BigBrother] PUSH RECEIVED: didReceiveRemoteNotification")
+        BBLog("[BigBrother] PUSH RECEIVED: didReceiveRemoteNotification")
         UserDefaults.appGroup?
             .set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastPushReceivedAt)
 
@@ -136,7 +136,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             completionHandler()
             return
         }
-        NSLog("[BigBrother] Background URLSession wake from tunnel — applying enforcement")
+        BBLog("[BigBrother] Background URLSession wake from tunnel — applying enforcement")
 
         let defaults = UserDefaults.appGroup
         let flagEpoch = defaults?.double(forKey: AppGroupKeys.needsEnforcementRefresh) ?? 0
@@ -158,7 +158,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             }
             defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
             defaults?.set(Date().timeIntervalSince1970, forKey: "bgURLSessionEnforcedAt")
-            NSLog("[BigBrother] Background URLSession enforcement applied: \(resolution.mode.rawValue)")
+            BBLog("[BigBrother] Background URLSession enforcement applied: \(resolution.mode.rawValue)")
         }
         completionHandler()
     }
@@ -193,7 +193,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             defaults?.removeObject(forKey: AppGroupKeys.permissionFixerCompletedOnce)
             defaults?.set(true, forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
             UserDefaults.standard.set(UUID().uuidString, forKey: installTokenKey)
-            NSLog("[BigBrother] AppDelegate: fresh install/reinstall detected — forced showPermissionFixerOnNextLaunch, cleared permissionFixerCompletedOnce")
+            BBLog("[BigBrother] AppDelegate: fresh install/reinstall detected — forced showPermissionFixerOnNextLaunch, cleared permissionFixerCompletedOnce")
             return
         }
 
@@ -204,7 +204,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         let fcStatus = AuthorizationCenter.shared.authorizationStatus
         if fcStatus != .approved {
             defaults?.set(true, forKey: AppGroupKeys.showPermissionFixerOnNextLaunch)
-            NSLog("[BigBrother] AppDelegate: FC auth=\(fcStatus.rawValue) — setting guided setup flag to suppress prompts")
+            BBLog("[BigBrother] AppDelegate: FC auth=\(fcStatus.rawValue) — setting guided setup flag to suppress prompts")
         }
     }
 
@@ -239,7 +239,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // prompts ahead of the stepwise fixer flow.
         let defaults = UserDefaults.appGroup
         if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
-            NSLog("[BigBrother] restoreEnforcementIfNeeded: guided setup active — deferring to PermissionFixerView")
+            BBLog("[BigBrother] restoreEnforcementIfNeeded: guided setup active — deferring to PermissionFixerView")
             return
         }
 
@@ -248,7 +248,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // the previous session are still active and correct.
         let authCenter = AuthorizationCenter.shared
         guard authCenter.authorizationStatus == .approved else {
-            NSLog("[BigBrother] restoreEnforcementIfNeeded: FC auth not ready (status=\(authCenter.authorizationStatus.rawValue)) — previous shields still active, skipping write")
+            BBLog("[BigBrother] restoreEnforcementIfNeeded: FC auth not ready (status=\(authCenter.authorizationStatus.rawValue)) — previous shields still active, skipping write")
             return
         }
 
@@ -286,7 +286,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             // near-future one-shot DeviceActivity so the Monitor can apply
             // enforcement from its privileged context. The old stopMonitoring
             // trick didn't reliably wake the Monitor on iOS 17+.
-            NSLog("[BigBrother] restoreEnforcementIfNeeded: background launch (state=\(uiAppState.rawValue)) — scheduling Monitor refresh")
+            BBLog("[BigBrother] restoreEnforcementIfNeeded: background launch (state=\(uiAppState.rawValue)) — scheduling Monitor refresh")
             scheduleEnforcementRefreshActivity(source: "appDelegate.bgLaunch")
         } else {
             // Foreground — apply via canonical EnforcementServiceImpl path.
@@ -342,9 +342,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     try capturedEnforcement.apply(capturedPolicy)
-                    NSLog("[BigBrother] restoreEnforcementIfNeeded: applied via EnforcementServiceImpl (background), mode=\(capturedMode.rawValue) reason=\(resolution.reason)")
+                    BBLog("[BigBrother] restoreEnforcementIfNeeded: applied via EnforcementServiceImpl (background), mode=\(capturedMode.rawValue) reason=\(resolution.reason)")
                 } catch {
-                    NSLog("[BigBrother] restoreEnforcementIfNeeded: enforcement.apply failed: \(error.localizedDescription)")
+                    BBLog("[BigBrother] restoreEnforcementIfNeeded: enforcement.apply failed: \(error.localizedDescription)")
                     try? AppGroupStorage().appendDiagnosticEntry(DiagnosticEntry(
                         category: .enforcement,
                         message: "AppDelegate restore enforcement.apply failed",
@@ -400,11 +400,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             do {
                 try center.startMonitoring(activityName, during: schedule)
             } catch {
-                NSLog("[AppDelegate] Failed to register \(q.name): \(error)")
+                BBLog("[AppDelegate] Failed to register \(q.name): \(error)")
             }
         }
         let count = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
-        NSLog("[AppDelegate] Reconciliation: \(count) quarters registered")
+        BBLog("[AppDelegate] Reconciliation: \(count) quarters registered")
     }
 
     // MARK: - BGTaskScheduler

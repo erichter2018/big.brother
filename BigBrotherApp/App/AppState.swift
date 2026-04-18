@@ -108,13 +108,13 @@ final class AppState {
         let (privateKey, publicKey) = CommandSigner.generateKeyPair()
         try? keychain.setData(privateKey, forKey: StorageKeys.commandSigningPrivateKey)
         try? keychain.setData(publicKey, forKey: StorageKeys.commandSigningPublicKey)
-        NSLog("[Parent] Generated missing signing keypair")
+        BBLog("[Parent] Generated missing signing keypair")
     }
 
     private func autoDistributeSigningKeysIfNeeded(_ heartbeats: [DeviceHeartbeat]) {
         guard let pubKeyData = try? keychain.getData(forKey: StorageKeys.commandSigningPublicKey),
               pubKeyData.count >= 32 else {
-            NSLog("[Parent] No signing public key in Keychain — cannot distribute")
+            BBLog("[Parent] No signing public key in Keychain — cannot distribute")
             return
         }
         let pubKeyBase64 = pubKeyData.base64EncodedString()
@@ -128,7 +128,7 @@ final class AppState {
                     target: .device(hb.deviceID),
                     action: .addTrustedSigningKey(publicKeyBase64: pubKeyBase64)
                 )
-                NSLog("[Parent] Auto-pushed signing key to \(hb.deviceID.rawValue)")
+                BBLog("[Parent] Auto-pushed signing key to \(hb.deviceID.rawValue)")
             }
         }
     }
@@ -889,6 +889,7 @@ final class AppState {
         }
         try? storage.writeAppTimeLimits(localLimits)
         try? storage.writeTimeLimitExhaustedApps(exhausted)
+        AlwaysAllowedBackup.mirror(from: storage)
         if familyControlsAvailable {
             // Serialized off-main registration. See `deviceActivityQueue`
             // class comment above for the two reasons (XPC is blocking, and
@@ -1036,6 +1037,7 @@ final class AppState {
         }
         try? storage.writeAppTimeLimits(localLimits)
         try? storage.writeTimeLimitExhaustedApps(exhausted)
+        AlwaysAllowedBackup.mirror(from: storage)
         if familyControlsAvailable {
             // Serialized off-main registration. See `deviceActivityQueue`
             // class comment above for the two reasons (XPC is blocking, and
@@ -1648,7 +1650,7 @@ final class AppState {
                 do {
                     try scheduleManager.registerReconciliationSchedule()
                 } catch {
-                    NSLog("[BigBrother] Reconciliation registration FAILED on launch: \(error)")
+                    BBLog("[BigBrother] Reconciliation registration FAILED on launch: \(error)")
                 }
 
                 // Register usage tracking milestones for screen time reporting.
@@ -1658,8 +1660,8 @@ final class AppState {
                 let allActivities = DeviceActivityCenter().activities
                 let reconciliation = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }
                 let usage = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.usagetracking") }
-                NSLog("[BigBrother] Active activities: \(allActivities.count) total, \(reconciliation.count) reconciliation, \(usage.count) usage tracking")
-                for a in reconciliation { NSLog("[BigBrother]   reconciliation: \(a.rawValue)") }
+                BBLog("[BigBrother] Active activities: \(allActivities.count) total, \(reconciliation.count) reconciliation, \(usage.count) usage tracking")
+                for a in reconciliation { BBLog("[BigBrother]   reconciliation: \(a.rawValue)") }
             }
         }
 
@@ -1815,12 +1817,12 @@ final class AppState {
                 let daCenter = DeviceActivityCenter()
                 let reconciliationCount = daCenter.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
                 if reconciliationCount < 4 {
-                    NSLog("[AppState] DeviceActivity health check: only \(reconciliationCount)/4 — re-registering")
+                    BBLog("[AppState] DeviceActivity health check: only \(reconciliationCount)/4 — re-registering")
                     try? ScheduleManagerImpl().registerReconciliationSchedule()
                 }
                 let usageCount = daCenter.activities.filter { $0.rawValue.hasPrefix("bigbrother.usagetracking") }.count
                 if usageCount == 0 {
-                    NSLog("[AppState] DeviceActivity health check: usage tracking missing — re-registering")
+                    BBLog("[AppState] DeviceActivity health check: usage tracking missing — re-registering")
                     ScheduleRegistrar.registerUsageTracking()
                 }
             }
@@ -2017,7 +2019,7 @@ final class AppState {
                 fixerActiveDefaults?.set(true, forKey: AppGroupKeys.allPermissionsGranted)
                 fixerActiveDefaults?.set(true, forKey: AppGroupKeys.enforcementPermissionsOK)
                 // Update diagnostic write only — no enforcement.apply() here.
-                NSLog("[BigBrother] handleAuthorizationChange: FC authorized during guided setup — deferring enforcement to post-fixer")
+                BBLog("[BigBrother] handleAuthorizationChange: FC authorized during guided setup — deferring enforcement to post-fixer")
             }
             return
         }
@@ -2091,7 +2093,7 @@ final class AppState {
             // Re-register reconciliation schedules now that FC auth is available.
             // Registration before auth silently fails (DeviceActivity requires FC auth).
             try? ScheduleManagerImpl().registerReconciliationSchedule()
-            NSLog("[BigBrother] Reconciliation schedules registered after auth restored")
+            BBLog("[BigBrother] Reconciliation schedules registered after auth restored")
 
             // Re-apply enforcement now that authorization is available.
             // b439: Dispatch the clearAllRestrictions + apply chain to a
@@ -2192,19 +2194,19 @@ final class AppState {
         // error locally so one slow/failing fetch doesn't cascade.
         async let devicesTask: [ChildDevice]? = {
             do { return try await cloudKit.fetchDevices(familyID: familyID) }
-            catch { NSLog("[BigBrother] fetchDevices failed: \(error.localizedDescription)"); return nil }
+            catch { BBLog("[BigBrother] fetchDevices failed: \(error.localizedDescription)"); return nil }
         }()
         async let heartbeatsTask: [DeviceHeartbeat]? = {
             do { return try await cloudKit.fetchLatestHeartbeats(familyID: familyID) }
-            catch { NSLog("[BigBrother] fetchLatestHeartbeats failed: \(error.localizedDescription)"); return nil }
+            catch { BBLog("[BigBrother] fetchLatestHeartbeats failed: \(error.localizedDescription)"); return nil }
         }()
         async let hbProfilesTask: [HeartbeatProfile]? = {
             do { return try await cloudKit.fetchHeartbeatProfiles(familyID: familyID) }
-            catch { NSLog("[BigBrother] fetchHeartbeatProfiles failed: \(error.localizedDescription)"); return nil }
+            catch { BBLog("[BigBrother] fetchHeartbeatProfiles failed: \(error.localizedDescription)"); return nil }
         }()
         async let scheduleProfilesTask: [ScheduleProfile]? = {
             do { return try await cloudKit.fetchScheduleProfiles(familyID: familyID) }
-            catch { NSLog("[BigBrother] fetchScheduleProfiles failed: \(error.localizedDescription)"); return nil }
+            catch { BBLog("[BigBrother] fetchScheduleProfiles failed: \(error.localizedDescription)"); return nil }
         }()
 
         let fetchedDevices = await devicesTask
@@ -3507,7 +3509,7 @@ final class AppState {
                     ModeChangeNotifier.notifyTemporaryUnlock(durationSeconds: remainingFreeTime)
                 }
             } catch {
-                NSLog("[BigBrother] Timed unlock start failed: \(error.localizedDescription)")
+                BBLog("[BigBrother] Timed unlock start failed: \(error.localizedDescription)")
                 await MainActor.run { self?.timedUnlockStartInFlight = false }
             }
         }
@@ -3629,7 +3631,7 @@ final class AppState {
                     ModeChangeNotifier.notify(newMode: mode)
                 }
             } catch {
-                NSLog("[BigBrother] Timed unlock end failed: \(error.localizedDescription)")
+                BBLog("[BigBrother] Timed unlock end failed: \(error.localizedDescription)")
                 await MainActor.run { self?.timedUnlockEndInFlight = false }
             }
         }
@@ -3769,7 +3771,7 @@ extension AppState {
     func runCommandDeliveryTest(targetDeviceID: DeviceID) {
         guard let familyID = parentState?.familyID,
               let ck = cloudKit else {
-            NSLog("[CommandDeliveryTest] ABORT — no familyID or cloudKit service")
+            BBLog("[CommandDeliveryTest] ABORT — no familyID or cloudKit service")
             return
         }
 
@@ -3782,8 +3784,7 @@ extension AppState {
 
             var latencies: [TimeInterval] = []
 
-            NSLog("[CommandDeliveryTest] === START === target=%@ cycles=%d",
-                  String(targetDeviceID.rawValue.prefix(8)), totalCycles)
+            BBLog("[CommandDeliveryTest] === START === target=\(String(targetDeviceID.rawValue.prefix(8))) cycles=\(totalCycles)")
 
             for cycle in 1...totalCycles {
                 // --- Phase A: locked ---
@@ -3791,8 +3792,7 @@ extension AppState {
                 do {
                     try await self?.sendCommand(target: .device(targetDeviceID), action: .setMode(.locked))
                 } catch {
-                    NSLog("[CommandDeliveryTest] cycle %d: sendCommand(locked) FAILED — %@",
-                          cycle, error.localizedDescription)
+                    BBLog("[CommandDeliveryTest] cycle \(cycle): sendCommand(locked) FAILED — \(error.localizedDescription)")
                     continue
                 }
 
@@ -3808,9 +3808,9 @@ extension AppState {
                 if let lockedAt = lockedConfirmed {
                     let lockLatency = lockedAt.timeIntervalSince(lockStart)
                     latencies.append(lockLatency)
-                    NSLog("[CommandDeliveryTest] cycle %d LOCK confirmed in %.1fs", cycle, lockLatency)
+                    BBLog("[CommandDeliveryTest] cycle \(cycle) LOCK confirmed in \(String(format: "%.1f", lockLatency))s")
                 } else {
-                    NSLog("[CommandDeliveryTest] cycle %d LOCK TIMEOUT after %d polls", cycle, maxPollAttempts)
+                    BBLog("[CommandDeliveryTest] cycle \(cycle) LOCK TIMEOUT after \(maxPollAttempts) polls")
                 }
 
                 // --- Phase B: unlocked ---
@@ -3818,8 +3818,7 @@ extension AppState {
                 do {
                     try await self?.sendCommand(target: .device(targetDeviceID), action: .setMode(.unlocked))
                 } catch {
-                    NSLog("[CommandDeliveryTest] cycle %d: sendCommand(unlocked) FAILED — %@",
-                          cycle, error.localizedDescription)
+                    BBLog("[CommandDeliveryTest] cycle \(cycle): sendCommand(unlocked) FAILED — \(error.localizedDescription)")
                     continue
                 }
 
@@ -3835,15 +3834,15 @@ extension AppState {
                 if let unlockedAt = unlockedConfirmed {
                     let unlockLatency = unlockedAt.timeIntervalSince(unlockStart)
                     latencies.append(unlockLatency)
-                    NSLog("[CommandDeliveryTest] cycle %d UNLOCK confirmed in %.1fs", cycle, unlockLatency)
+                    BBLog("[CommandDeliveryTest] cycle \(cycle) UNLOCK confirmed in \(String(format: "%.1f", unlockLatency))s")
                 } else {
-                    NSLog("[CommandDeliveryTest] cycle %d UNLOCK TIMEOUT after %d polls", cycle, maxPollAttempts)
+                    BBLog("[CommandDeliveryTest] cycle \(cycle) UNLOCK TIMEOUT after \(maxPollAttempts) polls")
                 }
             }
 
             // --- Summary ---
             if latencies.isEmpty {
-                NSLog("[CommandDeliveryTest] === DONE === No successful measurements")
+                BBLog("[CommandDeliveryTest] === DONE === No successful measurements")
                 return
             }
 
@@ -3856,14 +3855,14 @@ extension AppState {
             let p95idx = Int(Double(count) * 0.95)
             let p95 = sorted[Swift.min(p95idx, count - 1)]
 
-            NSLog("[CommandDeliveryTest] === SUMMARY ===")
-            NSLog("[CommandDeliveryTest]   samples: %d / %d expected", count, totalCycles * 2)
-            NSLog("[CommandDeliveryTest]   min:  %.1fs", min)
-            NSLog("[CommandDeliveryTest]   p50:  %.1fs", p50)
-            NSLog("[CommandDeliveryTest]   p95:  %.1fs", p95)
-            NSLog("[CommandDeliveryTest]   max:  %.1fs", max)
-            NSLog("[CommandDeliveryTest]   mean: %.1fs", mean)
-            NSLog("[CommandDeliveryTest] === END ===")
+            BBLog("[CommandDeliveryTest] === SUMMARY ===")
+            BBLog("[CommandDeliveryTest]   samples: \(count) / \(totalCycles * 2) expected")
+            BBLog("[CommandDeliveryTest]   min:  \(String(format: "%.1f", min))s")
+            BBLog("[CommandDeliveryTest]   p50:  \(String(format: "%.1f", p50))s")
+            BBLog("[CommandDeliveryTest]   p95:  \(String(format: "%.1f", p95))s")
+            BBLog("[CommandDeliveryTest]   max:  \(String(format: "%.1f", max))s")
+            BBLog("[CommandDeliveryTest]   mean: \(String(format: "%.1f", mean))s")
+            BBLog("[CommandDeliveryTest] === END ===")
         }
     }
 
@@ -3888,16 +3887,13 @@ extension AppState {
                         return Date()
                     }
                     if attempt % 5 == 0 {
-                        NSLog("[CommandDeliveryTest]   poll %d: mode=%@ (want %@)",
-                              attempt, hb.currentMode.rawValue, expectedMode.rawValue)
+                        BBLog("[CommandDeliveryTest]   poll \(attempt): mode=\(hb.currentMode.rawValue) (want \(expectedMode.rawValue))")
                     }
                 } else if attempt == 1 {
-                    NSLog("[CommandDeliveryTest]   poll %d: no heartbeat for device %@",
-                          attempt, String(targetDeviceID.rawValue.prefix(8)))
+                    BBLog("[CommandDeliveryTest]   poll \(attempt): no heartbeat for device \(String(targetDeviceID.rawValue.prefix(8)))")
                 }
             } catch {
-                NSLog("[CommandDeliveryTest]   poll %d: fetch error — %@",
-                      attempt, error.localizedDescription)
+                BBLog("[CommandDeliveryTest]   poll \(attempt): fetch error — \(error.localizedDescription)")
             }
         }
         return nil

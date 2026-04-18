@@ -76,7 +76,7 @@ enum ParentTestCommandReceiver {
             )
         }
 
-        NSLog("[ParentTestCommandReceiver] Installed \(TestNotification.allCases.count) Darwin observers")
+        BBLog("[ParentTestCommandReceiver] Installed \(TestNotification.allCases.count) Darwin observers")
     }
 
     /// Read the target device CK_ID from the App Group file.
@@ -99,17 +99,17 @@ final class ParentTestCommandBox {
 
     func dispatch(name: String) {
         guard let notif = ParentTestCommandReceiver.TestNotification(rawValue: name) else {
-            NSLog("[ParentTestCommandReceiver] Unknown notification: \(name)")
+            BBLog("[ParentTestCommandReceiver] Unknown notification: \(name)")
             return
         }
         guard let appState else {
-            NSLog("[ParentTestCommandReceiver] No appState — ignoring \(name)")
+            BBLog("[ParentTestCommandReceiver] No appState — ignoring \(name)")
             return
         }
 
         // Command delivery test — uses hardcoded device ID, no target file needed.
         if notif.isDeliveryTest {
-            NSLog("[ParentTestCommandReceiver] Starting command delivery test")
+            BBLog("[ParentTestCommandReceiver] Starting command delivery test")
             Task { @MainActor in
                 appState.runCommandDeliveryTest(
                     targetDeviceID: AppState.commandDeliveryTestDeviceID
@@ -119,22 +119,22 @@ final class ParentTestCommandBox {
         }
 
         guard let targetDevice = ParentTestCommandReceiver.readTarget() else {
-            NSLog("[ParentTestCommandReceiver] No target file in App Group — ignoring \(name)")
+            BBLog("[ParentTestCommandReceiver] No target file in App Group — ignoring \(name)")
             return
         }
 
         guard let action = notif.action else {
-            NSLog("[ParentTestCommandReceiver] Notification \(name) has no action — ignoring")
+            BBLog("[ParentTestCommandReceiver] Notification \(name) has no action — ignoring")
             return
         }
-        NSLog("[ParentTestCommandReceiver] Dispatching \(action.displayDescription) → device \(targetDevice.rawValue.prefix(8))")
+        BBLog("[ParentTestCommandReceiver] Dispatching \(action.displayDescription) → device \(targetDevice.rawValue.prefix(8))")
 
         Task { @MainActor in
             do {
                 try await appState.sendCommand(target: .device(targetDevice), action: action)
-                NSLog("[ParentTestCommandReceiver] Command sent successfully via CloudKit")
+                BBLog("[ParentTestCommandReceiver] Command sent successfully via CloudKit")
             } catch {
-                NSLog("[ParentTestCommandReceiver] sendCommand FAILED: \(error.localizedDescription)")
+                BBLog("[ParentTestCommandReceiver] sendCommand FAILED: \(error.localizedDescription)")
             }
         }
     }

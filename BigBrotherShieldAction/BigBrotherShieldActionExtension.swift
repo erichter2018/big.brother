@@ -469,7 +469,7 @@ class BigBrotherShieldActionExtension: ShieldActionDelegate {
         }
         defaults?.removeObject(forKey: AppGroupKeys.needsEnforcementRefresh)
         defaults?.set(Date().timeIntervalSince1970, forKey: "shieldActionEnforcedAt")
-        NSLog("[ShieldAction] Trampoline: applied \(resolution.mode.rawValue) enforcement")
+        BBLog("[ShieldAction] Trampoline: applied \(resolution.mode.rawValue) enforcement")
     }
 
     // MARK: - Diagnostics

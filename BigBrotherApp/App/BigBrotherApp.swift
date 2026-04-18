@@ -92,6 +92,19 @@ struct BigBrotherApp: App {
         appState.configureServices()
         StartupWatchdog.log("configureServices complete")
 
+        // Restore always-allowed tokens + time limits from iCloud KVS
+        // if this is a fresh install and we have a backup. Must run
+        // BEFORE performRestoration / Monitor reads start, so restoration
+        // reads the revived state. No-op on devices that already have
+        // local state or that have already attempted restore once.
+        if appState.deviceRole == .child {
+            StartupWatchdog.log("AlwaysAllowedBackup.restoreIfNeeded")
+            let restored = AlwaysAllowedBackup.restoreIfNeeded(into: appState.storage)
+            if restored {
+                BBLog("[BigBrotherApp] restored always-allowed state from iCloud KVS backup")
+            }
+        }
+
         // Restore enforcement state (child devices). This is synchronous and fast.
         StartupWatchdog.log("performRestoration starting")
         appState.performRestoration()
@@ -245,11 +258,11 @@ struct BigBrotherApp: App {
         for attempt in 1...maxAttempts {
             do {
                 try await cloudKit?.setupSubscriptions(familyID: familyID, deviceID: deviceID)
-                NSLog("[BigBrother] CK subscriptions setup OK (attempt \(attempt))")
+                BBLog("[BigBrother] CK subscriptions setup OK (attempt \(attempt))")
                 StartupWatchdog.log("Subscriptions setup succeeded (attempt \(attempt))")
                 return
             } catch {
-                NSLog("[BigBrother] CK subscriptions setup FAILED (attempt \(attempt)/\(maxAttempts)): \(error)")
+                BBLog("[BigBrother] CK subscriptions setup FAILED (attempt \(attempt)/\(maxAttempts)): \(error)")
                 StartupWatchdog.log("Subscriptions setup failed (attempt \(attempt)/\(maxAttempts)): \(error)")
                 if attempt < maxAttempts {
                     try? await Task.sleep(for: .seconds(Double(attempt) * 2))

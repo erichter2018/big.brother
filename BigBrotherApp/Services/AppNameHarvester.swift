@@ -43,7 +43,7 @@ enum AppNameHarvester {
 
         guard count > 0 else { return }
         defaults?.set(nameMap, forKey: AppGroupKeys.harvestedAppNames)
-        NSLog("[AppNameHarvester] Captured \(count) app name(s)")
+        BBLog("[AppNameHarvester] Captured \(count) app name(s)")
     }
 
     /// Look up a harvested name by fingerprint.

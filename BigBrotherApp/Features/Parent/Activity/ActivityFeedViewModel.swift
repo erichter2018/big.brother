@@ -177,7 +177,7 @@ final class ActivityFeedViewModel {
                 events: rawEvents
             )
         } catch {
-            NSLog("[Activity] fetchEventLogs failed: \(error.localizedDescription) — building summary from heartbeat/DNS only")
+            BBLog("[Activity] fetchEventLogs failed: \(error.localizedDescription) — building summary from heartbeat/DNS only")
             // Don't leave the Report tab blank on CK failure — heartbeat and
             // DNS snapshots are cached locally and still produce a meaningful
             // weekly summary (screen time, top apps, unlock counts). Events

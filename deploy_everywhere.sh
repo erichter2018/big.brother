@@ -146,11 +146,29 @@ for ((i=0; i<TOTAL; i++)); do
     fi
 done
 
-# ── Phase 1+2: Install & Launch (interleaved) ──────────────────────────────
-# Install retries every 5 minutes. Launch attempts every minute for installed devices.
-# Devices that install successfully get launched immediately without waiting for others.
+# ── Phase 1+2: Install & Launch (interleaved, parallel) ────────────────────
+# Pattern lifted from `2afaf1f` (the known-good version): all pending devices
+# are installed and launched IN PARALLEL each round via backgrounded helper
+# functions; the parent `wait`s for each pid and reads its exit code. Install
+# retries every RETRY_INTERVAL (5min). Launch retries every LAUNCH_INTERVAL
+# (60s) for devices that installed but not yet launched. devicectl's own
+# internal timeout bounds each call — no perl SIGALRM wrapper needed.
 install_attempt=0
 last_install_time=0
+
+# Install the .app to a single device. Exits 0 on success, 1 on failure.
+_install_one() {
+    local uuid="$1"
+    local result
+    result=$(xcrun devicectl device install app --device "$uuid" "$APP" 2>&1)
+    echo "$result" | grep -q "options:"
+}
+
+# Launch the app on a single device. Exits 0 on success, 1 on failure.
+_launch_one() {
+    local uuid="$1"
+    xcrun devicectl device process launch --device "$uuid" "$BID" >/dev/null 2>&1
+}
 
 while true; do
     now=$(date +%s)
@@ -166,40 +184,57 @@ while true; do
     # All done?
     [ "$install_pending" -eq 0 ] && [ "$launch_pending" -eq 0 ] && break
 
-    # Install attempt (every 5 minutes or first time)
+    # Install attempt (every 5 minutes or first time) — PARALLEL across pending devices.
     if [ "$install_pending" -gt 0 ] && [ $((now - last_install_time)) -ge $RETRY_INTERVAL -o "$install_attempt" -eq 0 ]; then
         install_attempt=$((install_attempt + 1))
-        if [ "$install_pending" -gt 0 ]; then
-            echo "=== INSTALL attempt $install_attempt — $install_pending device(s) remaining ==="
-            for ((i=0; i<TOTAL; i++)); do
-                [ "${INSTALL_OK[$i]}" -ne 0 ] && continue
-                name="${TARGETS[$i]}"
-                idx=$(find_device_index "$name")
-                uuid="${ALL_XCODE_IDS[$idx]}"
-                result=$(xcrun devicectl device install app --device "$uuid" "$APP" 2>&1)
-                if echo "$result" | grep -q "options:"; then
-                    INSTALL_OK[$i]=1
-                    echo "  + $name installed"
-                else
-                    echo "  x $name install failed"
-                fi
-            done
-            ok=0
-            for ((i=0; i<TOTAL; i++)); do [ "${INSTALL_OK[$i]}" -eq 1 ] && ok=$((ok + 1)); done
-            echo "Installed: $ok/$TOTAL"
-            last_install_time=$(date +%s)
-        fi
+        echo "=== INSTALL attempt $install_attempt — $install_pending device(s) remaining ==="
+        install_pids=(); install_idxs=()
+        for ((i=0; i<TOTAL; i++)); do
+            [ "${INSTALL_OK[$i]}" -ne 0 ] && continue
+            name="${TARGETS[$i]}"
+            didx=$(find_device_index "$name")
+            uuid="${ALL_XCODE_IDS[$didx]}"
+            _install_one "$uuid" &
+            install_pids+=($!)
+            install_idxs+=($i)
+        done
+        for ((j=0; j<${#install_pids[@]}; j++)); do
+            wait "${install_pids[$j]}"
+            rc=$?
+            i="${install_idxs[$j]}"
+            name="${TARGETS[$i]}"
+            if [ "$rc" -eq 0 ]; then
+                INSTALL_OK[$i]=1
+                echo "  + $name installed"
+            else
+                echo "  x $name install failed"
+            fi
+        done
+        ok=0
+        for ((i=0; i<TOTAL; i++)); do [ "${INSTALL_OK[$i]}" -eq 1 ] && ok=$((ok + 1)); done
+        echo "Installed: $ok/$TOTAL"
+        last_install_time=$(date +%s)
     fi
 
-    # Launch any installed-but-not-launched devices (once each)
+    # Launch any installed-but-not-launched devices — PARALLEL, retries every LAUNCH_INTERVAL.
     if [ "$launch_pending" -gt 0 ]; then
+        launch_pids=(); launch_idxs=()
         for ((i=0; i<TOTAL; i++)); do
             [ "${INSTALL_OK[$i]}" -ne 1 ] && continue
             [ "${LAUNCH_OK[$i]}" -eq 1 ] && continue
             name="${TARGETS[$i]}"
-            idx=$(find_device_index "$name")
-            uuid="${ALL_XCODE_IDS[$idx]}"
-            if xcrun devicectl device process launch --device "$uuid" "$BID" >/dev/null 2>&1; then
+            didx=$(find_device_index "$name")
+            uuid="${ALL_XCODE_IDS[$didx]}"
+            _launch_one "$uuid" &
+            launch_pids+=($!)
+            launch_idxs+=($i)
+        done
+        for ((j=0; j<${#launch_pids[@]}; j++)); do
+            wait "${launch_pids[$j]}"
+            rc=$?
+            i="${launch_idxs[$j]}"
+            name="${TARGETS[$i]}"
+            if [ "$rc" -eq 0 ]; then
                 LAUNCH_OK[$i]=1
                 echo "  + $name launched"
             else

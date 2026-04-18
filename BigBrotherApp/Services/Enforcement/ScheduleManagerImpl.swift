@@ -66,7 +66,7 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
         // Log existing activities before registration for diagnosis.
         let existingActivities = center.activities
         let existingNames = existingActivities.map(\.rawValue)
-        NSLog("[ScheduleManager] Before registration: \(existingActivities.count) activities: \(existingNames)")
+        BBLog("[ScheduleManager] Before registration: \(existingActivities.count) activities: \(existingNames)")
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
             message: "Reconciliation registration starting",
@@ -101,16 +101,16 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
                 do {
                     try center.startMonitoring(activityName, during: schedule)
                     registered += 1
-                    NSLog("[ScheduleManager] ✓ Registered \(q.name)\(attempt > 1 ? " (attempt \(attempt))" : "")")
+                    BBLog("[ScheduleManager] ✓ Registered \(q.name)\(attempt > 1 ? " (attempt \(attempt))" : "")")
                     break
                 } catch {
                     if attempt < 3 {
-                        NSLog("[ScheduleManager] ✗ \(q.name) attempt \(attempt) failed: \(error.localizedDescription) — retrying in 0.5s")
+                        BBLog("[ScheduleManager] ✗ \(q.name) attempt \(attempt) failed: \(error.localizedDescription) — retrying in 0.5s")
                         usleep(500_000) // 0.5s — shorter than 1s to reduce UI freeze
                     } else {
                         let msg = "\(q.name): \(error.localizedDescription)"
                         errors.append(msg)
-                        NSLog("[ScheduleManager] ✗ FAILED \(msg) (all 3 attempts)")
+                        BBLog("[ScheduleManager] ✗ FAILED \(msg) (all 3 attempts)")
                     }
                 }
             }
@@ -118,7 +118,7 @@ final class ScheduleManagerImpl: ScheduleManagerProtocol {
 
         let afterCount = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
         let result = "Registered \(registered)/4 quarters (\(afterCount) visible in .activities)"
-        NSLog("[ScheduleManager] \(result)")
+        BBLog("[ScheduleManager] \(result)")
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
             message: errors.isEmpty ? "Reconciliation registered OK" : "Reconciliation registration PARTIAL",

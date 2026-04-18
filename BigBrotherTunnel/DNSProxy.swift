@@ -64,9 +64,24 @@ final class DNSProxy {
     /// tunnel has asked us to tear down. Guarded by `upstreamStateLock`.
     private var stopped: Bool = false
     private var upstreamConnection: NWConnection?
-    private let upstreamHost: Network.NWEndpoint.Host
+    /// Current upstream (rotates across `upstreamPool` on reconnect, see
+    /// `reconnectUpstream`). Starts at `upstreamPool[0]`; on each reconnect
+    /// that wasn't preceded by a recent successful probe, advances to the
+    /// next entry. This breaks the runaway when a carrier filters a single
+    /// public resolver — observed on Olivia's iPhone 2026-04-17 where
+    /// `1.1.1.1:53` was filtered, leading to 4491 reconnects in one day.
+    private var upstreamHost: Network.NWEndpoint.Host
     private let upstreamPort: Network.NWEndpoint.Port
-    private let upstreamHostDescription: String
+    private var upstreamHostDescription: String
+    /// Candidate upstreams, rotated on repeated failure. Single-entry when
+    /// safe-search or blackhole mode requires a specific resolver.
+    private let upstreamPool: [String]
+    private var upstreamPoolIndex: Int = 0
+    /// Reconnect backoff state. Reset on any upstream response (client query
+    /// or probe). Bounded by `maxReconnectBackoff`.
+    private var reconnectAttempt: Int = 0
+    private let baseReconnectBackoff: TimeInterval = 0.5
+    private let maxReconnectBackoff: TimeInterval = 60
     /// Serial queue for all upstream connection callbacks (state updates,
     /// receive completions). Serial so we never process two callbacks
     /// concurrently — the pending-queue and onUpstreamResponse logic
@@ -282,6 +297,17 @@ final class DNSProxy {
 
     init(provider: NEPacketTunnelProvider, upstreamDNSServer: String, storage: AppGroupStorage) {
         self.provider = provider
+        // Build the rotation pool. For "plain" resolvers (1.1.1.1) we rotate
+        // across public resolvers so a single carrier-filtered upstream
+        // doesn't wedge DNS indefinitely. For content-filtering resolvers
+        // (CleanBrowsing, etc.) we keep a single-entry pool because
+        // alternates would bypass safe-search semantics.
+        let publicRotation = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+        if publicRotation.contains(upstreamDNSServer) {
+            self.upstreamPool = publicRotation
+        } else {
+            self.upstreamPool = [upstreamDNSServer]
+        }
         self.upstreamHost = Network.NWEndpoint.Host(upstreamDNSServer)
         self.upstreamPort = Network.NWEndpoint.Port(integerLiteral: 53)
         self.upstreamHostDescription = upstreamDNSServer
@@ -313,7 +339,7 @@ final class DNSProxy {
         setupUpstreamConnection(reason: "start")
         fastPathResolver.start()
         let gen = startReadLoopInternal()
-        NSLog("[DNSProxy] Started → \(upstreamHostDescription) (readLoop gen=\(gen)), fastPath active")
+        BBLog("[DNSProxy] Started → \(upstreamHostDescription) (readLoop gen=\(gen)), fastPath active")
     }
 
     /// Telemetry-only hook for "a read/write on the upstream failed." The
@@ -413,7 +439,7 @@ final class DNSProxy {
         if stopped {
             upstreamStateLock.unlock()
             connection.cancel()
-            NSLog("[DNSProxy] setupUpstreamConnection racing stop — discarding fresh connection (reason=\(reason))")
+            BBLog("[DNSProxy] setupUpstreamConnection racing stop — discarding fresh connection (reason=\(reason))")
             return
         }
         let oldConnection = upstreamConnection
@@ -431,7 +457,7 @@ final class DNSProxy {
         // re-arm.
         receiveNextUpstream(on: connection, generation: gen)
 
-        NSLog("[DNSProxy] Upstream connection created (gen=\(gen), reason=\(reason))")
+        BBLog("[DNSProxy] Upstream connection created (gen=\(gen), reason=\(reason))")
     }
 
     /// Handle state transitions from the upstream connection. This is the
@@ -450,10 +476,10 @@ final class DNSProxy {
             waitingEnteredAt = nil
             currentConnectionReachedReady = true
             upstreamStateLock.unlock()
-            NSLog("[DNSProxy] Upstream state → ready (gen=\(generation))")
+            BBLog("[DNSProxy] Upstream state → ready (gen=\(generation))")
 
         case .preparing:
-            NSLog("[DNSProxy] Upstream state → preparing (gen=\(generation))")
+            BBLog("[DNSProxy] Upstream state → preparing (gen=\(generation))")
 
         case .waiting(let error):
             // Transient: iOS is trying to recover path connectivity. Sends
@@ -467,7 +493,7 @@ final class DNSProxy {
                 waitingEnteredAt = Date()
             }
             upstreamStateLock.unlock()
-            NSLog("[DNSProxy] Upstream state → waiting: \(error.debugDescription) (gen=\(generation))")
+            BBLog("[DNSProxy] Upstream state → waiting: \(error.debugDescription) (gen=\(generation))")
 
         case .failed(let error):
             // Startup grace period: if this connection never reached
@@ -482,7 +508,7 @@ final class DNSProxy {
             let reachedReady = currentConnectionReachedReady
             upstreamStateLock.unlock()
             if !reachedReady && startupAge < startupGracePeriod {
-                NSLog("[DNSProxy] Upstream state → failed during startup (\(Int(startupAge))s, gen=\(generation)) — delaying rebuild")
+                BBLog("[DNSProxy] Upstream state → failed during startup (\(Int(startupAge))s, gen=\(generation)) — delaying rebuild")
                 markUpstreamUnhealthy()
                 let delay = startupGracePeriod - startupAge + 0.5
                 upstreamQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -490,19 +516,19 @@ final class DNSProxy {
                     // Only rebuild if we're still the current generation —
                     // otherwise something else already handled it.
                     guard generation == self.currentUpstreamGeneration else { return }
-                    NSLog("[DNSProxy] Startup grace expired (gen=\(generation)) — reconnecting")
+                    BBLog("[DNSProxy] Startup grace expired (gen=\(generation)) — reconnecting")
                     self.reconnectUpstream()
                 }
                 break
             }
             // Terminal — connection is dead. Trigger rebuild.
-            NSLog("[DNSProxy] Upstream state → failed: \(error.debugDescription) (gen=\(generation)) — reconnecting")
+            BBLog("[DNSProxy] Upstream state → failed: \(error.debugDescription) (gen=\(generation)) — reconnecting")
             markUpstreamUnhealthy()
             reconnectUpstream()
 
         case .cancelled:
             // Expected during our own tear-down. No action.
-            NSLog("[DNSProxy] Upstream state → cancelled (gen=\(generation))")
+            BBLog("[DNSProxy] Upstream state → cancelled (gen=\(generation))")
 
         case .setup:
             break
@@ -523,7 +549,7 @@ final class DNSProxy {
             guard generation == self.currentUpstreamGeneration else { return }
 
             if let error {
-                NSLog("[DNSProxy] Upstream receive error: \(error.debugDescription) (gen=\(generation))")
+                BBLog("[DNSProxy] Upstream receive error: \(error.debugDescription) (gen=\(generation))")
                 // Don't recall — state handler will fire failed/cancelled
                 // and rebuild will schedule a fresh receive loop on the
                 // new connection. Recalling here would race with rebuild.
@@ -552,7 +578,7 @@ final class DNSProxy {
               Date().timeIntervalSince(enteredAt) > waitingStuckThreshold else {
             return
         }
-        NSLog("[DNSProxy] Upstream stuck in .waiting for \(Int(Date().timeIntervalSince(enteredAt)))s — forcing reconnect")
+        BBLog("[DNSProxy] Upstream stuck in .waiting for \(Int(Date().timeIntervalSince(enteredAt)))s — forcing reconnect")
         // `setupUpstreamConnection` (called via `reconnectUpstream`) will
         // reset `waitingEnteredAt` under the lock — no need to clear here.
         reconnectUpstream()
@@ -572,7 +598,7 @@ final class DNSProxy {
               Date().timeIntervalSince(enteredAt) > waitingStuckThreshold else {
             return false
         }
-        NSLog("[DNSProxy] Upstream stuck in .waiting for \(Int(Date().timeIntervalSince(enteredAt)))s — forcing reconnect")
+        BBLog("[DNSProxy] Upstream stuck in .waiting for \(Int(Date().timeIntervalSince(enteredAt)))s — forcing reconnect")
         reconnectUpstream()
         return true
     }
@@ -600,7 +626,7 @@ final class DNSProxy {
         let hasConn = upstreamConnection != nil
         upstreamStateLock.unlock()
         guard hasConn else {
-            NSLog("[DNSProxy] Health: no upstream connection — creating")
+            BBLog("[DNSProxy] Health: no upstream connection — creating")
             reconnectUpstream()
             return false
         }
@@ -620,7 +646,7 @@ final class DNSProxy {
         let oldest = pending.values.min(by: { $0.at < $1.at })?.at
         pendingLock.unlock()
         if count > 20, let oldest, Date().timeIntervalSince(oldest) > 3 {
-            NSLog("[DNSProxy] Health: \(count) pending queries (oldest \(Int(Date().timeIntervalSince(oldest)))s) — upstream may be dead, reconnecting")
+            BBLog("[DNSProxy] Health: \(count) pending queries (oldest \(Int(Date().timeIntervalSince(oldest)))s) — upstream may be dead, reconnecting")
             reconnectUpstream()
             return false
         }
@@ -635,6 +661,15 @@ final class DNSProxy {
     /// reports `.failed`, when `healthCheck()` detects a stuck `.waiting`,
     /// or from probe timeouts. NWConnection migrates paths internally for
     /// routine interface swaps — this path is for terminal failures only.
+    ///
+    /// b673: adds exponential backoff + upstream rotation to break the
+    /// runaway observed on cellular networks where a single filtered
+    /// resolver (e.g. carrier-blocked `1.1.1.1:53`) caused thousands of
+    /// reconnect attempts per day. Each reconnect increments
+    /// `reconnectAttempt`, waits `baseReconnectBackoff * 2^(attempt-1)`
+    /// (capped at `maxReconnectBackoff`), then rotates to the next entry
+    /// in `upstreamPool` before rebuilding. `reconnectAttempt` resets to
+    /// zero on any upstream response (see `onUpstreamResponse`).
     func reconnectUpstream() {
         // Drop any in-flight probes — they were sent via the old connection
         // and their responses won't arrive on the new one. Also reset the
@@ -667,11 +702,26 @@ final class DNSProxy {
             }
         }
 
-        setupUpstreamConnection(reason: "reconnect")
-        if !orphaned.isEmpty {
-            NSLog("[DNSProxy] Upstream reconnected → \(upstreamHostDescription) (\(orphaned.count) orphaned queries refused)")
-        } else {
-            NSLog("[DNSProxy] Upstream reconnected → \(upstreamHostDescription)")
+        // Rotate upstream + compute backoff. Update under upstreamStateLock
+        // to serialize with any concurrent setupUpstreamConnection caller.
+        upstreamStateLock.lock()
+        reconnectAttempt += 1
+        let attempt = reconnectAttempt
+        let exp = min(Double(attempt - 1), 8) // cap exponent to avoid overflow; 2^8=256 × 0.5 = 128, already over cap
+        let delay = min(baseReconnectBackoff * pow(2.0, exp), maxReconnectBackoff)
+        if upstreamPool.count > 1 {
+            upstreamPoolIndex = (upstreamPoolIndex + 1) % upstreamPool.count
+            let next = upstreamPool[upstreamPoolIndex]
+            upstreamHost = Network.NWEndpoint.Host(next)
+            upstreamHostDescription = next
+        }
+        let desc = upstreamHostDescription
+        upstreamStateLock.unlock()
+
+        BBLog("[DNSProxy] Upstream reconnect scheduled → \(desc) (attempt \(attempt), delay \(String(format: "%.2f", delay))s, \(orphaned.count) orphaned)")
+        upstreamQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.setupUpstreamConnection(reason: "reconnect")
         }
     }
 
@@ -724,7 +774,7 @@ final class DNSProxy {
             let currentGen = self.readLoopGeneration
             self.readLoopLock.unlock()
             if currentGen != generation {
-                NSLog("[DNSProxy] readLoop gen=\(generation) superseded by gen=\(currentGen) — draining")
+                BBLog("[DNSProxy] readLoop gen=\(generation) superseded by gen=\(currentGen) — draining")
                 return
             }
             for p in packets { self.onPacket(p) }
@@ -864,7 +914,7 @@ final class DNSProxy {
             // Pending map is completely full (should be impossible with the
             // 300 cap). Drop the query rather than corrupt state.
             pendingLock.unlock()
-            NSLog("[DNSProxy] pending table full (65k) — dropping query")
+            BBLog("[DNSProxy] pending table full (65k) — dropping query")
             return
         }
         // Advance pointer but never into the reserved probe range.
@@ -907,7 +957,7 @@ final class DNSProxy {
         let sendConnection = upstreamConnection
         upstreamStateLock.unlock()
         if let sendConnection, case .failed = sendConnection.state {
-            NSLog("[DNSProxy] Upstream connection in .failed state — reconnecting before forward")
+            BBLog("[DNSProxy] Upstream connection in .failed state — reconnecting before forward")
             reconnectUpstream()
         }
 
@@ -936,7 +986,7 @@ final class DNSProxy {
                 if let error {
                     guard let self,
                           sendGen == self.currentUpstreamGeneration else { return }
-                    NSLog("[DNSProxy] Upstream send failed: \(error.debugDescription)")
+                    BBLog("[DNSProxy] Upstream send failed: \(error.debugDescription)")
                     self.markUpstreamUnhealthy()
                 }
             }
@@ -972,10 +1022,17 @@ final class DNSProxy {
         // Any upstream response — probe or real — is proof the session is
         // healthy on the current interface. Update the liveness timestamp
         // so the probe scheduler can skip unnecessary probes during active
-        // browsing.
+        // browsing. Also reset the reconnect backoff counter so the next
+        // transient failure starts a fresh 500ms delay instead of whatever
+        // we'd escalated to previously.
         probeLock.lock()
         lastUpstreamResponseAt = Date()
         probeLock.unlock()
+        upstreamStateLock.lock()
+        if reconnectAttempt > 0 {
+            reconnectAttempt = 0
+        }
+        upstreamStateLock.unlock()
 
         // Active health probe response — clear the outstanding entry, never
         // forward to a client.
@@ -1079,7 +1136,7 @@ final class DNSProxy {
                 if let error {
                     guard let self,
                           sendGen == self.currentUpstreamGeneration else { return }
-                    NSLog("[DNSProxy] Probe send failed: \(error.debugDescription)")
+                    BBLog("[DNSProxy] Probe send failed: \(error.debugDescription)")
                     self.markUpstreamUnhealthy()
                 }
             }
@@ -1093,7 +1150,7 @@ final class DNSProxy {
             let stillOutstanding = self.outstandingProbes.removeValue(forKey: probedTxn) != nil
             self.probeLock.unlock()
             if stillOutstanding {
-                NSLog("[DNSProxy] Active probe timed out after \(self.probeTimeoutSeconds)s — upstream wedged, reconnecting")
+                BBLog("[DNSProxy] Active probe timed out after \(self.probeTimeoutSeconds)s — upstream wedged, reconnecting")
                 TunnelTelemetry.update { telemetry in
                     telemetry.dnsProbeTimeouts += 1
                     telemetry.lastProbeTimeoutAt = Date().timeIntervalSince1970
@@ -1336,11 +1393,11 @@ final class DNSProxy {
         // srcIP/dstIP slices must be exactly 4 bytes each or the
         // replaceSubrange calls below corrupt the header.
         guard payload.count <= 65507 else {
-            NSLog("[DNSProxy] buildIPPacket: payload too large (\(payload.count)B) — dropping")
+            BBLog("[DNSProxy] buildIPPacket: payload too large (\(payload.count)B) — dropping")
             return Data()
         }
         guard srcIP.count == 4, dstIP.count == 4 else {
-            NSLog("[DNSProxy] buildIPPacket: bad IP length src=\(srcIP.count) dst=\(dstIP.count)")
+            BBLog("[DNSProxy] buildIPPacket: bad IP length src=\(srcIP.count) dst=\(dstIP.count)")
             return Data()
         }
         let udpLen = UInt16(8 + payload.count)
@@ -1405,7 +1462,7 @@ final class DNSProxy {
                     p.append(appName)
                     defaults?.set(p, forKey: AppGroupKeys.newAppDetections)
                 }
-                NSLog("[DNSProxy] New app: \(appName)")
+                BBLog("[DNSProxy] New app: \(appName)")
             }
             knownAppsLock.unlock()
         }
@@ -1626,7 +1683,7 @@ final class DNSProxy {
             writeResponse(refused, destIP: entry.ip, destPort: entry.port)
         }
         if !stale.isEmpty {
-            NSLog("[DNSProxy] Cleaned \(stale.count) stale pending queries (\(pending.count) remaining)")
+            BBLog("[DNSProxy] Cleaned \(stale.count) stale pending queries (\(pending.count) remaining)")
         }
     }
 

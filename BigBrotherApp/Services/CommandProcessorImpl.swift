@@ -178,6 +178,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         await MainActor.run {
             if bgTaskID != .invalid { UIApplication.shared.endBackgroundTask(bgTaskID) }
         }
+
+        // Mirror always-allowed + time-limit state to iCloud KVS so the
+        // data survives a full uninstall. Runs AFTER all command writes
+        // have committed (inside the 500ms grace above) so we don't
+        // capture an intermediate state. Cheap write — just the current
+        // in-memory iCloud KVS cache, synchronize flushes to disk later.
+        AlwaysAllowedBackup.mirror(from: storage)
     }
 
     #if DEBUG
@@ -192,13 +199,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
             ChildEnrollmentState.self,
             forKey: StorageKeys.enrollmentState
         ) else {
-            NSLog("[TestCommandReceiver] No enrollment — dropping test command \(command.id)")
+            BBLog("[TestCommandReceiver] No enrollment — dropping test command \(command.id)")
             return
         }
         beginEnforcementBatch()
         defer { endEnforcementBatch() }
         let result = await processCommand(command, enrollment: enrollment)
-        NSLog("[TestCommandReceiver] Processed \(command.action): \(result.logReason)")
+        BBLog("[TestCommandReceiver] Processed \(command.action): \(result.logReason)")
     }
     #endif
 
@@ -219,7 +226,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         let enforcementDefaults = UserDefaults.appGroup
         let refreshEpoch = enforcementDefaults?.double(forKey: AppGroupKeys.needsEnforcementRefresh) ?? 0
         if refreshEpoch > 0 {
-            NSLog("[BigBrother] needsEnforcementRefresh flag set (epoch=\(refreshEpoch)) — applying enforcement")
+            BBLog("[BigBrother] needsEnforcementRefresh flag set (epoch=\(refreshEpoch)) — applying enforcement")
             // b602: Clear the flag FIRST to prevent the enforcement loop.
             // Without this, every 3s/5s poll finds the flag still set and
             // calls enforcement.apply() on the main actor — synchronous XPC
@@ -1163,11 +1170,11 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
         )
 
         let result = try snapshotStore.commit(output.snapshot)
-        NSLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): snapshot committed, calling enforcement.apply()")
+        BBLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): snapshot committed, calling enforcement.apply()")
         switch result {
         case .committed(let snapshot):
             try enforcement?.apply(snapshot.effectivePolicy)
-            NSLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): enforcement.apply() completed")
+            BBLog("[CommandProcessor] applyMode(\(effectiveMode.rawValue)): enforcement.apply() completed")
             try snapshotStore.markApplied()
 
             // Verify write stuck — moved off main thread to avoid UI freeze.
@@ -1188,28 +1195,28 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 try? await Task.sleep(for: .seconds(1))
                 guard let currentSnap = verifySnapshotStore.loadCurrentSnapshot(),
                       currentSnap.effectivePolicy.policyVersion == committedVersion else {
-                    NSLog("[CommandProcessor] Post-write verify SKIPPED — newer snapshot superseded v\(committedVersion)")
+                    BBLog("[CommandProcessor] Post-write verify SKIPPED — newer snapshot superseded v\(committedVersion)")
                     return
                 }
                 let verifyDiag = verifyEnforcement?.shieldDiagnostic()
                 let shouldBeShielded = currentSnap.effectivePolicy.resolvedMode != .unlocked
                 let isShielded = verifyDiag?.shieldsActive == true || verifyDiag?.categoryActive == true
                 if shouldBeShielded != isShielded {
-                    NSLog("[CommandProcessor] POST-WRITE VERIFY FAILED — retrying (shields=\(isShielded), expected=\(shouldBeShielded))")
+                    BBLog("[CommandProcessor] POST-WRITE VERIFY FAILED — retrying (shields=\(isShielded), expected=\(shouldBeShielded))")
                     try? await Task.sleep(for: .seconds(0.5))
                     // Re-read again — another command may have landed in the 0.5s sleep.
                     guard let stillCurrent = verifySnapshotStore.loadCurrentSnapshot(),
                           stillCurrent.effectivePolicy.policyVersion == committedVersion else {
-                        NSLog("[CommandProcessor] Post-write verify retry SKIPPED — newer snapshot superseded v\(committedVersion)")
+                        BBLog("[CommandProcessor] Post-write verify retry SKIPPED — newer snapshot superseded v\(committedVersion)")
                         return
                     }
                     try? verifyEnforcement?.apply(stillCurrent.effectivePolicy)
                     let retryDiag = verifyEnforcement?.shieldDiagnostic()
                     let retryOK = (retryDiag?.shieldsActive == true || retryDiag?.categoryActive == true) == shouldBeShielded
-                    NSLog("[CommandProcessor] Retry result: \(retryOK ? "OK" : "STILL FAILED")")
+                    BBLog("[CommandProcessor] Retry result: \(retryOK ? "OK" : "STILL FAILED")")
                     if retryOK { Self.recordShieldsAppliedForCmd(verifyCmdID) }
                 } else {
-                    NSLog("[CommandProcessor] Post-write verify OK")
+                    BBLog("[CommandProcessor] Post-write verify OK")
                     Self.recordShieldsAppliedForCmd(verifyCmdID)
                 }
             }
@@ -1237,7 +1244,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     try? await Task.sleep(for: .seconds(1))
                     let confirmedAt = defaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0
                     if confirmedAt >= triggerTime {
-                        NSLog("[CommandProcessor] Monitor confirmed enforcement after \(attempt)s")
+                        BBLog("[CommandProcessor] Monitor confirmed enforcement after \(attempt)s")
                         confirmed = true
                         Self.recordShieldsAppliedForCmd(monitorCmdID)
                         break
@@ -1246,17 +1253,17 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                     // that command's own retry loop now owns recovery.
                     guard let currentSnap = verifySnapshotStore.loadCurrentSnapshot(),
                           currentSnap.effectivePolicy.policyVersion == committedVersion else {
-                        NSLog("[CommandProcessor] Monitor confirm loop exiting — newer snapshot superseded v\(committedVersion)")
+                        BBLog("[CommandProcessor] Monitor confirm loop exiting — newer snapshot superseded v\(committedVersion)")
                         return
                     }
                     if attempt % 3 == 0 {
                         let isUnlockRetry = currentSnap.effectivePolicy.resolvedMode == .unlocked
-                        NSLog("[CommandProcessor] \(isUnlockRetry ? "Unlock" : "Lock") not confirmed after \(attempt)s — retrying main-app apply")
+                        BBLog("[CommandProcessor] \(isUnlockRetry ? "Unlock" : "Lock") not confirmed after \(attempt)s — retrying main-app apply")
                         try? verifyEnforcement?.apply(currentSnap.effectivePolicy)
                     }
                 }
                 if !confirmed {
-                    NSLog("[CommandProcessor] Monitor not confirmed within main-app window; scheduled refresh (~90s) will handle it")
+                    BBLog("[CommandProcessor] Monitor not confirmed within main-app window; scheduled refresh (~90s) will handle it")
                     defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.needsEnforcementRefresh)
                 }
             }
@@ -1414,13 +1421,13 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 try? await Task.sleep(for: .seconds(1))
                 let confirmedAt = defaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0
                 if confirmedAt >= triggerTime {
-                    NSLog("[CommandProcessor] Monitor confirmed temp unlock enforcement after \(attempt)s")
+                    BBLog("[CommandProcessor] Monitor confirmed temp unlock enforcement after \(attempt)s")
                     confirmed = true
                     break
                 }
                 // Retry clear from app every 3s as backup
                 if attempt % 3 == 0 {
-                    NSLog("[CommandProcessor] Temp unlock not confirmed after \(attempt)s — retrying clear")
+                    BBLog("[CommandProcessor] Temp unlock not confirmed after \(attempt)s — retrying clear")
                     if let snap = self?.snapshotStore.loadCurrentSnapshot() {
                         try? self?.enforcement?.apply(snap.effectivePolicy)
                     }
@@ -1430,7 +1437,7 @@ final class CommandProcessorImpl: CommandProcessorProtocol, @unchecked Sendable 
                 }
             }
             if !confirmed {
-                NSLog("[CommandProcessor] Monitor did NOT confirm temp unlock after 10s — flag set")
+                BBLog("[CommandProcessor] Monitor did NOT confirm temp unlock after 10s — flag set")
                 defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.needsEnforcementRefresh)
             }
         }

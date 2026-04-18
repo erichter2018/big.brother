@@ -124,7 +124,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Tunnel Lifecycle
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
-        NSLog("[Tunnel] startTunnel called (b\(AppConstants.appBuildNumber))")
+        BBLog("[Tunnel] startTunnel called (b\(AppConstants.appBuildNumber))")
         tunnelStartedAt = Date()
 
         // Telemetry: count every tunnel start. A high count = iOS is
@@ -159,10 +159,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let upstreamDNS: String
         if shouldBlackhole {
             upstreamDNS = "1.1.1.1" // Real DNS — proxy handles blackhole with Apple exemptions
-            NSLog("[Tunnel] DNS blackhole active — internet blocked (Apple domains exempt), reasons: \(activeBlockReasons.map(\.rawValue).joined(separator: ", "))")
+            BBLog("[Tunnel] DNS blackhole active — internet blocked (Apple domains exempt), reasons: \(activeBlockReasons.map(\.rawValue).joined(separator: ", "))")
         } else if safeSearchEnabled {
             upstreamDNS = "185.228.168.168" // CleanBrowsing Family
-            NSLog("[Tunnel] DNS safe search enabled (CleanBrowsing Family)")
+            BBLog("[Tunnel] DNS safe search enabled (CleanBrowsing Family)")
         } else {
             upstreamDNS = "1.1.1.1" // Cloudflare (fast, reliable)
         }
@@ -188,12 +188,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error {
-                NSLog("[Tunnel] Failed to set network settings: \(error.localizedDescription)")
+                BBLog("[Tunnel] Failed to set network settings: \(error.localizedDescription)")
                 completionHandler(error)
                 return
             }
 
-            NSLog("[Tunnel] Tunnel started successfully (no-route mode)")
+            BBLog("[Tunnel] Tunnel started successfully (no-route mode)")
 
             self?.writeTunnelStatus("running")
             self?.dnsProxy?.start()
@@ -219,7 +219,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        NSLog("[Tunnel] stopTunnel called (reason: \(reason.rawValue))")
+        BBLog("[Tunnel] stopTunnel called (reason: \(reason.rawValue))")
 
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
@@ -252,7 +252,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Flush screen time so the main app reads current values for its heartbeat.
             flushScreenTimeSession()
             if !mainAppAlive {
-                NSLog("[Tunnel] Main app came back alive")
+                BBLog("[Tunnel] Main app came back alive")
                 mainAppAlive = true
                 tunnelOwnsHeartbeat = false
             }
@@ -311,7 +311,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if let lastPing = self.lastPingFromApp, Date().timeIntervalSince(lastPing) < 120 {
                 self.tunnelOwnsHeartbeat = false
                 self.mainAppAlive = true
-                NSLog("[Tunnel] App recovered (recent IPC ping) — handing back heartbeat duties")
+                BBLog("[Tunnel] App recovered (recent IPC ping) — handing back heartbeat duties")
                 return
             }
             Task { await self.sendHeartbeatFromTunnel(reason: "timer") }
@@ -386,9 +386,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         do {
             _ = try await db.modifyRecords(saving: records, deleting: [], savePolicy: .allKeys)
             lastEnforcementLogUploadAt = batch.last?.timestamp ?? lastEnforcementLogUploadAt
-            NSLog("[Tunnel] Enforcement log: uploaded \(batch.count) entries")
+            BBLog("[Tunnel] Enforcement log: uploaded \(batch.count) entries")
         } catch {
-            NSLog("[Tunnel] Enforcement log batch failed: \(error.localizedDescription)")
+            BBLog("[Tunnel] Enforcement log batch failed: \(error.localizedDescription)")
         }
 
         // Auto-prune records older than 48 hours
@@ -407,7 +407,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             if !idsToDelete.isEmpty {
                 _ = try await db.modifyRecords(saving: [], deleting: idsToDelete)
-                NSLog("[Tunnel] Enforcement log: pruned \(idsToDelete.count) records older than 48h")
+                BBLog("[Tunnel] Enforcement log: pruned \(idsToDelete.count) records older than 48h")
             }
         } catch {
             // Non-fatal — old records just accumulate until next prune
@@ -497,9 +497,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         do {
             try await db.save(record)
-            NSLog("[Tunnel] DNS activity synced: \(mergedDomains.count) domains (merged), \(mergedTotal) queries")
+            BBLog("[Tunnel] DNS activity synced: \(mergedDomains.count) domains (merged), \(mergedTotal) queries")
         } catch {
-            NSLog("[Tunnel] DNS activity sync failed: \(error.localizedDescription)")
+            BBLog("[Tunnel] DNS activity sync failed: \(error.localizedDescription)")
         }
     }
 
@@ -513,14 +513,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Day changed — flush yesterday's data, reset counters
             dnsProxy?.flushToAppGroup()
             dnsProxy?.resetDaily()
-            NSLog("[Tunnel] Daily reset for new day")
+            BBLog("[Tunnel] Daily reset for new day")
         }
 
         // Reset screen time if stored date doesn't match today — handles both
         // day rollover AND fresh tunnel start after deploy (lastDNSDateCheck was nil).
         let defaults = UserDefaults.appGroup
         if defaults?.string(forKey: screenTimeDateKey) != today {
-            NSLog("[Tunnel] Screen time reset for new day (was: \(defaults?.integer(forKey: screenTimeMinutesKey) ?? 0)m, \(defaults?.integer(forKey: screenTimeUnlockCountKey) ?? 0) unlocks)")
+            BBLog("[Tunnel] Screen time reset for new day (was: \(defaults?.integer(forKey: screenTimeMinutesKey) ?? 0)m, \(defaults?.integer(forKey: screenTimeUnlockCountKey) ?? 0) unlocks)")
             defaults?.set(today, forKey: screenTimeDateKey)
             defaults?.set(0, forKey: screenTimeSecondsKey)
             defaults?.set(0, forKey: screenTimeMinutesKey)
@@ -591,7 +591,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             //   - DNSProxy.healthCheck() reconnects only if the upstream
             //     session is cancelled/failed or the pending queue is stalled
             if self.networkSettingsNeedRetry {
-                NSLog("[Tunnel] (fast-path) retrying failed network settings application")
+                BBLog("[Tunnel] (fast-path) retrying failed network settings application")
                 self.reapplyNetworkSettings()
             }
             // Kid-DNS is the authoritative signal for the recovery ladder:
@@ -667,7 +667,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             nil,
             .deliverImmediately
         )
-        NSLog("[Tunnel] installed command-poke Darwin observer")
+        BBLog("[Tunnel] installed command-poke Darwin observer")
     }
 
     /// Fire a one-shot command poll now, outside the fast-path timer. Safe to
@@ -676,11 +676,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// command anyway.
     private func triggerImmediatePoll(reason: String) {
         guard !isPollingCommands else {
-            NSLog("[Tunnel] pokePoll (\(reason)) skipped — poll already in flight")
+            BBLog("[Tunnel] pokePoll (\(reason)) skipped — poll already in flight")
             return
         }
         isPollingCommands = true
-        NSLog("[Tunnel] pokePoll (\(reason)) firing immediate command poll")
+        BBLog("[Tunnel] pokePoll (\(reason)) firing immediate command poll")
         Task {
             await self.pollAndProcessCommands()
             self.isPollingCommands = false
@@ -713,7 +713,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if appDead && mainAppAlive {
             // App just died — take over screen time tracking + heartbeats
-            NSLog("[Tunnel] Main app appears dead — taking over heartbeat duties")
+            BBLog("[Tunnel] Main app appears dead — taking over heartbeat duties")
             mainAppAlive = false
             tunnelOwnsHeartbeat = true
 
@@ -737,7 +737,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // ManagedSettingsStore. The Monitor handles free-window-specific nags.
         } else if !appDead && !mainAppAlive {
             // App came back (via App Group timestamp, before IPC resumes)
-            NSLog("[Tunnel] Main app appears alive again (App Group timestamp updated)")
+            BBLog("[Tunnel] Main app appears alive again (App Group timestamp updated)")
             mainAppAlive = true
             // b457: hand heartbeat duties back. Previously only the IPC ping
             // path cleared this flag, so a recovery detected via App Group
@@ -758,7 +758,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let pauseDefaults = UserDefaults.appGroup
         if pauseDefaults?.object(forKey: AppGroupKeys.restrictionsPausedByChild) != nil {
             if !activeBlockReasons.isEmpty {
-                NSLog("[Tunnel] Restrictions paused by child — clearing all DNS blocks")
+                BBLog("[Tunnel] Restrictions paused by child — clearing all DNS blocks")
                 let allReasons = Set(DNSBlockReason.allCases)
                 batchUpdateBlockReasons(remove: allReasons)
             }
@@ -770,7 +770,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
            unblockAt > 0, Date().timeIntervalSince1970 >= unblockAt {
             blockDefaults?.removeObject(forKey: AppGroupKeys.internetBlockedUntil)
             setBlockReason(.parentCommand, active: false)
-            NSLog("[Tunnel] Internet block expired — traffic restored")
+            BBLog("[Tunnel] Internet block expired — traffic restored")
             tunnelOwnsHeartbeat = false
         }
 
@@ -784,7 +784,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if activeBlockReasons.contains(.parentCommand) {
             let unblockAt = blockDefaults?.double(forKey: AppGroupKeys.internetBlockedUntil) ?? 0
             if unblockAt <= 0 {
-                NSLog("[Tunnel] .parentCommand invariant: internetBlockedUntil cleared — releasing reason")
+                BBLog("[Tunnel] .parentCommand invariant: internetBlockedUntil cleared — releasing reason")
                 setBlockReason(.parentCommand, active: false)
             }
         }
@@ -801,7 +801,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
            blockDefaults?.bool(forKey: AppGroupKeys.buildMismatchDNSBlock) == true {
             let mainBuild = blockDefaults?.integer(forKey: AppGroupKeys.mainAppLastLaunchedBuild) ?? 0
             if mainBuild >= AppConstants.appBuildNumber {
-                NSLog("[Tunnel] Clearing stale build-mismatch blackhole — main app on b\(mainBuild)")
+                BBLog("[Tunnel] Clearing stale build-mismatch blackhole — main app on b\(mainBuild)")
                 blockDefaults?.removeObject(forKey: AppGroupKeys.internetBlockedUntil)
                 blockDefaults?.removeObject(forKey: AppGroupKeys.buildMismatchDNSBlock)
                 if activeBlockReasons.contains(.parentCommand) {
@@ -836,7 +836,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // the appDead && mainAppAlive transition never fires (mainAppAlive starts false).
         // Catch this case and take over heartbeat duties.
         if appDead && !tunnelOwnsHeartbeat {
-            NSLog("[Tunnel] Cold-start: app already dead on tunnel start — taking over heartbeat")
+            BBLog("[Tunnel] Cold-start: app already dead on tunnel start — taking over heartbeat")
             tunnelOwnsHeartbeat = true
             Task { await sendHeartbeatFromTunnel(reason: "coldStartAppDead") }
         }
@@ -869,7 +869,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // FC auth degradation via its own UI. Blackholing while the app is alive
             // creates a deadlock: DNS blocked → no CloudKit → can't receive commands.
             if !activeBlockReasons.contains(.permissionsRevoked) {
-                NSLog("[Tunnel] FC auth revoked (\(fcAuth ?? "nil")) + app dead + mode \(resolution.mode.rawValue) — blocking internet")
+                BBLog("[Tunnel] FC auth revoked (\(fcAuth ?? "nil")) + app dead + mode \(resolution.mode.rawValue) — blocking internet")
                 setBlockReason(.permissionsRevoked, active: true)
 
                 // Notify kid
@@ -884,7 +884,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 Task { await sendPermissionRevokedAlert() }
             }
         } else if activeBlockReasons.contains(.permissionsRevoked) && authOK {
-            NSLog("[Tunnel] FC auth restored — unblocking internet")
+            BBLog("[Tunnel] FC auth restored — unblocking internet")
             setBlockReason(.permissionsRevoked, active: false)
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["fc-auth-revoked"])
         }
@@ -1000,7 +1000,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             _ = try? storage.commitCorrectedSnapshot(correctedSnapshot)
         }
 
-        NSLog("[Tunnel] Stale unlock state detected — corrected to \(resolution.mode.rawValue) (ext:\(extStale) snap:\(snapshotStale)). Scheduling Monitor refresh.")
+        BBLog("[Tunnel] Stale unlock state detected — corrected to \(resolution.mode.rawValue) (ext:\(extStale) snap:\(snapshotStale)). Scheduling Monitor refresh.")
         scheduleEnforcementRefreshActivity(source: "staleUnlock")
 
         // The tunnel can't write to ManagedSettingsStore, so shields remain cleared.
@@ -1019,7 +1019,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if resolution.mode != .unlocked && !mainAppAlive && appDead && !activeBlockReasons.contains(.emergencyAppDead) {
             let shieldsConfirmedDown = staleDefaults?.object(forKey: AppGroupKeys.shieldsActiveAtLastHeartbeat) as? Bool == false
             if resolution.mode == .lockedDown || shieldsConfirmedDown {
-                NSLog("[Tunnel] \(resolution.mode.rawValue) + app dead + shields \(shieldsConfirmedDown ? "CONFIRMED DOWN" : "lockedDown override") — activating DNS blackhole")
+                BBLog("[Tunnel] \(resolution.mode.rawValue) + app dead + shields \(shieldsConfirmedDown ? "CONFIRMED DOWN" : "lockedDown override") — activating DNS blackhole")
                 setBlockReason(.emergencyAppDead, active: true)
                 emergencyActivatedAt = Date()
             }
@@ -1045,7 +1045,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let resolution = ModeStackResolver.resolve(storage: storage)
         if resolution.mode == .unlocked {
             if activeBlockReasons.contains(.buildMismatch) {
-                NSLog("[Tunnel] Build mismatch cleared — device is unlocked, no point blocking DNS")
+                BBLog("[Tunnel] Build mismatch cleared — device is unlocked, no point blocking DNS")
                 buildMismatchFirstDetectedAt = nil
                 setBlockReason(.buildMismatch, active: false)
                 UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["bb-open-app"])
@@ -1059,7 +1059,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // the app right after install, so give it 2 minutes to start and
                 // write the new build number before blocking internet.
                 buildMismatchFirstDetectedAt = Date()
-                NSLog("[Tunnel] Build mismatch: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — 2-min grace before blocking")
+                BBLog("[Tunnel] Build mismatch: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — 2-min grace before blocking")
 
                 postOpenAppNag("Open Big Brother to restore internet access.")
             }
@@ -1076,14 +1076,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                let detected = buildMismatchFirstDetectedAt,
                Date().timeIntervalSince(detected) > 120,
                !appRecentlyActive {
-                NSLog("[Tunnel] Build mismatch grace expired + app dead: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — blocking internet")
+                BBLog("[Tunnel] Build mismatch grace expired + app dead: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — blocking internet")
                 setBlockReason(.buildMismatch, active: true)
             } else if activeBlockReasons.contains(.buildMismatch) && appRecentlyActive {
-                NSLog("[Tunnel] Build mismatch: app is alive (can enforce shields) — releasing DNS block")
+                BBLog("[Tunnel] Build mismatch: app is alive (can enforce shields) — releasing DNS block")
                 setBlockReason(.buildMismatch, active: false)
             }
         } else if buildMismatchFirstDetectedAt != nil {
-            NSLog("[Tunnel] Build mismatch resolved: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — restoring internet")
+            BBLog("[Tunnel] Build mismatch resolved: app=b\(mainAppBuild) tunnel=b\(tunnelBuild) — restoring internet")
             buildMismatchFirstDetectedAt = nil
             setBlockReason(.buildMismatch, active: false)
             Task { await sendHeartbeatFromTunnel(reason: "buildMismatchCleared") }
@@ -1278,7 +1278,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         guard !releasing.isEmpty else { return [] }
 
         for reason in releasing {
-            NSLog("[Tunnel] Releasing \(reason.rawValue) blackhole — app alive (\(trigger))")
+            BBLog("[Tunnel] Releasing \(reason.rawValue) blackhole — app alive (\(trigger))")
         }
 
         if releasing.contains(.buildMismatch) {
@@ -1318,14 +1318,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             pendingShieldConfirmation = nil
             emergencyCheckCount = 0
             batchUpdateBlockReasons(remove: Set(DNSBlockReason.allCases))
-            NSLog("[Tunnel] DNS released — unlocked mode, shields will clear via Monitor")
+            BBLog("[Tunnel] DNS released — unlocked mode, shields will clear via Monitor")
         case .lockedDown:
             // Permanent DNS blackhole while lockedDown holds.
             setBlockReason(.lockedDownMode, active: true)
         case .restricted, .locked:
             // Release lockedDown if we're transitioning down from it.
             setBlockReason(.lockedDownMode, active: false)
-            NSLog("[Tunnel] Mode \(mode.rawValue) — Monitor will apply shields via stopMonitoring trigger")
+            BBLog("[Tunnel] Mode \(mode.rawValue) — Monitor will apply shields via stopMonitoring trigger")
         }
     }
 
@@ -1345,7 +1345,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func seedBlockReasonsOnStart() {
         let resolution = ModeStackResolver.resolve(storage: storage)
         if resolution.mode == .unlocked {
-            NSLog("[Tunnel] Seed: mode is unlocked — no block reasons seeded")
+            BBLog("[Tunnel] Seed: mode is unlocked — no block reasons seeded")
             return
         }
 
@@ -1380,7 +1380,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if let extState = storage.readExtensionSharedState(), extState.currentMode == .lockedDown {
             let extAge = now - extState.writtenAt.timeIntervalSince1970
             if mainAppRecentlyActive && extAge > 7200 {
-                NSLog("[Tunnel] Seed: stale lockedDown extState (\(Int(extAge))s old) — NOT seeding blackhole, main app is active")
+                BBLog("[Tunnel] Seed: stale lockedDown extState (\(Int(extAge))s old) — NOT seeding blackhole, main app is active")
             } else {
                 seeded.insert(.lockedDownMode)
             }
@@ -1388,7 +1388,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                   snap.effectivePolicy.resolvedMode == .lockedDown {
             let snapAge = now - snap.createdAt.timeIntervalSince1970
             if mainAppRecentlyActive && snapAge > 7200 {
-                NSLog("[Tunnel] Seed: stale lockedDown snapshot (\(Int(snapAge))s old) — NOT seeding blackhole, main app is active")
+                BBLog("[Tunnel] Seed: stale lockedDown snapshot (\(Int(snapAge))s old) — NOT seeding blackhole, main app is active")
             } else {
                 seeded.insert(.lockedDownMode)
             }
@@ -1405,7 +1405,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
            unblockAt > 0, now < unblockAt {
             let buildMismatchFlag = defaults?.bool(forKey: AppGroupKeys.buildMismatchDNSBlock) == true
             if buildMismatchFlag && buildMismatchResolved {
-                NSLog("[Tunnel] Seed: clearing stale build-mismatch internetBlockedUntil — main app launched on b\(currentBuild)")
+                BBLog("[Tunnel] Seed: clearing stale build-mismatch internetBlockedUntil — main app launched on b\(currentBuild)")
                 defaults?.removeObject(forKey: AppGroupKeys.internetBlockedUntil)
                 defaults?.removeObject(forKey: AppGroupKeys.buildMismatchDNSBlock)
             } else {
@@ -1428,7 +1428,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         blockReasonsLock.unlock()
         lastAppliedBlackholeState = finalBlackhole
         if !seeded.isEmpty {
-            NSLog("[Tunnel] Seeded block reasons: \(seeded.map(\.rawValue).joined(separator: ", "))")
+            BBLog("[Tunnel] Seeded block reasons: \(seeded.map(\.rawValue).joined(separator: ", "))")
         }
     }
 
@@ -1464,7 +1464,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // value newer than the activation is a real restoration.
             let shieldsFlagAge = shieldsFlagAt > 0 ? Date().timeIntervalSince1970 - shieldsFlagAt : .infinity
             if shieldsUp && shieldsFlagAge < 600 {
-                NSLog("[Tunnel] Shields confirmed UP (flag age \(Int(shieldsFlagAge))s) — lifting emergency blackhole, backstop no longer needed")
+                BBLog("[Tunnel] Shields confirmed UP (flag age \(Int(shieldsFlagAge))s) — lifting emergency blackhole, backstop no longer needed")
                 deactivateEmergencyBlackhole()
                 return
             }
@@ -1477,7 +1477,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // cycle will re-activate if conditions still warrant it.
             if let activatedAt = emergencyActivatedAt,
                Date().timeIntervalSince(activatedAt) > emergencyAppDeadMaxTTL {
-                NSLog("[Tunnel] Emergency blackhole TTL reached (\(Int(emergencyAppDeadMaxTTL))s) — releasing unconditionally; next check re-activates if still needed")
+                BBLog("[Tunnel] Emergency blackhole TTL reached (\(Int(emergencyAppDeadMaxTTL))s) — releasing unconditionally; next check re-activates if still needed")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .enforcement,
                     message: "Emergency blackhole auto-released at TTL",
@@ -1540,7 +1540,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Activate emergency blackhole — only fire once, not every 30s.
         guard !activeBlockReasons.contains(.emergencyAppDead) else { return }
-        NSLog("[Tunnel] EMERGENCY: App dead (age \(Int(appAge))s), Monitor dead (\(Int(monitorAge))s), screen unlocked, mode should be \(resolution.mode.rawValue) — activating DNS blackhole")
+        BBLog("[Tunnel] EMERGENCY: App dead (age \(Int(appAge))s), Monitor dead (\(Int(monitorAge))s), screen unlocked, mode should be \(resolution.mode.rawValue) — activating DNS blackhole")
         setBlockReason(.emergencyAppDead, active: true)
 
         // Notify parent via CloudKit event (once)
@@ -1553,7 +1553,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         emergencyActivatedAt = nil
         setBlockReason(.emergencyAppDead, active: false)
         Task { await sendHeartbeatFromTunnel(reason: "emergencyBlackholeCleared") }
-        NSLog("[Tunnel] Emergency blackhole deactivated — normal enforcement resumed")
+        BBLog("[Tunnel] Emergency blackhole deactivated — normal enforcement resumed")
     }
 
     /// Immediately write current block state to UserDefaults so the next heartbeat
@@ -1600,7 +1600,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Only attempt relay every 60s to avoid spamming dead-code schedules.
         guard age < 60 else { return }
 
-        NSLog("[Tunnel] Relaying enforcement refresh (signal age: \(Int(age))s, no confirmation)")
+        BBLog("[Tunnel] Relaying enforcement refresh (signal age: \(Int(age))s, no confirmation)")
     }
 
     /// Persistent enforcement verifier — runs every 30s on the liveness timer.
@@ -1634,7 +1634,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let extExpectsShields = extState.currentMode != .unlocked
             // If the extension state disagrees with ModeStackResolver, something is stale
             if extExpectsShields != expectedShieldsUp {
-                NSLog("[Tunnel] verifyEnforcement: mode mismatch — resolver=\(resolution.mode.rawValue) extState=\(extState.currentMode.rawValue)")
+                BBLog("[Tunnel] verifyEnforcement: mode mismatch — resolver=\(resolution.mode.rawValue) extState=\(extState.currentMode.rawValue)")
             }
         }
 
@@ -1645,7 +1645,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let age = Date().timeIntervalSince1970 - lastTrigger
             guard age >= 30 else { return }
 
-            NSLog("[Tunnel] verifyEnforcement: MISMATCH — expected shields \(expectedShieldsUp ? "UP" : "DOWN") but got \(actualShieldsUp ? "UP" : "DOWN") (mode=\(resolution.mode.rawValue))")
+            BBLog("[Tunnel] verifyEnforcement: MISMATCH — expected shields \(expectedShieldsUp ? "UP" : "DOWN") but got \(actualShieldsUp ? "UP" : "DOWN") (mode=\(resolution.mode.rawValue))")
             defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.tunnelEnforcementTriggerAt)
             scheduleEnforcementRefreshActivity(source: "verifyEnforcement")
         }
@@ -1671,13 +1671,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let wasActive = activeBlockReasons.contains(.scheduledLockedDown)
         if shouldBlock != wasActive {
             if shouldBlock {
-                NSLog("[Tunnel] Schedule enforcement DNS active — mode \(resolution.mode.rawValue), app not alive")
+                BBLog("[Tunnel] Schedule enforcement DNS active — mode \(resolution.mode.rawValue), app not alive")
                 setBlockReason(.scheduledLockedDown, active: true)
                 Task { await sendHeartbeatFromTunnel(reason: "scheduleEnforcementActivated") }
                 // Notify the kid — tapping opens BB which restores full enforcement + DNS.
                 postOpenAppNag("Open Big Brother to restore internet access.")
             } else {
-                NSLog("[Tunnel] Schedule enforcement DNS cleared — \(resolution.mode == .unlocked ? "mode unlocked" : "app alive")")
+                BBLog("[Tunnel] Schedule enforcement DNS cleared — \(resolution.mode == .unlocked ? "mode unlocked" : "app alive")")
                 setBlockReason(.scheduledLockedDown, active: false)
                 Task { await sendHeartbeatFromTunnel(reason: "scheduleEnforcementCleared") }
             }
@@ -1694,7 +1694,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if Date().timeIntervalSince1970 - lastNag > 3600 { // Max once per hour
                 nagDefaults?.set(Date().timeIntervalSince1970, forKey: lastNagKey)
                 postOpenAppNag("Tap to restore location tracking and full protection.")
-                NSLog("[Tunnel] Posted location nag notification — app dead for \(Int(appDeadFor))s")
+                BBLog("[Tunnel] Posted location nag notification — app dead for \(Int(appDeadFor))s")
             }
         }
     }
@@ -1714,13 +1714,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Monitor confirmed! Release temporary DNS blackhole.
             pendingShieldConfirmation = nil
             setBlockReason(.pendingShieldConfirmation, active: false)
-            NSLog("[Tunnel] Shield confirmation received — releasing temporary DNS blackhole (\(Int(age))s)")
+            BBLog("[Tunnel] Shield confirmation received — releasing temporary DNS blackhole (\(Int(age))s)")
             return
         }
 
         // Hard timeout after 5 minutes — release the block, Monitor may be dead
         if age > 300 {
-            NSLog("[Tunnel] Shield confirmation HARD TIMEOUT after \(Int(age))s — releasing DNS block")
+            BBLog("[Tunnel] Shield confirmation HARD TIMEOUT after \(Int(age))s — releasing DNS block")
             pendingShieldConfirmation = nil
             setBlockReason(.pendingShieldConfirmation, active: false)
             return
@@ -1728,7 +1728,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Soft warning at 2 minutes
         if age > 120 {
-            NSLog("[Tunnel] Shield confirmation waiting \(Int(age))s — Monitor may be slow")
+            BBLog("[Tunnel] Shield confirmation waiting \(Int(age))s — Monitor may be slow")
         }
     }
 
@@ -1748,7 +1748,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         defaults?.removeObject(forKey: AppGroupKeys.monitorNeedsHeartbeat)
-        NSLog("[Tunnel] Monitor requested heartbeat (\(Int(age))s ago) — sending")
+        BBLog("[Tunnel] Monitor requested heartbeat (\(Int(age))s ago) — sending")
         Task { await sendHeartbeatFromTunnel(reason: "monitorConfirmation") }
     }
 
@@ -1767,7 +1767,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             limits[idx].dailyLimitMinutes += extraMinutes
             limits[idx].updatedAt = Date()
             try? storage.writeAppTimeLimits(limits)
-            NSLog("[Tunnel] Granted +\(extraMinutes)m for \(limits[idx].appName) (now \(limits[idx].dailyLimitMinutes)m)")
+            BBLog("[Tunnel] Granted +\(extraMinutes)m for \(limits[idx].appName) (now \(limits[idx].dailyLimitMinutes)m)")
         }
 
         // Update DNS blocked domains (remove this app's domains).
@@ -1822,7 +1822,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         updateTimeLimitBlockedDomains()
         reapplyNetworkSettings()
         signalMonitorToReconcile()
-        NSLog("[Tunnel] Blocked \(limit.appName) for today")
+        BBLog("[Tunnel] Blocked \(limit.appName) for today")
     }
 
     /// Schedule a one-shot near-future DeviceActivity that wakes the Monitor
@@ -1868,9 +1868,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         do {
             try center.startMonitoring(activityName, during: schedule)
-            NSLog("[Tunnel] EnforcementRefresh \(source): registered \(activityName.rawValue), fires ~\(Int(delaySeconds))s")
+            BBLog("[Tunnel] EnforcementRefresh \(source): registered \(activityName.rawValue), fires ~\(Int(delaySeconds))s")
         } catch {
-            NSLog("[Tunnel] EnforcementRefresh \(source): FAILED — \(error.localizedDescription)")
+            BBLog("[Tunnel] EnforcementRefresh \(source): FAILED — \(error.localizedDescription)")
         }
     }
 
@@ -1892,7 +1892,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let url = URL(string: "https://www.apple.com/robots.txt") else { return }
         let task = session.downloadTask(with: url)
         task.resume()
-        NSLog("[Tunnel] Background URLSession wake triggered: \(id)")
+        BBLog("[Tunnel] Background URLSession wake triggered: \(id)")
     }
 
     /// Handle removeTimeLimit from tunnel: remove limit, remove from allowed, update DNS.
@@ -1926,7 +1926,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         updateTimeLimitBlockedDomains()
         signalMonitorToReconcile()
-        NSLog("[Tunnel] Removed time limit for \(removed?.appName ?? fingerprint)")
+        BBLog("[Tunnel] Removed time limit for \(removed?.appName ?? fingerprint)")
     }
 
     /// Recalculate time-limit DNS blocked domains from exhausted apps.
@@ -2012,9 +2012,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 try await db.save(record)
                 syncedUnlockRequestIDs.insert(idString)
                 try? storage.updateEventUploadState(ids: [entry.id], state: .uploaded)
-                NSLog("[Tunnel] Synced unlock request to CloudKit: \(entry.details?.prefix(60) ?? "?")")
+                BBLog("[Tunnel] Synced unlock request to CloudKit: \(entry.details?.prefix(60) ?? "?")")
             } catch {
-                NSLog("[Tunnel] Failed to sync unlock request: \(error.localizedDescription)")
+                BBLog("[Tunnel] Failed to sync unlock request: \(error.localizedDescription)")
             }
         }
     }
@@ -2067,9 +2067,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         do {
             _ = try await CloudKitRESTClient.modifyRecords(restReqs)
             restSyncedIDs = Set(toUpload.map(\.id))
-            NSLog("[Tunnel] syncResolvedPendingReviews REST: \(restSyncedIDs.count)/\(toUpload.count) uploaded")
+            BBLog("[Tunnel] syncResolvedPendingReviews REST: \(restSyncedIDs.count)/\(toUpload.count) uploaded")
         } catch {
-            NSLog("[Tunnel] syncResolvedPendingReviews REST failed (\(error.localizedDescription)) — framework fallback")
+            BBLog("[Tunnel] syncResolvedPendingReviews REST failed (\(error.localizedDescription)) — framework fallback")
         }
 
         // Apply the REST-synced IDs directly if we got them all; otherwise
@@ -2135,7 +2135,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 db.add(op)
             }
         } catch {
-            NSLog("[Tunnel] Failed to sync pending reviews: \(error.localizedDescription)")
+            BBLog("[Tunnel] Failed to sync pending reviews: \(error.localizedDescription)")
         }
 
         if !syncedIDs.isEmpty {
@@ -2148,7 +2148,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 try? storage.writeRawData(encoded, forKey: AppGroupKeys.pendingReviewLocalJSON)
             }
             defaults?.removeObject(forKey: AppGroupKeys.pendingReviewNeedsSync)
-            NSLog("[Tunnel] Synced \(syncedIDs.count)/\(toUpload.count) pending reviews (skipped \(reviews.count - toUpload.count) resolved)")
+            BBLog("[Tunnel] Synced \(syncedIDs.count)/\(toUpload.count) pending reviews (skipped \(reviews.count - toUpload.count) resolved)")
         }
     }
 
@@ -2220,10 +2220,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     changed = true
 
                     if !isMatch {
-                        NSLog("[Tunnel] DNS DECEPTION: child said '\(watch.childGivenName)' but DNS shows '\(detected)' (\(hits)/\(total) hits)")
+                        BBLog("[Tunnel] DNS DECEPTION: child said '\(watch.childGivenName)' but DNS shows '\(detected)' (\(hits)/\(total) hits)")
                         Task { await self.reportDeception(watch: watches[i], detectedName: detected) }
                     } else {
-                        NSLog("[Tunnel] DNS verified: '\(watch.childGivenName)' matches '\(detected)'")
+                        BBLog("[Tunnel] DNS verified: '\(watch.childGivenName)' matches '\(detected)'")
                     }
                 }
             }
@@ -2254,7 +2254,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         changed = true
 
                         if !isMatch {
-                            NSLog("[Tunnel] DNS DECEPTION (ongoing): child said '\(watch.childGivenName)' but DNS shows '\(top.key)' (\(top.value) hits)")
+                            BBLog("[Tunnel] DNS DECEPTION (ongoing): child said '\(watch.childGivenName)' but DNS shows '\(top.key)' (\(top.value) hits)")
                             Task { await self.reportDeception(watch: watches[i], detectedName: top.key) }
                         }
                     }
@@ -2298,7 +2298,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             record["appName"] = "\(detectedName) (child said: \(watch.childGivenName))" as NSString
             record["updatedAt"] = Date()
             _ = try? await db.save(record)
-            NSLog("[Tunnel] Updated CloudKit app name to '\(detectedName)' (was '\(watch.childGivenName)')")
+            BBLog("[Tunnel] Updated CloudKit app name to '\(detectedName)' (was '\(watch.childGivenName)')")
         }
     }
 
@@ -2324,9 +2324,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             record["details"] = details
             record["timestamp"] = entry.timestamp as NSDate
             try await db.save(record)
-            NSLog("[Tunnel] Emergency alert uploaded to CloudKit")
+            BBLog("[Tunnel] Emergency alert uploaded to CloudKit")
         } catch {
-            NSLog("[Tunnel] Failed to upload emergency alert: \(error.localizedDescription)")
+            BBLog("[Tunnel] Failed to upload emergency alert: \(error.localizedDescription)")
         }
     }
 
@@ -2340,16 +2340,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if durationSeconds > 0 {
             let resolution = ModeStackResolver.resolve(storage: storage)
             if resolution.mode == .unlocked {
-                NSLog("[Tunnel] Internet block request ignored — mode is unlocked")
+                BBLog("[Tunnel] Internet block request ignored — mode is unlocked")
                 return
             }
             let unblockAt = Date().addingTimeInterval(Double(durationSeconds))
             defaults?.set(unblockAt.timeIntervalSince1970, forKey: AppGroupKeys.internetBlockedUntil)
-            NSLog("[Tunnel] Internet blocked for \(durationSeconds)s (until \(unblockAt))")
+            BBLog("[Tunnel] Internet blocked for \(durationSeconds)s (until \(unblockAt))")
             setBlockReason(.parentCommand, active: true)
         } else {
             defaults?.removeObject(forKey: AppGroupKeys.internetBlockedUntil)
-            NSLog("[Tunnel] Internet unblocked")
+            BBLog("[Tunnel] Internet unblocked")
             setBlockReason(.parentCommand, active: false)
         }
     }
@@ -2449,7 +2449,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if reapplyInFlight {
             reapplyPending = true
             reapplyLock.unlock()
-            NSLog("[Tunnel] reapplyNetworkSettings: coalesced (another call in flight)")
+            BBLog("[Tunnel] reapplyNetworkSettings: coalesced (another call in flight)")
             return
         }
         reapplyInFlight = true
@@ -2460,7 +2460,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Always sync proxy blackhole mode (cheap Bool assignment)
         dnsProxy?.isBlackholeMode = wantBlackhole
         if wantBlackhole {
-            NSLog("[Tunnel] DNS proxy blackhole active — reasons: \(activeBlockReasons.map(\.rawValue).joined(separator: ", "))")
+            BBLog("[Tunnel] DNS proxy blackhole active — reasons: \(activeBlockReasons.map(\.rawValue).joined(separator: ", "))")
         }
 
         // Always flush state to UserDefaults for heartbeat
@@ -2482,7 +2482,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 reapplyPending = false
                 reapplyLock.unlock()
                 if shouldRerun {
-                    NSLog("[Tunnel] reapplyNetworkSettings: coalesced rerun (no-op early return)")
+                    BBLog("[Tunnel] reapplyNetworkSettings: coalesced rerun (no-op early return)")
                     reapplyNetworkSettings(force: true)
                 }
                 return
@@ -2539,13 +2539,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.setNetworkSettingsWithTimeout(settings, timeoutSeconds: 5.0) { [weak self] error, timedOut in
                 guard let self else { return }
                 if let error {
-                    NSLog("[Tunnel] Failed to reapply settings: \(error.localizedDescription) — will retry on next liveness tick")
+                    BBLog("[Tunnel] Failed to reapply settings: \(error.localizedDescription) — will retry on next liveness tick")
                     self.networkSettingsNeedRetry = true
                     // b432: Do NOT commit lastAppliedBlackholeState — leave it
                     // at the previous value so the next non-forced call won't
                     // short-circuit on the equality guard.
                 } else if timedOut {
-                    NSLog("[Tunnel] setTunnelNetworkSettings timed out after 5s — proceeding anyway, DNS read loop will restart")
+                    BBLog("[Tunnel] setTunnelNetworkSettings timed out after 5s — proceeding anyway, DNS read loop will restart")
                     self.networkSettingsNeedRetry = true
                     // Same as error case — don't commit on timeout.
                 } else {
@@ -2559,10 +2559,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         wantBlackhole: wantBlackhole
                     )
                     if committed {
-                        NSLog("[Tunnel] Network settings reapplied\(enteringBlackhole ? " (connections reset)" : "")\(force ? " (forced)" : "") [gen=\(myGeneration)]")
+                        BBLog("[Tunnel] Network settings reapplied\(enteringBlackhole ? " (connections reset)" : "")\(force ? " (forced)" : "") [gen=\(myGeneration)]")
                         self.networkSettingsNeedRetry = false
                     } else {
-                        NSLog("[Tunnel] Network settings reapplied but generation stale (my=\(myGeneration)) — skipping commit")
+                        BBLog("[Tunnel] Network settings reapplied but generation stale (my=\(myGeneration)) — skipping commit")
                     }
                 }
                 // Restart DNS read loop regardless — the old packetFlow becomes
@@ -2598,7 +2598,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.reasserting = false
                 }
                 if shouldRerun {
-                    NSLog("[Tunnel] reapplyNetworkSettings: coalesced rerun picked up")
+                    BBLog("[Tunnel] reapplyNetworkSettings: coalesced rerun picked up")
                     self.reapplyNetworkSettings(force: true)
                 }
             }
@@ -2607,7 +2607,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if needsTeardown {
             // Two-step: nil settings tears down the interface → drops all TCP connections.
             // Then re-apply with blackhole DNS. Apps that try to reconnect hit the blackhole.
-            NSLog("[Tunnel] Entering blackhole — tearing down interface to kill existing connections")
+            BBLog("[Tunnel] Entering blackhole — tearing down interface to kill existing connections")
             setNetworkSettingsWithTimeout(nil, timeoutSeconds: 5.0) { [weak self] error, timedOut in
                 guard let self else { return }
                 // b436 (audit fix): If the nil teardown FAILED or TIMED OUT,
@@ -2623,7 +2623,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // retry the whole sequence (equality guard is bypassed when
                 // networkSettingsNeedRetry is true).
                 if error != nil || timedOut {
-                    NSLog("[Tunnel] Nil-teardown failed (error=\(error?.localizedDescription ?? "none"), timedOut=\(timedOut)) — ABORTING reapply, will retry")
+                    BBLog("[Tunnel] Nil-teardown failed (error=\(error?.localizedDescription ?? "none"), timedOut=\(timedOut)) — ABORTING reapply, will retry")
                     try? self.storage.appendDiagnosticEntry(DiagnosticEntry(
                         category: .command,
                         message: "Blackhole nil-teardown FAILED — aborting reapply",
@@ -2643,7 +2643,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         self.reasserting = false
                     }
                     if shouldRerun {
-                        NSLog("[Tunnel] reapplyNetworkSettings: coalesced rerun (after teardown fail)")
+                        BBLog("[Tunnel] reapplyNetworkSettings: coalesced rerun (after teardown fail)")
                         self.reapplyNetworkSettings(force: true)
                     }
                     return
@@ -2657,7 +2657,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Retry of a failed blackhole entry — teardown already committed
             // on the previous attempt, just re-run applySettings to push the
             // blackhole DNS through.
-            NSLog("[Tunnel] Entering blackhole retry — teardown already committed, skipping to applySettings")
+            BBLog("[Tunnel] Entering blackhole retry — teardown already committed, skipping to applySettings")
             applySettings()
         } else {
             applySettings()
@@ -2721,9 +2721,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // we just didn't wait long enough. Clear the retry flag
                 // so the fast path stops reapplying.
                 if let error {
-                    NSLog("[Tunnel] setTunnelNetworkSettings late completion (post-timeout): \(error.localizedDescription)")
+                    BBLog("[Tunnel] setTunnelNetworkSettings late completion (post-timeout): \(error.localizedDescription)")
                 } else {
-                    NSLog("[Tunnel] setTunnelNetworkSettings late completion (post-timeout): success — clearing retry flag")
+                    BBLog("[Tunnel] setTunnelNetworkSettings late completion (post-timeout): success — clearing retry flag")
                     self?.networkSettingsNeedRetry = false
                 }
             }
@@ -2816,7 +2816,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let local = storage.readActiveScheduleProfile()
                 if local != profile {
                     try? storage.writeActiveScheduleProfile(profile)
-                    NSLog("[Tunnel] Schedule profile synced: \(name) (\(profile.lockedWindows.count) locked, \(profile.unlockedWindows.count) unlocked windows)")
+                    BBLog("[Tunnel] Schedule profile synced: \(name) (\(profile.lockedWindows.count) locked, \(profile.unlockedWindows.count) unlocked windows)")
                 }
                 break
             }
@@ -2887,17 +2887,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     deferredHeartbeat = true
                     processedByTunnel.insert(commandID)
                     Self.markCommandAppliedAsync(db: db, recordName: commandID)
-                    NSLog("[Tunnel] Processed requestHeartbeat command: \(commandID)")
+                    BBLog("[Tunnel] Processed requestHeartbeat command: \(commandID)")
                 } else if tunnelAction == "requestDiagnostics" {
                     await collectAndUploadDiagnostics(enrollment: enrollment)
                     processedByTunnel.insert(commandID)
                     Self.markCommandAppliedAsync(db: db, recordName: commandID)
-                    NSLog("[Tunnel] Processed requestDiagnostics command: \(commandID)")
+                    BBLog("[Tunnel] Processed requestDiagnostics command: \(commandID)")
                 } else if tunnelAction == "blockInternet" {
                     reapplyNetworkSettings()
                     processedByTunnel.insert(commandID)
                     Self.markCommandAppliedAsync(db: db, recordName: commandID)
-                    NSLog("[Tunnel] Processed blockInternet (mode-driven): \(commandID)")
+                    BBLog("[Tunnel] Processed blockInternet (mode-driven): \(commandID)")
                 } else if let tunnelAction,
                           Self.isTunnelProcessableAction(tunnelAction) {
                     let ckRecord = CKRecord(
@@ -2917,7 +2917,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         db: db
                     )
                     processedByTunnel.insert(commandID)
-                    NSLog("[Tunnel] Processed mode command \(tunnelAction): \(commandID) (appAlive=\(mainAppAlive))")
+                    BBLog("[Tunnel] Processed mode command \(tunnelAction): \(commandID) (appAlive=\(mainAppAlive))")
                 } else {
                     processedByTunnel.insert(commandID)
                 }
@@ -2929,7 +2929,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // nothing about whether the kid's Safari can resolve. The
             // DNS healthCheck path in startLivenessTimer is authoritative.
         } catch {
-            NSLog("[Tunnel] Command poll failed: \(error.localizedDescription)")
+            BBLog("[Tunnel] Command poll failed: \(error.localizedDescription)")
             commandPollFailureCount += 1
             if commandPollFailureCount >= 6 {
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -3049,7 +3049,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 record["status"] = "applied"
                 _ = try? await db.save(record)
             } catch {
-                NSLog("[Tunnel] markApplied failed for \(recordName): \(error.localizedDescription)")
+                BBLog("[Tunnel] markApplied failed for \(recordName): \(error.localizedDescription)")
             }
         }
     }
@@ -3137,7 +3137,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             _ = try await CloudKitRESTClient.modifyRecords([req])
             return true
         } catch {
-            NSLog("[Tunnel] Heartbeat REST save failed: \(error.localizedDescription) — falling back to framework")
+            BBLog("[Tunnel] Heartbeat REST save failed: \(error.localizedDescription) — falling back to framework")
             return false
         }
     }
@@ -3197,11 +3197,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // clobbering a just-installed fresh disable command.
         let verify = DNSFilteringState.read(from: defaults)
         guard verify == snapshot else {
-            NSLog("[Tunnel] DNS filtering auto-reenable deferred — state changed under us")
+            BBLog("[Tunnel] DNS filtering auto-reenable deferred — state changed under us")
             return
         }
         DNSFilteringState.write(.defaultEnabled, to: defaults)
-        NSLog("[Tunnel] DNS filtering auto-re-enabled")
+        BBLog("[Tunnel] DNS filtering auto-re-enabled")
     }
 
     private static func parseTunnelActionType(from json: String) -> String? {
@@ -3323,7 +3323,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         guard let mode = targetMode else {
-            NSLog("[Tunnel] Could not determine target mode from \(actionType) command")
+            BBLog("[Tunnel] Could not determine target mode from \(actionType) command")
             return
         }
 
@@ -3336,7 +3336,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let expiresAt = issuedAt.addingTimeInterval(Double(duration))
             // If the unlock already expired before we could process it, skip
             guard expiresAt > Date() else {
-                NSLog("[Tunnel] Temp unlock already expired (issued \(issuedAt), duration \(duration)s)")
+                BBLog("[Tunnel] Temp unlock already expired (issued \(issuedAt), duration \(duration)s)")
                 record["status"] = "applied"
                 _ = try? await db.save(record)
                 return
@@ -3400,7 +3400,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             warnings: existingPolicy?.warnings ?? [],
             policyVersion: (existingPolicy?.policyVersion ?? 0) + 1
         )
-        NSLog("[Tunnel] processCommand(\(actionType) → \(mode.rawValue)): allowedAppTokensData \(freshAllowedTokensData == nil ? "nil" : "\(freshAllowedTokensData!.count)B")")
+        BBLog("[Tunnel] processCommand(\(actionType) → \(mode.rawValue)): allowedAppTokensData \(freshAllowedTokensData == nil ? "nil" : "\(freshAllowedTokensData!.count)B")")
         let correctedSnapshot = PolicySnapshot(
             source: .commandApplied,
             trigger: "Tunnel: \(actionType) while app dead → \(mode.rawValue)",
@@ -3461,14 +3461,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             do {
                 try storage.markCommandProcessed(commandUUID)
             } catch {
-                NSLog("[Tunnel] markCommandProcessed FAILED for \(commandUUID): \(error.localizedDescription)")
+                BBLog("[Tunnel] markCommandProcessed FAILED for \(commandUUID): \(error.localizedDescription)")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .command,
                     message: "Tunnel markCommandProcessed failed for \(commandUUID.uuidString.prefix(8)): \(error.localizedDescription)"
                 ))
             }
         } else {
-            NSLog("[Tunnel] Could not parse UUID from recordName \(record.recordID.recordName) — primary dedup will miss this command")
+            BBLog("[Tunnel] Could not parse UUID from recordName \(record.recordID.recordName) — primary dedup will miss this command")
         }
 
         // Also mark in tunnel-specific UserDefaults for tunnel's own dedup.
@@ -3536,7 +3536,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// production latency when a parent flips a mode and the child's main
     /// app has been suspended.
     func handleTunnelTestNotification(_ notif: TunnelTestCommandReceiver.TestNotification) async {
-        NSLog("[Tunnel] handleTunnelTestNotification: \(notif.rawValue)")
+        BBLog("[Tunnel] handleTunnelTestNotification: \(notif.rawValue)")
         if notif == .requestHeartbeat {
             await sendHeartbeatFromTunnel(reason: "bgTestRequestHeartbeat", force: true)
             return
@@ -3545,7 +3545,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // VPN recovery hooks — exercise the tunnel's network recovery paths
         // on wifi-only devices that can't do real interface transitions.
         if notif == .recoverReapply {
-            NSLog("[Tunnel] Recovery test: forcing full network settings reapply")
+            BBLog("[Tunnel] Recovery test: forcing full network settings reapply")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
                 message: "Recovery test: reapply (simulated interface transition)"
@@ -3558,7 +3558,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         if notif == .recoverStaleTransport {
-            NSLog("[Tunnel] Recovery test: injecting stale transport state")
+            BBLog("[Tunnel] Recovery test: injecting stale transport state")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
                 message: "Recovery test: staleTransport (simulated DNS wedge)"
@@ -3674,7 +3674,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             try? await Task.sleep(for: .seconds(1))
             let confirmedAt = applyDefaults?.double(forKey: AppGroupKeys.monitorEnforcementConfirmedAt) ?? 0
             if confirmedAt >= triggerTime {
-                NSLog("[Tunnel] bgTest Monitor confirmed after \(attempt)s")
+                BBLog("[Tunnel] bgTest Monitor confirmed after \(attempt)s")
                 applyDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.enforcementApplyFinishedAt)
                 break
             }
@@ -3863,7 +3863,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             ckRecord["diagJSON"] = str
         }
         _ = try? await db.save(ckRecord)
-        NSLog("[Tunnel] Diagnostic report uploaded (\(recentLogs.count) log entries)")
+        BBLog("[Tunnel] Diagnostic report uploaded (\(recentLogs.count) log entries)")
     }
 
     // MARK: - CloudKit Heartbeat
@@ -3884,7 +3884,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             ChildEnrollmentState.self,
             forKey: StorageKeys.enrollmentState
         ) else {
-            NSLog("[Tunnel] No enrollment state — cannot send heartbeat")
+            BBLog("[Tunnel] No enrollment state — cannot send heartbeat")
             return
         }
 
@@ -3893,7 +3893,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults.appGroup
         let lastHBAt = defaults?.double(forKey: AppGroupKeys.lastHeartbeatSentAt) ?? 0
         if !force && mainAppAlive && lastHBAt > 0 && Date().timeIntervalSince1970 - lastHBAt < 120 {
-            NSLog("[Tunnel] Main app sent heartbeat recently — skipping")
+            BBLog("[Tunnel] Main app sent heartbeat recently — skipping")
             return
         }
 
@@ -4029,7 +4029,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         } else if lastShieldsActive != nil && !reportedModeIsUnlocked {
             // Suppressing a stale "shields down in restricted" report during a
             // transition. Log it so we can confirm the fix is working.
-            NSLog("[Tunnel] Suppressed stale shield=down report during mode transition (mode=\(modeResolution.mode.rawValue), flagAge=\(Int(shieldFlagAge))s)")
+            BBLog("[Tunnel] Suppressed stale shield=down report during mode transition (mode=\(modeResolution.mode.rawValue), flagAge=\(Int(shieldFlagAge))s)")
         }
         // If lastShieldsActive is nil (main app never sent heartbeat), leave fields
         // as-is from the record (may have previous main-app values).
@@ -4188,7 +4188,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Permission backoff — but cap at 5 minutes max and always try at least once every 5 min.
         // Previous bug: exponential backoff up to 30 min caused heartbeats to go silent for too long.
         if let backoffUntil = heartbeatPermissionBackoffUntil, Date() < backoffUntil {
-            NSLog("[Tunnel] Heartbeat skipped — permission backoff (\(heartbeatPermissionFailures) failures, retry at \(backoffUntil))")
+            BBLog("[Tunnel] Heartbeat skipped — permission backoff (\(heartbeatPermissionFailures) failures, retry at \(backoffUntil))")
             return
         }
         // Reset backoff if enough time has passed — don't stay backed off forever
@@ -4221,7 +4221,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let desc = error.localizedDescription.lowercased()
             if desc.contains("permission") || desc.contains("not permitted") {
                 heartbeatPermissionFailures += 1
-                NSLog("[Tunnel] Heartbeat permission denied (attempt \(heartbeatPermissionFailures)) — deleting stale record and recreating")
+                BBLog("[Tunnel] Heartbeat permission denied (attempt \(heartbeatPermissionFailures)) — deleting stale record and recreating")
                 // b457: check the delete result. If the delete itself fails
                 // with a permission error, the record is owned by an iCloud
                 // account we can no longer touch — recreating will also fail
@@ -4240,7 +4240,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     if deleteDesc.contains("permission") || deleteDesc.contains("not permitted") {
                         deleteFailedPermission = true
                     }
-                    NSLog("[Tunnel] Heartbeat record delete failed: \(deleteError.localizedDescription)")
+                    BBLog("[Tunnel] Heartbeat record delete failed: \(deleteError.localizedDescription)")
                 }
                 if deleteFailedPermission {
                     UserDefaults.appGroup?
@@ -4268,13 +4268,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     // Heartbeats are critical — never go silent for more than 5 minutes.
                     let backoff = min(60.0 * pow(2.0, Double(heartbeatPermissionFailures - 1)), 300)
                     heartbeatPermissionBackoffUntil = Date().addingTimeInterval(backoff)
-                    NSLog("[Tunnel] Heartbeat recreate failed — backing off \(Int(backoff))s")
+                    BBLog("[Tunnel] Heartbeat recreate failed — backing off \(Int(backoff))s")
                     // Don't feed permission failures into the DNS recovery ladder —
                     // permission errors are an account-level issue, not a network one.
                     return
                 }
             } else {
-                NSLog("[Tunnel] Heartbeat failed: \(error.localizedDescription)")
+                BBLog("[Tunnel] Heartbeat failed: \(error.localizedDescription)")
                 // b468: DO NOT feed heartbeat failures into the network recovery ladder.
                 // Framework-based CloudKit saves (db.save) are throttled by cloudd after
                 // ~3 minutes of the main app being backgrounded, even when the tunnel
@@ -4285,7 +4285,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         defaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.lastHeartbeatSentAt)
-        NSLog("[Tunnel] Heartbeat sent (reason: \(reason))")
+        BBLog("[Tunnel] Heartbeat sent (reason: \(reason))")
 
         // Save daily screen time snapshot (one record per device per day)
         let slotData = (defaults?.dictionary(forKey: screenTimeSlotKey) as? [String: Int]) ?? [:]
@@ -4327,7 +4327,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         do {
             try await db.save(stRecord)
         } catch {
-            NSLog("[Tunnel] Screen time snapshot save failed: \(error.localizedDescription)")
+            BBLog("[Tunnel] Screen time snapshot save failed: \(error.localizedDescription)")
         }
     }
 
@@ -4450,7 +4450,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             pathMonitorInitialCallbackPending = false
             lastPathInterfaceSignature = signature
             lastPathStatusSatisfied = path.status == .satisfied
-            NSLog("[Tunnel] Network path seed: '\(signature)' (status: \(path.status)) — no reapply")
+            BBLog("[Tunnel] Network path seed: '\(signature)' (status: \(path.status)) — no reapply")
             // Persist for other code that reads the last-known signature.
             let seedDefaults = UserDefaults.appGroup
             seedDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.tunnelNetworkPathChangedAt)
@@ -4470,7 +4470,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // satisfied↔unsatisfied flips). Excludes the first-callback seed.
         TunnelTelemetry.update { $0.pathChanges += 1 }
 
-        NSLog("[Tunnel] Network path changed — was '\(previous)', now '\(signature)' (status: \(path.status))")
+        BBLog("[Tunnel] Network path changed — was '\(previous)', now '\(signature)' (status: \(path.status))")
 
         // b513: Debounce rapid network transitions. Toggling wifi off produces
         // multiple intermediate states (wifi+cell → cell → wifi+cell → ...) within
@@ -4485,7 +4485,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Immediately reconnect upstream DNS — cheap, no downtime.
             // This alone fixes most wifi↔cellular transitions.
             self.dnsProxy?.reconnectUpstream()
-            NSLog("[Tunnel] Network changed — reconnected upstream DNS (instant)")
+            BBLog("[Tunnel] Network changed — reconnected upstream DNS (instant)")
 
             // b631 audit finding: the prior code gated the full re-plumb on
             // `dnsProxy.healthCheck() == false`, but a healthy DNS upstream
@@ -4501,7 +4501,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let capturedSignature = signature
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                NSLog("[Tunnel] Network change settled (\(capturedSignature)) — forcing re-plumb to rebind packet flow")
+                BBLog("[Tunnel] Network change settled (\(capturedSignature)) — forcing re-plumb to rebind packet flow")
                 try? self.storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .command,
                     message: "Network path transition — re-plumbing tunnel",
@@ -4527,7 +4527,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// dies. The DNS proxy's own healthCheck handles stuck sessions.
     private func checkNetworkPathAndReconnect() {
         if pathMonitor == nil {
-            NSLog("[Tunnel] Path monitor missing — re-seeding")
+            BBLog("[Tunnel] Path monitor missing — re-seeding")
             startNetworkPathMonitoring()
         }
     }
@@ -4538,7 +4538,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if success {
             if consecutiveHealthFailures > 0 {
                 let streak = consecutiveHealthFailures
-                NSLog("[Tunnel] Network health recovered after \(streak) consecutive failures")
+                BBLog("[Tunnel] Network health recovered after \(streak) consecutive failures")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .command,
                     message: "Network health recovered after \(streak) consecutive failures (recovery level reached: \(healthRecoveryLevel))"
@@ -4587,7 +4587,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if healthRecoveryLevel < 3 && count >= 12 && recentlyHeardFromApp {
             healthRecoveryLevel = 3
             lastHealthRecoveryAction = now
-            NSLog("[Tunnel] Network recovery FAST L3: reapplyNetworkSettings (count=\(count), reason=\(reason))")
+            BBLog("[Tunnel] Network recovery FAST L3: reapplyNetworkSettings (count=\(count), reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
                 message: "Network recovery FAST L3: reapplyNetworkSettings (DNS bound to dead interface)",
@@ -4601,7 +4601,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if healthRecoveryLevel < 1 && count >= 6 {
             healthRecoveryLevel = 1
             lastHealthRecoveryAction = Date()
-            NSLog("[Tunnel] Network recovery L1: reconnectUpstream (\(count) failures, reason=\(reason))")
+            BBLog("[Tunnel] Network recovery L1: reconnectUpstream (\(count) failures, reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
                 message: "Network recovery L1: reconnectUpstream",
@@ -4615,7 +4615,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if healthRecoveryLevel < 2 && count >= 18 {
             healthRecoveryLevel = 2
             lastHealthRecoveryAction = Date()
-            NSLog("[Tunnel] Network recovery L2: recreate DNS proxy (\(count) failures, reason=\(reason))")
+            BBLog("[Tunnel] Network recovery L2: recreate DNS proxy (\(count) failures, reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
                 message: "Network recovery L2: recreate DNS proxy",
@@ -4629,7 +4629,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if healthRecoveryLevel < 3 && count >= 36 {
             healthRecoveryLevel = 3
             lastHealthRecoveryAction = Date()
-            NSLog("[Tunnel] Network recovery L3: reapplyNetworkSettings (\(count) failures, reason=\(reason))")
+            BBLog("[Tunnel] Network recovery L3: reapplyNetworkSettings (\(count) failures, reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
                 message: "Network recovery L3: reapplyNetworkSettings",
@@ -4644,7 +4644,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if healthRecoveryLevel < 4 && count >= 60 {
             healthRecoveryLevel = 4
             lastHealthRecoveryAction = Date()
-            NSLog("[Tunnel] Network recovery L4: RESTARTING TUNNEL (\(count) failures, reason=\(reason))")
+            BBLog("[Tunnel] Network recovery L4: RESTARTING TUNNEL (\(count) failures, reason=\(reason))")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .command,
                 message: "L4 Recovery: Restarting tunnel after \(count) consecutive health failures",
@@ -4682,7 +4682,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         dnsProxy?.isBlackholeMode = shouldBlackhole
         dnsProxy?.start()
-        NSLog("[Tunnel] DNS proxy recreated with upstream \(upstreamDNS)")
+        BBLog("[Tunnel] DNS proxy recreated with upstream \(upstreamDNS)")
     }
 
     // MARK: - Screen Lock Monitoring
@@ -4704,7 +4704,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let locked = stale ? true : rawLocked
         dnsProxy?.isDeviceLocked = locked
         if !locked { lastUnlockAt = Date() }
-        NSLog("[Tunnel] Screen lock monitoring started (initial: \(locked ? "locked" : "unlocked"), stale: \(stale))")
+        BBLog("[Tunnel] Screen lock monitoring started (initial: \(locked ? "locked" : "unlocked"), stale: \(stale))")
     }
 
     private func stopScreenLockMonitoring() {
@@ -4834,7 +4834,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         defaults?.set(slots, forKey: screenTimeSlotKey)
 
-        NSLog("[Tunnel] Screen time: +\(seconds)s = \(accumulated / 60)m total today")
+        BBLog("[Tunnel] Screen time: +\(seconds)s = \(accumulated / 60)m total today")
     }
 
     /// Flush any in-progress unlock session (call before heartbeat or tunnel stop).

@@ -44,7 +44,7 @@ struct AppLaunchRestorer {
         // recovery → probe → rescue → Step 4 AuthorizationCenter prompt),
         // firing Screen Time prompts ahead of the stepwise fixer flow.
         if defaults?.bool(forKey: AppGroupKeys.showPermissionFixerOnNextLaunch) == true {
-            NSLog("[AppLaunchRestorer] Skipping — guided setup active, PermissionFixerView will handle enforcement after permissions are granted")
+            BBLog("[AppLaunchRestorer] Skipping — guided setup active, PermissionFixerView will handle enforcement after permissions are granted")
             return
         }
 
@@ -61,7 +61,7 @@ struct AppLaunchRestorer {
         let appDelegateRanRecently = appDelegateRestoreAt > 0 &&
             Date().timeIntervalSince1970 - appDelegateRestoreAt < 2.0
         if appDelegateRanRecently {
-            NSLog("[AppLaunchRestorer] Skipping — AppDelegate.restoreEnforcementIfNeeded ran \(Int(Date().timeIntervalSince1970 - appDelegateRestoreAt))s ago (avoiding concurrent writer race)")
+            BBLog("[AppLaunchRestorer] Skipping — AppDelegate.restoreEnforcementIfNeeded ran \(Int(Date().timeIntervalSince1970 - appDelegateRestoreAt))s ago (avoiding concurrent writer race)")
             // Still reset the throttle so the next launch has a fresh budget.
             enforcement.resetThrottle()
             return

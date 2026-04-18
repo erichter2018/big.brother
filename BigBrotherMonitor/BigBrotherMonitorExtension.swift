@@ -76,7 +76,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             ManagedSettingsStore(named: .init(name)).clearAllSettings()
         }
         defaults?.set(true, forKey: AppGroupKeys.migratedToSingleStore)
-        NSLog("[Monitor] Migrated: cleared legacy stores")
+        BBLog("[Monitor] Migrated: cleared legacy stores")
     }
 
     override func intervalDidStart(for activity: DeviceActivityName) {
@@ -104,7 +104,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Reconciliation quarter window started — verify enforcement matches snapshot.
         if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
-            NSLog("[Monitor] intervalDidStart FIRED for \(activity.rawValue)")
+            BBLog("[Monitor] intervalDidStart FIRED for \(activity.rawValue)")
             reconcile()
             return
         }
@@ -113,16 +113,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // to apply ManagedSettings from its privileged context (background writes from
         // the main app are unreliable).
         if activity.rawValue.hasPrefix("bigbrother.enforcementRefresh") {
-            NSLog("[Monitor] enforcementRefresh FIRED for \(activity.rawValue)")
+            BBLog("[Monitor] enforcementRefresh FIRED for \(activity.rawValue)")
             let resolution = ModeStackResolver.resolve(storage: storage)
             let policy = storage.readPolicySnapshot()?.effectivePolicy
-            NSLog("[Monitor] enforcementRefresh: mode=\(resolution.mode.rawValue) reason=\(resolution.reason)")
+            BBLog("[Monitor] enforcementRefresh: mode=\(resolution.mode.rawValue) reason=\(resolution.reason)")
             if resolution.mode == .unlocked {
                 clearAllShieldStores()
-                NSLog("[Monitor] enforcementRefresh: cleared all shields (unlocked)")
+                BBLog("[Monitor] enforcementRefresh: cleared all shields (unlocked)")
             } else {
                 applyShieldingToAllStores(mode: resolution.mode, policy: policy)
-                NSLog("[Monitor] enforcementRefresh: applied shields for \(resolution.mode.rawValue)")
+                BBLog("[Monitor] enforcementRefresh: applied shields for \(resolution.mode.rawValue)")
             }
             updateSharedState(mode: resolution.mode)
             // Confirm enforcement applied via UserDefaults — main app polls this.
@@ -210,7 +210,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Enforcement refresh trigger ended (1-minute window expired or was stopped).
         // Apply enforcement one more time as a safety net.
         if activity.rawValue.hasPrefix("bigbrother.enforcementRefresh") {
-            NSLog("[Monitor] enforcementRefresh intervalDidEnd for \(activity.rawValue)")
+            BBLog("[Monitor] enforcementRefresh intervalDidEnd for \(activity.rawValue)")
             let resolution = ModeStackResolver.resolve(storage: storage)
             let policy = storage.readPolicySnapshot()?.effectivePolicy
             if resolution.mode == .unlocked {
@@ -226,16 +226,16 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Reconciliation quarter ended — triggered by natural end OR by stopMonitoring from tunnel/main app.
         // This is the ON-DEMAND enforcement trigger. Apply shields from our privileged context.
         if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
-            NSLog("[Monitor] intervalDidEnd FIRED for \(activity.rawValue)")
+            BBLog("[Monitor] intervalDidEnd FIRED for \(activity.rawValue)")
             let resolution = ModeStackResolver.resolve(storage: storage)
             let policy = storage.readPolicySnapshot()?.effectivePolicy
-            NSLog("[Monitor] On-demand enforcement: mode=\(resolution.mode.rawValue) reason=\(resolution.reason)")
+            BBLog("[Monitor] On-demand enforcement: mode=\(resolution.mode.rawValue) reason=\(resolution.reason)")
             if resolution.mode == .unlocked {
                 clearAllShieldStores()
-                NSLog("[Monitor] Cleared all shield stores (unlocked)")
+                BBLog("[Monitor] Cleared all shield stores (unlocked)")
             } else {
                 applyShieldingToAllStores(mode: resolution.mode, policy: policy)
-                NSLog("[Monitor] Applied shields for \(resolution.mode.rawValue)")
+                BBLog("[Monitor] Applied shields for \(resolution.mode.rawValue)")
             }
             updateSharedState(mode: resolution.mode)
             // Confirm enforcement applied via UserDefaults — main app polls this.
@@ -310,7 +310,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
 
         // Reconciliation quarter warning — 3 hours before end = mid-quarter enforcement check.
         if activity.rawValue.hasPrefix("bigbrother.reconciliation.q") {
-            NSLog("[Monitor] intervalWillEndWarning for \(activity.rawValue) — reconciling")
+            BBLog("[Monitor] intervalWillEndWarning for \(activity.rawValue) — reconciling")
             reconcile()
             return
         }
@@ -321,7 +321,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         rearmEnforcementHeartbeat()
 
         if event.rawValue == "enforcement.heartbeat" {
-            NSLog("[Monitor] Enforcement heartbeat fired — flag checked")
+            BBLog("[Monitor] Enforcement heartbeat fired — flag checked")
             return
         }
 
@@ -395,7 +395,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // Add a small slack (5 min) for clock skew and rounding.
         let maxReasonableMinutes = minutesSinceMidnight + 5
         if minutes > maxReasonableMinutes {
-            NSLog("[Monitor] Ignoring stale-delivery usage milestone: \(minutes)m claimed, only \(minutesSinceMidnight)m since midnight. Likely yesterday's threshold delivered late.")
+            BBLog("[Monitor] Ignoring stale-delivery usage milestone: \(minutes)m claimed, only \(minutesSinceMidnight)m since midnight. Likely yesterday's threshold delivered late.")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "Screen time milestone ignored (stale cross-midnight delivery): \(minutes)m @ \(minutesSinceMidnight)m elapsed"
@@ -1216,9 +1216,9 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let center = DeviceActivityCenter()
         do {
             try center.startMonitoring(activity, during: schedule)
-            NSLog("[Monitor] Re-registered \(activity.rawValue)")
+            BBLog("[Monitor] Re-registered \(activity.rawValue)")
         } catch {
-            NSLog("[Monitor] Failed to re-register \(activity.rawValue): \(error)")
+            BBLog("[Monitor] Failed to re-register \(activity.rawValue): \(error)")
         }
     }
 
@@ -1323,7 +1323,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         do {
             try center.startMonitoring(activityName, during: schedule, events: [eventName: event])
         } catch {
-            NSLog("[Monitor] Failed to rearm enforcement heartbeat: \(error.localizedDescription)")
+            BBLog("[Monitor] Failed to rearm enforcement heartbeat: \(error.localizedDescription)")
         }
     }
 
@@ -1903,7 +1903,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
            !tokenData.isEmpty,
            let allowed = try? decoder.decode(Set<ApplicationToken>.self, from: tokenData) {
             tokens.formUnion(allowed)
-            NSLog("[Monitor] collectAllowedTokens: file read empty, loaded \(allowed.count) from snapshot fallback")
+            BBLog("[Monitor] collectAllowedTokens: file read empty, loaded \(allowed.count) from snapshot fallback")
         }
 
         // Temporarily allowed apps (non-expired only).
@@ -1914,7 +1914,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        NSLog("[Monitor] collectAllowedTokens: \(tokens.count) total (\(tokens.count) permanent + temp)")
+        BBLog("[Monitor] collectAllowedTokens: \(tokens.count) total (\(tokens.count) permanent + temp)")
         return tokens
     }
 
@@ -2314,7 +2314,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         // 1. Reconciliation quarters (4 expected)
         let reconciliationCount = allActivities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation.q") }.count
         if reconciliationCount < 4 {
-            NSLog("[Monitor] Reconciliation incomplete (\(reconciliationCount)/4) — re-registering")
+            BBLog("[Monitor] Reconciliation incomplete (\(reconciliationCount)/4) — re-registering")
             reregisterReconciliationSchedule()
             reconcile()
         }
@@ -2325,7 +2325,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             $0.rawValue.hasPrefix("bigbrother.scheduleprofile.") || $0.rawValue.hasPrefix("bigbrother.essentialwindow.")
         }.count
         if scheduleCount == 0, let profile = storage.readActiveScheduleProfile() {
-            NSLog("[Monitor] Schedule window activities MISSING — re-registering from \(profile.name)")
+            BBLog("[Monitor] Schedule window activities MISSING — re-registering from \(profile.name)")
             reregisterScheduleWindows(profile: profile, center: center)
         }
     }
@@ -2346,7 +2346,7 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         let count = center.activities.filter {
             $0.rawValue.hasPrefix(unlockPrefix) || $0.rawValue.hasPrefix(lockPrefix)
         }.count
-        NSLog("[Monitor] Re-registered \(count) schedule window activities")
+        BBLog("[Monitor] Re-registered \(count) schedule window activities")
     }
 
     private func registerScheduleWindow(_ window: ActiveWindow, prefix: String, center: DeviceActivityCenter) {
@@ -2400,11 +2400,11 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
             do {
                 try center.startMonitoring(activityName, during: schedule)
             } catch {
-                NSLog("[Monitor] Failed to register \(q.name): \(error)")
+                BBLog("[Monitor] Failed to register \(q.name): \(error)")
             }
         }
         let count = center.activities.filter { $0.rawValue.hasPrefix("bigbrother.reconciliation") }.count
-        NSLog("[Monitor] Re-registered reconciliation: \(count) quarters")
+        BBLog("[Monitor] Re-registered reconciliation: \(count) quarters")
     }
 
     private static func todayDateString() -> String {

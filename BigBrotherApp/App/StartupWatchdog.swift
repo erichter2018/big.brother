@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import BigBrotherCore
 
 // File-scoped globals referenced by the SIGUSR1 handler.
 // A @convention(c) closure cannot capture Swift statics, so these live
@@ -201,7 +202,7 @@ enum StartupWatchdog {
     }
 
     private static func write(_ line: String, truncate: Bool = false) {
-        NSLog("[BB] %@", line)
+        BBLog("[BB] \(line)")
         guard let url else { return }
         let data = Data((line + "\n").utf8)
         writeQueue.async {

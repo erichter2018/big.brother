@@ -123,6 +123,7 @@
 		923B6DEAA3097619F97B3AC6 /* BedtimeComplianceSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7D9C138A1239E96996144D /* BedtimeComplianceSection.swift */; };
 		94B2930159ECD884F1FF0D7A /* PendingAppReviewSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFDCC84CB93005BD5C519C6C /* PendingAppReviewSection.swift */; };
 		997213C1D484F1F0BBE2D0E0 /* SyncCoordinatorImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 508B63D3F65B1A2E0E8636EE /* SyncCoordinatorImpl.swift */; };
+		9B3ED2078BA4050F85EC5ABF /* APNsRegistrationRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57C368EE6C2E493D4492EB03 /* APNsRegistrationRecovery.swift */; };
 		9C272FFC62FFF8E521BC661B /* CloudKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 94E53286F8FE359FEF93B0B9 /* CloudKit.framework */; };
 		9C8E44DA8C5A3065756D0C39 /* FastPathResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED99CACC83DE4434B83F0F7 /* FastPathResolver.swift */; };
 		9E973AA701B475E740B3C6E0 /* ManagedSettings.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2F2C1FAF31FCCB98CFE58693 /* ManagedSettings.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
@@ -150,6 +151,7 @@
 		BAA54D7A8A572826EBD6154E /* BigBrotherShieldExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F85AF48051FD61F7CC41174 /* BigBrotherShieldExtension.swift */; };
 		BADEF007D85FCEBEACFA201D /* ActivityFeedSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25B72B0369A8D42F28572244 /* ActivityFeedSection.swift */; };
 		BB25BA24BA35CF5CF6AE004F /* BigBrotherMonitorExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B798B36FE0FAEB8B606C217 /* BigBrotherMonitorExtension.swift */; };
+		BB55C850D3475716996FAC85 /* AlwaysAllowedBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 727E937D3EFE3E44B35F7E8E /* AlwaysAllowedBackup.swift */; };
 		BC809B52E3AB20A74B635C50 /* ManageParentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A71169F2B01120A2C83B1C8E /* ManageParentsView.swift */; };
 		BDF57CCF089834D095F39F7D /* InsightsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5DC2165FE4CA5A8229AB9A /* InsightsView.swift */; };
 		BE4F33E2AC94D8F17A4F9804 /* CKRecordConversion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DFC4955AC83380BE38C8BC0 /* CKRecordConversion.swift */; };
@@ -343,6 +345,7 @@
 		508B63D3F65B1A2E0E8636EE /* SyncCoordinatorImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncCoordinatorImpl.swift; sourceTree = "<group>"; };
 		50EC40AF79E592665680B22C /* ActivityFeedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityFeedView.swift; sourceTree = "<group>"; };
 		545535D1C70ABF0A003B9E5B /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		57C368EE6C2E493D4492EB03 /* APNsRegistrationRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APNsRegistrationRecovery.swift; sourceTree = "<group>"; };
 		57E39333DD2C79C3B88F786B /* SubscriptionGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionGate.swift; sourceTree = "<group>"; };
 		5805D9BB41527AF54A57086A /* OnlineActivitySection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineActivitySection.swift; sourceTree = "<group>"; };
 		596B83F9E91AB835D52CB4BA /* EnforcementService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnforcementService.swift; sourceTree = "<group>"; };
@@ -362,6 +365,7 @@
 		6D6F28C469F306643A072853 /* ChildDetailSectionOrder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildDetailSectionOrder.swift; sourceTree = "<group>"; };
 		6ED99CACC83DE4434B83F0F7 /* FastPathResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FastPathResolver.swift; sourceTree = "<group>"; };
 		6F4546B78CBB0E676E0F52A1 /* CKRecordMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CKRecordMapping.swift; sourceTree = "<group>"; };
+		727E937D3EFE3E44B35F7E8E /* AlwaysAllowedBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlwaysAllowedBackup.swift; sourceTree = "<group>"; };
 		7425110E1AD24BCA7B6F62EE /* ScheduleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleManager.swift; sourceTree = "<group>"; };
 		773C468E734D5EDF5913F67B /* CommandSendable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSendable.swift; sourceTree = "<group>"; };
 		792778475B47D7B9A5347B7E /* ScheduleEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleEditorViewModel.swift; sourceTree = "<group>"; };
@@ -607,6 +611,8 @@
 				99144863A826CE58A7773FD2 /* Enforcement */,
 				F5BA6A413B36D0E39E75967D /* Enrollment */,
 				B9C786546A71A2939658F484 /* TimerIntegration */,
+				727E937D3EFE3E44B35F7E8E /* AlwaysAllowedBackup.swift */,
+				57C368EE6C2E493D4492EB03 /* APNsRegistrationRecovery.swift */,
 				B990D2705A50DABAD5E9BE6E /* AppLaunchRestorer.swift */,
 				BBA3B6C10FF4EDB4AF7DE3EA /* AppNameHarvester.swift */,
 				D3290E376B632F9418F4C5A5 /* AppReviewNotificationService.swift */,
@@ -1443,10 +1449,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9B3ED2078BA4050F85EC5ABF /* APNsRegistrationRecovery.swift in Sources */,
 				BADEF007D85FCEBEACFA201D /* ActivityFeedSection.swift in Sources */,
 				E6D59FCA271598150FD056A8 /* ActivityFeedView.swift in Sources */,
 				2A7333B38AD4A92D3676A910 /* ActivityFeedViewModel.swift in Sources */,
 				90FFAAE761F58EC28A2072FF /* AddChildView.swift in Sources */,
+				BB55C850D3475716996FAC85 /* AlwaysAllowedBackup.swift in Sources */,
 				CD80BF2C155A9A0AE6689FBF /* AlwaysAllowedSelectionView.swift in Sources */,
 				DDC64E2A886E861A761A24AC /* AlwaysAllowedSetupView.swift in Sources */,
 				54647100AF3EC99E715A1CAC /* AppBlockingSetupView.swift in Sources */,

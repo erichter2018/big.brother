@@ -66,7 +66,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             ManagedSettingsStore(named: .init(name)).clearAllSettings()
         }
         defaults?.set(true, forKey: AppGroupKeys.migratedToSingleStore)
-        NSLog("[Enforcement] Migrated: cleared legacy stores (base, schedule, tempUnlock)")
+        BBLog("[Enforcement] Migrated: cleared legacy stores (base, schedule, tempUnlock)")
     }
     private let storage: any SharedStorageProtocol
     private let fcManager: any FamilyControlsManagerProtocol
@@ -112,7 +112,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         Self.applyLock.lock()
         defer { Self.applyLock.unlock() }
         guard let snapshot = storage.readPolicySnapshot() else {
-            NSLog("[Enforcement] forceDaemonRescue: no snapshot, skipping")
+            BBLog("[Enforcement] forceDaemonRescue: no snapshot, skipping")
             return
         }
         let policy = snapshot.effectivePolicy
@@ -188,7 +188,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             return
         }
 
-        NSLog("[Enforcement] apply() START — mode=\(policy.resolvedMode.rawValue) isTemp=\(policy.isTemporaryUnlock)")
+        BBLog("[Enforcement] apply() START — mode=\(policy.resolvedMode.rawValue) isTemp=\(policy.isTemporaryUnlock)")
 
         // Timing: record the exact instants around the ManagedSettings write
         // so the automated test harness can separate apply latency from
@@ -202,7 +202,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
         // Auth warm-up: touch authorizationStatus to wake the FamilyControls XPC daemon.
         let authStatus = authorizationStatus
-        NSLog("[Enforcement] authStatus=\(authStatus) — XPC warmup (no sleep)")
+        BBLog("[Enforcement] authStatus=\(authStatus) — XPC warmup (no sleep)")
 
         let defaults = UserDefaults.appGroup
         defaults?.set("apply", forKey: AppGroupKeys.lastShieldChangeReason)
@@ -232,12 +232,12 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
 
         switch policy.resolvedMode {
         case .unlocked:
-            NSLog("[Enforcement] clearing all shields (unlocked)")
+            BBLog("[Enforcement] clearing all shields (unlocked)")
             clearAllShieldStores()
             recordShieldedAppCount(0)
 
         case .restricted, .locked, .lockedDown:
-            NSLog("[Enforcement] applying shields for \(policy.resolvedMode.rawValue)")
+            BBLog("[Enforcement] applying shields for \(policy.resolvedMode.rawValue)")
             applyShield(allowExemptions: policy.resolvedMode == .restricted, policyRestrictions: policy.deviceRestrictions)
         }
 
@@ -248,7 +248,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         let diagResult = shieldDiagnostic()
         let shouldBeShielded = policy.resolvedMode != .unlocked
         let isShielded = diagResult.shieldsActive || diagResult.categoryActive
-        NSLog("[Enforcement] apply() DONE — shields=\(diagResult.shieldsActive) cat=\(diagResult.categoryActive) shouldBeShielded=\(shouldBeShielded) match=\(shouldBeShielded == isShielded)")
+        BBLog("[Enforcement] apply() DONE — shields=\(diagResult.shieldsActive) cat=\(diagResult.categoryActive) shouldBeShielded=\(shouldBeShielded) match=\(shouldBeShielded == isShielded)")
 
         // Write actual shield state so the tunnel can verify enforcement consistency.
         // Companion timestamp lets the tunnel distinguish fresh Monitor/app writes
@@ -312,7 +312,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 degradedDefaults?.removeObject(forKey: AppGroupKeys.fcAuthDegraded)
                 degradedDefaults?.removeObject(forKey: AppGroupKeys.fcAuthDegradedAt)
                 degradedDefaults?.removeObject(forKey: "fcAuthDegradedNotificationSent")
-                NSLog("[Enforcement] FC auth recovered — ManagedSettings writes working again")
+                BBLog("[Enforcement] FC auth recovered — ManagedSettings writes working again")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .auth,
                     message: "FC auth recovered — ManagedSettings writes working again"
@@ -351,7 +351,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 }
             }()
             if expectedShielded == retryDiag.shieldsActive && !retryInconsistent {
-                NSLog("[Enforcement] apply() verify: first read was stale (XPC latency), retry PASSED")
+                BBLog("[Enforcement] apply() verify: first read was stale (XPC latency), retry PASSED")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .enforcement,
                     message: "Verify retry PASSED — first read was stale (XPC latency)",
@@ -443,7 +443,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                     let probeLeakedWebCat = recoveryStore.shield.webDomainCategories != nil
                     let probeLeakedWebDom = recoveryStore.shield.webDomains != nil
                     if probeLeakedApps || probeLeakedCats || probeLeakedWebCat || probeLeakedWebDom {
-                        NSLog("[Enforcement] CRITICAL: enforcement.recovery probe clear FAILED — daemon dropped writes, state leaked")
+                        BBLog("[Enforcement] CRITICAL: enforcement.recovery probe clear FAILED — daemon dropped writes, state leaked")
                         try? storage.appendDiagnosticEntry(DiagnosticEntry(
                             category: .enforcement,
                             message: "enforcement.recovery probe clear FAILED — daemon wedged",
@@ -452,14 +452,14 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                     }
 
                     if recoveryCheck {
-                        NSLog("[Enforcement] Recovery probe succeeded — primary store corrupt, daemon alive. Running deep rescue.")
+                        BBLog("[Enforcement] Recovery probe succeeded — primary store corrupt, daemon alive. Running deep rescue.")
                         try? storage.appendDiagnosticEntry(DiagnosticEntry(
                             category: .enforcement,
                             message: "Primary store corrupt (recovery probe accepted writes) — running deep rescue",
                             details: "Recovery store fully cleared so it can't merge ghost shields."
                         ))
                     } else {
-                        NSLog("[Enforcement] Recovery probe failed — FC daemon may be dead. Running deep rescue as last resort.")
+                        BBLog("[Enforcement] Recovery probe failed — FC daemon may be dead. Running deep rescue as last resort.")
                         try? storage.appendDiagnosticEntry(DiagnosticEntry(
                             category: .enforcement,
                             message: "FC daemon may be dead (recovery probe rejected writes) — running deep rescue",
@@ -481,7 +481,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                             details: "Daemon unwedged without user action (probeOK=\(recoveryCheck))"
                         ))
                     } else {
-                        NSLog("[Enforcement] FC_AUTH_DEGRADED — deep rescue failed. Needs Screen Time toggle.")
+                        BBLog("[Enforcement] FC_AUTH_DEGRADED — deep rescue failed. Needs Screen Time toggle.")
                         let degradedDefaults = UserDefaults.appGroup
                         degradedDefaults?.set(true, forKey: AppGroupKeys.fcAuthDegraded)
                         degradedDefaults?.set(Date().timeIntervalSince1970, forKey: AppGroupKeys.fcAuthDegradedAt)
@@ -542,7 +542,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // and time-limit activities (each of which expects its own custom
         // schedule). The kick is purely a daemon-wake side effect, so
         // restricting it to the reconciliation activities is sufficient.
-        NSLog("[Rescue] Step 1: DeviceActivity kick (reconciliation only)")
+        BBLog("[Rescue] Step 1: DeviceActivity kick (reconciliation only)")
         let center = DeviceActivityCenter()
         let allActivities = center.activities
         let reconciliationActivities = allActivities.filter {
@@ -572,7 +572,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // Step 2: State-machine flush. Write empty → nil → real. Walks the
         // agent through its full validation path, often resolving cache/disk
         // divergence where the agent's in-memory state is stale but disk is OK.
-        NSLog("[Rescue] Step 2: state-machine flush")
+        BBLog("[Rescue] Step 2: state-machine flush")
         enforcementStore.shield.applications = []
         Thread.sleep(forTimeInterval: 0.2)
         enforcementStore.shield.applications = nil
@@ -585,13 +585,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         }
         Thread.sleep(forTimeInterval: 0.5)
         if verifies() {
-            NSLog("[Rescue] State-machine flush recovered shields")
+            BBLog("[Rescue] State-machine flush recovered shields")
             return true
         }
 
         // Step 3: clearAllSettings on every named store we know about, then
         // re-apply. Broadens the clear beyond just enforcementStore.
-        NSLog("[Rescue] Step 3: broad clearAllSettings")
+        BBLog("[Rescue] Step 3: broad clearAllSettings")
         clearAllShieldStores()
         enforcementStore.clearAllSettings()
         Thread.sleep(forTimeInterval: 0.3)
@@ -603,7 +603,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         }
         Thread.sleep(forTimeInterval: 0.5)
         if verifies() {
-            NSLog("[Rescue] Broad clear recovered shields")
+            BBLog("[Rescue] Broad clear recovered shields")
             return true
         }
 
@@ -615,13 +615,13 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         // from reaching AuthorizationCenter at all. Pass `.individual` since
         // that's the preferred type for new auth, but the value doesn't really
         // matter — the daemon-wake side effect is what we want.
-        NSLog("[Rescue] Step 4: AuthorizationCenter XPC poke")
+        BBLog("[Rescue] Step 4: AuthorizationCenter XPC poke")
         let rescueSemaphore = DispatchSemaphore(value: 0)
         Task {
             do {
                 try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
             } catch {
-                NSLog("[Rescue] AuthorizationCenter call threw: \(error.localizedDescription)")
+                BBLog("[Rescue] AuthorizationCenter call threw: \(error.localizedDescription)")
             }
             rescueSemaphore.signal()
         }
@@ -636,11 +636,11 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
         }
         Thread.sleep(forTimeInterval: 0.5)
         if verifies() {
-            NSLog("[Rescue] Auth re-request recovered shields")
+            BBLog("[Rescue] Auth re-request recovered shields")
             return true
         }
 
-        NSLog("[Rescue] All rescue steps failed — daemon needs user intervention")
+        BBLog("[Rescue] All rescue steps failed — daemon needs user intervention")
         return false
     }
 
@@ -687,7 +687,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             else { return [] }
             return tokens
         }()
-        NSLog("[Enforcement] applyShield: allowExemptions=\(allowExemptions) picker=\(pickerTokens.count) allowed=\(allowedTokens.count)")
+        BBLog("[Enforcement] applyShield: allowExemptions=\(allowExemptions) picker=\(pickerTokens.count) allowed=\(allowedTokens.count)")
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
             message: "applyShield: allowExemptions=\(allowExemptions) picker=\(pickerTokens.count) allowed=\(allowedTokens.count)"
@@ -746,7 +746,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             assignShieldApplicationsIfChanged(effectiveApps)
             assignShieldApplicationCategoriesIfChanged(.all(except: allowedTokens))
             recordShieldedAppCount(perAppTokens.count)
-            NSLog("[Enforcement] applyShield: wrote shield.applications=\(perAppTokens.count) apps + .all(except: \(allowedTokens.count)) catch-all")
+            BBLog("[Enforcement] applyShield: wrote shield.applications=\(perAppTokens.count) apps + .all(except: \(allowedTokens.count)) catch-all")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "applyShield WROTE: shield.applications=\(perAppTokens.count) + .all(except: \(allowedTokens.count))"
@@ -778,14 +778,14 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             assignShieldApplicationsIfChanged(effectiveExplicitApps)
             if allowedTokens.isEmpty {
                 assignShieldApplicationCategoriesIfChanged(.all())
-                NSLog("[Enforcement] applyShield: wrote shield.applications=\(explicitApps?.count ?? 0) apps + .all() (no exemptions)")
+                BBLog("[Enforcement] applyShield: wrote shield.applications=\(explicitApps?.count ?? 0) apps + .all() (no exemptions)")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .enforcement,
                     message: "applyShield WROTE: shield.applications=\(explicitApps?.count ?? 0) + .all()"
                 ))
             } else {
                 assignShieldApplicationCategoriesIfChanged(.all(except: allowedTokens))
-                NSLog("[Enforcement] applyShield: wrote shield.applications=\(explicitApps?.count ?? 0) apps + .all(except: \(allowedTokens.count))")
+                BBLog("[Enforcement] applyShield: wrote shield.applications=\(explicitApps?.count ?? 0) apps + .all(except: \(allowedTokens.count))")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .enforcement,
                     message: "applyShield WROTE: shield.applications=\(explicitApps?.count ?? 0) + .all(except: \(allowedTokens.count))"
@@ -985,7 +985,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             let stillHasWebCat = legacy.shield.webDomainCategories != nil
             let stillHasWebDom = legacy.shield.webDomains != nil
             if stillHasApps || stillHasCats || stillHasWebCat || stillHasWebDom {
-                NSLog("[Enforcement] Legacy store '\(name)' did not clear on first attempt — escalating to clearAllSettings")
+                BBLog("[Enforcement] Legacy store '\(name)' did not clear on first attempt — escalating to clearAllSettings")
                 try? storage.appendDiagnosticEntry(DiagnosticEntry(
                     category: .enforcement,
                     message: "Legacy store '\(name)' clear failed — retrying with clearAllSettings",
@@ -1000,7 +1000,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 let f3 = legacy.shield.webDomainCategories != nil
                 let f4 = legacy.shield.webDomains != nil
                 if f1 || f2 || f3 || f4 {
-                    NSLog("[Enforcement] CRITICAL: legacy store '\(name)' STILL not cleared after clearAllSettings — daemon wedge or external writer (iCloud Screen Time sync)")
+                    BBLog("[Enforcement] CRITICAL: legacy store '\(name)' STILL not cleared after clearAllSettings — daemon wedge or external writer (iCloud Screen Time sync)")
                     try? storage.appendDiagnosticEntry(DiagnosticEntry(
                         category: .enforcement,
                         message: "Legacy store '\(name)' WEDGED — clearAllSettings failed",
@@ -1124,7 +1124,7 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
             }
         }
 
-        NSLog("[Enforcement] collectAllowedTokens: total=\(tokens.count) source=\(fileReadSource) temp=\(tempCount)")
+        BBLog("[Enforcement] collectAllowedTokens: total=\(tokens.count) source=\(fileReadSource) temp=\(tempCount)")
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
             message: "collectAllowedTokens: total=\(tokens.count) source=\(fileReadSource) temp=\(tempCount)"
@@ -1439,9 +1439,9 @@ func scheduleEnforcementRefreshActivity(
         }
         do {
             try center.startMonitoring(activityName, during: schedule)
-            NSLog("[EnforcementRefresh] \(source): registered \(activityName.rawValue), fires ~\(Int(delaySeconds))s from now")
+            BBLog("[EnforcementRefresh] \(source): registered \(activityName.rawValue), fires ~\(Int(delaySeconds))s from now")
         } catch {
-            NSLog("[EnforcementRefresh] \(source): FAILED to register \(activityName.rawValue): \(error.localizedDescription)")
+            BBLog("[EnforcementRefresh] \(source): FAILED to register \(activityName.rawValue): \(error.localizedDescription)")
             try? AppGroupStorage().appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "EnforcementRefresh schedule failed",

@@ -550,7 +550,7 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
                     do {
                         try await ck.setupSubscriptions(familyID: famID, deviceID: devID)
                     } catch {
-                        NSLog("[Heartbeat] periodic subscription self-heal failed: \(error.localizedDescription)")
+                        BBLog("[Heartbeat] periodic subscription self-heal failed: \(error.localizedDescription)")
                     }
                 }
             }

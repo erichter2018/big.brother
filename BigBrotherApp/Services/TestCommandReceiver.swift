@@ -81,7 +81,7 @@ enum TestCommandReceiver {
                 .deliverImmediately
             )
         }
-        NSLog("[TestCommandReceiver] Installed \(TestNotification.allCases.count) Darwin observers")
+        BBLog("[TestCommandReceiver] Installed \(TestNotification.allCases.count) Darwin observers")
         // Diagnostic trace so the parent-side harness can verify the receiver is alive.
         let storage = AppGroupStorage()
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
@@ -110,7 +110,7 @@ final class TestCommandReceiverBox {
             return
         }
         guard let appState, let commandProcessor = appState.commandProcessor as? CommandProcessorImpl else {
-            NSLog("[TestCommandReceiver] \(name): no commandProcessor available")
+            BBLog("[TestCommandReceiver] \(name): no commandProcessor available")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "TestCommandReceiver RX \(name) — NO commandProcessor"
@@ -118,7 +118,7 @@ final class TestCommandReceiverBox {
             return
         }
 
-        NSLog("[TestCommandReceiver] Received \(name) → dispatching \(notif.action)")
+        BBLog("[TestCommandReceiver] Received \(name) → dispatching \(notif.action)")
         try? storage.appendDiagnosticEntry(DiagnosticEntry(
             category: .enforcement,
             message: "TestCommandReceiver RX \(name) → \(notif.action)"
@@ -130,7 +130,7 @@ final class TestCommandReceiverBox {
         // commands, and the ID is unique per invocation so dedup doesn't
         // swallow back-to-back test shots.
         guard let enrollment = appState.enrollmentState else {
-            NSLog("[TestCommandReceiver] \(name): no enrollment state")
+            BBLog("[TestCommandReceiver] \(name): no enrollment state")
             try? storage.appendDiagnosticEntry(DiagnosticEntry(
                 category: .enforcement,
                 message: "TestCommandReceiver RX \(name) — NO enrollment"

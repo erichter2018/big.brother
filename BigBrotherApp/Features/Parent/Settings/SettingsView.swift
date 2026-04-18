@@ -442,10 +442,10 @@ struct SettingsView: View {
                         let failed = results.deleteResults.values.filter { if case .failure = $0 { return true } else { return false } }
                         deleteCount += batchIDs.count - failed.count
                         if !failed.isEmpty {
-                            NSLog("[BigBrother] Failed to delete \(failed.count)/\(batchIDs.count) enforcement log records")
+                            BBLog("[BigBrother] Failed to delete \(failed.count)/\(batchIDs.count) enforcement log records")
                         }
                     } catch {
-                        NSLog("[BigBrother] Enforcement log delete batch failed: \(error.localizedDescription)")
+                        BBLog("[BigBrother] Enforcement log delete batch failed: \(error.localizedDescription)")
                     }
                 }
             }

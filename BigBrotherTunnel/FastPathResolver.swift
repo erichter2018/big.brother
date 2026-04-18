@@ -125,7 +125,7 @@ final class FastPathResolver {
             return
         }
         guard pending.count < Self.maxInflight else {
-            NSLog("[FastPath] admission control: %d in-flight, dropping", pending.count)
+            BBLog("[FastPath] admission control: \(pending.count) in-flight, dropping")
             sendSERVFAIL(originalTxn: originalTxn, clientIP: clientIP, clientPort: clientPort)
             return
         }
@@ -181,7 +181,7 @@ final class FastPathResolver {
             guard let self else { return }
             self.queue.async {
                 if let error {
-                    NSLog("[FastPath] send error upstream %d: %@", idx, error.localizedDescription)
+                    BBLog("[FastPath] send error upstream \(idx): \(error.localizedDescription)")
                     self.teardownConnection(index: idx)
                     self.sendToUpstream(query: query, proxyTxn: proxyTxn, attempt: attempt + 1)
                     return
@@ -205,7 +205,7 @@ final class FastPathResolver {
                 guard self.connectionGenerations[index] == generation else { return }
 
                 if let error {
-                    NSLog("[FastPath] recv error upstream %d: %@", index, error.localizedDescription)
+                    BBLog("[FastPath] recv error upstream \(index): \(error.localizedDescription)")
                     self.teardownConnection(index: index)
                     if self.pending[proxyTxn] != nil {
                         self.sendToUpstream(query: self.pending[proxyTxn]!.query, proxyTxn: proxyTxn, attempt: attempt + 1)
@@ -224,7 +224,7 @@ final class FastPathResolver {
                 // we sent.  Discard spoofed packets silently.
                 let responseTxn = UInt16(data[data.startIndex]) << 8 | UInt16(data[data.startIndex + 1])
                 guard responseTxn == proxyTxn else {
-                    NSLog("[FastPath] txn mismatch: expected %04X got %04X — possible spoof", proxyTxn, responseTxn)
+                    BBLog("[FastPath] txn mismatch: expected \(String(format: "%04X", proxyTxn)) got \(String(format: "%04X", responseTxn)) — possible spoof")
                     // Don't retry — just wait for the real response or timeout.
                     return
                 }
@@ -273,7 +273,7 @@ final class FastPathResolver {
                 guard self.connectionGenerations[index] == gen else { return }
                 switch state {
                 case .failed, .cancelled:
-                    NSLog("[FastPath] connection %d state: %@", index, "\(state)")
+                    BBLog("[FastPath] connection \(index) state: \(state)")
                     self.teardownConnection(index: index)
                 default:
                     break
@@ -309,7 +309,7 @@ final class FastPathResolver {
             timer.cancel()
             guard let self else { return }
             self.queue.async {
-                NSLog("[FastPath] idle timeout for upstream %d", index)
+                BBLog("[FastPath] idle timeout for upstream \(index)")
                 self.teardownConnection(index: index)
             }
         }
@@ -323,7 +323,7 @@ final class FastPathResolver {
         guard let entry = pending.removeValue(forKey: proxyTxn) else {
             return  // Already completed.
         }
-        NSLog("[FastPath] query timeout txn=%04X", proxyTxn)
+        BBLog("[FastPath] query timeout txn=\(String(format: "%04X", proxyTxn))")
         sendSERVFAIL(originalTxn: entry.originalTxn, clientIP: entry.clientIP, clientPort: entry.clientPort)
     }
 

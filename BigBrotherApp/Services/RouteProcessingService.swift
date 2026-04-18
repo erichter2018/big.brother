@@ -111,7 +111,7 @@ final class RouteProcessingService: @unchecked Sendable {
     ) {
         // Don't start a new run if one is already active.
         guard activeTask == nil else {
-            NSLog("[RouteProcessing] Already running — skipping")
+            BBLog("[RouteProcessing] Already running — skipping")
             return
         }
 
@@ -123,13 +123,13 @@ final class RouteProcessingService: @unchecked Sendable {
             guard let self else { return }
             await MainActor.run { self.isProcessing = true }
 
-            NSLog("[RouteProcessing] Starting background route processing for \(devices.count) devices")
+            BBLog("[RouteProcessing] Starting background route processing for \(devices.count) devices")
             let startTime = CFAbsoluteTimeGetCurrent()
 
             await self.processAllDevices(cloudKit: cloudKit, devices: devices, familyID: fid)
 
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            NSLog("[RouteProcessing] Complete in \(String(format: "%.1f", elapsed))s")
+            BBLog("[RouteProcessing] Complete in \(String(format: "%.1f", elapsed))s")
 
             await MainActor.run {
                 self.isProcessing = false
@@ -166,12 +166,12 @@ final class RouteProcessingService: @unchecked Sendable {
                     allBreadcrumbs[device.id] = crumbs.sorted { $0.timestamp < $1.timestamp }
                 }
             } catch {
-                NSLog("[RouteProcessing] Failed to fetch breadcrumbs for \(device.displayName): \(error.localizedDescription)")
+                BBLog("[RouteProcessing] Failed to fetch breadcrumbs for \(device.displayName): \(error.localizedDescription)")
             }
         }
 
         guard !allBreadcrumbs.isEmpty else {
-            NSLog("[RouteProcessing] No breadcrumbs found — nothing to process")
+            BBLog("[RouteProcessing] No breadcrumbs found — nothing to process")
             return
         }
 
@@ -200,7 +200,7 @@ final class RouteProcessingService: @unchecked Sendable {
                     continue
                 }
 
-                NSLog("[RouteProcessing] Processing trip: \(trip.startTime) -> \(trip.endTime) (\(trip.breadcrumbCount) points)")
+                BBLog("[RouteProcessing] Processing trip: \(trip.startTime) -> \(trip.endTime) (\(trip.breadcrumbCount) points)")
 
                 // Step 1: Snap route to roads via MKDirections.
                 let routeResult = await snapRouteToRoads(
@@ -220,14 +220,14 @@ final class RouteProcessingService: @unchecked Sendable {
                 Self.markTripProcessed(key: tripKey)
                 processedTrips += 1
 
-                NSLog("[RouteProcessing] Trip done: \(routeResult.cachedSegments)/\(routeResult.totalSegments) cached, \(routeResult.newSegments) new")
+                BBLog("[RouteProcessing] Trip done: \(routeResult.cachedSegments)/\(routeResult.totalSegments) cached, \(routeResult.newSegments) new")
             }
         }
 
         // Force-save speed limit cache to disk.
         await SpeedLimitService.shared.persistToDisk()
 
-        NSLog("[RouteProcessing] Summary: \(totalTrips) trips total, \(processedTrips) processed, \(skippedTrips) already cached")
+        BBLog("[RouteProcessing] Summary: \(totalTrips) trips total, \(processedTrips) processed, \(skippedTrips) already cached")
     }
 
     // MARK: - Route Snapping (MKDirections)
@@ -491,7 +491,7 @@ final class RouteProcessingService: @unchecked Sendable {
             }
         }
         if purged > 0 {
-            NSLog("[RouteProcessing] Purged \(purged) stale trip markers")
+            BBLog("[RouteProcessing] Purged \(purged) stale trip markers")
         }
     }
 }

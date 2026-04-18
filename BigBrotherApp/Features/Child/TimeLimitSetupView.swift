@@ -397,6 +397,7 @@ struct TimeLimitSetupView: View {
         let storage = AppGroupStorage()
         do {
             try storage.writeAppTimeLimits(savedApps)
+            AlwaysAllowedBackup.mirror(from: storage)
         } catch {
             saveError = "Save failed: \(error.localizedDescription)"
         }
@@ -414,6 +415,7 @@ struct TimeLimitSetupView: View {
         tokens.insert(token)
         if let encoded = try? JSONEncoder().encode(tokens) {
             try? storage.writeRawData(encoded, forKey: StorageKeys.allowedAppTokens)
+            AlwaysAllowedBackup.mirror(from: storage)
         }
     }
 
@@ -424,6 +426,7 @@ struct TimeLimitSetupView: View {
         tokens.remove(token)
         if let encoded = try? JSONEncoder().encode(tokens) {
             try? storage.writeRawData(encoded, forKey: StorageKeys.allowedAppTokens)
+            AlwaysAllowedBackup.mirror(from: storage)
         }
     }
 

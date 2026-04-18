@@ -261,7 +261,7 @@ struct PermissionFixerView: View {
                 let startedAt = Date()
                 try? await appState.enforcement?.requestAuthorization()
                 let elapsed = Date().timeIntervalSince(startedAt)
-                NSLog("[PermissionFixer] FC auth round-trip: \(String(format: "%.2f", elapsed))s")
+                BBLog("[PermissionFixer] FC auth round-trip: \(String(format: "%.2f", elapsed))s")
                 await MainActor.run {
                     isGrantingFamilyControls = false
                     refreshPermissions()
@@ -306,7 +306,18 @@ struct PermissionFixerView: View {
                 Task {
                     let center = UNUserNotificationCenter.current()
                     _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
-                    await MainActor.run { refreshPermissions() }
+                    // After the user grants notifications we MUST re-call
+                    // registerForRemoteNotifications — the one in
+                    // AppDelegate.didFinishLaunching ran while auth was
+                    // .notDetermined and iOS silently no-op'd it. Without
+                    // this second call the device never gets an APNs token
+                    // (observed on Juliet's iPad 2026-04-17: `APNs: NEVER`
+                    // despite notifications subsequently being granted,
+                    // forcing every command through the REST polling path).
+                    await MainActor.run {
+                        UIApplication.shared.registerForRemoteNotifications()
+                        refreshPermissions()
+                    }
                 }
             } else {
                 openSettings()

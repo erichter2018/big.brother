@@ -132,6 +132,7 @@ struct ParentTabView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 appState.checkForUnlockRequestsNow()
+                APNsRegistrationRecovery.reRegisterIfNeeded()
             }
         }
     }

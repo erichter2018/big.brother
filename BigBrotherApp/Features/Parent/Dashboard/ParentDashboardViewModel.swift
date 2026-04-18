@@ -1093,7 +1093,7 @@ final class ParentDashboardViewModel: CommandSendable {
 
                 // Child thinks it should be unlocked but parent says restricted/locked → fix it
                 lastScheduleCorrection[dev.id] = Date()
-                NSLog("[BigBrother] Schedule mismatch on \(dev.displayName): child=\(childMode.rawValue) parent=\(parentMode.rawValue) — sending returnToSchedule")
+                BBLog("[BigBrother] Schedule mismatch on \(dev.displayName): child=\(childMode.rawValue) parent=\(parentMode.rawValue) — sending returnToSchedule")
                 try? await appState.sendCommand(
                     target: .device(dev.id),
                     action: .returnToSchedule

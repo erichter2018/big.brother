@@ -101,7 +101,7 @@ enum BackgroundRefreshHandler {
                 return aps["alert"] != nil
             }()
 
-            NSLog("[BigBrother] Push received (child, \(isAlertPush ? "alert" : "silent")) — processing commands NOW")
+            BBLog("[BigBrother] Push received (child, \(isAlertPush ? "alert" : "silent")) — processing commands NOW")
 
             // Suppress duplicate local notifications when the alert push already showed a banner.
             let processor = await MainActor.run { appState.commandProcessor as? CommandProcessorImpl }
@@ -121,11 +121,11 @@ enum BackgroundRefreshHandler {
                 try await appState.commandProcessor?.processIncomingCommands()
                 processor?.suppressModeNotifications = false
                 await MainActor.run { appState.refreshLocalState() }
-                NSLog("[BigBrother] Push command processing complete")
+                BBLog("[BigBrother] Push command processing complete")
                 return .newData
             } catch {
                 processor?.suppressModeNotifications = false
-                NSLog("[BigBrother] Push command processing failed: \(error.localizedDescription)")
+                BBLog("[BigBrother] Push command processing failed: \(error.localizedDescription)")
                 return .failed
             }
         }
@@ -159,7 +159,7 @@ enum BackgroundRefreshHandler {
                         appState.childrenWithPendingRequests.remove(childID)
                     }
                 }
-                NSLog("[BigBrother] Push review INLINE suppressed: child=\(childID.rawValue.prefix(8)) app=\(inline.appName)")
+                BBLog("[BigBrother] Push review INLINE suppressed: child=\(childID.rawValue.prefix(8)) app=\(inline.appName)")
                 return .newData
             }
             await MainActor.run {
@@ -174,7 +174,7 @@ enum BackgroundRefreshHandler {
                 childName: name,
                 childProfileID: childID
             )
-            NSLog("[BigBrother] Push review INLINE upsert: child=\(childID.rawValue.prefix(8)) app=\(inline.appName)")
+            BBLog("[BigBrother] Push review INLINE upsert: child=\(childID.rawValue.prefix(8)) app=\(inline.appName)")
             // Reconcile the full list in the background so dedup/auto-approve
             // filters catch up without making the UI wait.
             Task.detached { [cloudKit] in
@@ -203,7 +203,7 @@ enum BackgroundRefreshHandler {
         // or CK truncated). Do a single-record fetch and upsert.
         try? await Task.sleep(for: .milliseconds(500))
         guard let review = try? await cloudKit.fetchPendingAppReview(recordID: recordID) else {
-            NSLog("[BigBrother] Push review fetch failed for \(recordID.recordName)")
+            BBLog("[BigBrother] Push review fetch failed for \(recordID.recordName)")
             return .failed
         }
         let childID = review.childProfileID
@@ -236,7 +236,7 @@ enum BackgroundRefreshHandler {
                 }
             }
         }
-        NSLog("[BigBrother] Push review FETCH upsert: child=\(childID.rawValue.prefix(8)) count=\(liveReviews.count)")
+        BBLog("[BigBrother] Push review FETCH upsert: child=\(childID.rawValue.prefix(8)) count=\(liveReviews.count)")
         return .newData
     }
 

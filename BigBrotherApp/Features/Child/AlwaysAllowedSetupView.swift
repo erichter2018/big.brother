@@ -144,6 +144,10 @@ struct AlwaysAllowedSetupView: View {
 
             feedbackMessage = "Saved: \(tokens.count) always-allowed apps"
 
+            // Mirror to iCloud KVS so the picker's selection survives a
+            // full app uninstall (see AlwaysAllowedBackup for details).
+            AlwaysAllowedBackup.mirror(from: appState.storage)
+
             // Reapply enforcement so exemptions take effect immediately.
             if let policy = appState.currentEffectivePolicy,
                policy.resolvedMode != .unlocked,
@@ -180,7 +184,7 @@ struct AlwaysAllowedSetupView: View {
                         )
                         try? await cloudKit.saveTimeLimitConfig(config)
                     }
-                    NSLog("[AlwaysAllowed] Persisted \(selection.applications.count) picker approvals to CK")
+                    BBLog("[AlwaysAllowed] Persisted \(selection.applications.count) picker approvals to CK")
                 }
             }
 

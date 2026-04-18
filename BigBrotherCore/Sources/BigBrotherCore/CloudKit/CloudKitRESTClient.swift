@@ -47,7 +47,7 @@ public enum CloudKitRESTClient {
 
     public static func tripAuthCircuitBreaker() {
         restDisabledDueToAuthError = true
-        NSLog("[CloudKitREST] Circuit breaker tripped — REST writes disabled for this session")
+        BBLog("[CloudKitREST] Circuit breaker tripped — REST writes disabled for this session")
     }
 
     // MARK: - Types

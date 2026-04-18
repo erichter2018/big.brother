@@ -24,7 +24,7 @@ final class VPNManagerService {
             self.connectionStatus = connection.status
             if self.lastLoggedStatus != connection.status {
                 self.lastLoggedStatus = connection.status
-                NSLog("[VPN] Status changed: \(connection.status.rawValue)")
+                BBLog("[VPN] Status changed: \(connection.status.rawValue)")
             }
         }
     }
@@ -68,7 +68,7 @@ final class VPNManagerService {
             let oldConfig = (existing.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
             let oldBuild = oldConfig?["version"] as? Int ?? 0
             if oldBuild != AppConstants.appBuildNumber {
-                NSLog("[VPN] Build mismatch: tunnel=b\(oldBuild) app=b\(AppConstants.appBuildNumber) — restarting tunnel")
+                BBLog("[VPN] Build mismatch: tunnel=b\(oldBuild) app=b\(AppConstants.appBuildNumber) — restarting tunnel")
                 manager.connection.stopVPNTunnel()
                 for _ in 0..<20 {
                     try? await Task.sleep(for: .milliseconds(250))
@@ -79,7 +79,7 @@ final class VPNManagerService {
 
         if manager.connection.status != .connected && manager.connection.status != .connecting {
             try manager.connection.startVPNTunnel()
-            NSLog("[VPN] Tunnel started on b\(AppConstants.appBuildNumber)")
+            BBLog("[VPN] Tunnel started on b\(AppConstants.appBuildNumber)")
         }
 
         connectionStatus = manager.connection.status
@@ -115,7 +115,7 @@ final class VPNManagerService {
         let live = await liveConnectionStatus()
         guard live != .connected && live != .connecting else { return }
         if let last = lastRestartAt, Date().timeIntervalSince(last) < 60 { return }
-        NSLog("[VPN] Tunnel disconnected (status=\(live.rawValue)) — restarting")
+        BBLog("[VPN] Tunnel disconnected (status=\(live.rawValue)) — restarting")
         try? await installAndStart()
     }
 

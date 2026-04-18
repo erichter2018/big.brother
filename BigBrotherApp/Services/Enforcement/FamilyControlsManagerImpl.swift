@@ -132,11 +132,11 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
         // the wall-clock duration so future debug sessions can tell
         // instantly whether the delay is inside Apple's call or our code.
         let authStartedAt = Date()
-        NSLog("[BigBrother] requestAuthorization(.individual) START")
+        BBLog("[BigBrother] requestAuthorization(.individual) START")
         do {
             try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
             let elapsed = Date().timeIntervalSince(authStartedAt)
-            NSLog("[BigBrother] requestAuthorization(.individual) SUCCESS in \(String(format: "%.2f", elapsed))s")
+            BBLog("[BigBrother] requestAuthorization(.individual) SUCCESS in \(String(format: "%.2f", elapsed))s")
             defaults.set("individual", forKey: Self.authTypeKey)
             UserDefaults.standard.set("individual", forKey: Self.authTypeKey)
             defaults.removeObject(forKey: Self.authFailReasonKey)
@@ -149,7 +149,7 @@ final class FamilyControlsManagerImpl: FamilyControlsManagerProtocol, @unchecked
             return
         } catch {
             let elapsed = Date().timeIntervalSince(authStartedAt)
-            NSLog("[BigBrother] requestAuthorization(.individual) FAILED in \(String(format: "%.2f", elapsed))s: \(error.localizedDescription)")
+            BBLog("[BigBrother] requestAuthorization(.individual) FAILED in \(String(format: "%.2f", elapsed))s: \(error.localizedDescription)")
             // Map the error to a human-readable reason and surface it loudly.
             // No fallback — this is a terminal failure. Parent must investigate.
             let reason: String
