@@ -29,17 +29,63 @@ enum ScheduleRegistrar {
     /// Suffix for the morning portion of a cross-midnight window.
     private static let morningSuffix = ".am"
 
-    /// Maximum schedule window registrations (unlocked + locked combined).
-    /// iOS DeviceActivityCenter has a ~20 activity cap per app. Reserve slots for:
-    ///   4 reconciliation activities + 1 usage tracking + N time limits.
-    /// 12 schedule windows leaves room for everything else.
-    private static let maxScheduleWindowRegistrations = 12
+    /// iOS DeviceActivityCenter has a ~20 activity-per-app limit. We share
+    /// that budget across several categories; when we exceed it iOS silently
+    /// drops the excess with no error, which manifests as "schedule windows
+    /// randomly skipped" or "time-limit app not blocked when it should be".
+    ///
+    /// Reserved slots we don't control here:
+    ///   - 4 reconciliation quarters
+    ///   - 1 usage tracking
+    ///   - 1 enforcement heartbeat
+    ///   - 1 for an occasional temp/timed-unlock / lockUntil
+    /// Total fixed reservation ≈ 7, leaving ≈ 13 for variable registrations.
+    /// We split the remainder: 8 for schedule activities (expanded — see below)
+    /// and 5 for time-limit apps. Everything else re-registers on the 6-hour
+    /// reconciliation tick so dropped registrations get another chance.
+    ///
+    /// NOTE: This cap counts CONCRETE DA activities after cross-midnight
+    /// expansion. An overnight 21:30→07:00 window contributes 2 (.pm + .am)
+    /// to the count, not 1 — before b675 we counted the logical window and
+    /// silently doubled our real usage.
+    private static let maxScheduleWindowRegistrations = 8
+    /// Cap on per-app time-limit DA activity registrations. Each one is a
+    /// full `DeviceActivitySchedule` with ~100 milestone events. Capping
+    /// protects against an over-eager parent blowing past iOS's activity
+    /// limit and knocking out schedule windows in the process.
+    static let maxTimeLimitRegistrations = 5
+
+    /// Concrete DA activity we plan to register with the center.
+    private struct ConcreteActivity {
+        let name: DeviceActivityName
+        let schedule: DeviceActivitySchedule
+        let label: String
+    }
+
+    /// A logical window plus the 1-or-2 concrete DA activities it produces.
+    /// Budget accounting happens at THIS level so a cross-midnight window
+    /// is either registered whole (both halves) or dropped whole — never
+    /// half-registered, which would silently miss one side of the transition.
+    private struct PlannedWindow {
+        let activities: [ConcreteActivity]
+        /// Minutes between "now" and the next real start of this logical
+        /// window. 0 if we're currently inside it.
+        let proximity: Int
+    }
 
     /// Register DeviceActivity schedules for the given profile.
     /// Clears any previously registered schedule profile activities first.
-    /// If the profile has more windows than the cap allows, registers only the
-    /// next upcoming windows sorted by proximity to now. The reconciliation
-    /// callbacks (every 6 hours) re-register, keeping a rolling window.
+    ///
+    /// Budget policy:
+    ///   * Active windows (device is currently inside them) get proximity 0,
+    ///     so they always win under budget pressure — dropping an active
+    ///     window would unlock apps that are actively supposed to be locked.
+    ///   * Cross-midnight windows are ranked + truncated as a PAIR — either
+    ///     both halves register or neither. Half-registering silently drops
+    ///     one side of the transition.
+    ///   * Proximity accounts for day-of-week: a Friday-only window
+    ///     evaluated on Wednesday scores two days out, not "next occurrence
+    ///     of that H:M today."
     static func register(_ profile: ScheduleProfile, storage: any SharedStorageProtocol) {
         let center = DeviceActivityCenter()
 
@@ -49,89 +95,137 @@ enum ScheduleRegistrar {
         // Write the profile to App Group so the extension can read it.
         try? storage.writeActiveScheduleProfile(profile)
 
-        let totalWindows = profile.unlockedWindows.count + profile.lockedWindows.count
-        if totalWindows <= maxScheduleWindowRegistrations {
-            // Small schedule — register all windows.
-            for window in profile.unlockedWindows {
-                registerWindow(window, prefix: activityPrefix, label: "unlocked", center: center)
-            }
-            for window in profile.lockedWindows {
-                registerWindow(window, prefix: essentialPrefix, label: "locked", center: center)
-            }
-        } else {
-            // Large schedule — only register the next N upcoming windows.
-            // The Monitor uses ModeStackResolver + the stored profile to determine
-            // the correct mode, so even unregistered windows are handled on
-            // reconciliation callbacks.
-            let now = Date()
-            let cal = Calendar.current
-            let currentMinutes = cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now)
+        let now = Date()
 
-            struct ScoredWindow {
-                let window: ActiveWindow
-                let isUnlocked: Bool
-                let minutesUntilStart: Int
-            }
+        // Plan every logical window with its concrete activities and proximity score.
+        var planned: [PlannedWindow] = []
+        for w in profile.unlockedWindows {
+            planned.append(planWindow(w, prefix: activityPrefix, label: "unlocked", now: now))
+        }
+        for w in profile.lockedWindows {
+            planned.append(planWindow(w, prefix: essentialPrefix, label: "locked", now: now))
+        }
 
-            var scored: [ScoredWindow] = []
-            for w in profile.unlockedWindows {
-                let startMin = w.startTime.hour * 60 + w.startTime.minute
-                let diff = (startMin - currentMinutes + 1440) % 1440
-                scored.append(ScoredWindow(window: w, isUnlocked: true, minutesUntilStart: diff))
-            }
-            for w in profile.lockedWindows {
-                let startMin = w.startTime.hour * 60 + w.startTime.minute
-                let diff = (startMin - currentMinutes + 1440) % 1440
-                scored.append(ScoredWindow(window: w, isUnlocked: false, minutesUntilStart: diff))
-            }
+        // Sort by proximity — register soonest-firing windows first.
+        planned.sort { $0.proximity < $1.proximity }
 
-            // Sort by proximity — register nearest transitions first.
-            scored.sort { $0.minutesUntilStart < $1.minutesUntilStart }
-
-            for item in scored.prefix(maxScheduleWindowRegistrations) {
-                let prefix = item.isUnlocked ? activityPrefix : essentialPrefix
-                let label = item.isUnlocked ? "unlocked" : "locked"
-                registerWindow(item.window, prefix: prefix, label: label, center: center)
+        // Greedy budget allocation at the LOGICAL WINDOW level.
+        // Cross-midnight windows consume 2 slots; same-day consume 1.
+        var toRegister: [ConcreteActivity] = []
+        var budgetRemaining = maxScheduleWindowRegistrations
+        var droppedWindows = 0
+        for w in planned {
+            if budgetRemaining >= w.activities.count {
+                toRegister.append(contentsOf: w.activities)
+                budgetRemaining -= w.activities.count
+            } else {
+                droppedWindows += 1
             }
+        }
+        if droppedWindows > 0 {
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Schedule budget: \(droppedWindows) window(s) dropped; \(toRegister.count)/\(maxScheduleWindowRegistrations) activity slots used",
+                details: "iOS caps ~20 DA activities/app; cross-midnight windows count as 2. Reconciliation (every 6h) re-evaluates by proximity."
+            ))
+        }
+
+        for a in toRegister {
+            register(a.name, schedule: a.schedule, label: a.label, center: center)
         }
 
         // Register usage tracking milestones.
         registerUsageTracking()
     }
 
-    private static func registerWindow(_ window: ActiveWindow, prefix: String, label: String, center: DeviceActivityCenter) {
+    /// Build the concrete activities + proximity score for a logical window.
+    /// Same-day windows produce 1 activity; cross-midnight windows produce 2.
+    private static func planWindow(
+        _ window: ActiveWindow,
+        prefix: String,
+        label: String,
+        now: Date
+    ) -> PlannedWindow {
+        let proximity = proximityMinutes(for: window, now: now)
+
         if window.startTime < window.endTime {
-            // Same-day window — register directly.
-            let activityName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)")
+            let name = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)")
             let schedule = DeviceActivitySchedule(
                 intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
                 intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
                 repeats: true
             )
-            register(activityName, schedule: schedule, label: label, center: center)
-        } else {
-            // Cross-midnight window (e.g., 21:30 → 07:00).
-            // Split into evening (21:30→23:59) and morning (00:00→07:00).
-            // The Monitor's day-of-week check + ActiveWindow.contains() handle correctness.
-
-            // Evening portion: start → 23:59
-            let eveningName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)\(eveningSuffix)")
-            let eveningSchedule = DeviceActivitySchedule(
-                intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
-                intervalEnd: DateComponents(hour: 23, minute: 59),
-                repeats: true
+            return PlannedWindow(
+                activities: [ConcreteActivity(name: name, schedule: schedule, label: label)],
+                proximity: proximity
             )
-            register(eveningName, schedule: eveningSchedule, label: "\(label)-pm", center: center)
-
-            // Morning portion: 00:00 → end
-            let morningName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)\(morningSuffix)")
-            let morningSchedule = DeviceActivitySchedule(
-                intervalStart: DateComponents(hour: 0, minute: 0),
-                intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
-                repeats: true
-            )
-            register(morningName, schedule: morningSchedule, label: "\(label)-am", center: center)
         }
+
+        // Cross-midnight — two concrete activities, ranked and truncated together.
+        let eveningName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)\(eveningSuffix)")
+        let eveningSchedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
+            intervalEnd: DateComponents(hour: 23, minute: 59),
+            repeats: true
+        )
+        let morningName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)\(morningSuffix)")
+        let morningSchedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: 0, minute: 0),
+            intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
+            repeats: true
+        )
+        return PlannedWindow(
+            activities: [
+                ConcreteActivity(name: eveningName, schedule: eveningSchedule, label: "\(label)-pm"),
+                ConcreteActivity(name: morningName, schedule: morningSchedule, label: "\(label)-am"),
+            ],
+            proximity: proximity
+        )
+    }
+
+    /// Minutes until the next real firing of this window.
+    ///
+    ///   * 0 if the device is currently INSIDE the window (we must keep it
+    ///     registered or the Monitor can't run the intervalDidEnd handler).
+    ///   * Otherwise: scan days 0–6 forward from today, find the soonest day
+    ///     that matches `daysOfWeek`, return minutes-until-start on that day.
+    ///
+    /// A pure H:M proximity would mis-rank day-of-week-restricted windows
+    /// (e.g. a Friday-only window evaluated on Wednesday night would score
+    /// "soon" because the H:M fires tonight). Under budget pressure that
+    /// Friday window could displace a same-day Thursday window and still
+    /// not fire for 24h.
+    private static func proximityMinutes(for window: ActiveWindow, now: Date, calendar: Calendar = .current) -> Int {
+        if window.contains(now, calendar: calendar) { return 0 }
+
+        let nowHour = calendar.component(.hour, from: now)
+        let nowMinute = calendar.component(.minute, from: now)
+        let nowMin = nowHour * 60 + nowMinute
+        let startMin = window.startTime.hour * 60 + window.startTime.minute
+        let todayRaw = calendar.component(.weekday, from: now)
+        guard let todayDOW = DayOfWeek(rawValue: todayRaw) else {
+            // Unknown weekday — shouldn't happen; fall back to H:M-only
+            // math so we don't return Int.max and starve the window.
+            return (startMin - nowMin + 1440) % 1440
+        }
+
+        // Scan today + next 6 days.
+        for offset in 0..<7 {
+            guard let dayRaw = DayOfWeek(rawValue: ((todayDOW.rawValue - 1 + offset) % 7) + 1),
+                  window.daysOfWeek.contains(dayRaw) else { continue }
+            if offset == 0 {
+                // Today is an applicable day. Window starts strictly in the future?
+                if startMin > nowMin {
+                    return startMin - nowMin
+                }
+                // Start time is "now or past today"; we already know contains() is
+                // false so we're past the end — check subsequent days.
+                continue
+            }
+            return offset * 1440 + (startMin - nowMin)
+        }
+        // No applicable day in a week (empty daysOfWeek). Deprioritise hard.
+        return Int.max
     }
 
     private static func register(_ name: DeviceActivityName, schedule: DeviceActivitySchedule, label: String, center: DeviceActivityCenter) {
@@ -284,9 +378,18 @@ enum ScheduleRegistrar {
 
         let decoder = JSONDecoder()
 
+        // First pass: handle stale-pending + undecodable entries OUT of the
+        // eligibility set so they don't burn a cap slot only to fall through.
+        // - pendingNameResolution older than 1h → auto-resolve in storage and
+        //   skip this pass (the next pass of this function will pick up the
+        //   resolved entry).
+        // - token that won't decode → skip (something's wrong with storage).
+        // b675-audit-2 fix: previously this filtering happened AFTER the
+        // `prefix(maxTimeLimitRegistrations)` cap, so a top-5 entry that
+        // `continue`-ed left the round with 4 real registrations when the
+        // budget could have fit 5.
+        var eligible: [AppTimeLimit] = []
         for limit in limits where limit.dailyLimitMinutes > 0 {
-            // Auto-resolve stale pending name resolution — if pending for over 1 hour,
-            // apply the resolved limit so the app isn't stuck at 1 minute forever.
             if limit.pendingNameResolution == true,
                Date().timeIntervalSince(limit.createdAt) > 3600 {
                 let storage = AppGroupStorage()
@@ -300,8 +403,37 @@ enum ScheduleRegistrar {
                     }
                     try? storage.writeAppTimeLimits(allLimits)
                 }
-                continue // Re-registration will pick up the corrected limit on next call
+                continue
             }
+            if (try? decoder.decode(ApplicationToken.self, from: limit.tokenData)) == nil {
+                #if DEBUG
+                print("[BigBrother] Failed to decode token for time limit: \(limit.appName)")
+                #endif
+                continue
+            }
+            eligible.append(limit)
+        }
+
+        // Rank by most-recently-updated first — that's the best proxy for
+        // current parent intent. (Codex argued for smallest-limit-first to
+        // preserve strictest parent constraints; Gemini argued for most-
+        // likely-to-matter. `updatedAt` captures freshness of parent intent
+        // without over-optimising for either.) Then cap to
+        // `maxTimeLimitRegistrations` so total DA registrations stay under
+        // iOS's ~20/process limit.
+        eligible.sort { $0.updatedAt > $1.updatedAt }
+        let toRegister = Array(eligible.prefix(maxTimeLimitRegistrations))
+        let droppedLimits = eligible.count - toRegister.count
+        if droppedLimits > 0 {
+            let storage = AppGroupStorage()
+            try? storage.appendDiagnosticEntry(DiagnosticEntry(
+                category: .enforcement,
+                message: "Time-limit budget: registering \(toRegister.count)/\(eligible.count) apps (dropped \(droppedLimits))",
+                details: "iOS caps ~20 DA activities/app; max \(maxTimeLimitRegistrations) time-limited apps supported. Reduce active rules or increase cap after auditing other registrations."
+            ))
+        }
+
+        for limit in toRegister {
             guard let appToken = try? decoder.decode(ApplicationToken.self, from: limit.tokenData) else {
                 #if DEBUG
                 print("[BigBrother] Failed to decode token for time limit: \(limit.appName)")
