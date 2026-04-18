@@ -762,9 +762,11 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
     private static var currentModelIdentifier: String { DeviceInfo.modelIdentifier }
 
     /// Append a heartbeat entry to the `recentHeartbeats` ring buffer in
-    /// App Group. Keeps the newest 5 entries. Called after a successful
-    /// send so the kid-side Diagnostics view can show heartbeat flow
-    /// without a CloudKit round-trip.
+    /// App Group. Keeps the newest 20 entries (~100 min of history at the
+    /// 5-minute heartbeat cadence). The diagnostic screen displays this
+    /// without a CloudKit round-trip; 5 was too few to show a sustained
+    /// failure window when debugging.
+    private static let heartbeatRingCapacity = 20
     private static func appendHeartbeatRing(mode: String, seq: Int64) {
         let defaults = UserDefaults.appGroup
         var entries: [HeartbeatRingEntry] = {
@@ -776,7 +778,9 @@ final class HeartbeatServiceImpl: HeartbeatServiceProtocol {
             mode: mode,
             seq: seq
         ))
-        if entries.count > 5 { entries = Array(entries.suffix(5)) }
+        if entries.count > heartbeatRingCapacity {
+            entries = Array(entries.suffix(heartbeatRingCapacity))
+        }
         if let data = try? JSONEncoder().encode(entries) {
             defaults?.set(data, forKey: AppGroupKeys.recentHeartbeats)
         }

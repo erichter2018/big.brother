@@ -128,6 +128,12 @@ final class RouteProcessingService: @unchecked Sendable {
 
             await self.processAllDevices(cloudKit: cloudKit, devices: devices, familyID: fid)
 
+            // Auto-purge processed-trip markers older than the lookback window.
+            // Previously purgeStaleMarkers() was defined but never invoked, so
+            // routeProcessed.<deviceID>.<start>.<end> keys accumulated in
+            // UserDefaults.standard indefinitely — hundreds per week per device.
+            Self.purgeStaleMarkers()
+
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
             BBLog("[RouteProcessing] Complete in \(String(format: "%.1f", elapsed))s")
 

@@ -403,7 +403,22 @@ final class EnforcementServiceImpl: EnforcementServiceProtocol {
                 applyRestrictions(policy.deviceRestrictions)
 
                 let retryDiag = shieldDiagnostic()
-                if retryDiag.shieldsActive == expectedShielded {
+                // Mode-aware verify — mirrors the pre-reset check at line 292.
+                // Previously this only looked at `shieldsActive`, so a
+                // half-broken reapply where the category landed but per-app
+                // tokens didn't (or vice versa for lockedDown) was reported
+                // as a clean recovery when it wasn't. Caught by Gemini
+                // round-2 audit.
+                let retryInconsistentAfterReset: Bool = {
+                    guard expectedShielded else { return false }
+                    switch policy.resolvedMode {
+                    case .lockedDown: return retryDiag.appCount > 0
+                    case .locked:    return !retryDiag.categoryActive
+                    case .restricted: return !retryDiag.shieldsActive
+                    default:         return false
+                    }
+                }()
+                if retryDiag.shieldsActive == expectedShielded && !retryInconsistentAfterReset {
                     try? storage.appendDiagnosticEntry(DiagnosticEntry(
                         category: .enforcement,
                         message: "Enforcement recovery SUCCEEDED after reset",
