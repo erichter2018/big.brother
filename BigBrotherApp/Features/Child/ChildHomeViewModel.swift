@@ -564,10 +564,16 @@ final class ChildHomeViewModel {
         guard appState.familyControlsAvailable else { return false }
         let current = appState.enforcement?.authorizationStatus ?? .notDetermined
         if current == .authorized { return false }
-        // FC auth starts as notDetermined on launch and can take 30+ seconds
-        // to validate with Apple servers, especially for .child auth.
-        // If we have a persisted auth type (in either defaults store), we were
-        // previously authorized — don't show the permissions button for a transient delay.
+        // `.denied` is terminal — user (or ScreenTime passcode) explicitly
+        // declined. Previously the code fell through to the "has persisted
+        // auth type → skip button" escape, which masked Isla's iPad showing
+        // FC:DENY while the Permissions button stayed hidden. Always show
+        // the fixer on .denied so the parent has a visible fix path.
+        if current == .denied { return true }
+        // `.notDetermined` is transient: FC can take 30+ seconds to validate
+        // on launch, especially for .child auth. If a persisted auth type
+        // exists (app group or standard defaults), assume we're in that
+        // revalidation window and avoid flashing the button at the kid.
         let appGroupType = UserDefaults.appGroup?
             .string(forKey: AppGroupKeys.authorizationType)
         let standardType = UserDefaults.standard.string(forKey: "fr.bigbrother.authorizationType")
