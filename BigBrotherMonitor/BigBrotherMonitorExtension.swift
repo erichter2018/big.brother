@@ -2330,53 +2330,99 @@ class BigBrotherMonitorExtension: DeviceActivityMonitor {
         }
     }
 
-    /// Re-register schedule window DeviceActivity entries from a stored ScheduleProfile.
-    /// Mirrors ScheduleRegistrar.register() logic but callable from the Monitor extension.
+    /// Re-register schedule window DeviceActivity entries from a stored
+    /// ScheduleProfile. Mirrors ScheduleRegistrar.register() — including the
+    /// budget cap + atomic cross-midnight handling + proximity ranking.
+    /// Monitor can't link directly to ScheduleRegistrar (different target),
+    /// so this is a deliberate near-duplicate. If the planner logic drifts,
+    /// this copy needs to be updated too.
     private func reregisterScheduleWindows(profile: ScheduleProfile, center: DeviceActivityCenter) {
+        struct ConcreteActivity {
+            let name: DeviceActivityName
+            let schedule: DeviceActivitySchedule
+        }
+        struct PlannedWindow {
+            let activities: [ConcreteActivity]
+            let proximity: Int
+        }
+
         let unlockPrefix = "bigbrother.scheduleprofile."
         let lockPrefix = "bigbrother.essentialwindow."
+        let maxRegistrations = 8 // mirrors ScheduleRegistrar.maxScheduleWindowRegistrations
+        let now = Date()
+        let cal = Calendar.current
 
-        for window in profile.unlockedWindows {
-            registerScheduleWindow(window, prefix: unlockPrefix, center: center)
+        func proximityMinutes(for window: ActiveWindow) -> Int {
+            if window.contains(now, calendar: cal) { return 0 }
+            let nowMin = cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now)
+            let startMin = window.startTime.hour * 60 + window.startTime.minute
+            let todayRaw = cal.component(.weekday, from: now)
+            guard let today = DayOfWeek(rawValue: todayRaw) else {
+                return (startMin - nowMin + 1440) % 1440
+            }
+            for offset in 0..<7 {
+                guard let day = DayOfWeek(rawValue: ((today.rawValue - 1 + offset) % 7) + 1),
+                      window.daysOfWeek.contains(day) else { continue }
+                if offset == 0 {
+                    if startMin > nowMin { return startMin - nowMin }
+                    continue
+                }
+                return offset * 1440 + (startMin - nowMin)
+            }
+            return Int.max
         }
-        for window in profile.lockedWindows {
-            registerScheduleWindow(window, prefix: lockPrefix, center: center)
-        }
 
-        let count = center.activities.filter {
-            $0.rawValue.hasPrefix(unlockPrefix) || $0.rawValue.hasPrefix(lockPrefix)
-        }.count
-        BBLog("[Monitor] Re-registered \(count) schedule window activities")
-    }
-
-    private func registerScheduleWindow(_ window: ActiveWindow, prefix: String, center: DeviceActivityCenter) {
-        if window.startTime < window.endTime {
-            // Same-day window
-            let name = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)")
-            let schedule = DeviceActivitySchedule(
-                intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
-                intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
-                repeats: true
-            )
-            try? center.startMonitoring(name, during: schedule)
-        } else {
-            // Cross-midnight — split into evening + morning
+        func plan(_ window: ActiveWindow, prefix: String) -> PlannedWindow {
+            let proximity = proximityMinutes(for: window)
+            if window.startTime < window.endTime {
+                let name = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString)")
+                let schedule = DeviceActivitySchedule(
+                    intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
+                    intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
+                    repeats: true
+                )
+                return PlannedWindow(activities: [ConcreteActivity(name: name, schedule: schedule)], proximity: proximity)
+            }
             let eveningName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString).pm")
             let eveningSchedule = DeviceActivitySchedule(
                 intervalStart: DateComponents(hour: window.startTime.hour, minute: window.startTime.minute),
                 intervalEnd: DateComponents(hour: 23, minute: 59),
                 repeats: true
             )
-            try? center.startMonitoring(eveningName, during: eveningSchedule)
-
             let morningName = DeviceActivityName(rawValue: "\(prefix)\(window.id.uuidString).am")
             let morningSchedule = DeviceActivitySchedule(
                 intervalStart: DateComponents(hour: 0, minute: 0),
                 intervalEnd: DateComponents(hour: window.endTime.hour, minute: window.endTime.minute),
                 repeats: true
             )
-            try? center.startMonitoring(morningName, during: morningSchedule)
+            return PlannedWindow(
+                activities: [
+                    ConcreteActivity(name: eveningName, schedule: eveningSchedule),
+                    ConcreteActivity(name: morningName, schedule: morningSchedule),
+                ],
+                proximity: proximity
+            )
         }
+
+        var planned: [PlannedWindow] = []
+        for w in profile.unlockedWindows where !w.daysOfWeek.isEmpty && w.startTime != w.endTime {
+            planned.append(plan(w, prefix: unlockPrefix))
+        }
+        for w in profile.lockedWindows where !w.daysOfWeek.isEmpty && w.startTime != w.endTime {
+            planned.append(plan(w, prefix: lockPrefix))
+        }
+        planned.sort { $0.proximity < $1.proximity }
+
+        var budget = maxRegistrations
+        var registered = 0
+        for win in planned where budget >= win.activities.count {
+            for a in win.activities {
+                try? center.startMonitoring(a.name, during: a.schedule)
+                registered += 1
+            }
+            budget -= win.activities.count
+        }
+        BBLog("[Monitor] Re-registered \(registered) schedule window activities (budget cap \(maxRegistrations))")
     }
 
     /// Re-register the 4 quarter-day reconciliation windows from the Monitor extension.

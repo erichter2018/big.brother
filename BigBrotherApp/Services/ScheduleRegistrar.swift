@@ -99,10 +99,14 @@ enum ScheduleRegistrar {
 
         // Plan every logical window with its concrete activities and proximity score.
         var planned: [PlannedWindow] = []
-        for w in profile.unlockedWindows {
+        // Skip malformed windows the editor might have saved:
+        //  * daysOfWeek == [] → window never applies on any day.
+        //  * startTime == endTime → zero-width or full-day; DA can't encode.
+        // Both would silently waste budget slots otherwise.
+        for w in profile.unlockedWindows where !w.daysOfWeek.isEmpty && w.startTime != w.endTime {
             planned.append(planWindow(w, prefix: activityPrefix, label: "unlocked", now: now))
         }
-        for w in profile.lockedWindows {
+        for w in profile.lockedWindows where !w.daysOfWeek.isEmpty && w.startTime != w.endTime {
             planned.append(planWindow(w, prefix: essentialPrefix, label: "locked", now: now))
         }
 
